@@ -37,4 +37,4 @@ Propagated the server-aware transformer through the Bybit StreamSelector so conn
 - **bybit_dual_feed.rs** -Bybit Public Trades + Order Book L2
 See [`bybit_dual_feed.rs`](examples/bybit_dual_feed.rs) for a ready-to-run setup that fans in Bybit Spot & USDT-perpetual public trades together with L2 order book depth. The example builds a combined `MarketStreamResult<MarketDataInstrument, DataKind>` feed that downstream systems (eg/ the Barter Engine) can consume directly.
 
-- **scalping_orderbook_backtest.rs** -example that mirrors the Python v8 scalper. The example replays historic orderbook snapshots and trades to simulate maker-only entries and exits with queue-aware fills, cluster-driven take-profits, time-stop repricing, and end-of-day forced closures. (examples/python_version_benchmark)
+- **scalping_orderbook_backtest.rs** -example that mirrors the Python v8 scalper. The example replays historic orderbook snapshots (examples/data/) and trades samples to simulate maker-only entries and exits with queue-aware fills, cluster-driven take-profits, time-stop repricing, and end-of-day forced closures. (examples/python_version_benchmark)

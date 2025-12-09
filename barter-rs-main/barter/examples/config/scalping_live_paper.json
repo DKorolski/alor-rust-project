@@ -1,0 +1,24 @@
+{
+  "system_config_path": "barter/examples/config/system_config_bybit_perpetual.json",
+  "output_csv": "barter/examples/data/scalping_live_trades.csv",
+  "runtime_secs": 600,
+  "min_history": 50,
+  "strategy": {
+    "tick_size": 0.1,
+    "order_size": 1.0,
+    "fee_rate_maker": 0.0,
+    "fee_rate_taker": 0.000066,
+    "broker_fee_abs": 1.0,
+    "tp_ticks": 200,
+    "entry_cluster_q": 0.895,
+    "max_cluster_depth_entry": 12,
+    "exit_cluster_q": 0.1,
+    "max_cluster_depth_exit": 12,
+    "exit_cluster_start_ms": 800,
+    "exit_order_timeout_ms": 2500,
+    "exit_cluster_max_diff_ticks": 197,
+    "max_hold_ms": 15000,
+    "time_stop_order_timeout_ms": 800,
+    "entry_order_timeout_ms": 800
+  }
+}

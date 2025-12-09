@@ -5,3 +5,17 @@ Cargo.lock
 # IDE
 .idea/
 *.iml
+
+.DS_Store
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.bak
