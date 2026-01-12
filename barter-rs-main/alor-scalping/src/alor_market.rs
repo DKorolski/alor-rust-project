@@ -18,15 +18,15 @@ const OAUTH_URL: &str = "https://oauth.alor.ru/refresh";
 const DEFAULT_TEST_REFRESH_TOKEN: &str = "";
 const DEFAULT_DEPTH: usize = 10;
 
-pub async fn alor_siz5_stream() -> BoxStream<'static, EngineEvent> {
+pub async fn alor_sih6_stream() -> BoxStream<'static, EngineEvent> {
     let access_token = load_access_token().await.expect("failed to load token");
     unsafe {
         std::env::set_var("ALOR_ACCESS_TOKEN", &access_token);
     }
 
     let instrument = MarketInstrumentData {
-        key: "siz5".to_string(),
-        name_exchange: barter_instrument::instrument::name::InstrumentNameExchange::new("SIZ5"),
+        key: "sih6".to_string(),
+        name_exchange: barter_instrument::instrument::name::InstrumentNameExchange::new("SIH6"),
         kind: MarketDataInstrumentKind::Spot,
     };
 

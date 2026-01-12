@@ -19,3 +19,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rust_decimal = "1"
 num-traits = "0.2"
 csv = "1"
+tokio-tungstenite = { workspace = true }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
+rand = { workspace = true }

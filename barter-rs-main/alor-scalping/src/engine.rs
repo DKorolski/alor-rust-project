@@ -223,7 +223,12 @@ impl ScalpingEngine {
     pub fn on_event(&mut self, event: EngineEvent) -> Vec<OrderCommand> {
         match event {
             EngineEvent::OrderBookL2 { ts, bids, asks } => self.on_orderbook(ts, bids, asks),
-            EngineEvent::Trade { ts, price, qty, .. } => self.on_trade(ts, price, qty),
+            EngineEvent::Trade {
+                ts,
+                price,
+                qty,
+                side,
+            } => self.on_trade(ts, price, qty, side),
         }
     }
 
@@ -344,7 +349,13 @@ impl ScalpingEngine {
         cmds
     }
 
-    fn on_trade(&mut self, ts: DateTime<Utc>, price: f64, size: f64) -> Vec<OrderCommand> {
+    fn on_trade(
+        &mut self,
+        ts: DateTime<Utc>,
+        price: f64,
+        size: f64,
+        trade_side: TradeSide,
+    ) -> Vec<OrderCommand> {
         let mut cmds = Vec::new();
         let ts_ms = ts.timestamp_millis();
         self.last_trade_price = Some(price);
@@ -353,7 +364,8 @@ impl ScalpingEngine {
         if let Some(order) = self.entry_order.take() {
             let visible_ts = order.ts.timestamp_millis() + self.cfg.order_placement_delay_ms;
             if ts_ms >= visible_ts {
-                if let Some(order) = self.fill_entry(order, price, size, ts, &mut cmds) {
+                if let Some(order) = self.fill_entry(order, price, size, ts, trade_side, &mut cmds)
+                {
                     self.entry_order = Some(order);
                 }
             } else {
@@ -364,7 +376,9 @@ impl ScalpingEngine {
         if let Some((order, reason)) = self.exit_order.take() {
             let visible_ts = order.ts.timestamp_millis() + self.cfg.order_placement_delay_ms;
             if ts_ms >= visible_ts {
-                if let Some(order) = self.fill_exit(order, price, size, ts, reason, &mut cmds) {
+                if let Some(order) =
+                    self.fill_exit(order, price, size, ts, trade_side, reason, &mut cmds)
+                {
                     self.exit_order = Some((order, reason));
                 }
             } else {
@@ -381,44 +395,83 @@ impl ScalpingEngine {
         price: f64,
         qty: f64,
         ts: DateTime<Utc>,
+        trade_side: TradeSide,
         cmds: &mut Vec<OrderCommand>,
     ) -> Option<OrderTicket> {
-        let filled = match self.side {
-            1 => price + f64::EPSILON >= order.price,
-            -1 => price <= order.price + f64::EPSILON,
-            _ => false,
-        };
+        let eps = 1e-9;
+        let mut filled_entry = false;
 
-        if filled {
-            order.queue_ahead -= qty;
-            if order.queue_ahead <= 0.0 {
-                let entry_price = order.price;
-                self.entry_price = Some(entry_price);
-                self.entry_ts = Some(ts.timestamp_millis());
-                self.entry_time = Some(ts);
-                self.entry_order_ts = Some(order.ts.timestamp_millis());
-                self.tp_plain = Some(if self.side == 1 {
-                    entry_price + self.cfg.tp_ticks as f64 * self.cfg.tick_size
-                } else {
-                    entry_price - self.cfg.tp_ticks as f64 * self.cfg.tick_size
-                });
-                self.favorable_price = Some(entry_price);
-                let is_taker = order.aggressive;
-                self.entry_liquidity = Some(if is_taker { "taker" } else { "maker" }.to_string());
-                if is_taker {
-                    self.n_entry_taker += 1;
+        match self.side {
+            1 => {
+                if !matches!(trade_side, TradeSide::Sell) {
+                    return Some(order);  // Продажа не может быть исполнена, если это ордер на покупку
                 }
-                self.state = State::InPosition;
-                info!(ts = ?ts, price = entry_price, side = self.side, "entry filled");
-                cmds.push(OrderCommand::CancelAll);
-                self.entry_order = None;
-                self.exit_order = None;
-                return None;
+
+                if price > order.price + eps {
+                    // price выше нашего ордера, ожидаем выполнения
+                } else if (price - order.price).abs() <= eps {
+                    // цена достигла ордера
+                    order.queue_ahead -= qty;
+                    if order.queue_ahead <= 0.0 {
+                        filled_entry = true;
+                    }
+                } else {
+                    // цена прошла через ордер, считаем что ордер исполнился
+                    filled_entry = true;
+                }
             }
+            -1 => {
+                if !matches!(trade_side, TradeSide::Buy) {
+                    return Some(order);  // Покупка не может быть исполнена, если это ордер на продажу
+                }
+
+                if price < order.price - eps {
+                    // цена еще ниже ордера, ждем
+                } else if (price - order.price).abs() <= eps {
+                    // цена достигла ордера
+                    order.queue_ahead -= qty;
+                    if order.queue_ahead <= 0.0 {
+                        filled_entry = true;
+                    }
+                } else {
+                    // цена прошла через ордер, считаем что ордер исполнился
+                    filled_entry = true;
+                }
+            }
+            _ => return Some(order),  // Прочие состояния пропускаем
         }
 
-        Some(order)
+        if !filled_entry {
+            return Some(order);
+        }
+
+        // Обновляем данные о позиции
+        let entry_price = order.price;
+        self.entry_price = Some(entry_price);
+        self.entry_ts = Some(ts.timestamp_millis());
+        self.entry_time = Some(ts);
+        self.entry_order_ts = Some(order.ts.timestamp_millis());
+        self.tp_plain = Some(if self.side == 1 {
+            entry_price + self.cfg.tp_ticks as f64 * self.cfg.tick_size
+        } else {
+            entry_price - self.cfg.tp_ticks as f64 * self.cfg.tick_size
+        });
+        self.favorable_price = Some(entry_price);
+
+        let is_taker = order.aggressive;
+        self.entry_liquidity = Some(if is_taker { "taker" } else { "maker" }.to_string());
+        if is_taker {
+            self.n_entry_taker += 1;
+        }
+        self.state = State::InPosition;
+        info!(ts = ?ts, price = entry_price, side = self.side, "entry filled");
+
+        cmds.push(OrderCommand::CancelAll);
+        self.entry_order = None;
+        self.exit_order = None;
+        None
     }
+
 
     fn fill_exit(
         &mut self,
@@ -426,31 +479,63 @@ impl ScalpingEngine {
         price: f64,
         qty: f64,
         ts: DateTime<Utc>,
+        trade_side: TradeSide,
         reason: OrderReason,
         cmds: &mut Vec<OrderCommand>,
     ) -> Option<OrderTicket> {
-        let filled = match self.side {
-            1 => price + f64::EPSILON >= order.price,
-            -1 => price <= order.price + f64::EPSILON,
-            _ => false,
-        };
+        let eps = 1e-9;
+        let mut filled_exit = false;
 
-        if filled {
-            order.queue_ahead -= qty;
-            if order.queue_ahead <= 0.0 {
-                self.exit_liquidity =
-                    Some(if order.aggressive { "taker" } else { "maker" }.to_string());
-                if order.aggressive {
-                    self.n_exit_taker += 1;
+        match self.side {
+            1 => {
+                if !matches!(trade_side, TradeSide::Buy) {
+                    return Some(order);
                 }
-                self.exit_order_is_aggressive = order.aggressive;
-                self.exit_order = None;
-                self.close_position(ts, order.price, reason, cmds);
-                return None;
+
+                if price < order.price - eps {
+                    // best bid still below our ask
+                } else if (price - order.price).abs() <= eps {
+                    order.queue_ahead -= qty;
+                    if order.queue_ahead <= 0.0 {
+                        filled_exit = true;
+                    }
+                } else {
+                    // trade-through above our price
+                    filled_exit = true;
+                }
             }
+            -1 => {
+                if !matches!(trade_side, TradeSide::Sell) {
+                    return Some(order);
+                }
+
+                if price > order.price + eps {
+                    // best ask still above our bid
+                } else if (price - order.price).abs() <= eps {
+                    order.queue_ahead -= qty;
+                    if order.queue_ahead <= 0.0 {
+                        filled_exit = true;
+                    }
+                } else {
+                    // trade-through below our price
+                    filled_exit = true;
+                }
+            }
+            _ => return Some(order),
         }
 
-        Some(order)
+        if !filled_exit {
+            return Some(order);
+        }
+
+        self.exit_liquidity = Some(if order.aggressive { "taker" } else { "maker" }.to_string());
+        if order.aggressive {
+            self.n_exit_taker += 1;
+        }
+        self.exit_order_is_aggressive = order.aggressive;
+        self.exit_order = None;
+        self.close_position(ts, order.price, reason, cmds);
+        None
     }
 
     fn try_place_cluster_exit(
