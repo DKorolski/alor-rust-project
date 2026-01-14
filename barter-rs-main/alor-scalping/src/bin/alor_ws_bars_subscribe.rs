@@ -11,10 +11,11 @@ const OAUTH_URL: &str = "https://oauth.alor.ru/refresh";
 const WS_URL: &str = "wss://api.alor.ru/ws";
 
 const DEFAULT_PORTFOLIO: &str = "7502T0U";
-const DEFAULT_SYMBOL: &str = "IMOEXF";
+const DEFAULT_SYMBOL: &str = "USDRUBF";
 const DEFAULT_EXCHANGE: &str = "MOEX";
 const DEFAULT_INSTRUMENT_GROUP: &str = "RFUD";
 const DEFAULT_TIMEFRAME_SEC: i64 = 60;
+const DEFAULT_FROM_DATE: &str = "01.01.2026";
 const DEFAULT_SKIP_HISTORY: bool = false;
 const DEFAULT_SPLIT_ADJUST: bool = true;
 const DEFAULT_FORMAT: &str = "Simple";
@@ -47,7 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| parse_bool(&v))
         .unwrap_or(DEFAULT_SPLIT_ADJUST);
 
-    let from_start = start_of_utc_day();
+    let from_date = get_env_or_default("ALOR_FROM_DATE", DEFAULT_FROM_DATE);
+    let from_start = parse_utc_date(&from_date)?;
     let from_ts = from_start.timestamp();
 
     println!("Используем:");
@@ -89,6 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(data) = first_msg.get("data") {
         println!("first.bar: {data}");
     }
+
+    let history_count = print_history(&mut ws_stream, &format).await?;
+    println!("history.count: {history_count}");
 
     Ok(())
 }
@@ -233,6 +238,20 @@ fn start_of_utc_day() -> DateTime<Utc> {
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
 }
 
+fn parse_utc_date(value: &str) -> Result<DateTime<Utc>, Box<dyn std::error::Error>> {
+    let parts: Vec<&str> = value.trim().split('.').collect();
+    if parts.len() != 3 {
+        return Err(format!("invalid date format (expected dd.mm.yyyy): {value}").into());
+    }
+    let day: u32 = parts[0].parse()?;
+    let month: u32 = parts[1].parse()?;
+    let year: i32 = parts[2].parse()?;
+    Ok(Utc
+        .with_ymd_and_hms(year, month, day, 0, 0, 0)
+        .single()
+        .ok_or_else(|| format!("invalid date: {value}"))?)
+}
+
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_lowercase().as_str() {
         "1" | "true" | "yes" | "y" => Some(true),
@@ -249,4 +268,39 @@ fn new_guid() -> String {
         .take(32)
         .map(char::from)
         .collect()
+}
+
+async fn print_history(
+    stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, WsError>> + Unpin),
+    format: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut count = 0usize;
+    let idle_timeout = Duration::from_secs(2);
+
+    loop {
+        let msg = match timeout(idle_timeout, stream.next()).await {
+            Ok(Some(res)) => res?,
+            Ok(None) => break,
+            Err(_) => break,
+        };
+
+        let Message::Text(txt) = msg else { continue };
+        let Ok(val) = serde_json::from_str::<Value>(&txt) else { continue };
+
+        if val.get("httpCode").is_some() {
+            println!("ws.control: {val}");
+            continue;
+        }
+
+        if let Some(data) = val.get("data") {
+            count += 1;
+            if format.eq_ignore_ascii_case("Simple") {
+                println!("bar: {data}");
+            } else {
+                println!("bar: {data}");
+            }
+        }
+    }
+
+    Ok(count)
 }
