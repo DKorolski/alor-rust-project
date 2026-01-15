@@ -18,7 +18,7 @@ const WS_URL: &str = "wss://api.alor.ru/ws";
 const DEFAULT_PORTFOLIO: &str = "7502T0U";
 const DEFAULT_SYMBOL: &str = "IMOEXF";
 const DEFAULT_EXCHANGE: &str = "MOEX";
-const DEFAULT_PRICE: f64 = 2700.0;
+const DEFAULT_PRICE: f64 = 2680.0;
 const DEFAULT_QTY: i32 = 1;
 const UPDATE_DELTA: f64 = 10.0;
 const TIME_IN_FORCE: &str = "BookOrCancel";
@@ -108,6 +108,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("<< CREATE RESP: {} (dt={create_ack_ms:.2} ms)", create_resp);
+    if !is_http_ok(&create_resp) {
+        println!("CWS error on create: {}", cws_error_message(&create_resp));
+        return Ok(());
+    }
 
     let order_number = order_id_from_cws(&create_resp)
         .ok_or_else(|| anyhow::anyhow!("orderNumber missing in create response"))?;
@@ -162,6 +166,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("<< UPDATE RESP: {} (dt={update_ack_ms:.2} ms)", update_resp);
+    if !is_http_ok(&update_resp) {
+        println!("CWS error on update: {}", cws_error_message(&update_resp));
+        return Ok(());
+    }
 
     let updated_order_number = order_id_from_cws(&update_resp)
         .ok_or_else(|| anyhow::anyhow!("orderNumber missing in update response"))?;
@@ -257,6 +265,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("<< DELETE RESP: {} (dt={delete_ack_ms:.2} ms)", delete_resp);
+    if !is_http_ok(&delete_resp) {
+        println!("CWS error on delete: {}", cws_error_message(&delete_resp));
+        return Ok(());
+    }
     let rec_d = wait_order_event(
         &mut ws_delete_rx,
         WaitOpts {
@@ -701,14 +713,6 @@ async fn send_with_ack(
     let resp = read_until_guid(stream, guid, timeout_dur).await?;
     let dt = duration_ms(t0.elapsed());
 
-    let http_code = resp
-        .get("httpCode")
-        .and_then(Value::as_i64)
-        .unwrap_or_default();
-    if http_code != 200 {
-        return Err(format!("CWS command failed: {resp}").into());
-    }
-
     Ok((resp, dt))
 }
 
@@ -749,6 +753,23 @@ fn price_matches(price_val: Option<&Value>, expected: f64) -> bool {
             .unwrap_or(false),
         _ => true,
     }
+}
+
+fn is_http_ok(resp: &Value) -> bool {
+    resp.get("httpCode").and_then(Value::as_i64) == Some(200)
+}
+
+fn cws_error_message(resp: &Value) -> String {
+    let code = resp
+        .get("httpCode")
+        .and_then(Value::as_i64)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let message = resp
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("<no message>");
+    format!("httpCode={code} message={message}")
 }
 
 fn duration_ms(dur: Duration) -> f64 {

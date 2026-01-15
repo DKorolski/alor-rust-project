@@ -27,6 +27,8 @@ const TIME_IN_FORCE: &str = "BookOrCancel";
 const DEFAULT_STOP_CONDITION: &str = "More";
 const ALLOW_MARGIN: bool = true;
 const DEFAULT_ACTIVATE: bool = true;
+const DEFAULT_STOP_ORDER_STATUSES: &[&str] =
+    &["working", "canceled", "rejected", "filled"];
 
 const TERMINAL_STATUSES: &[&str] = &[
     "canceled",
@@ -68,6 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| parse_bool(&v))
         .unwrap_or(DEFAULT_ACTIVATE);
+    let stop_statuses = get_env_list("ALOR_STOP_ORDER_STATUSES")
+        .unwrap_or_else(|| DEFAULT_STOP_ORDER_STATUSES.iter().map(|s| s.to_string()).collect());
 
     let stop_price = price - stop_offset;
 
@@ -86,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  tif      : {TIME_IN_FORCE}");
     println!("  cond     : {stop_condition}");
     println!("  activate : {activate}");
+    println!("  statuses : {}", stop_statuses.join(","));
 
     let (ws_data, _) = connect_async(WS_URL).await?;
     let (mut ws_sink, ws_stream) = ws_data.split();
@@ -110,6 +115,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         first_msg
     );
 
+    let mut stop_subscribe_rx = ws_router.subscribe();
+    let stop_subscribe_guid = new_guid();
+    let (stop_first_msg, stop_subscribe_rt_ms) = subscribe_stop_orders(
+        &mut ws_sink,
+        &mut stop_subscribe_rx,
+        &stop_subscribe_guid,
+        &access_token,
+        &portfolio,
+        &exchange,
+        &stop_statuses,
+    )
+    .await?;
+    println!(
+        "<< STOP SUBSCRIBE FIRST: {} (dt={stop_subscribe_rt_ms:.2} ms)",
+        stop_first_msg
+    );
+
     let (auth_resp, auth_dt_ms) =
         authorize_cws(&mut cws_sink, &mut cws_stream, &access_token).await?;
     println!("<< AUTH RESP: {} (dt={auth_dt_ms:.2} ms)", auth_resp);
@@ -132,6 +154,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("<< CREATE RESP: {} (dt={create_ack_ms:.2} ms)", create_resp);
+    if !is_http_ok(&create_resp) {
+        println!("CWS error on create: {}", cws_error_message(&create_resp));
+        return Ok(());
+    }
 
     let order_number = order_id_from_cws(&create_resp)
         .ok_or_else(|| anyhow::anyhow!("orderNumber missing in create response"))?;
@@ -143,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             comment: Some(comment.clone()),
             predicate: None,
             timeout: Duration::from_secs(1),
-            first_msg: Some(first_msg.clone()),
+            first_msg: Some(stop_first_msg.clone()),
         },
     )
     .await;
@@ -192,6 +218,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("<< UPDATE RESP: {} (dt={update_ack_ms:.2} ms)", update_resp);
+    if !is_http_ok(&update_resp) {
+        println!("CWS error on update: {}", cws_error_message(&update_resp));
+        return Ok(());
+    }
 
     let updated_order_number = order_id_from_cws(&update_resp)
         .ok_or_else(|| anyhow::anyhow!("orderNumber missing in update response"))?;
@@ -225,11 +255,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             comment: None,
             predicate: Some(Box::new(move |r| {
                 matches!(
-                    (r.get("symbol"), r.get("portfolio"), r.get("price")),
-                    (Some(Value::String(sym)), Some(Value::String(port)), price_val)
+                    (r.get("symbol"), r.get("portfolio"), r.get("stopPrice")),
+                    (Some(Value::String(sym)), Some(Value::String(port)), stop_price_val)
                         if sym == &symbol_filter
                             && port == &portfolio_filter
-                            && price_matches(price_val, price_filter)
+                            && price_matches(stop_price_val, price_filter)
                 )
             })),
             timeout: Duration::from_secs(2),
@@ -287,6 +317,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("<< DELETE RESP: {} (dt={delete_ack_ms:.2} ms)", delete_resp);
+    if !is_http_ok(&delete_resp) {
+        println!("CWS error on delete: {}", cws_error_message(&delete_resp));
+        return Ok(());
+    }
     let rec_d = wait_order_event(
         &mut ws_delete_rx,
         WaitOpts {
@@ -351,6 +385,17 @@ fn parse_bool(value: &str) -> Option<bool> {
         "0" | "false" | "no" | "n" => Some(false),
         _ => None,
     }
+}
+
+fn get_env_list(key: &str) -> Option<Vec<String>> {
+    let raw = std::env::var(key).ok()?;
+    let items: Vec<String> = raw
+        .split(',')
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .collect();
+    if items.is_empty() { None } else { Some(items) }
 }
 
 async fn get_access_token() -> Result<String, Box<dyn std::error::Error>> {
@@ -625,6 +670,64 @@ async fn subscribe_orders(
         .and_then(|res| res.map_err(Into::into))
 }
 
+async fn subscribe_stop_orders(
+    sink: &mut (impl Sink<Message, Error = WsError> + Unpin),
+    rx: &mut broadcast::Receiver<Value>,
+    guid: &str,
+    access_token: &str,
+    portfolio: &str,
+    exchange: &str,
+    order_statuses: &[String],
+) -> Result<(Value, f64), Box<dyn std::error::Error>> {
+    let mut msg = serde_json::Map::new();
+    msg.insert("opcode".into(), Value::String("StopOrdersGetAndSubscribeV2".to_string()));
+    msg.insert("exchange".into(), Value::String(exchange.to_string()));
+    msg.insert("portfolio".into(), Value::String(portfolio.to_string()));
+    msg.insert("skipHistory".into(), Value::Bool(true));
+    msg.insert("format".into(), Value::String("Simple".to_string()));
+    msg.insert("guid".into(), Value::String(guid.to_string()));
+    msg.insert("token".into(), Value::String(access_token.to_string()));
+
+    if !order_statuses.is_empty() {
+        msg.insert(
+            "orderStatuses".into(),
+            Value::Array(order_statuses.iter().cloned().map(Value::String).collect()),
+        );
+    }
+
+    let msg = Value::Object(msg);
+
+    let payload = serde_json::to_string(&msg)?;
+    println!(">> STOP SUBSCRIBE REQ: {payload}");
+    let t0 = Instant::now();
+    sink.send(Message::Text(payload.into())).await?;
+
+    let wait_future = async move {
+        loop {
+            match rx.recv().await {
+                Ok(val) => {
+                    if let Some(code) = val.get("httpCode").and_then(Value::as_i64) {
+                        if code == 200 {
+                            return Ok((val, duration_ms(t0.elapsed())));
+                        }
+                        return Err(format!("StopOrdersGetAndSubscribeV2 failed: {val}"));
+                    }
+
+                    if val.get("guid").and_then(Value::as_str) == Some(guid) {
+                        return Ok((val, duration_ms(t0.elapsed())));
+                    }
+                }
+                Err(_) => return Err("WS channel closed".to_string()),
+            }
+        }
+    };
+
+    timeout(Duration::from_secs(5), wait_future)
+        .await
+        .map_err(|_| "StopOrdersGetAndSubscribeV2 timeout".into())
+        .and_then(|res| res.map_err(Into::into))
+}
+
 async fn authorize_cws(
     sink: &mut (impl Sink<Message, Error = WsError> + Unpin),
     stream: &mut (impl Stream<Item = Result<Message, WsError>> + Unpin),
@@ -756,14 +859,6 @@ async fn send_with_ack(
     let resp = read_until_guid(stream, guid, timeout_dur).await?;
     let dt = duration_ms(t0.elapsed());
 
-    let http_code = resp
-        .get("httpCode")
-        .and_then(Value::as_i64)
-        .unwrap_or_default();
-    if http_code != 200 {
-        return Err(format!("CWS command failed: {resp}").into());
-    }
-
     Ok((resp, dt))
 }
 
@@ -804,6 +899,23 @@ fn price_matches(price_val: Option<&Value>, expected: f64) -> bool {
             .unwrap_or(false),
         _ => true,
     }
+}
+
+fn is_http_ok(resp: &Value) -> bool {
+    resp.get("httpCode").and_then(Value::as_i64) == Some(200)
+}
+
+fn cws_error_message(resp: &Value) -> String {
+    let code = resp
+        .get("httpCode")
+        .and_then(Value::as_i64)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let message = resp
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("<no message>");
+    format!("httpCode={code} message={message}")
 }
 
 fn duration_ms(dur: Duration) -> f64 {
