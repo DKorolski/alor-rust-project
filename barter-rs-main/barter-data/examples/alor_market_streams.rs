@@ -33,8 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Alor subscriptions use the exchange symbol directly
     let instrument = MarketInstrumentData {
-        key: "siz5".to_string(),
-        name_exchange: InstrumentNameExchange::new("SIZ5"),
+        key: "sih6".to_string(),
+        name_exchange: InstrumentNameExchange::new("SIH6"),
         // MarketDataInstrumentKind::Spot is accepted by the subscription validator for ExchangeId::Other
         kind: MarketDataInstrumentKind::Spot,
     };
