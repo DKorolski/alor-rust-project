@@ -1,0 +1,26 @@
+# Example configuration for alor-gateway
+portfolio = "7502T0U"
+exchange = "MOEX"
+instrument_group = "RFUD"
+symbols = ["IMOEXF"]
+
+tf_sec = 60
+from_ts = 0
+
+ws_url = "wss://api.alor.ru/ws"
+cws_url = "wss://api.alor.ru/cws"
+oauth_url = "https://oauth.alor.ru/refresh"
+refresh_token = ""
+
+skip_history_bars = false
+skip_history_positions = false
+skip_history_orders = false
+split_adjust = true
+format = "Simple"
+frequency_ms = 250
+
+backoff_initial_ms = 1000
+backoff_max_ms = 30000
+backoff_multiplier = 2
+
+max_silence_bars_sec = 180

@@ -1,8 +1,10 @@
 use std::env;
+use std::fs;
 
+use serde::Deserialize;
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AlorGatewayConfig {
     pub portfolio: String,
     pub exchange: String,
@@ -28,13 +30,17 @@ pub struct AlorGatewayConfig {
 
 impl AlorGatewayConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
+        if let Ok(path) = env::var("ALOR_GATEWAY_CONFIG") {
+            return Self::from_file(path);
+        }
+
         Ok(Self {
             portfolio: get_required("ALOR_PORTFOLIO")?,
             exchange: env::var("ALOR_EXCHANGE").unwrap_or_else(|_| "MOEX".to_string()),
             instrument_group: env::var("ALOR_INSTRUMENT_GROUP")
                 .unwrap_or_else(|_| "RFUD".to_string()),
             symbols: parse_list(
-                &env::var("ALOR_SYMBOLS").unwrap_or_else(|_| "IMOEXF".to_string()),
+                &env::var("ALOR_SYMBOLS").unwrap_or_else(|_| "USDRUBF".to_string()),
             ),
             tf_sec: parse_i64("ALOR_TF_SEC", 60)?,
             from_ts: parse_i64("ALOR_FROM_TS", 0)?,
@@ -56,14 +62,88 @@ impl AlorGatewayConfig {
             max_silence_bars_sec: parse_u64("ALOR_MAX_SILENCE_BARS_SEC", 180)?,
         })
     }
+
+    fn from_file(path: String) -> Result<Self, ConfigError> {
+        let contents = fs::read_to_string(&path).map_err(|err| ConfigError::ReadFile {
+            path: path.clone(),
+            source: err,
+        })?;
+        let file_cfg: FileConfig = toml::from_str(&contents)
+            .map_err(|err| ConfigError::ParseToml { path: path.clone(), source: err })?;
+
+        Ok(Self {
+            portfolio: file_cfg
+                .portfolio
+                .ok_or(ConfigError::MissingField("portfolio"))?,
+            exchange: file_cfg.exchange.unwrap_or_else(|| "MOEX".to_string()),
+            instrument_group: file_cfg
+                .instrument_group
+                .unwrap_or_else(|| "RFUD".to_string()),
+            symbols: file_cfg.symbols.unwrap_or_else(|| vec!["USDRUBF".to_string()]),
+            tf_sec: file_cfg.tf_sec.unwrap_or(60),
+            from_ts: file_cfg.from_ts.unwrap_or(0),
+            ws_url: file_cfg
+                .ws_url
+                .unwrap_or_else(|| "wss://api.alor.ru/ws".into()),
+            cws_url: file_cfg
+                .cws_url
+                .unwrap_or_else(|| "wss://api.alor.ru/cws".into()),
+            oauth_url: file_cfg
+                .oauth_url
+                .unwrap_or_else(|| "https://oauth.alor.ru/refresh".into()),
+            refresh_token: file_cfg
+                .refresh_token
+                .ok_or(ConfigError::MissingField("refresh_token"))?,
+            skip_history_bars: file_cfg.skip_history_bars.unwrap_or(false),
+            skip_history_positions: file_cfg.skip_history_positions.unwrap_or(false),
+            skip_history_orders: file_cfg.skip_history_orders.unwrap_or(false),
+            split_adjust: file_cfg.split_adjust.unwrap_or(true),
+            format: file_cfg.format.unwrap_or_else(|| "Simple".to_string()),
+            frequency_ms: file_cfg.frequency_ms.unwrap_or(250),
+            backoff_initial_ms: file_cfg.backoff_initial_ms.unwrap_or(1_000),
+            backoff_max_ms: file_cfg.backoff_max_ms.unwrap_or(30_000),
+            backoff_multiplier: file_cfg.backoff_multiplier.unwrap_or(2),
+            max_silence_bars_sec: file_cfg.max_silence_bars_sec.unwrap_or(180),
+        })
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("missing env var {0}")]
     MissingVar(&'static str),
+    #[error("missing required field {0}")]
+    MissingField(&'static str),
     #[error("invalid int env var {0}: {1}")]
     InvalidInt(&'static str, #[source] std::num::ParseIntError),
+    #[error("failed to read config file {path}: {source}")]
+    ReadFile { path: String, #[source] source: std::io::Error },
+    #[error("failed to parse toml config {path}: {source}")]
+    ParseToml { path: String, #[source] source: toml::de::Error },
+}
+
+#[derive(Debug, Deserialize)]
+struct FileConfig {
+    portfolio: Option<String>,
+    exchange: Option<String>,
+    instrument_group: Option<String>,
+    symbols: Option<Vec<String>>,
+    tf_sec: Option<i64>,
+    from_ts: Option<i64>,
+    ws_url: Option<String>,
+    cws_url: Option<String>,
+    oauth_url: Option<String>,
+    refresh_token: Option<String>,
+    skip_history_bars: Option<bool>,
+    skip_history_positions: Option<bool>,
+    skip_history_orders: Option<bool>,
+    split_adjust: Option<bool>,
+    format: Option<String>,
+    frequency_ms: Option<i64>,
+    backoff_initial_ms: Option<u64>,
+    backoff_max_ms: Option<u64>,
+    backoff_multiplier: Option<u8>,
+    max_silence_bars_sec: Option<u64>,
 }
 
 fn get_required(key: &'static str) -> Result<String, ConfigError> {
