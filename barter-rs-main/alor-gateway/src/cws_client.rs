@@ -35,9 +35,8 @@ impl CwsClient {
                     Ok(()) => break,
                     Err(error) => {
                         warn!(?error, "cws session error; reconnecting");
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * cfg.backoff_multiplier as u32)
-                            .min(Duration::from_millis(cfg.backoff_max_ms));
+                        tokio::time::sleep(jittered(backoff)).await;
+                        backoff = next_backoff(backoff, &cfg);
                     }
                 }
             }
@@ -234,4 +233,19 @@ fn guid_of(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.get("requestGuid").and_then(Value::as_str))
         .map(|value| value.to_string())
+}
+
+fn next_backoff(current: Duration, cfg: &AlorGatewayConfig) -> Duration {
+    (current * cfg.backoff_multiplier as u32).min(Duration::from_millis(cfg.backoff_max_ms))
+}
+
+fn jittered(duration: Duration) -> Duration {
+    let jitter_pct = 0.2;
+    let millis = duration.as_millis() as f64;
+    let jitter = rand::random::<f64>() * jitter_pct;
+    let offset = millis * jitter;
+    let lower = millis - offset;
+    let upper = millis + offset;
+    let jittered = lower + (rand::random::<f64>() * (upper - lower));
+    Duration::from_millis(jittered.max(0.0) as u64)
 }

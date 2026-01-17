@@ -1,5 +1,11 @@
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataOrigin {
+    History,
+    Live,
+}
+
 #[derive(Debug, Clone)]
 pub struct BarEvent {
     pub symbol: String,
@@ -9,6 +15,7 @@ pub struct BarEvent {
     pub l: f64,
     pub c: f64,
     pub v: f64,
+    pub origin: DataOrigin,
 }
 
 #[derive(Debug, Clone)]

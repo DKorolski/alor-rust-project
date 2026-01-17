@@ -1,12 +1,15 @@
 use alor_scalping::strategy::{
     Action, OrderSnapshot, PositionSnapshot, StrategyBar, StrategyContext, StrategyCore,
 };
-use chrono::{FixedOffset, TimeZone};
-use tokio::sync::mpsc;
+use std::collections::VecDeque;
+
+use chrono::{Datelike, FixedOffset, TimeZone, Utc};
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use crate::cws_client::CwsHandle;
-use crate::models::{BarEvent, OrdersSnapshot, PositionsSnapshot};
+use crate::health::GatewayPhase;
+use crate::models::{BarEvent, DataOrigin, OrdersSnapshot, PositionsSnapshot};
 use crate::state::orders_manager::OrdersManagerHandle;
 use crate::state::positions_manager::PositionsManagerHandle;
 
@@ -17,6 +20,9 @@ pub struct StrategyRunner<S> {
     cws: CwsHandle,
     portfolio: String,
     exchange: String,
+    phase_rx: watch::Receiver<GatewayPhase>,
+    history_sessions: u8,
+    session_rollover_hour_utc: u8,
 }
 
 impl<S> StrategyRunner<S>
@@ -30,6 +36,9 @@ where
         cws: CwsHandle,
         portfolio: String,
         exchange: String,
+        phase_rx: watch::Receiver<GatewayPhase>,
+        history_sessions: u8,
+        session_rollover_hour_utc: u8,
     ) -> Self {
         Self {
             strategy,
@@ -38,28 +47,68 @@ where
             cws,
             portfolio,
             exchange,
+            phase_rx,
+            history_sessions,
+            session_rollover_hour_utc,
         }
     }
 
     pub fn start(mut self, mut bars_rx: mpsc::Receiver<BarEvent>) {
         tokio::spawn(async move {
+            let mut history_buffer: VecDeque<BarEvent> = VecDeque::new();
+            let mut session_ids: VecDeque<i32> = VecDeque::new();
+            let mut last_phase = *self.phase_rx.borrow();
             while let Some(bar) = bars_rx.recv().await {
+                let phase = *self.phase_rx.borrow();
+                if phase != last_phase {
+                    if phase == GatewayPhase::LiveReady
+                        && session_ids.len() < self.history_sessions as usize
+                    {
+                        warn!(
+                            expected_sessions = self.history_sessions,
+                            loaded_sessions = session_ids.len(),
+                            "history sessions fewer than expected"
+                        );
+                    }
+                    last_phase = phase;
+                }
+
+                if bar.origin == DataOrigin::History {
+                    let session_key =
+                        session_id(bar.close_time_utc, self.session_rollover_hour_utc);
+                    if !session_ids.contains(&session_key) {
+                        session_ids.push_back(session_key);
+                        while session_ids.len() > self.history_sessions as usize {
+                            if let Some(removed) = session_ids.pop_front() {
+                                history_buffer.retain(|b| {
+                                    session_id(b.close_time_utc, self.session_rollover_hour_utc)
+                                        != removed
+                                });
+                            }
+                        }
+                    }
+                    history_buffer.push_back(bar.clone());
+                }
+
                 let ctx = StrategyContext {
                     positions: map_positions(self.positions.snapshot()),
                     orders: map_orders(self.orders.snapshot()),
                 };
+                let should_trade = phase == GatewayPhase::LiveReady && bar.origin == DataOrigin::Live;
                 let bar = map_bar(bar);
                 let actions = self.strategy.on_bar(bar, ctx);
-                for action in actions {
-                    if let Err(error) = execute_action(
-                        &self.cws,
-                        &self.portfolio,
-                        &self.exchange,
-                        action,
-                    )
-                    .await
-                    {
-                        warn!(?error, "strategy action failed");
+                if should_trade {
+                    for action in actions {
+                        if let Err(error) = execute_action(
+                            &self.cws,
+                            &self.portfolio,
+                            &self.exchange,
+                            action,
+                        )
+                        .await
+                        {
+                            warn!(?error, "strategy action failed");
+                        }
                     }
                 }
             }
@@ -172,4 +221,13 @@ impl SideAsStr for alor_scalping::strategy::Side {
             alor_scalping::strategy::Side::Sell => "sell",
         }
     }
+}
+
+fn session_id(close_time_utc: i64, rollover_hour_utc: u8) -> i32 {
+    let shifted = close_time_utc - (rollover_hour_utc as i64 * 3600);
+    let date = Utc
+        .timestamp_opt(shifted, 0)
+        .single()
+        .expect("valid timestamp");
+    date.date_naive().num_days_from_ce()
 }

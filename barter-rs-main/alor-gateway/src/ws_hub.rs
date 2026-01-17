@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use chrono::Utc;
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -16,6 +17,7 @@ use crate::ws_subscriptions::{
 pub enum WsEvent {
     Raw(Value),
     Conn(ConnEvent),
+    Subscribed { wallclock_ts: i64 },
 }
 
 #[derive(Debug)]
@@ -33,6 +35,7 @@ pub struct WsHubHandle {
 #[derive(Debug)]
 enum HubCommand {
     Resubscribe { from_ts: Option<i64> },
+    Reconnect,
     Shutdown,
 }
 
@@ -48,6 +51,7 @@ impl WsHub {
 
         tokio::spawn(async move {
             let mut should_run = true;
+            let mut backoff = Duration::from_millis(cfg.backoff_initial_ms);
             while should_run {
                 if event_tx.send(WsEvent::Conn(ConnEvent::Reconnecting)).await.is_err() {
                     break;
@@ -60,7 +64,8 @@ impl WsHub {
                     Err(error) => {
                         warn!(?error, "ws hub error; reconnecting");
                         let _ = event_tx.send(WsEvent::Conn(ConnEvent::Disconnected)).await;
-                        tokio::time::sleep(Duration::from_millis(cfg.backoff_initial_ms)).await;
+                        tokio::time::sleep(jittered(backoff)).await;
+                        backoff = next_backoff(backoff, &cfg);
                     }
                 }
             }
@@ -88,6 +93,10 @@ impl WsHubHandle {
             .await;
     }
 
+    pub async fn reconnect(&self) {
+        let _ = self.cmd_tx.send(HubCommand::Reconnect).await;
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(HubCommand::Shutdown).await;
     }
@@ -107,6 +116,12 @@ async fn connect_and_run(
     let _ = event_tx.send(WsEvent::Conn(ConnEvent::Connected)).await;
 
     subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, None).await?;
+    let subscribe_wallclock_ts = Utc::now().timestamp();
+    let _ = event_tx
+        .send(WsEvent::Subscribed {
+            wallclock_ts: subscribe_wallclock_ts,
+        })
+        .await;
 
     loop {
         tokio::select! {
@@ -115,6 +130,16 @@ async fn connect_and_run(
                     Some(HubCommand::Resubscribe { from_ts }) => {
                         info!("ws hub resubscribe requested");
                         subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, from_ts).await?;
+                        let subscribe_wallclock_ts = Utc::now().timestamp();
+                        let _ = event_tx
+                            .send(WsEvent::Subscribed {
+                                wallclock_ts: subscribe_wallclock_ts,
+                            })
+                            .await;
+                    }
+                    Some(HubCommand::Reconnect) => {
+                        info!("ws hub reconnect requested");
+                        return Err(anyhow::anyhow!("forced reconnect"));
                     }
                     Some(HubCommand::Shutdown) | None => {
                         info!("ws hub shutdown requested");
@@ -167,10 +192,20 @@ async fn subscribe_all(
         send_and_ack(ws_sink, ws_stream, &guid, &msg, "bars").await?;
     }
 
-    let (guid, msg) = build_positions_subscribe(cfg, token, cfg.skip_history_positions);
+    let positions_skip_history = if from_ts.is_some() {
+        false
+    } else {
+        cfg.skip_history_positions
+    };
+    let (guid, msg) = build_positions_subscribe(cfg, token, positions_skip_history);
     send_and_ack(ws_sink, ws_stream, &guid, &msg, "positions").await?;
 
-    let (guid, msg) = build_orders_subscribe(cfg, token, cfg.skip_history_orders);
+    let orders_skip_history = if from_ts.is_some() {
+        false
+    } else {
+        cfg.skip_history_orders
+    };
+    let (guid, msg) = build_orders_subscribe(cfg, token, orders_skip_history);
     send_and_ack(ws_sink, ws_stream, &guid, &msg, "orders").await?;
 
     Ok(())
@@ -222,4 +257,19 @@ fn guid_of(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.get("requestGuid").and_then(Value::as_str))
         .map(|value| value.to_string())
+}
+
+fn next_backoff(current: Duration, cfg: &AlorGatewayConfig) -> Duration {
+    (current * cfg.backoff_multiplier as u32).min(Duration::from_millis(cfg.backoff_max_ms))
+}
+
+fn jittered(duration: Duration) -> Duration {
+    let jitter_pct = 0.2;
+    let millis = duration.as_millis() as f64;
+    let jitter = rand::random::<f64>() * jitter_pct;
+    let offset = millis * jitter;
+    let lower = millis - offset;
+    let upper = millis + offset;
+    let jittered = lower + (rand::random::<f64>() * (upper - lower));
+    Duration::from_millis(jittered.max(0.0) as u64)
 }

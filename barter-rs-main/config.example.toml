@@ -24,3 +24,7 @@ backoff_max_ms = 30000
 backoff_multiplier = 2
 
 max_silence_bars_sec = 180
+
+history_sessions = 2
+history_days_back = 5
+session_rollover_hour_utc = 6

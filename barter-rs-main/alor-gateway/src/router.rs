@@ -5,77 +5,117 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::models::{BarEvent, OrderEvent, PositionEvent};
+use crate::models::{BarEvent, DataOrigin, OrderEvent, PositionEvent};
 
 pub struct Router;
+
+#[derive(Debug)]
+pub enum RouterCommand {
+    UpdateSubscribeWallclock(i64),
+}
+
+#[derive(Debug)]
+pub enum RouterControl {
+    AuthError(i64),
+}
 
 pub struct RouterStreams {
     pub bars_rx: mpsc::Receiver<BarEvent>,
     pub positions_rx: mpsc::Receiver<PositionEvent>,
     pub orders_rx: mpsc::Receiver<OrderEvent>,
+    pub control_rx: mpsc::Receiver<RouterControl>,
 }
 
 impl Router {
-    pub fn start(mut raw_rx: mpsc::Receiver<Value>) -> RouterStreams {
+    pub fn start(
+        mut raw_rx: mpsc::Receiver<Value>,
+        tf_sec: i64,
+    ) -> (mpsc::Sender<RouterCommand>, RouterStreams) {
         let (bars_tx, bars_rx) = mpsc::channel(1024);
         let (positions_tx, positions_rx) = mpsc::channel(1024);
         let (orders_tx, orders_rx) = mpsc::channel(1024);
+        let (control_tx, control_rx) = mpsc::channel(32);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
 
         tokio::spawn(async move {
             let mut bar_dedup = HashSet::new();
-            while let Some(value) = raw_rx.recv().await {
-                if let Some(code) = value.get("httpCode").and_then(Value::as_i64) {
-                    if matches!(code, 401 | 403) {
-                        warn!(http_code = code, "auth error from ws");
-                    }
-                    continue;
-                }
-
-                let bars = parse_bars(&value);
-                if !bars.is_empty() {
-                    for bar in bars {
-                        let key = (bar.symbol.clone(), bar.close_time_utc);
-                        if bar_dedup.insert(key) {
-                            let _ = bars_tx.send(bar).await;
-                        } else {
-                            debug!("duplicate bar dropped");
+            let mut live_cutoff_ts: Option<i64> = None;
+            loop {
+                tokio::select! {
+                    cmd = cmd_rx.recv() => {
+                        match cmd {
+                            Some(RouterCommand::UpdateSubscribeWallclock(ts)) => {
+                                live_cutoff_ts = Some(ts - (2 * tf_sec));
+                            }
+                            None => break,
                         }
                     }
-                    continue;
-                }
+                    value = raw_rx.recv() => {
+                        let Some(value) = value else {
+                            break;
+                        };
+                        if let Some(code) = value.get("httpCode").and_then(Value::as_i64) {
+                            if matches!(code, 401 | 403) {
+                                warn!(http_code = code, "auth error from ws");
+                                let _ = control_tx.send(RouterControl::AuthError(code)).await;
+                            }
+                            continue;
+                        }
 
-                if let Some(position) = parse_position(&value) {
-                    let _ = positions_tx.send(position).await;
-                    continue;
-                }
+                        let bars = parse_bars(&value, live_cutoff_ts);
+                        if !bars.is_empty() {
+                            for bar in bars {
+                                let key = (bar.symbol.clone(), bar.close_time_utc);
+                                if bar_dedup.insert(key) {
+                                    let _ = bars_tx.send(bar).await;
+                                } else {
+                                    debug!("duplicate bar dropped");
+                                }
+                            }
+                            continue;
+                        }
 
-                if let Some(order) = parse_order(&value) {
-                    let _ = orders_tx.send(order).await;
+                        if let Some(position) = parse_position(&value) {
+                            let _ = positions_tx.send(position).await;
+                            continue;
+                        }
+
+                        if let Some(order) = parse_order(&value) {
+                            let _ = orders_tx.send(order).await;
+                        }
+                    }
                 }
             }
         });
 
-        RouterStreams {
-            bars_rx,
-            positions_rx,
-            orders_rx,
-        }
+        (
+            cmd_tx,
+            RouterStreams {
+                bars_rx,
+                positions_rx,
+                orders_rx,
+                control_rx,
+            },
+        )
     }
 }
 
-fn parse_bars(value: &Value) -> Vec<BarEvent> {
+fn parse_bars(value: &Value, live_cutoff_ts: Option<i64>) -> Vec<BarEvent> {
     let Some(data) = value.get("data") else {
         return Vec::new();
     };
 
     if let Some(items) = data.as_array() {
-        return items.iter().filter_map(parse_bar_item).collect();
+        return items
+            .iter()
+            .filter_map(|item| parse_bar_item(item, live_cutoff_ts))
+            .collect();
     }
 
-    parse_bar_item(data).into_iter().collect()
+    parse_bar_item(data, live_cutoff_ts).into_iter().collect()
 }
 
-fn parse_bar_item(data: &Value) -> Option<BarEvent> {
+fn parse_bar_item(data: &Value, live_cutoff_ts: Option<i64>) -> Option<BarEvent> {
     let symbol = data
         .get("symbol")
         .or_else(|| data.get("code"))
@@ -83,6 +123,11 @@ fn parse_bar_item(data: &Value) -> Option<BarEvent> {
         .to_string();
     let close_time = data.get("time").or_else(|| data.get("timestamp"))?;
     let close_time_utc = to_i64(close_time)?;
+    let origin = match live_cutoff_ts {
+        Some(cutoff) if close_time_utc <= cutoff => DataOrigin::History,
+        Some(_) => DataOrigin::Live,
+        None => DataOrigin::Live,
+    };
     Some(BarEvent {
         symbol,
         close_time_utc,
@@ -91,6 +136,7 @@ fn parse_bar_item(data: &Value) -> Option<BarEvent> {
         l: data.get("low").and_then(Value::as_f64).unwrap_or_default(),
         c: data.get("close").and_then(Value::as_f64).unwrap_or_default(),
         v: data.get("volume").and_then(Value::as_f64).unwrap_or_default(),
+        origin,
     })
 }
 
