@@ -7,7 +7,8 @@ members = [
     "barter-integration",
     "barter-macro", 
     "barter-instrument",
-    "alor-scalping"
+    "alor-scalping",
+    "alor-gateway"
 ]
 
 [workspace.dependencies]
