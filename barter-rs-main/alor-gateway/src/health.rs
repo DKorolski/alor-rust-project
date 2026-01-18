@@ -24,4 +24,5 @@ pub struct HealthState {
     pub token_refresh_count: u64,
     pub gateway_phase: GatewayPhase,
     pub readiness: bool,
+    pub backpressure_lagged: bool,
 }

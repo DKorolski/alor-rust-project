@@ -1,4 +1,7 @@
 # Example configuration for alor-gateway
+#[general]
+price_step = 0.5
+volume_step = 1
 portfolio = "7502T0U"
 exchange = "MOEX"
 instrument_group = "RFUD"

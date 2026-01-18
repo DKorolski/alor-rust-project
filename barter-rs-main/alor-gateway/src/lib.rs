@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod cws_client;
+pub mod gateway_events;
 pub mod health;
 pub mod models;
 pub mod router;

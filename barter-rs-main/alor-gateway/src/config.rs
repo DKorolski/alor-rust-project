@@ -30,6 +30,8 @@ pub struct AlorGatewayConfig {
     pub history_days_back: u8,
     pub session_rollover_hour_utc: u8,
     pub health_listen_addr: String,
+    pub price_step: f64,
+    pub volume_step: f64,
 }
 
 impl AlorGatewayConfig {
@@ -69,6 +71,8 @@ impl AlorGatewayConfig {
             session_rollover_hour_utc: parse_u8("ALOR_SESSION_ROLLOVER_HOUR_UTC", 7)?,
             health_listen_addr: env::var("ALOR_HEALTH_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
+            price_step: parse_f64("ALOR_PRICE_STEP", 0.0)?,
+            volume_step: parse_f64("ALOR_VOLUME_STEP", 0.0)?,
         })
     }
 
@@ -119,6 +123,18 @@ impl AlorGatewayConfig {
             health_listen_addr: file_cfg
                 .health_listen_addr
                 .unwrap_or_else(|| "127.0.0.1:8080".to_string()),
+            price_step: file_cfg
+                .general
+                .as_ref()
+                .and_then(|general| general.price_step)
+                .or(file_cfg.price_step)
+                .unwrap_or(0.0),
+            volume_step: file_cfg
+                .general
+                .as_ref()
+                .and_then(|general| general.volume_step)
+                .or(file_cfg.volume_step)
+                .unwrap_or(0.0),
         })
     }
 }
@@ -131,6 +147,8 @@ pub enum ConfigError {
     MissingField(&'static str),
     #[error("invalid int env var {0}: {1}")]
     InvalidInt(&'static str, #[source] std::num::ParseIntError),
+    #[error("invalid float env var {0}: {1}")]
+    InvalidFloat(&'static str, #[source] std::num::ParseFloatError),
     #[error("failed to read config file {path}: {source}")]
     ReadFile { path: String, #[source] source: std::io::Error },
     #[error("failed to parse toml config {path}: {source}")]
@@ -139,6 +157,7 @@ pub enum ConfigError {
 
 #[derive(Debug, Deserialize)]
 struct FileConfig {
+    general: Option<GeneralConfig>,
     portfolio: Option<String>,
     exchange: Option<String>,
     instrument_group: Option<String>,
@@ -163,6 +182,14 @@ struct FileConfig {
     history_days_back: Option<u8>,
     session_rollover_hour_utc: Option<u8>,
     health_listen_addr: Option<String>,
+    price_step: Option<f64>,
+    volume_step: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneralConfig {
+    price_step: Option<f64>,
+    volume_step: Option<f64>,
 }
 
 fn get_required(key: &'static str) -> Result<String, ConfigError> {
@@ -194,6 +221,15 @@ fn parse_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
 fn parse_u8(key: &'static str, default: u8) -> Result<u8, ConfigError> {
     match env::var(key) {
         Ok(value) => value.parse::<u8>().map_err(|err| ConfigError::InvalidInt(key, err)),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_f64(key: &'static str, default: f64) -> Result<f64, ConfigError> {
+    match env::var(key) {
+        Ok(value) => value
+            .parse::<f64>()
+            .map_err(|err| ConfigError::InvalidFloat(key, err)),
         Err(_) => Ok(default),
     }
 }

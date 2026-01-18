@@ -1,5 +1,5 @@
-use std::time::Duration;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
+use crate::gateway_events::{GatewayEvent, log_event};
 use crate::ws_subscriptions::{
     build_bars_subscribe, build_orders_subscribe, build_positions_subscribe,
 };
@@ -40,6 +41,42 @@ enum HubCommand {
     Shutdown,
 }
 
+#[derive(Debug, Clone)]
+struct Subscription {
+    guid: String,
+    symbol: String,
+    subscription_type: String,
+    is_active: bool,
+}
+
+#[derive(Debug, Default)]
+struct SubscriptionManager {
+    desired_subscriptions: HashMap<String, Subscription>,
+    active_subscriptions: HashMap<String, Subscription>,
+}
+
+impl SubscriptionManager {
+    fn add_subscription(&mut self, subscription: Subscription) {
+        self.desired_subscriptions
+            .insert(subscription.guid.clone(), subscription);
+    }
+
+    fn activate_subscription(&mut self, guid: &str) -> Option<Subscription> {
+        if let Some(mut subscription) = self.desired_subscriptions.remove(guid) {
+            subscription.is_active = true;
+            self.active_subscriptions
+                .insert(guid.to_string(), subscription.clone());
+            return Some(subscription);
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.desired_subscriptions.clear();
+        self.active_subscriptions.clear();
+    }
+}
+
 pub struct WsHub;
 
 impl WsHub {
@@ -52,11 +89,14 @@ impl WsHub {
 
         tokio::spawn(async move {
             let mut should_run = true;
+            let mut attempt: u64 = 0;
             let mut backoff = Duration::from_millis(cfg.backoff_initial_ms);
             while should_run {
                 if event_tx.send(WsEvent::Conn(ConnEvent::Reconnecting)).await.is_err() {
                     break;
                 }
+                attempt += 1;
+                log_event(GatewayEvent::Reconnecting { attempt });
                 match connect_and_run(&cfg, &token_provider, &event_tx, &mut cmd_rx).await {
                     Ok(()) => {
                         info!("ws hub ended gracefully");
@@ -112,8 +152,10 @@ async fn connect_and_run(
     let token = token_provider.access_token().await?;
     let (ws_stream, _) = tokio_tungstenite::connect_async(&cfg.ws_url).await?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
+    let mut subscription_manager = SubscriptionManager::default();
 
     info!("ws hub connected");
+    log_event(GatewayEvent::Connected);
     let _ = event_tx.send(WsEvent::Conn(ConnEvent::Connected)).await;
 
     let subscribe_wallclock_ts = Utc::now().timestamp();
@@ -122,8 +164,17 @@ async fn connect_and_run(
             wallclock_ts: subscribe_wallclock_ts,
         })
         .await;
-    let mut bars_guid_map =
-        subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, None, event_tx).await?;
+    subscription_manager.reset();
+    let mut bars_guid_map = subscribe_all(
+        cfg,
+        &token,
+        &mut ws_sink,
+        &mut ws_stream,
+        None,
+        event_tx,
+        &mut subscription_manager,
+    )
+    .await?;
 
     loop {
         tokio::select! {
@@ -131,14 +182,25 @@ async fn connect_and_run(
                 match cmd {
                     Some(HubCommand::Resubscribe { from_ts }) => {
                         info!("ws hub resubscribe requested");
+                        log_event(GatewayEvent::ResyncStarted);
                         let subscribe_wallclock_ts = Utc::now().timestamp();
                         let _ = event_tx
                             .send(WsEvent::Subscribed {
                                 wallclock_ts: subscribe_wallclock_ts,
                             })
                             .await;
-                        bars_guid_map =
-                            subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, from_ts, event_tx).await?;
+                        subscription_manager.reset();
+                        bars_guid_map = subscribe_all(
+                            cfg,
+                            &token,
+                            &mut ws_sink,
+                            &mut ws_stream,
+                            from_ts,
+                            event_tx,
+                            &mut subscription_manager,
+                        )
+                        .await?;
+                        log_event(GatewayEvent::ResyncDone);
                     }
                     Some(HubCommand::Reconnect) => {
                         info!("ws hub reconnect requested");
@@ -183,6 +245,7 @@ async fn subscribe_all(
     ws_stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
     from_ts: Option<i64>,
     event_tx: &mpsc::Sender<WsEvent>,
+    subscription_manager: &mut SubscriptionManager,
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut bars_guid_map = HashMap::new();
     let bars_from_ts = from_ts.unwrap_or(cfg.from_ts);
@@ -202,7 +265,23 @@ async fn subscribe_all(
             skip_history,
         );
         bars_guid_map.insert(guid.clone(), symbol.clone());
-        send_and_ack(ws_sink, ws_stream, &guid, &msg, "bars", event_tx, &bars_guid_map).await?;
+        subscription_manager.add_subscription(Subscription {
+            guid: guid.clone(),
+            symbol: symbol.clone(),
+            subscription_type: "bars".to_string(),
+            is_active: false,
+        });
+        send_and_ack(
+            ws_sink,
+            ws_stream,
+            &guid,
+            &msg,
+            "bars",
+            event_tx,
+            &bars_guid_map,
+            subscription_manager,
+        )
+        .await?;
     }
 
     let positions_skip_history = if from_ts.is_some() {
@@ -211,7 +290,23 @@ async fn subscribe_all(
         cfg.skip_history_positions
     };
     let (guid, msg) = build_positions_subscribe(cfg, token, positions_skip_history);
-    send_and_ack(ws_sink, ws_stream, &guid, &msg, "positions", event_tx, &bars_guid_map).await?;
+    subscription_manager.add_subscription(Subscription {
+        guid: guid.clone(),
+        symbol: cfg.portfolio.clone(),
+        subscription_type: "positions".to_string(),
+        is_active: false,
+    });
+    send_and_ack(
+        ws_sink,
+        ws_stream,
+        &guid,
+        &msg,
+        "positions",
+        event_tx,
+        &bars_guid_map,
+        subscription_manager,
+    )
+    .await?;
 
     let orders_skip_history = if from_ts.is_some() {
         false
@@ -219,7 +314,23 @@ async fn subscribe_all(
         cfg.skip_history_orders
     };
     let (guid, msg) = build_orders_subscribe(cfg, token, orders_skip_history);
-    send_and_ack(ws_sink, ws_stream, &guid, &msg, "orders", event_tx, &bars_guid_map).await?;
+    subscription_manager.add_subscription(Subscription {
+        guid: guid.clone(),
+        symbol: cfg.portfolio.clone(),
+        subscription_type: "orders".to_string(),
+        is_active: false,
+    });
+    send_and_ack(
+        ws_sink,
+        ws_stream,
+        &guid,
+        &msg,
+        "orders",
+        event_tx,
+        &bars_guid_map,
+        subscription_manager,
+    )
+    .await?;
 
     Ok(bars_guid_map)
 }
@@ -232,11 +343,26 @@ async fn send_and_ack(
     label: &str,
     event_tx: &mpsc::Sender<WsEvent>,
     bars_guid_map: &HashMap<String, String>,
+    subscription_manager: &mut SubscriptionManager,
 ) -> anyhow::Result<()> {
     info!(guid, label, "ws subscribe send");
     ws_sink.send(Message::Text(msg.to_string().into())).await?;
 
-    let ack = read_until_guid(ws_stream, guid, Duration::from_secs(5), event_tx, bars_guid_map).await?;
+    let ack = read_until_guid(
+        ws_stream,
+        guid,
+        Duration::from_secs(5),
+        event_tx,
+        bars_guid_map,
+        subscription_manager,
+    )
+    .await?;
+    if let Some(subscription) = subscription_manager.activate_subscription(guid) {
+        log_event(GatewayEvent::Subscribed {
+            symbol: subscription.symbol,
+            subscription_type: subscription.subscription_type,
+        });
+    }
     debug!(?ack, guid, label, "ws subscribe ack");
     Ok(())
 }
@@ -247,6 +373,7 @@ async fn read_until_guid(
     timeout_dur: Duration,
     event_tx: &mpsc::Sender<WsEvent>,
     bars_guid_map: &HashMap<String, String>,
+    subscription_manager: &SubscriptionManager,
 ) -> anyhow::Result<Value> {
     let fut = async move {
         while let Some(msg) = stream.next().await {
@@ -266,7 +393,20 @@ async fn read_until_guid(
 
     match tokio::time::timeout(timeout_dur, fut).await {
         Ok(inner) => inner,
-        Err(_) => Err(anyhow::anyhow!("ws subscribe timeout")),
+        Err(_) => {
+            if let Some(subscription) = subscription_manager.desired_subscriptions.get(guid) {
+                log_event(GatewayEvent::AckTimeout {
+                    symbol: subscription.symbol.clone(),
+                    subscription_type: subscription.subscription_type.clone(),
+                });
+            } else {
+                log_event(GatewayEvent::AckTimeout {
+                    symbol: "<unknown>".to_string(),
+                    subscription_type: "<unknown>".to_string(),
+                });
+            }
+            Err(anyhow::anyhow!("ws subscribe timeout"))
+        }
     }
 }
 

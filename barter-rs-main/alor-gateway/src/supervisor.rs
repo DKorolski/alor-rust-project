@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
 use crate::cws_client::CwsClient;
+use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::{GatewayPhase, HealthState};
 use crate::router::{Router, RouterCommand, RouterControl};
 use crate::state::orders_manager::OrdersManager;
@@ -68,7 +69,19 @@ impl Supervisor {
                 while let Some(event) = ws_events.recv().await {
                     match event {
                         WsEvent::Raw(value) => {
-                            let _ = raw_tx.send(value).await;
+                            match raw_tx.try_send(value) {
+                                Ok(()) => {
+                                    let mut guard = health.write();
+                                    guard.backpressure_lagged = false;
+                                }
+                                Err(error) => {
+                                    let mut guard = health.write();
+                                    guard.backpressure_lagged = true;
+                                    guard.readiness = false;
+                                    log_event(GatewayEvent::Lagged { duration_ms: 0 });
+                                    warn!(?error, "backpressure detected: raw queue full");
+                                }
+                            }
                         }
                         WsEvent::Conn(conn) => {
                             let mut guard = health.write();
@@ -237,6 +250,8 @@ impl Supervisor {
             phase_rx,
             cfg.history_sessions,
             cfg.session_rollover_hour_utc,
+            cfg.price_step,
+            cfg.volume_step,
         )
         .start(bars_rx);
 
@@ -256,11 +271,14 @@ impl Supervisor {
                 let mut guard = self.health.write();
                 guard.last_bar_age_sec = last_bar_instant.read().elapsed().as_secs();
                 guard.gateway_phase = *phase_tx.borrow();
-                guard.readiness = guard.gateway_phase == GatewayPhase::LiveReady && guard.ws_connected;
+                guard.readiness = guard.gateway_phase == GatewayPhase::LiveReady
+                    && guard.ws_connected
+                    && !guard.backpressure_lagged;
             }
 
             if last_bar_instant.read().elapsed() > silence_threshold {
                 warn!("bar silence detected; resubscribing");
+                log_event(GatewayEvent::ResyncStarted);
                 let from_ts = last_bar_ts.read().values().min().map(|ts| ts - (cfg.tf_sec * 2));
                 if let Some(from_ts) = from_ts {
                     hub_handle.resubscribe_from(from_ts).await;
@@ -268,6 +286,7 @@ impl Supervisor {
                     hub_handle.resubscribe_all().await;
                 }
                 *last_bar_instant.write() = Instant::now();
+                log_event(GatewayEvent::ResyncDone);
             }
         }
 

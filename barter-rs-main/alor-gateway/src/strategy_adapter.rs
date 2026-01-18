@@ -23,6 +23,8 @@ pub struct StrategyRunner<S> {
     phase_rx: watch::Receiver<GatewayPhase>,
     history_sessions: u8,
     session_rollover_hour_utc: u8,
+    price_step: f64,
+    volume_step: f64,
 }
 
 impl<S> StrategyRunner<S>
@@ -39,6 +41,8 @@ where
         phase_rx: watch::Receiver<GatewayPhase>,
         history_sessions: u8,
         session_rollover_hour_utc: u8,
+        price_step: f64,
+        volume_step: f64,
     ) -> Self {
         Self {
             strategy,
@@ -50,6 +54,8 @@ where
             phase_rx,
             history_sessions,
             session_rollover_hour_utc,
+            price_step,
+            volume_step,
         }
     }
 
@@ -103,6 +109,8 @@ where
                             &self.cws,
                             &self.portfolio,
                             &self.exchange,
+                            self.price_step,
+                            self.volume_step,
                             action,
                         )
                         .await
@@ -178,6 +186,8 @@ async fn execute_action(
     cws: &CwsHandle,
     portfolio: &str,
     exchange: &str,
+    price_step: f64,
+    volume_step: f64,
     action: Action,
 ) -> anyhow::Result<()> {
     match action {
@@ -188,6 +198,8 @@ async fn execute_action(
             side,
         } => {
             info!(?symbol, price, qty, ?side, "strategy place limit");
+            let price = normalize_step(price, price_step);
+            let qty = normalize_step(qty, volume_step);
             let _ = cws
                 .create_limit(portfolio, exchange, &symbol, price, qty, side.as_str())
                 .await?;
@@ -202,6 +214,8 @@ async fn execute_action(
             new_qty,
         } => {
             info!(order_id, new_price, new_qty, "strategy replace order");
+            let new_price = normalize_step(new_price, price_step);
+            let new_qty = normalize_step(new_qty, volume_step);
             let _ = cws.replace(order_id, new_price, new_qty).await?;
         }
         Action::Noop => {}
@@ -230,4 +244,12 @@ fn session_id(close_time_utc: i64, rollover_hour_utc: u8) -> i32 {
         .single()
         .expect("valid timestamp");
     date.date_naive().num_days_from_ce()
+}
+
+fn normalize_step(value: f64, step: f64) -> f64 {
+    if step <= 0.0 {
+        value
+    } else {
+        (value / step).round() * step
+    }
 }

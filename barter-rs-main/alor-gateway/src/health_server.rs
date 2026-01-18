@@ -15,6 +15,7 @@ struct ReadinessResponse {
     last_bar_age_sec: u64,
     last_positions_ts: i64,
     last_orders_ts: i64,
+    backpressure_lagged: bool,
 }
 
 pub async fn serve(health: Arc<RwLock<HealthState>>, addr: String) -> anyhow::Result<()> {
@@ -42,5 +43,6 @@ async fn readiness(State(health): State<Arc<RwLock<HealthState>>>) -> Json<Readi
         last_bar_age_sec: guard.last_bar_age_sec,
         last_positions_ts: guard.last_positions_ts,
         last_orders_ts: guard.last_orders_ts,
+        backpressure_lagged: guard.backpressure_lagged,
     })
 }
