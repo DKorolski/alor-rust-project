@@ -29,6 +29,7 @@ pub struct AlorGatewayConfig {
     pub history_sessions: u8,
     pub history_days_back: u8,
     pub session_rollover_hour_utc: u8,
+    pub health_listen_addr: String,
 }
 
 impl AlorGatewayConfig {
@@ -66,6 +67,8 @@ impl AlorGatewayConfig {
             history_sessions: parse_u8("ALOR_HISTORY_SESSIONS", 2)?,
             history_days_back: parse_u8("ALOR_HISTORY_DAYS_BACK", 5)?,
             session_rollover_hour_utc: parse_u8("ALOR_SESSION_ROLLOVER_HOUR_UTC", 7)?,
+            health_listen_addr: env::var("ALOR_HEALTH_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
         })
     }
 
@@ -113,6 +116,9 @@ impl AlorGatewayConfig {
             history_sessions: file_cfg.history_sessions.unwrap_or(2),
             history_days_back: file_cfg.history_days_back.unwrap_or(5),
             session_rollover_hour_utc: file_cfg.session_rollover_hour_utc.unwrap_or(7),
+            health_listen_addr: file_cfg
+                .health_listen_addr
+                .unwrap_or_else(|| "127.0.0.1:8080".to_string()),
         })
     }
 }
@@ -156,6 +162,7 @@ struct FileConfig {
     history_sessions: Option<u8>,
     history_days_back: Option<u8>,
     session_rollover_hour_utc: Option<u8>,
+    health_listen_addr: Option<String>,
 }
 
 fn get_required(key: &'static str) -> Result<String, ConfigError> {

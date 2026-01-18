@@ -28,3 +28,4 @@ max_silence_bars_sec = 180
 history_sessions = 2
 history_days_back = 5
 session_rollover_hour_utc = 6
+health_listen_addr = "127.0.0.1:8081"

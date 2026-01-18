@@ -112,7 +112,6 @@ async fn connect_and_run(
     let token = token_provider.access_token().await?;
     let (ws_stream, _) = tokio_tungstenite::connect_async(&cfg.ws_url).await?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
-    let mut bars_guid_map = HashMap::<String, String>::new();
 
     info!("ws hub connected");
     let _ = event_tx.send(WsEvent::Conn(ConnEvent::Connected)).await;
@@ -123,7 +122,8 @@ async fn connect_and_run(
             wallclock_ts: subscribe_wallclock_ts,
         })
         .await;
-    bars_guid_map = subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, None, event_tx).await?;
+    let mut bars_guid_map =
+        subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, None, event_tx).await?;
 
     loop {
         tokio::select! {

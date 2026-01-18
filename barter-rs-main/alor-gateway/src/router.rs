@@ -241,3 +241,80 @@ fn to_i64(value: &Value) -> Option<i64> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_bars_respects_origin_cutoff() {
+        let value = json!({
+            "data": {
+                "symbol": "IMOEXF",
+                "time": 900,
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10.0
+            }
+        });
+        let bars = parse_bars(&value, Some(1000));
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].origin, DataOrigin::History);
+
+        let value = json!({
+            "data": {
+                "symbol": "IMOEXF",
+                "time": 1100,
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10.0
+            }
+        });
+        let bars = parse_bars(&value, Some(1000));
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].origin, DataOrigin::Live);
+    }
+
+    #[test]
+    fn parse_position_event() {
+        let value = json!({
+            "data": {
+                "symbol": "IMOEXF",
+                "qty": 2.0,
+                "avgPrice": 100.0,
+                "timestamp": 1700000000
+            }
+        });
+        let position = parse_position(&value).expect("position");
+        assert_eq!(position.symbol, "IMOEXF");
+        assert_eq!(position.qty, 2.0);
+        assert_eq!(position.avg_price, 100.0);
+        assert_eq!(position.ts_utc, 1700000000);
+    }
+
+    #[test]
+    fn parse_order_event() {
+        let value = json!({
+            "data": {
+                "orderId": 42,
+                "symbol": "IMOEXF",
+                "status": "working",
+                "filled": 1.0,
+                "price": 99.5,
+                "timestamp": 1700000001
+            }
+        });
+        let order = parse_order(&value).expect("order");
+        assert_eq!(order.order_id, 42);
+        assert_eq!(order.symbol, "IMOEXF");
+        assert_eq!(order.status, "working");
+        assert_eq!(order.filled, 1.0);
+        assert_eq!(order.price, 99.5);
+        assert_eq!(order.ts_utc, 1700000001);
+    }
+}
