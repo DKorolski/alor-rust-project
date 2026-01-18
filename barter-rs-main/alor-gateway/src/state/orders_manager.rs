@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
@@ -10,6 +11,8 @@ use crate::models::{OrderEvent, OrdersSnapshot};
 #[derive(Clone)]
 pub struct OrdersManagerHandle {
     store: Arc<RwLock<HashMap<i64, OrderEvent>>>,
+    synced: Arc<AtomicBool>,
+    last_ts: Arc<AtomicI64>,
 }
 
 pub struct OrdersManager;
@@ -17,20 +20,31 @@ pub struct OrdersManager;
 impl OrdersManager {
     pub fn start(mut rx: mpsc::Receiver<OrderEvent>) -> OrdersManagerHandle {
         let store = Arc::new(RwLock::new(HashMap::new()));
+        let synced = Arc::new(AtomicBool::new(false));
+        let last_ts = Arc::new(AtomicI64::new(0));
         let store_clone = store.clone();
+        let synced_clone = synced.clone();
+        let last_ts_clone = last_ts.clone();
 
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 debug!(order_id = event.order_id, status = %event.status, "order update");
+                let ts = event.ts_utc;
                 if is_terminal(&event.status) {
                     store_clone.write().remove(&event.order_id);
                 } else {
                     store_clone.write().insert(event.order_id, event);
                 }
+                synced_clone.store(true, Ordering::SeqCst);
+                last_ts_clone.store(ts, Ordering::SeqCst);
             }
         });
 
-        OrdersManagerHandle { store }
+        OrdersManagerHandle {
+            store,
+            synced,
+            last_ts,
+        }
     }
 }
 
@@ -52,6 +66,14 @@ impl OrdersManagerHandle {
                 }
             })
             .collect()
+    }
+
+    pub fn synced(&self) -> bool {
+        self.synced.load(Ordering::SeqCst)
+    }
+
+    pub fn last_ts(&self) -> i64 {
+        self.last_ts.load(Ordering::SeqCst)
     }
 }
 

@@ -1,9 +1,11 @@
 use std::time::Duration;
+use std::collections::HashMap;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use chrono::{DateTime, TimeZone, Utc};
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -16,6 +18,7 @@ use crate::ws_subscriptions::{
 pub enum WsEvent {
     Raw(Value),
     Conn(ConnEvent),
+    Subscribed { wallclock_ts: i64 },
 }
 
 #[derive(Debug)]
@@ -33,6 +36,7 @@ pub struct WsHubHandle {
 #[derive(Debug)]
 enum HubCommand {
     Resubscribe { from_ts: Option<i64> },
+    Reconnect,
     Shutdown,
 }
 
@@ -48,6 +52,7 @@ impl WsHub {
 
         tokio::spawn(async move {
             let mut should_run = true;
+            let mut backoff = Duration::from_millis(cfg.backoff_initial_ms);
             while should_run {
                 if event_tx.send(WsEvent::Conn(ConnEvent::Reconnecting)).await.is_err() {
                     break;
@@ -60,7 +65,8 @@ impl WsHub {
                     Err(error) => {
                         warn!(?error, "ws hub error; reconnecting");
                         let _ = event_tx.send(WsEvent::Conn(ConnEvent::Disconnected)).await;
-                        tokio::time::sleep(Duration::from_millis(cfg.backoff_initial_ms)).await;
+                        tokio::time::sleep(jittered(backoff)).await;
+                        backoff = next_backoff(backoff, &cfg);
                     }
                 }
             }
@@ -88,6 +94,10 @@ impl WsHubHandle {
             .await;
     }
 
+    pub async fn reconnect(&self) {
+        let _ = self.cmd_tx.send(HubCommand::Reconnect).await;
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(HubCommand::Shutdown).await;
     }
@@ -106,7 +116,14 @@ async fn connect_and_run(
     info!("ws hub connected");
     let _ = event_tx.send(WsEvent::Conn(ConnEvent::Connected)).await;
 
-    subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, None).await?;
+    let subscribe_wallclock_ts = Utc::now().timestamp();
+    let _ = event_tx
+        .send(WsEvent::Subscribed {
+            wallclock_ts: subscribe_wallclock_ts,
+        })
+        .await;
+    let mut bars_guid_map =
+        subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, None, event_tx).await?;
 
     loop {
         tokio::select! {
@@ -114,7 +131,18 @@ async fn connect_and_run(
                 match cmd {
                     Some(HubCommand::Resubscribe { from_ts }) => {
                         info!("ws hub resubscribe requested");
-                        subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, from_ts).await?;
+                        let subscribe_wallclock_ts = Utc::now().timestamp();
+                        let _ = event_tx
+                            .send(WsEvent::Subscribed {
+                                wallclock_ts: subscribe_wallclock_ts,
+                            })
+                            .await;
+                        bars_guid_map =
+                            subscribe_all(cfg, &token, &mut ws_sink, &mut ws_stream, from_ts, event_tx).await?;
+                    }
+                    Some(HubCommand::Reconnect) => {
+                        info!("ws hub reconnect requested");
+                        return Err(anyhow::anyhow!("forced reconnect"));
                     }
                     Some(HubCommand::Shutdown) | None => {
                         info!("ws hub shutdown requested");
@@ -126,6 +154,7 @@ async fn connect_and_run(
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
                         if let Ok(val) = serde_json::from_str::<Value>(&txt) {
+                            let val = attach_symbol(val, &bars_guid_map);
                             if event_tx.send(WsEvent::Raw(val)).await.is_err() {
                                 return Ok(());
                             }
@@ -153,9 +182,17 @@ async fn subscribe_all(
     ws_sink: &mut (impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
     ws_stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
     from_ts: Option<i64>,
-) -> anyhow::Result<()> {
+    event_tx: &mpsc::Sender<WsEvent>,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut bars_guid_map = HashMap::new();
     let bars_from_ts = from_ts.unwrap_or(cfg.from_ts);
     let skip_history = from_ts.is_none() && cfg.skip_history_bars;
+    debug!(
+        bars_from_ts,
+        bars_from_ts_rfc3339 = %format_ts(bars_from_ts),
+        skip_history,
+        "ws bars subscribe window"
+    );
     for symbol in &cfg.symbols {
         let (guid, msg) = build_bars_subscribe(
             cfg,
@@ -164,16 +201,27 @@ async fn subscribe_all(
             bars_from_ts,
             skip_history,
         );
-        send_and_ack(ws_sink, ws_stream, &guid, &msg, "bars").await?;
+        bars_guid_map.insert(guid.clone(), symbol.clone());
+        send_and_ack(ws_sink, ws_stream, &guid, &msg, "bars", event_tx, &bars_guid_map).await?;
     }
 
-    let (guid, msg) = build_positions_subscribe(cfg, token, cfg.skip_history_positions);
-    send_and_ack(ws_sink, ws_stream, &guid, &msg, "positions").await?;
+    let positions_skip_history = if from_ts.is_some() {
+        false
+    } else {
+        cfg.skip_history_positions
+    };
+    let (guid, msg) = build_positions_subscribe(cfg, token, positions_skip_history);
+    send_and_ack(ws_sink, ws_stream, &guid, &msg, "positions", event_tx, &bars_guid_map).await?;
 
-    let (guid, msg) = build_orders_subscribe(cfg, token, cfg.skip_history_orders);
-    send_and_ack(ws_sink, ws_stream, &guid, &msg, "orders").await?;
+    let orders_skip_history = if from_ts.is_some() {
+        false
+    } else {
+        cfg.skip_history_orders
+    };
+    let (guid, msg) = build_orders_subscribe(cfg, token, orders_skip_history);
+    send_and_ack(ws_sink, ws_stream, &guid, &msg, "orders", event_tx, &bars_guid_map).await?;
 
-    Ok(())
+    Ok(bars_guid_map)
 }
 
 async fn send_and_ack(
@@ -182,11 +230,13 @@ async fn send_and_ack(
     guid: &str,
     msg: &str,
     label: &str,
+    event_tx: &mpsc::Sender<WsEvent>,
+    bars_guid_map: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     info!(guid, label, "ws subscribe send");
     ws_sink.send(Message::Text(msg.to_string().into())).await?;
 
-    let ack = read_until_guid(ws_stream, guid, Duration::from_secs(5)).await?;
+    let ack = read_until_guid(ws_stream, guid, Duration::from_secs(5), event_tx, bars_guid_map).await?;
     debug!(?ack, guid, label, "ws subscribe ack");
     Ok(())
 }
@@ -195,6 +245,8 @@ async fn read_until_guid(
     stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
     guid: &str,
     timeout_dur: Duration,
+    event_tx: &mpsc::Sender<WsEvent>,
+    bars_guid_map: &HashMap<String, String>,
 ) -> anyhow::Result<Value> {
     let fut = async move {
         while let Some(msg) = stream.next().await {
@@ -204,6 +256,8 @@ async fn read_until_guid(
                     if guid_of(&val).as_deref() == Some(guid) {
                         return Ok(val);
                     }
+                    let val = attach_symbol(val, bars_guid_map);
+                    let _ = event_tx.send(WsEvent::Raw(val)).await;
                 }
             }
         }
@@ -222,4 +276,51 @@ fn guid_of(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.get("requestGuid").and_then(Value::as_str))
         .map(|value| value.to_string())
+}
+
+fn attach_symbol(mut value: Value, bars_guid_map: &HashMap<String, String>) -> Value {
+    let Some(guid) = guid_of(&value) else {
+        return value;
+    };
+    let Some(symbol) = bars_guid_map.get(&guid) else {
+        return value;
+    };
+    let Some(data) = value.get_mut("data") else {
+        return value;
+    };
+    if let Some(obj) = data.as_object_mut() {
+        if !obj.contains_key("symbol") && !obj.contains_key("code") {
+            obj.insert("symbol".to_string(), Value::String(symbol.clone()));
+        }
+    } else if let Some(arr) = data.as_array_mut() {
+        for item in arr.iter_mut() {
+            if let Some(obj) = item.as_object_mut() {
+                if !obj.contains_key("symbol") && !obj.contains_key("code") {
+                    obj.insert("symbol".to_string(), Value::String(symbol.clone()));
+                }
+            }
+        }
+    }
+    value
+}
+
+fn format_ts(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
+        .to_rfc3339()
+}
+
+fn next_backoff(current: Duration, cfg: &AlorGatewayConfig) -> Duration {
+    (current * cfg.backoff_multiplier as u32).min(Duration::from_millis(cfg.backoff_max_ms))
+}
+
+fn jittered(duration: Duration) -> Duration {
+    let jitter_pct = 0.2;
+    let millis = duration.as_millis() as f64;
+    let jitter = rand::random::<f64>() * jitter_pct;
+    let offset = millis * jitter;
+    let lower = millis - offset;
+    let upper = millis + offset;
+    let jittered = lower + (rand::random::<f64>() * (upper - lower));
+    Duration::from_millis(jittered.max(0.0) as u64)
 }

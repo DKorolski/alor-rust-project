@@ -14,7 +14,7 @@ const OAUTH_URL: &str = "https://oauth.alor.ru/refresh";
 const WS_URL: &str = "wss://api.alor.ru/ws";
 
 const DEFAULT_PORTFOLIO: &str = "7502T0U";
-const DEFAULT_SYMBOL: &str = "USDRUBF";
+const DEFAULT_SYMBOL: &str = "IMOEXF";
 const DEFAULT_EXCHANGE: &str = "MOEX";
 const DEFAULT_INSTRUMENT_GROUP: &str = "RFUD";
 const DEFAULT_TIMEFRAME_SEC: i64 = 60;
@@ -24,7 +24,7 @@ const DEFAULT_FORMAT: &str = "Simple";
 const DEFAULT_FREQUENCY_MS: i64 = 250;
 const DEFAULT_TRADE_LOG: &str = "paper_trades_1.csv";
 const DEFAULT_START_CASH: f64 = 30_000.0;
-const DEFAULT_FROM_DATE: &str = "2025-01-01";
+const DEFAULT_FROM_DATE: &str = "2025-12-31";
 const DEFAULT_HISTORY_BATCH_LIMIT: usize = 4999;
 const DEFAULT_HISTORY_ONLY: bool = true;
 const DEFAULT_HISTORY_MAX_GAP_MIN: i64 = 10_080;

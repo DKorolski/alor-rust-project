@@ -26,6 +26,10 @@ pub struct AlorGatewayConfig {
     pub backoff_max_ms: u64,
     pub backoff_multiplier: u8,
     pub max_silence_bars_sec: u64,
+    pub history_sessions: u8,
+    pub history_days_back: u8,
+    pub session_rollover_hour_utc: u8,
+    pub health_listen_addr: String,
 }
 
 impl AlorGatewayConfig {
@@ -60,6 +64,11 @@ impl AlorGatewayConfig {
             backoff_max_ms: parse_u64("ALOR_BACKOFF_MAX_MS", 30_000)?,
             backoff_multiplier: parse_u8("ALOR_BACKOFF_MULTIPLIER", 2)?,
             max_silence_bars_sec: parse_u64("ALOR_MAX_SILENCE_BARS_SEC", 180)?,
+            history_sessions: parse_u8("ALOR_HISTORY_SESSIONS", 2)?,
+            history_days_back: parse_u8("ALOR_HISTORY_DAYS_BACK", 5)?,
+            session_rollover_hour_utc: parse_u8("ALOR_SESSION_ROLLOVER_HOUR_UTC", 7)?,
+            health_listen_addr: env::var("ALOR_HEALTH_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
         })
     }
 
@@ -104,6 +113,12 @@ impl AlorGatewayConfig {
             backoff_max_ms: file_cfg.backoff_max_ms.unwrap_or(30_000),
             backoff_multiplier: file_cfg.backoff_multiplier.unwrap_or(2),
             max_silence_bars_sec: file_cfg.max_silence_bars_sec.unwrap_or(180),
+            history_sessions: file_cfg.history_sessions.unwrap_or(2),
+            history_days_back: file_cfg.history_days_back.unwrap_or(5),
+            session_rollover_hour_utc: file_cfg.session_rollover_hour_utc.unwrap_or(7),
+            health_listen_addr: file_cfg
+                .health_listen_addr
+                .unwrap_or_else(|| "127.0.0.1:8080".to_string()),
         })
     }
 }
@@ -144,6 +159,10 @@ struct FileConfig {
     backoff_max_ms: Option<u64>,
     backoff_multiplier: Option<u8>,
     max_silence_bars_sec: Option<u64>,
+    history_sessions: Option<u8>,
+    history_days_back: Option<u8>,
+    session_rollover_hour_utc: Option<u8>,
+    health_listen_addr: Option<String>,
 }
 
 fn get_required(key: &'static str) -> Result<String, ConfigError> {
