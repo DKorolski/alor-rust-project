@@ -10,7 +10,7 @@ from_ts = 0
 ws_url = "wss://api.alor.ru/ws"
 cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
-refresh_token = "742b4849-a27b-45fb-99e0-22e12ed92e87"
+refresh_token = ""
 
 skip_history_bars = false
 skip_history_positions = false
@@ -28,4 +28,3 @@ max_silence_bars_sec = 180
 history_sessions = 2
 history_days_back = 5
 session_rollover_hour_utc = 6
-bars_only = true

@@ -158,7 +158,6 @@ impl Supervisor {
             let positions_manager = positions_manager.clone();
             let orders_manager = orders_manager.clone();
             let symbols_len = cfg.symbols.len();
-            let bars_only = cfg.bars_only;
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
                 let mut history_min: Option<i64> = None;
@@ -182,7 +181,7 @@ impl Supervisor {
                         history_max = Some(history_max.map_or(bar.close_time_utc, |max| {
                             max.max(bar.close_time_utc)
                         }));
-                        info!(
+                        debug!(
                             symbol = %bar.symbol,
                             close_time_utc = bar.close_time_utc,
                             open = bar.o,
@@ -195,14 +194,15 @@ impl Supervisor {
                     } else {
                         if !logged_live_start {
                             info!(
-                                history_min,
-                                history_max,
+                                history_start_ts = history_min,
+                                history_end_ts = history_max,
                                 history_count,
+                                live_start_ts = bar.close_time_utc,
                                 "history backfill complete; live stream started"
                             );
                             logged_live_start = true;
                         }
-                        info!(
+                        debug!(
                             symbol = %bar.symbol,
                             close_time_utc = bar.close_time_utc,
                             open = bar.o,
@@ -216,8 +216,8 @@ impl Supervisor {
                     }
                     let live_ready =
                         live_symbols.read().len() >= symbols_len
-                            && (bars_only || positions_manager.synced())
-                            && (bars_only || orders_manager.synced());
+                            && positions_manager.synced()
+                            && orders_manager.synced();
                     if live_ready && *phase_tx.borrow() != GatewayPhase::LiveReady {
                         info!("gateway phase transition: LiveReady");
                         let _ = phase_tx.send(GatewayPhase::LiveReady);

@@ -29,7 +29,6 @@ pub struct AlorGatewayConfig {
     pub history_sessions: u8,
     pub history_days_back: u8,
     pub session_rollover_hour_utc: u8,
-    pub bars_only: bool,
 }
 
 impl AlorGatewayConfig {
@@ -67,7 +66,6 @@ impl AlorGatewayConfig {
             history_sessions: parse_u8("ALOR_HISTORY_SESSIONS", 2)?,
             history_days_back: parse_u8("ALOR_HISTORY_DAYS_BACK", 5)?,
             session_rollover_hour_utc: parse_u8("ALOR_SESSION_ROLLOVER_HOUR_UTC", 7)?,
-            bars_only: parse_bool("ALOR_BARS_ONLY", false),
         })
     }
 
@@ -115,7 +113,6 @@ impl AlorGatewayConfig {
             history_sessions: file_cfg.history_sessions.unwrap_or(2),
             history_days_back: file_cfg.history_days_back.unwrap_or(5),
             session_rollover_hour_utc: file_cfg.session_rollover_hour_utc.unwrap_or(7),
-            bars_only: file_cfg.bars_only.unwrap_or(false),
         })
     }
 }
@@ -159,7 +156,6 @@ struct FileConfig {
     history_sessions: Option<u8>,
     history_days_back: Option<u8>,
     session_rollover_hour_utc: Option<u8>,
-    bars_only: Option<bool>,
 }
 
 fn get_required(key: &'static str) -> Result<String, ConfigError> {

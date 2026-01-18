@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
@@ -38,7 +38,7 @@ impl Router {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
 
         tokio::spawn(async move {
-            let mut bar_dedup = HashSet::new();
+            let mut live_buffers: HashMap<String, BarEvent> = HashMap::new();
             let mut live_cutoff_ts: Option<i64> = None;
             loop {
                 tokio::select! {
@@ -65,11 +65,38 @@ impl Router {
                         let bars = parse_bars(&value, live_cutoff_ts);
                         if !bars.is_empty() {
                             for bar in bars {
-                                let key = (bar.symbol.clone(), bar.close_time_utc);
-                                if bar_dedup.insert(key) {
-                                    let _ = bars_tx.send(bar).await;
-                                } else {
-                                    debug!("duplicate bar dropped");
+                                match bar.origin {
+                                    DataOrigin::History => {
+                                        let _ = bars_tx.send(bar).await;
+                                    }
+                                    DataOrigin::Live => {
+                                        let symbol = bar.symbol.clone();
+                                        match live_buffers.get(&symbol) {
+                                            None => {
+                                                live_buffers.insert(symbol, bar);
+                                            }
+                                            Some(prev) if bar.close_time_utc == prev.close_time_utc => {
+                                                debug!(
+                                                    symbol = %symbol,
+                                                    close_time_utc = bar.close_time_utc,
+                                                    "live bar update buffered"
+                                                );
+                                                live_buffers.insert(symbol, bar);
+                                            }
+                                            Some(prev) if bar.close_time_utc > prev.close_time_utc => {
+                                                let _ = bars_tx.send(prev.clone()).await;
+                                                live_buffers.insert(symbol, bar);
+                                            }
+                                            Some(prev) => {
+                                                debug!(
+                                                    symbol = %symbol,
+                                                    close_time_prev = prev.close_time_utc,
+                                                    close_time_new = bar.close_time_utc,
+                                                    "live bar out of order dropped"
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             continue;
