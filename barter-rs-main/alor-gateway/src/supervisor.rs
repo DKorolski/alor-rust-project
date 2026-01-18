@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
@@ -46,6 +46,11 @@ impl Supervisor {
         if cfg.from_ts == 0 {
             cfg.from_ts = Utc::now().timestamp() - (cfg.history_days_back as i64 * 86_400);
         }
+        debug!(
+            from_ts = cfg.from_ts,
+            history_days_back = cfg.history_days_back,
+            "history backfill start configured"
+        );
 
         let (hub_handle, mut ws_events) = WsHub::start(cfg.clone(), self.token_provider.clone());
         let (raw_tx, raw_rx) = mpsc::channel(1024);
@@ -74,6 +79,17 @@ impl Supervisor {
                             }
                         }
                         WsEvent::Subscribed { wallclock_ts } => {
+                            let live_cutoff_ts = wallclock_ts - (2 * cfg.tf_sec);
+                            debug!(
+                                from_ts = cfg.from_ts,
+                                from_ts_rfc3339 = %format_ts(cfg.from_ts),
+                                wallclock_ts,
+                                wallclock_ts_rfc3339 = %format_ts(wallclock_ts),
+                                live_cutoff_ts,
+                                live_cutoff_ts_rfc3339 = %format_ts(live_cutoff_ts),
+                                tf_sec = cfg.tf_sec,
+                                "history backfill window computed"
+                            );
                             let _ = router_cmd_tx
                                 .send(RouterCommand::UpdateSubscribeWallclock(wallclock_ts))
                                 .await;
@@ -142,8 +158,13 @@ impl Supervisor {
             let positions_manager = positions_manager.clone();
             let orders_manager = orders_manager.clone();
             let symbols_len = cfg.symbols.len();
+            let bars_only = cfg.bars_only;
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
+                let mut history_min: Option<i64> = None;
+                let mut history_max: Option<i64> = None;
+                let mut history_count: u64 = 0;
+                let mut logged_live_start = false;
                 while let Some(bar) = bars_rx_inner.recv().await {
                     {
                         let mut guard = health.write();
@@ -153,13 +174,50 @@ impl Supervisor {
                     last_bar_ts
                         .write()
                         .insert(bar.symbol.clone(), bar.close_time_utc);
-                    if bar.origin == crate::models::DataOrigin::Live {
+                    if bar.origin == crate::models::DataOrigin::History {
+                        history_count += 1;
+                        history_min = Some(history_min.map_or(bar.close_time_utc, |min| {
+                            min.min(bar.close_time_utc)
+                        }));
+                        history_max = Some(history_max.map_or(bar.close_time_utc, |max| {
+                            max.max(bar.close_time_utc)
+                        }));
+                        info!(
+                            symbol = %bar.symbol,
+                            close_time_utc = bar.close_time_utc,
+                            open = bar.o,
+                            high = bar.h,
+                            low = bar.l,
+                            close = bar.c,
+                            volume = bar.v,
+                            "history bar"
+                        );
+                    } else {
+                        if !logged_live_start {
+                            info!(
+                                history_min,
+                                history_max,
+                                history_count,
+                                "history backfill complete; live stream started"
+                            );
+                            logged_live_start = true;
+                        }
+                        info!(
+                            symbol = %bar.symbol,
+                            close_time_utc = bar.close_time_utc,
+                            open = bar.o,
+                            high = bar.h,
+                            low = bar.l,
+                            close = bar.c,
+                            volume = bar.v,
+                            "live bar"
+                        );
                         live_symbols.write().insert(bar.symbol.clone());
                     }
                     let live_ready =
                         live_symbols.read().len() >= symbols_len
-                            && positions_manager.synced()
-                            && orders_manager.synced();
+                            && (bars_only || positions_manager.synced())
+                            && (bars_only || orders_manager.synced());
                     if live_ready && *phase_tx.borrow() != GatewayPhase::LiveReady {
                         info!("gateway phase transition: LiveReady");
                         let _ = phase_tx.send(GatewayPhase::LiveReady);
@@ -216,4 +274,10 @@ impl Supervisor {
         Ok(())
     }
 
+}
+
+fn format_ts(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
+        .to_rfc3339()
 }

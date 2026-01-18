@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -181,6 +181,12 @@ async fn subscribe_all(
 ) -> anyhow::Result<()> {
     let bars_from_ts = from_ts.unwrap_or(cfg.from_ts);
     let skip_history = from_ts.is_none() && cfg.skip_history_bars;
+    debug!(
+        bars_from_ts,
+        bars_from_ts_rfc3339 = %format_ts(bars_from_ts),
+        skip_history,
+        "ws bars subscribe window"
+    );
     for symbol in &cfg.symbols {
         let (guid, msg) = build_bars_subscribe(
             cfg,
@@ -192,21 +198,25 @@ async fn subscribe_all(
         send_and_ack(ws_sink, ws_stream, &guid, &msg, "bars").await?;
     }
 
-    let positions_skip_history = if from_ts.is_some() {
-        false
-    } else {
-        cfg.skip_history_positions
-    };
-    let (guid, msg) = build_positions_subscribe(cfg, token, positions_skip_history);
-    send_and_ack(ws_sink, ws_stream, &guid, &msg, "positions").await?;
+    if !cfg.bars_only {
+        let positions_skip_history = if from_ts.is_some() {
+            false
+        } else {
+            cfg.skip_history_positions
+        };
+        let (guid, msg) = build_positions_subscribe(cfg, token, positions_skip_history);
+        send_and_ack(ws_sink, ws_stream, &guid, &msg, "positions").await?;
 
-    let orders_skip_history = if from_ts.is_some() {
-        false
+        let orders_skip_history = if from_ts.is_some() {
+            false
+        } else {
+            cfg.skip_history_orders
+        };
+        let (guid, msg) = build_orders_subscribe(cfg, token, orders_skip_history);
+        send_and_ack(ws_sink, ws_stream, &guid, &msg, "orders").await?;
     } else {
-        cfg.skip_history_orders
-    };
-    let (guid, msg) = build_orders_subscribe(cfg, token, orders_skip_history);
-    send_and_ack(ws_sink, ws_stream, &guid, &msg, "orders").await?;
+        info!("ws hub bars-only mode: skipping positions/orders subscriptions");
+    }
 
     Ok(())
 }
@@ -257,6 +267,12 @@ fn guid_of(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.get("requestGuid").and_then(Value::as_str))
         .map(|value| value.to_string())
+}
+
+fn format_ts(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
+        .to_rfc3339()
 }
 
 fn next_backoff(current: Duration, cfg: &AlorGatewayConfig) -> Duration {
