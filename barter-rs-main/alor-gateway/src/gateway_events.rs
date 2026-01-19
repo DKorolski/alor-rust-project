@@ -1,5 +1,7 @@
 use tracing::{info, warn};
 
+use crate::health::ResyncMode;
+
 #[derive(Debug)]
 pub enum GatewayEvent {
     Connected,
@@ -7,8 +9,12 @@ pub enum GatewayEvent {
     Subscribed { symbol: String, subscription_type: String },
     AckTimeout { symbol: String, subscription_type: String },
     Lagged { duration_ms: u64 },
-    ResyncStarted,
-    ResyncDone,
+    ResyncStarted { mode: ResyncMode, reason: &'static str },
+    ResyncDone {
+        mode: ResyncMode,
+        gap_sec: u64,
+        bars_backfilled: u64,
+    },
 }
 
 pub fn log_event(event: GatewayEvent) {
@@ -26,7 +32,20 @@ pub fn log_event(event: GatewayEvent) {
         GatewayEvent::Lagged { duration_ms } => {
             warn!("Lagged detected: {} ms", duration_ms)
         }
-        GatewayEvent::ResyncStarted => info!("Resync started"),
-        GatewayEvent::ResyncDone => info!("Resync completed"),
+        GatewayEvent::ResyncStarted { mode, reason } => {
+            info!(?mode, reason, "Resync started")
+        }
+        GatewayEvent::ResyncDone {
+            mode,
+            gap_sec,
+            bars_backfilled,
+        } => {
+            info!(
+                ?mode,
+                gap_sec,
+                bars_backfilled,
+                "Resync completed"
+            )
+        }
     }
 }

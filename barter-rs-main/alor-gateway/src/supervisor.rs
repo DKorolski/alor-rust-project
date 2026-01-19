@@ -11,12 +11,12 @@ use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
 use crate::cws_client::CwsClient;
 use crate::gateway_events::{GatewayEvent, log_event};
-use crate::health::{GatewayPhase, HealthState};
+use crate::health::{GatewayPhase, HealthState, ResyncMode};
 use crate::router::{Router, RouterCommand, RouterControl};
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
-use crate::ws_hub::{ConnEvent, WsEvent, WsHub};
+use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub};
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -45,7 +45,8 @@ impl Supervisor {
     {
         let mut cfg = self.cfg.clone();
         if cfg.from_ts == 0 {
-            cfg.from_ts = Utc::now().timestamp() - (cfg.history_days_back as i64 * 86_400);
+            cfg.from_ts =
+                Utc::now().timestamp() - (cfg.cold_start_history_days_back as i64 * 86_400);
         }
         debug!(
             from_ts = cfg.from_ts,
@@ -57,6 +58,7 @@ impl Supervisor {
         let (raw_tx, raw_rx) = mpsc::channel(1024);
         let last_bar_instant = Arc::new(RwLock::new(Instant::now()));
         let last_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));
+        let last_delivered_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));
         let live_symbols = Arc::new(RwLock::new(HashSet::<String>::new()));
         let (phase_tx, phase_rx) = watch::channel(GatewayPhase::SyncingHistory);
 
@@ -77,6 +79,12 @@ impl Supervisor {
             let router_cmd_tx = router_cmd_tx.clone();
             let positions_manager = positions_manager.clone();
             let orders_manager = orders_manager.clone();
+            let last_delivered_bar_ts = last_delivered_bar_ts.clone();
+            let hub_handle = hub_handle.clone();
+            let symbols = cfg.symbols.clone();
+            let tf_sec = cfg.tf_sec;
+            let warm_reconnect_max_gap_sec = cfg.warm_reconnect_max_gap_sec;
+            let gap_backfill_padding_bars = cfg.gap_backfill_padding_bars;
             async move {
                 while let Some(event) = ws_events.recv().await {
                     match event {
@@ -100,10 +108,28 @@ impl Supervisor {
                             match conn {
                                 ConnEvent::Connected => guard.ws_connected = true,
                                 ConnEvent::Disconnected => guard.ws_connected = false,
-                                ConnEvent::Reconnecting => guard.ws_connected = false,
+                                ConnEvent::Reconnecting => {
+                                    guard.ws_connected = false;
+                                    guard.ws_reconnects_total += 1;
+                                    let (plan, mode) = compute_backfill_plan(
+                                        &symbols,
+                                        tf_sec,
+                                        warm_reconnect_max_gap_sec,
+                                        gap_backfill_padding_bars,
+                                        &last_delivered_bar_ts.read(),
+                                    );
+                                    hub_handle.set_backfill_plan(plan);
+                                    guard.last_resync_mode = mode;
+                                    guard.last_gap_backfill_sec =
+                                        hub_handle.backfill_plan().gap_sec;
+                                    guard.last_gap_backfill_bars = 0;
+                                }
                             }
                         }
-                        WsEvent::Subscribed { wallclock_ts } => {
+                        WsEvent::Subscribed {
+                            wallclock_ts,
+                            history_origin,
+                        } => {
                             let live_cutoff_ts = wallclock_ts - (2 * cfg.tf_sec);
                             debug!(
                                 from_ts = cfg.from_ts,
@@ -116,7 +142,10 @@ impl Supervisor {
                                 "history backfill window computed"
                             );
                             let _ = router_cmd_tx
-                                .send(RouterCommand::UpdateSubscribeWallclock(wallclock_ts))
+                                .send(RouterCommand::UpdateSubscribeWallclock {
+                                    wallclock_ts,
+                                    history_origin,
+                                })
                                 .await;
                         }
                         WsEvent::SubscriptionAck { subscription_type } => {
@@ -125,6 +154,15 @@ impl Supervisor {
                                 "orders" => orders_manager.mark_synced(),
                                 _ => {}
                             }
+                        }
+                        WsEvent::SubscriptionStats { desired, active } => {
+                            let mut guard = health.write();
+                            guard.desired_subscriptions_count = desired;
+                            guard.active_subscriptions_count = active;
+                        }
+                        WsEvent::WsRx { ts } => {
+                            let mut guard = health.write();
+                            guard.ws_last_rx_ts = ts;
                         }
                     }
                 }
@@ -180,6 +218,7 @@ impl Supervisor {
             let health = self.health.clone();
             let last_bar_instant = last_bar_instant.clone();
             let last_bar_ts = last_bar_ts.clone();
+            let last_delivered_bar_ts = last_delivered_bar_ts.clone();
             let live_symbols = live_symbols.clone();
             let phase_tx = phase_tx.clone();
             let positions_manager = positions_manager.clone();
@@ -200,7 +239,9 @@ impl Supervisor {
                     last_bar_ts
                         .write()
                         .insert(bar.symbol.clone(), bar.close_time_utc);
-                    if bar.origin == crate::models::DataOrigin::History {
+                    if bar.origin == crate::models::DataOrigin::History
+                        || bar.origin == crate::models::DataOrigin::HistoryGap
+                    {
                         history_count += 1;
                         history_min = Some(history_min.map_or(bar.close_time_utc, |min| {
                             min.min(bar.close_time_utc)
@@ -254,6 +295,22 @@ impl Supervisor {
                         );
                         let _ = phase_tx.send(GatewayPhase::LiveReady);
                     }
+                    let last_delivered = last_delivered_bar_ts
+                        .read()
+                        .get(&bar.symbol)
+                        .copied();
+                    if matches!(bar.origin, crate::models::DataOrigin::HistoryGap)
+                        && last_delivered.map_or(false, |ts| bar.close_time_utc <= ts)
+                    {
+                        continue;
+                    }
+                    if matches!(bar.origin, crate::models::DataOrigin::HistoryGap) {
+                        let mut guard = health.write();
+                        guard.last_gap_backfill_bars = guard.last_gap_backfill_bars.saturating_add(1);
+                    }
+                    last_delivered_bar_ts
+                        .write()
+                        .insert(bar.symbol.clone(), bar.close_time_utc);
                     let _ = bars_tx.send(bar).await;
                 }
             }
@@ -288,24 +345,53 @@ impl Supervisor {
             }
             {
                 let mut guard = self.health.write();
+                let now = Utc::now().timestamp();
                 guard.last_bar_age_sec = last_bar_instant.read().elapsed().as_secs();
                 guard.gateway_phase = *phase_tx.borrow();
+                guard.ws_last_rx_age_sec = if guard.ws_last_rx_ts > 0 {
+                    now.saturating_sub(guard.ws_last_rx_ts) as u64
+                } else {
+                    0
+                };
                 guard.readiness = guard.gateway_phase == GatewayPhase::LiveReady
                     && guard.ws_connected
-                    && !guard.backpressure_lagged;
+                    && !guard.backpressure_lagged
+                    && guard.ws_last_rx_age_sec <= cfg.ws_idle_timeout_sec
+                    && guard.active_subscriptions_count >= guard.desired_subscriptions_count;
             }
 
             if last_bar_instant.read().elapsed() > silence_threshold {
                 warn!("bar silence detected; resubscribing");
-                log_event(GatewayEvent::ResyncStarted);
-                let from_ts = last_bar_ts.read().values().min().map(|ts| ts - (cfg.tf_sec * 2));
-                if let Some(from_ts) = from_ts {
+                log_event(GatewayEvent::ResyncStarted {
+                    mode: ResyncMode::Warm,
+                    reason: "bar_silence",
+                });
+                let (plan, mode) = compute_backfill_plan(
+                    &cfg.symbols,
+                    cfg.tf_sec,
+                    cfg.warm_reconnect_max_gap_sec,
+                    cfg.gap_backfill_padding_bars,
+                    &last_delivered_bar_ts.read(),
+                );
+                hub_handle.set_backfill_plan(plan);
+                {
+                    let mut guard = self.health.write();
+                    guard.last_resync_mode = mode;
+                    guard.last_gap_backfill_sec = hub_handle.backfill_plan().gap_sec;
+                    guard.last_gap_backfill_bars = 0;
+                }
+                if let Some(from_ts) = hub_handle.backfill_plan().from_ts {
                     hub_handle.resubscribe_from(from_ts).await;
                 } else {
                     hub_handle.resubscribe_all().await;
                 }
                 *last_bar_instant.write() = Instant::now();
-                log_event(GatewayEvent::ResyncDone);
+                let plan = hub_handle.backfill_plan();
+                log_event(GatewayEvent::ResyncDone {
+                    mode: plan.mode,
+                    gap_sec: plan.gap_sec,
+                    bars_backfilled: self.health.read().last_gap_backfill_bars,
+                });
             }
         }
 
@@ -318,4 +404,37 @@ fn format_ts(ts: i64) -> String {
     DateTime::<Utc>::from_timestamp(ts, 0)
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
         .to_rfc3339()
+}
+
+fn compute_backfill_plan(
+    symbols: &[String],
+    tf_sec: i64,
+    warm_reconnect_max_gap_sec: u64,
+    gap_backfill_padding_bars: u8,
+    last_delivered: &HashMap<String, i64>,
+) -> (BackfillPlan, ResyncMode) {
+    let now_aligned = Utc::now().timestamp() / tf_sec * tf_sec;
+    let mut min_from: Option<i64> = None;
+    for symbol in symbols {
+        let Some(last) = last_delivered.get(symbol) else {
+            return (BackfillPlan::cold(), ResyncMode::Cold);
+        };
+        let from = *last - (gap_backfill_padding_bars as i64 * tf_sec);
+        min_from = Some(min_from.map_or(from, |min| min.min(from)));
+    }
+    let Some(from_ts) = min_from else {
+        return (BackfillPlan::cold(), ResyncMode::Cold);
+    };
+    let gap_sec = now_aligned.saturating_sub(from_ts) as u64;
+    if gap_sec > warm_reconnect_max_gap_sec {
+        return (BackfillPlan::cold(), ResyncMode::Cold);
+    }
+    (
+        BackfillPlan {
+            mode: ResyncMode::Warm,
+            from_ts: Some(from_ts),
+            gap_sec,
+        },
+        ResyncMode::Warm,
+    )
 }

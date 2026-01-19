@@ -36,6 +36,15 @@ pub struct AlorGatewayConfig {
     pub log_cash_positions: bool,
     pub cash_symbols: Vec<String>,
     pub log_existing_snapshot_orders: bool,
+    pub ws_idle_timeout_sec: u64,
+    pub ws_ping_interval_sec: u64,
+    pub ws_ping_timeout_sec: u64,
+    pub subscribe_ack_timeout_ms: u64,
+    pub subscribe_ack_timeout_positions_ms: u64,
+    pub subscribe_ack_retries: u8,
+    pub warm_reconnect_max_gap_sec: u64,
+    pub gap_backfill_padding_bars: u8,
+    pub cold_start_history_days_back: u8,
 }
 
 impl AlorGatewayConfig {
@@ -43,6 +52,12 @@ impl AlorGatewayConfig {
         if let Ok(path) = env::var("ALOR_GATEWAY_CONFIG") {
             return Self::from_file(path);
         }
+
+        let subscribe_ack_timeout_ms = parse_u64("ALOR_SUBSCRIBE_ACK_TIMEOUT_MS", 5_000)?;
+        let subscribe_ack_timeout_positions_ms = parse_u64(
+            "ALOR_SUBSCRIBE_ACK_TIMEOUT_POSITIONS_MS",
+            subscribe_ack_timeout_ms,
+        )?;
 
         Ok(Self {
             portfolio: get_required("ALOR_PORTFOLIO")?,
@@ -96,6 +111,15 @@ impl AlorGatewayConfig {
                 "ALOR_LOG_EXISTING_SNAPSHOT_ORDERS",
                 false,
             ),
+            ws_idle_timeout_sec: parse_u64("ALOR_WS_IDLE_TIMEOUT_SEC", 70)?,
+            ws_ping_interval_sec: parse_u64("ALOR_WS_PING_INTERVAL_SEC", 30)?,
+            ws_ping_timeout_sec: parse_u64("ALOR_WS_PING_TIMEOUT_SEC", 15)?,
+            subscribe_ack_timeout_ms,
+            subscribe_ack_timeout_positions_ms,
+            subscribe_ack_retries: parse_u8("ALOR_SUBSCRIBE_ACK_RETRIES", 3)?,
+            warm_reconnect_max_gap_sec: parse_u64("ALOR_WARM_RECONNECT_MAX_GAP_SEC", 21_600)?,
+            gap_backfill_padding_bars: parse_u8("ALOR_GAP_BACKFILL_PADDING_BARS", 2)?,
+            cold_start_history_days_back: parse_u8("ALOR_COLD_START_HISTORY_DAYS_BACK", 4)?,
         })
     }
 
@@ -114,6 +138,17 @@ impl AlorGatewayConfig {
         let log_positions_filter = file_cfg
             .log_positions_filter
             .unwrap_or_else(|| symbols.clone());
+        let subscribe_ack_timeout_ms = file_cfg
+            .ws
+            .as_ref()
+            .and_then(|ws| ws.subscribe_ack_timeout_ms)
+            .unwrap_or(5_000);
+        let subscribe_ack_timeout_positions_ms = file_cfg
+            .ws
+            .as_ref()
+            .and_then(|ws| ws.subscribe_ack_timeout_positions_ms)
+            .unwrap_or(subscribe_ack_timeout_ms);
+
         Ok(Self {
             portfolio: file_cfg
                 .portfolio
@@ -171,6 +206,43 @@ impl AlorGatewayConfig {
                 .cash_symbols
                 .unwrap_or_else(|| vec!["RUB".to_string(), "SUR".to_string()]),
             log_existing_snapshot_orders: file_cfg.log_existing_snapshot_orders.unwrap_or(false),
+            ws_idle_timeout_sec: file_cfg
+                .ws
+                .as_ref()
+                .and_then(|ws| ws.ws_idle_timeout_sec)
+                .unwrap_or(70),
+            ws_ping_interval_sec: file_cfg
+                .ws
+                .as_ref()
+                .and_then(|ws| ws.ws_ping_interval_sec)
+                .unwrap_or(30),
+            ws_ping_timeout_sec: file_cfg
+                .ws
+                .as_ref()
+                .and_then(|ws| ws.ws_ping_timeout_sec)
+                .unwrap_or(15),
+            subscribe_ack_timeout_ms,
+            subscribe_ack_timeout_positions_ms,
+            subscribe_ack_retries: file_cfg
+                .ws
+                .as_ref()
+                .and_then(|ws| ws.subscribe_ack_retries)
+                .unwrap_or(3),
+            warm_reconnect_max_gap_sec: file_cfg
+                .reconnect
+                .as_ref()
+                .and_then(|reconnect| reconnect.warm_reconnect_max_gap_sec)
+                .unwrap_or(21_600),
+            gap_backfill_padding_bars: file_cfg
+                .reconnect
+                .as_ref()
+                .and_then(|reconnect| reconnect.gap_backfill_padding_bars)
+                .unwrap_or(2),
+            cold_start_history_days_back: file_cfg
+                .reconnect
+                .as_ref()
+                .and_then(|reconnect| reconnect.cold_start_history_days_back)
+                .unwrap_or(4),
         })
     }
 }
@@ -224,12 +296,31 @@ struct FileConfig {
     log_cash_positions: Option<bool>,
     cash_symbols: Option<Vec<String>>,
     log_existing_snapshot_orders: Option<bool>,
+    ws: Option<WsConfig>,
+    reconnect: Option<ReconnectConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GeneralConfig {
     price_step: Option<f64>,
     volume_step: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WsConfig {
+    ws_idle_timeout_sec: Option<u64>,
+    ws_ping_interval_sec: Option<u64>,
+    ws_ping_timeout_sec: Option<u64>,
+    subscribe_ack_timeout_ms: Option<u64>,
+    subscribe_ack_timeout_positions_ms: Option<u64>,
+    subscribe_ack_retries: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReconnectConfig {
+    warm_reconnect_max_gap_sec: Option<u64>,
+    gap_backfill_padding_bars: Option<u8>,
+    cold_start_history_days_back: Option<u8>,
 }
 
 fn get_required(key: &'static str) -> Result<String, ConfigError> {

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::{Arc, atomic::{AtomicI64, Ordering}};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use chrono::{DateTime, TimeZone, Utc};
@@ -11,6 +13,8 @@ use tracing::{debug, info, warn};
 use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
 use crate::gateway_events::{GatewayEvent, log_event};
+use crate::health::ResyncMode;
+use crate::models::DataOrigin;
 use crate::ws_subscriptions::{
     build_bars_subscribe, build_orders_subscribe, build_positions_subscribe,
 };
@@ -19,8 +23,10 @@ use crate::ws_subscriptions::{
 pub enum WsEvent {
     Raw(Value),
     Conn(ConnEvent),
-    Subscribed { wallclock_ts: i64 },
+    Subscribed { wallclock_ts: i64, history_origin: DataOrigin },
     SubscriptionAck { subscription_type: String },
+    SubscriptionStats { desired: u32, active: u32 },
+    WsRx { ts: i64 },
 }
 
 #[derive(Debug)]
@@ -33,6 +39,7 @@ pub enum ConnEvent {
 #[derive(Debug, Clone)]
 pub struct WsHubHandle {
     cmd_tx: mpsc::Sender<HubCommand>,
+    backfill_plan: Arc<RwLock<BackfillPlan>>,
 }
 
 #[derive(Debug)]
@@ -48,12 +55,14 @@ struct Subscription {
     symbol: String,
     subscription_type: String,
     is_active: bool,
+    epoch: u64,
 }
 
 #[derive(Debug, Default)]
 struct SubscriptionManager {
     desired_subscriptions: HashMap<String, Subscription>,
     active_subscriptions: HashMap<String, Subscription>,
+    subscription_epoch: u64,
 }
 
 impl SubscriptionManager {
@@ -75,6 +84,15 @@ impl SubscriptionManager {
     fn reset(&mut self) {
         self.desired_subscriptions.clear();
         self.active_subscriptions.clear();
+        self.subscription_epoch = self.subscription_epoch.wrapping_add(1);
+    }
+
+    fn desired_count(&self) -> u32 {
+        self.desired_subscriptions.len() as u32 + self.active_subscriptions.len() as u32
+    }
+
+    fn active_count(&self) -> u32 {
+        self.active_subscriptions.len() as u32
     }
 }
 
@@ -87,6 +105,8 @@ impl WsHub {
     ) -> (WsHubHandle, mpsc::Receiver<WsEvent>) {
         let (event_tx, event_rx) = mpsc::channel(1024);
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let backfill_plan = Arc::new(RwLock::new(BackfillPlan::cold()));
+        let backfill_plan_task = backfill_plan.clone();
 
         tokio::spawn(async move {
             let mut should_run = true;
@@ -98,7 +118,14 @@ impl WsHub {
                 }
                 attempt += 1;
                 log_event(GatewayEvent::Reconnecting { attempt });
-                match connect_and_run(&cfg, &token_provider, &event_tx, &mut cmd_rx).await {
+                match connect_and_run(
+                    &cfg,
+                    &token_provider,
+                    &event_tx,
+                    &mut cmd_rx,
+                    backfill_plan_task.clone(),
+                )
+                .await {
                     Ok(()) => {
                         info!("ws hub ended gracefully");
                         should_run = false;
@@ -114,7 +141,7 @@ impl WsHub {
         });
 
         (
-            WsHubHandle { cmd_tx },
+            WsHubHandle { cmd_tx, backfill_plan },
             event_rx,
         )
     }
@@ -142,6 +169,31 @@ impl WsHubHandle {
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(HubCommand::Shutdown).await;
     }
+
+    pub fn set_backfill_plan(&self, plan: BackfillPlan) {
+        *self.backfill_plan.write() = plan;
+    }
+
+    pub fn backfill_plan(&self) -> BackfillPlan {
+        self.backfill_plan.read().clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BackfillPlan {
+    pub mode: ResyncMode,
+    pub from_ts: Option<i64>,
+    pub gap_sec: u64,
+}
+
+impl BackfillPlan {
+    pub fn cold() -> Self {
+        Self {
+            mode: ResyncMode::Cold,
+            from_ts: None,
+            gap_sec: 0,
+        }
+    }
 }
 
 async fn connect_and_run(
@@ -149,31 +201,49 @@ async fn connect_and_run(
     token_provider: &TokenProvider,
     event_tx: &mpsc::Sender<WsEvent>,
     cmd_rx: &mut mpsc::Receiver<HubCommand>,
+    backfill_plan: Arc<RwLock<BackfillPlan>>,
 ) -> anyhow::Result<()> {
     let token = token_provider.access_token().await?;
     let (ws_stream, _) = tokio_tungstenite::connect_async(&cfg.ws_url).await?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
     let mut subscription_manager = SubscriptionManager::default();
+    let last_ws_rx_ts = Arc::new(AtomicI64::new(Utc::now().timestamp()));
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(cfg.ws_ping_interval_sec));
 
     info!("ws hub connected");
     log_event(GatewayEvent::Connected);
     let _ = event_tx.send(WsEvent::Conn(ConnEvent::Connected)).await;
 
     let subscribe_wallclock_ts = Utc::now().timestamp();
+    let history_origin = match backfill_plan.read().mode {
+        ResyncMode::Warm => DataOrigin::HistoryGap,
+        ResyncMode::Cold => DataOrigin::History,
+    };
     let _ = event_tx
         .send(WsEvent::Subscribed {
             wallclock_ts: subscribe_wallclock_ts,
+            history_origin,
         })
         .await;
     subscription_manager.reset();
+    let _ = event_tx
+        .send(WsEvent::SubscriptionStats {
+            desired: subscription_manager.desired_count(),
+            active: subscription_manager.active_count(),
+        })
+        .await;
+    let plan = backfill_plan.read().clone();
     let mut bars_guid_map = subscribe_all(
         cfg,
         &token,
         &mut ws_sink,
         &mut ws_stream,
-        None,
+        plan.from_ts,
         event_tx,
         &mut subscription_manager,
+        &last_ws_rx_ts,
+        cfg.subscribe_ack_timeout_ms,
+        cfg.subscribe_ack_retries,
     )
     .await?;
 
@@ -183,14 +253,28 @@ async fn connect_and_run(
                 match cmd {
                     Some(HubCommand::Resubscribe { from_ts }) => {
                         info!("ws hub resubscribe requested");
-                        log_event(GatewayEvent::ResyncStarted);
+                        log_event(GatewayEvent::ResyncStarted {
+                            mode: backfill_plan.read().mode,
+                            reason: "resubscribe",
+                        });
                         let subscribe_wallclock_ts = Utc::now().timestamp();
+                        let history_origin = match backfill_plan.read().mode {
+                            ResyncMode::Warm => DataOrigin::HistoryGap,
+                            ResyncMode::Cold => DataOrigin::History,
+                        };
                         let _ = event_tx
                             .send(WsEvent::Subscribed {
                                 wallclock_ts: subscribe_wallclock_ts,
+                                history_origin,
                             })
                             .await;
                         subscription_manager.reset();
+                        let _ = event_tx
+                            .send(WsEvent::SubscriptionStats {
+                                desired: subscription_manager.desired_count(),
+                                active: subscription_manager.active_count(),
+                            })
+                            .await;
                         bars_guid_map = subscribe_all(
                             cfg,
                             &token,
@@ -199,9 +283,16 @@ async fn connect_and_run(
                             from_ts,
                             event_tx,
                             &mut subscription_manager,
+                            &last_ws_rx_ts,
+                            cfg.subscribe_ack_timeout_ms,
+                            cfg.subscribe_ack_retries,
                         )
                         .await?;
-                        log_event(GatewayEvent::ResyncDone);
+                        log_event(GatewayEvent::ResyncDone {
+                            mode: backfill_plan.read().mode,
+                            gap_sec: backfill_plan.read().gap_sec,
+                            bars_backfilled: 0,
+                        });
                     }
                     Some(HubCommand::Reconnect) => {
                         info!("ws hub reconnect requested");
@@ -213,9 +304,23 @@ async fn connect_and_run(
                     }
                 }
             }
+            _ = heartbeat.tick() => {
+                let now = Utc::now().timestamp();
+                let idle_age = now - last_ws_rx_ts.load(Ordering::SeqCst);
+                if idle_age > cfg.ws_idle_timeout_sec as i64 {
+                    return Err(anyhow::anyhow!("ws idle timeout"));
+                }
+                if idle_age > cfg.ws_ping_timeout_sec as i64 {
+                    return Err(anyhow::anyhow!("ws ping timeout"));
+                }
+                ws_sink.send(Message::Ping(Vec::new().into())).await?;
+            }
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
+                        let now = Utc::now().timestamp();
+                        last_ws_rx_ts.store(now, Ordering::SeqCst);
+                        let _ = event_tx.send(WsEvent::WsRx { ts: now }).await;
                         tracing::trace!(payload = %txt, "ws recv text");
                         if let Ok(val) = serde_json::from_str::<Value>(&txt) {
                             let val = attach_symbol(val, &bars_guid_map);
@@ -225,7 +330,15 @@ async fn connect_and_run(
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
+                        let now = Utc::now().timestamp();
+                        last_ws_rx_ts.store(now, Ordering::SeqCst);
+                        let _ = event_tx.send(WsEvent::WsRx { ts: now }).await;
                         ws_sink.send(Message::Pong(payload)).await?;
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        let now = Utc::now().timestamp();
+                        last_ws_rx_ts.store(now, Ordering::SeqCst);
+                        let _ = event_tx.send(WsEvent::WsRx { ts: now }).await;
                     }
                     Some(Ok(Message::Close(frame))) => {
                         info!(?frame, "ws close received");
@@ -248,6 +361,9 @@ async fn subscribe_all(
     from_ts: Option<i64>,
     event_tx: &mpsc::Sender<WsEvent>,
     subscription_manager: &mut SubscriptionManager,
+    last_ws_rx_ts: &Arc<AtomicI64>,
+    subscribe_ack_timeout_ms: u64,
+    subscribe_ack_retries: u8,
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut bars_guid_map = HashMap::new();
     let bars_from_ts = from_ts.unwrap_or(cfg.from_ts);
@@ -259,31 +375,51 @@ async fn subscribe_all(
         "ws bars subscribe window"
     );
     for symbol in &cfg.symbols {
-        let (guid, msg) = build_bars_subscribe(
-            cfg,
-            symbol,
-            token,
-            bars_from_ts,
-            skip_history,
-        );
-        bars_guid_map.insert(guid.clone(), symbol.clone());
-        subscription_manager.add_subscription(Subscription {
-            guid: guid.clone(),
-            symbol: symbol.clone(),
-            subscription_type: "bars".to_string(),
-            is_active: false,
-        });
-        send_and_ack(
-            ws_sink,
-            ws_stream,
-            &guid,
-            &msg,
-            "bars",
-            event_tx,
-            &bars_guid_map,
-            subscription_manager,
-        )
-        .await?;
+        let mut attempt = 0;
+        loop {
+            let (guid, msg) = build_bars_subscribe(
+                cfg,
+                symbol,
+                token,
+                bars_from_ts,
+                skip_history,
+            );
+            bars_guid_map.insert(guid.clone(), symbol.clone());
+            subscription_manager.add_subscription(Subscription {
+                guid: guid.clone(),
+                symbol: symbol.clone(),
+                subscription_type: "bars".to_string(),
+                is_active: false,
+                epoch: subscription_manager.subscription_epoch,
+            });
+            let _ = event_tx
+                .send(WsEvent::SubscriptionStats {
+                    desired: subscription_manager.desired_count(),
+                    active: subscription_manager.active_count(),
+                })
+                .await;
+            if send_and_ack(
+                ws_sink,
+                ws_stream,
+                &guid,
+                &msg,
+                "bars",
+                event_tx,
+                &bars_guid_map,
+                subscription_manager,
+                last_ws_rx_ts,
+                subscribe_ack_timeout_ms,
+            )
+            .await
+            .is_ok()
+            {
+                break;
+            }
+            attempt += 1;
+            if attempt >= subscribe_ack_retries {
+                return Err(anyhow::anyhow!("ws subscribe retry exceeded"));
+            }
+        }
     }
 
     let positions_skip_history = if from_ts.is_some() {
@@ -291,48 +427,88 @@ async fn subscribe_all(
     } else {
         cfg.skip_history_positions
     };
-    let (guid, msg) = build_positions_subscribe(cfg, token, positions_skip_history);
-    subscription_manager.add_subscription(Subscription {
-        guid: guid.clone(),
-        symbol: cfg.portfolio.clone(),
-        subscription_type: "positions".to_string(),
-        is_active: false,
-    });
-    send_and_ack(
-        ws_sink,
-        ws_stream,
-        &guid,
-        &msg,
-        "positions",
-        event_tx,
-        &bars_guid_map,
-        subscription_manager,
-    )
-    .await?;
+    let mut attempt = 0;
+    loop {
+        let (guid, msg) = build_positions_subscribe(cfg, token, positions_skip_history);
+        subscription_manager.add_subscription(Subscription {
+            guid: guid.clone(),
+            symbol: cfg.portfolio.clone(),
+            subscription_type: "positions".to_string(),
+            is_active: false,
+            epoch: subscription_manager.subscription_epoch,
+        });
+        let _ = event_tx
+            .send(WsEvent::SubscriptionStats {
+                desired: subscription_manager.desired_count(),
+                active: subscription_manager.active_count(),
+            })
+            .await;
+        if send_and_ack(
+            ws_sink,
+            ws_stream,
+            &guid,
+            &msg,
+            "positions",
+            event_tx,
+            &bars_guid_map,
+            subscription_manager,
+            last_ws_rx_ts,
+            subscribe_ack_timeout_ms,
+        )
+        .await
+        .is_ok()
+        {
+            break;
+        }
+        attempt += 1;
+        if attempt >= subscribe_ack_retries {
+            return Err(anyhow::anyhow!("ws subscribe retry exceeded"));
+        }
+    }
 
     let orders_skip_history = if from_ts.is_some() {
         false
     } else {
         cfg.skip_history_orders
     };
-    let (guid, msg) = build_orders_subscribe(cfg, token, orders_skip_history);
-    subscription_manager.add_subscription(Subscription {
-        guid: guid.clone(),
-        symbol: cfg.portfolio.clone(),
-        subscription_type: "orders".to_string(),
-        is_active: false,
-    });
-    send_and_ack(
-        ws_sink,
-        ws_stream,
-        &guid,
-        &msg,
-        "orders",
-        event_tx,
-        &bars_guid_map,
-        subscription_manager,
-    )
-    .await?;
+    let mut attempt = 0;
+    loop {
+        let (guid, msg) = build_orders_subscribe(cfg, token, orders_skip_history);
+        subscription_manager.add_subscription(Subscription {
+            guid: guid.clone(),
+            symbol: cfg.portfolio.clone(),
+            subscription_type: "orders".to_string(),
+            is_active: false,
+            epoch: subscription_manager.subscription_epoch,
+        });
+        let _ = event_tx
+            .send(WsEvent::SubscriptionStats {
+                desired: subscription_manager.desired_count(),
+                active: subscription_manager.active_count(),
+            })
+            .await;
+        if send_and_ack(
+            ws_sink,
+            ws_stream,
+            &guid,
+            &msg,
+            "orders",
+            event_tx,
+            &bars_guid_map,
+            subscription_manager,
+            last_ws_rx_ts,
+            subscribe_ack_timeout_ms,
+        )
+        .await
+        .is_ok()
+        {
+            break;
+        }
+        attempt += 1;
+        if attempt >= subscribe_ack_retries {
+            return Err(anyhow::anyhow!("ws subscribe retry exceeded"));
+        }
+    }
 
     Ok(bars_guid_map)
 }
@@ -346,6 +522,8 @@ async fn send_and_ack(
     event_tx: &mpsc::Sender<WsEvent>,
     bars_guid_map: &HashMap<String, String>,
     subscription_manager: &mut SubscriptionManager,
+    last_ws_rx_ts: &Arc<AtomicI64>,
+    subscribe_ack_timeout_ms: u64,
 ) -> anyhow::Result<()> {
     info!(guid, label, "ws subscribe send");
     debug!(payload = %msg, guid, label, "ws subscribe payload");
@@ -354,10 +532,11 @@ async fn send_and_ack(
     let ack = read_until_guid(
         ws_stream,
         guid,
-        Duration::from_secs(5),
+        Duration::from_millis(subscribe_ack_timeout_ms),
         event_tx,
         bars_guid_map,
         subscription_manager,
+        last_ws_rx_ts,
     )
     .await?;
     if let Some(subscription) = subscription_manager.activate_subscription(guid) {
@@ -369,6 +548,12 @@ async fn send_and_ack(
         let _ = event_tx
             .send(WsEvent::SubscriptionAck {
                 subscription_type,
+            })
+            .await;
+        let _ = event_tx
+            .send(WsEvent::SubscriptionStats {
+                desired: subscription_manager.desired_count(),
+                active: subscription_manager.active_count(),
             })
             .await;
     }
@@ -383,11 +568,15 @@ async fn read_until_guid(
     event_tx: &mpsc::Sender<WsEvent>,
     bars_guid_map: &HashMap<String, String>,
     subscription_manager: &SubscriptionManager,
+    last_ws_rx_ts: &Arc<AtomicI64>,
 ) -> anyhow::Result<Value> {
     let fut = async move {
         while let Some(msg) = stream.next().await {
             let msg = msg?;
             if let Message::Text(txt) = msg {
+                let now = Utc::now().timestamp();
+                last_ws_rx_ts.store(now, Ordering::SeqCst);
+                let _ = event_tx.send(WsEvent::WsRx { ts: now }).await;
                 tracing::trace!(payload = %txt, "ws recv text (awaiting guid)");
                 if let Ok(val) = serde_json::from_str::<Value>(&txt) {
                     if guid_of(&val).as_deref() == Some(guid) {

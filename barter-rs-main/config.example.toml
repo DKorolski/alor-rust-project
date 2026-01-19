@@ -13,7 +13,7 @@ from_ts = 0
 ws_url = "wss://api.alor.ru/ws"
 cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
-refresh_token = ""
+refresh_token = "742b4849-a27b-45fb-99e0-22e12ed92e87"
 
 log_positions_filter = ["IMOEXF"]
 log_cash_positions = false
@@ -37,3 +37,13 @@ history_sessions = 2
 history_days_back = 5
 session_rollover_hour_utc = 6
 health_listen_addr = "127.0.0.1:8081"
+
+ws_idle_timeout_sec = 70
+ws_ping_interval_sec = 30
+ws_ping_timeout_sec = 15
+subscribe_ack_timeout_ms = 5000
+subscribe_ack_retries = 3
+
+warm_reconnect_max_gap_sec = 21600
+gap_backfill_padding_bars = 2
+cold_start_history_days_back = 5

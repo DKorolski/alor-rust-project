@@ -6,6 +6,18 @@ pub enum GatewayPhase {
     LiveReady,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ResyncMode {
+    Cold,
+    Warm,
+}
+
+impl Default for ResyncMode {
+    fn default() -> Self {
+        Self::Cold
+    }
+}
+
 impl Default for GatewayPhase {
     fn default() -> Self {
         Self::SyncingHistory
@@ -25,4 +37,12 @@ pub struct HealthState {
     pub gateway_phase: GatewayPhase,
     pub readiness: bool,
     pub backpressure_lagged: bool,
+    pub ws_last_rx_ts: i64,
+    pub ws_last_rx_age_sec: u64,
+    pub ws_reconnects_total: u64,
+    pub last_resync_mode: ResyncMode,
+    pub last_gap_backfill_sec: u64,
+    pub last_gap_backfill_bars: u64,
+    pub active_subscriptions_count: u32,
+    pub desired_subscriptions_count: u32,
 }

@@ -79,7 +79,7 @@ where
                     last_phase = phase;
                 }
 
-                if bar.origin == DataOrigin::History {
+                if matches!(bar.origin, DataOrigin::History | DataOrigin::HistoryGap) {
                     let session_key =
                         session_id(bar.close_time_utc, self.session_rollover_hour_utc);
                     if !session_ids.contains(&session_key) {

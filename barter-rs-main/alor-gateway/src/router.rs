@@ -11,7 +11,7 @@ pub struct Router;
 
 #[derive(Debug)]
 pub enum RouterCommand {
-    UpdateSubscribeWallclock(i64),
+    UpdateSubscribeWallclock { wallclock_ts: i64, history_origin: DataOrigin },
 }
 
 #[derive(Debug)]
@@ -40,12 +40,14 @@ impl Router {
         tokio::spawn(async move {
             let mut live_buffers: HashMap<String, BarEvent> = HashMap::new();
             let mut live_cutoff_ts: Option<i64> = None;
+            let mut history_origin = DataOrigin::History;
             loop {
                 tokio::select! {
                     cmd = cmd_rx.recv() => {
                         match cmd {
-                            Some(RouterCommand::UpdateSubscribeWallclock(ts)) => {
-                                live_cutoff_ts = Some(ts - (2 * tf_sec));
+                            Some(RouterCommand::UpdateSubscribeWallclock { wallclock_ts, history_origin: origin }) => {
+                                live_cutoff_ts = Some(wallclock_ts - (2 * tf_sec));
+                                history_origin = origin;
                             }
                             None => break,
                         }
@@ -62,11 +64,11 @@ impl Router {
                             continue;
                         }
 
-                        let bars = parse_bars(&value, live_cutoff_ts);
+                        let bars = parse_bars(&value, live_cutoff_ts, history_origin);
                         if !bars.is_empty() {
                             for bar in bars {
                                 match bar.origin {
-                                    DataOrigin::History => {
+                                    DataOrigin::History | DataOrigin::HistoryGap => {
                                         let _ = bars_tx.send(bar).await;
                                     }
                                     DataOrigin::Live => {
@@ -127,7 +129,11 @@ impl Router {
     }
 }
 
-fn parse_bars(value: &Value, live_cutoff_ts: Option<i64>) -> Vec<BarEvent> {
+fn parse_bars(
+    value: &Value,
+    live_cutoff_ts: Option<i64>,
+    history_origin: DataOrigin,
+) -> Vec<BarEvent> {
     let Some(data) = value.get("data") else {
         return Vec::new();
     };
@@ -135,14 +141,18 @@ fn parse_bars(value: &Value, live_cutoff_ts: Option<i64>) -> Vec<BarEvent> {
     if let Some(items) = data.as_array() {
         return items
             .iter()
-            .filter_map(|item| parse_bar_item(item, live_cutoff_ts))
+            .filter_map(|item| parse_bar_item(item, live_cutoff_ts, history_origin))
             .collect();
     }
 
-    parse_bar_item(data, live_cutoff_ts).into_iter().collect()
+    parse_bar_item(data, live_cutoff_ts, history_origin).into_iter().collect()
 }
 
-fn parse_bar_item(data: &Value, live_cutoff_ts: Option<i64>) -> Option<BarEvent> {
+fn parse_bar_item(
+    data: &Value,
+    live_cutoff_ts: Option<i64>,
+    history_origin: DataOrigin,
+) -> Option<BarEvent> {
     let symbol = data
         .get("symbol")
         .or_else(|| data.get("code"))
@@ -151,7 +161,7 @@ fn parse_bar_item(data: &Value, live_cutoff_ts: Option<i64>) -> Option<BarEvent>
     let close_time = data.get("time").or_else(|| data.get("timestamp"))?;
     let close_time_utc = to_i64(close_time)?;
     let origin = match live_cutoff_ts {
-        Some(cutoff) if close_time_utc <= cutoff => DataOrigin::History,
+        Some(cutoff) if close_time_utc <= cutoff => history_origin,
         Some(_) => DataOrigin::Live,
         None => DataOrigin::Live,
     };
@@ -290,7 +300,7 @@ mod tests {
                 "volume": 10.0
             }
         });
-        let bars = parse_bars(&value, Some(1000));
+        let bars = parse_bars(&value, Some(1000), DataOrigin::History);
         assert_eq!(bars.len(), 1);
         assert_eq!(bars[0].origin, DataOrigin::History);
 
@@ -305,7 +315,7 @@ mod tests {
                 "volume": 10.0
             }
         });
-        let bars = parse_bars(&value, Some(1000));
+        let bars = parse_bars(&value, Some(1000), DataOrigin::History);
         assert_eq!(bars.len(), 1);
         assert_eq!(bars[0].origin, DataOrigin::Live);
     }

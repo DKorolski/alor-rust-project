@@ -4,18 +4,25 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use parking_lot::RwLock;
 use serde::Serialize;
 
-use crate::health::{GatewayPhase, HealthState};
+use crate::health::{GatewayPhase, HealthState, ResyncMode};
 
 #[derive(Debug, Serialize)]
 struct ReadinessResponse {
     readiness: bool,
     gateway_phase: GatewayPhase,
+    last_resync_mode: ResyncMode,
     ws_connected: bool,
     cws_authorized: bool,
     last_bar_age_sec: u64,
+    ws_last_rx_age_sec: u64,
     last_positions_ts: i64,
     last_orders_ts: i64,
     backpressure_lagged: bool,
+    active_subscriptions_count: u32,
+    desired_subscriptions_count: u32,
+    last_gap_backfill_sec: u64,
+    last_gap_backfill_bars: u64,
+    ws_reconnects_total: u64,
 }
 
 pub async fn serve(health: Arc<RwLock<HealthState>>, addr: String) -> anyhow::Result<()> {
@@ -38,11 +45,18 @@ async fn readiness(State(health): State<Arc<RwLock<HealthState>>>) -> Json<Readi
     Json(ReadinessResponse {
         readiness: guard.readiness,
         gateway_phase: guard.gateway_phase,
+        last_resync_mode: guard.last_resync_mode,
         ws_connected: guard.ws_connected,
         cws_authorized: guard.cws_authorized,
         last_bar_age_sec: guard.last_bar_age_sec,
+        ws_last_rx_age_sec: guard.ws_last_rx_age_sec,
         last_positions_ts: guard.last_positions_ts,
         last_orders_ts: guard.last_orders_ts,
         backpressure_lagged: guard.backpressure_lagged,
+        active_subscriptions_count: guard.active_subscriptions_count,
+        desired_subscriptions_count: guard.desired_subscriptions_count,
+        last_gap_backfill_sec: guard.last_gap_backfill_sec,
+        last_gap_backfill_bars: guard.last_gap_backfill_bars,
+        ws_reconnects_total: guard.ws_reconnects_total,
     })
 }
