@@ -62,9 +62,21 @@ impl Supervisor {
 
         let (router_cmd_tx, streams) = Router::start(raw_rx, cfg.tf_sec);
 
+        let (positions_tx, positions_rx) = mpsc::channel(1024);
+        let (orders_tx, orders_rx) = mpsc::channel(1024);
+        let positions_manager = PositionsManager::start(
+            positions_rx,
+            cfg.log_positions_filter.clone(),
+            cfg.log_cash_positions,
+            cfg.cash_symbols.clone(),
+        );
+        let orders_manager = OrdersManager::start(orders_rx, cfg.log_existing_snapshot_orders);
+
         tokio::spawn({
             let health = self.health.clone();
             let router_cmd_tx = router_cmd_tx.clone();
+            let positions_manager = positions_manager.clone();
+            let orders_manager = orders_manager.clone();
             async move {
                 while let Some(event) = ws_events.recv().await {
                     match event {
@@ -107,23 +119,17 @@ impl Supervisor {
                                 .send(RouterCommand::UpdateSubscribeWallclock(wallclock_ts))
                                 .await;
                         }
+                        WsEvent::SubscriptionAck { subscription_type } => {
+                            match subscription_type.as_str() {
+                                "positions" => positions_manager.mark_synced(),
+                                "orders" => orders_manager.mark_synced(),
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
         });
-
-        let (positions_tx, positions_rx) = mpsc::channel(1024);
-        let (orders_tx, orders_rx) = mpsc::channel(1024);
-        let positions_manager = PositionsManager::start(
-            positions_rx,
-            cfg.log_positions_filter.clone(),
-            cfg.log_cash_positions,
-            cfg.cash_symbols.clone(),
-        );
-        let orders_manager = OrdersManager::start(
-            orders_rx,
-            cfg.log_existing_snapshot_orders,
-        );
         let cws_handle = CwsClient::start(cfg.clone(), self.token_provider.clone());
 
         tokio::spawn({

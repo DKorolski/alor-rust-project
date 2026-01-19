@@ -20,6 +20,7 @@ pub enum WsEvent {
     Raw(Value),
     Conn(ConnEvent),
     Subscribed { wallclock_ts: i64 },
+    SubscriptionAck { subscription_type: String },
 }
 
 #[derive(Debug)]
@@ -360,10 +361,16 @@ async fn send_and_ack(
     )
     .await?;
     if let Some(subscription) = subscription_manager.activate_subscription(guid) {
+        let subscription_type = subscription.subscription_type.clone();
         log_event(GatewayEvent::Subscribed {
             symbol: subscription.symbol,
-            subscription_type: subscription.subscription_type,
+            subscription_type: subscription_type.clone(),
         });
+        let _ = event_tx
+            .send(WsEvent::SubscriptionAck {
+                subscription_type,
+            })
+            .await;
     }
     debug!(payload = %ack, guid, label, "ws subscribe ack");
     Ok(())

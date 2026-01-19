@@ -82,4 +82,9 @@ impl PositionsManagerHandle {
     pub fn last_ts(&self) -> i64 {
         self.last_ts.load(Ordering::SeqCst)
     }
+
+    pub fn mark_synced(&self) {
+        self.synced.store(true, Ordering::SeqCst);
+        self.last_ts.store(Utc::now().timestamp(), Ordering::SeqCst);
+    }
 }
