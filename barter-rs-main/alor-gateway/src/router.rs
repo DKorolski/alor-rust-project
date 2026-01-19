@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::models::{BarEvent, DataOrigin, OrderEvent, PositionEvent};
 
@@ -76,7 +76,7 @@ impl Router {
                                                 live_buffers.insert(symbol, bar);
                                             }
                                             Some(prev) if bar.close_time_utc == prev.close_time_utc => {
-                                                debug!(
+                                                trace!(
                                                     symbol = %symbol,
                                                     close_time_utc = bar.close_time_utc,
                                                     "live bar update buffered"
@@ -203,7 +203,7 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
     let order_id = data
         .get("orderId")
         .or_else(|| data.get("id"))
-        .and_then(Value::as_i64)?;
+        .and_then(to_i64)?;
     let symbol = data
         .get("symbol")
         .or_else(|| data.get("code"))
@@ -217,14 +217,35 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string(),
+        side: data
+            .get("side")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        order_type: data
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        qty: data
+            .get("qty")
+            .or_else(|| data.get("qtyUnits"))
+            .or_else(|| data.get("qtyBatch"))
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
         filled: data
             .get("filled")
             .or_else(|| data.get("filledQty"))
+            .or_else(|| data.get("filledQtyUnits"))
+            .or_else(|| data.get("filledQtyBatch"))
             .and_then(Value::as_f64)
             .unwrap_or_default(),
         price: data.get("price").and_then(Value::as_f64).unwrap_or_default(),
+        existing: data.get("existing").and_then(Value::as_bool).unwrap_or(false),
         ts_utc: data
-            .get("timestamp")
+            .get("updateTime")
+            .or_else(|| data.get("transTime"))
+            .or_else(|| data.get("timestamp"))
             .and_then(to_i64)
             .unwrap_or_else(|| Utc::now().timestamp()),
     })
@@ -330,8 +351,12 @@ mod tests {
                 "orderId": 42,
                 "symbol": "IMOEXF",
                 "status": "working",
+                "side": "buy",
+                "type": "limit",
+                "qty": 1.0,
                 "filled": 1.0,
                 "price": 99.5,
+                "existing": true,
                 "timestamp": 1700000001
             }
         });
@@ -339,8 +364,12 @@ mod tests {
         assert_eq!(order.order_id, 42);
         assert_eq!(order.symbol, "IMOEXF");
         assert_eq!(order.status, "working");
+        assert_eq!(order.side, "buy");
+        assert_eq!(order.order_type, "limit");
+        assert_eq!(order.qty, 1.0);
         assert_eq!(order.filled, 1.0);
         assert_eq!(order.price, 99.5);
+        assert!(order.existing);
         assert_eq!(order.ts_utc, 1700000001);
     }
 }

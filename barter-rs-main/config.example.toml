@@ -13,7 +13,12 @@ from_ts = 0
 ws_url = "wss://api.alor.ru/ws"
 cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
-refresh_token = ""
+refresh_token = "742b4849-a27b-45fb-99e0-22e12ed92e87"
+
+log_positions_filter = ["IMOEXF"]
+log_cash_positions = false
+cash_symbols = ["RUB", "SUR"]
+log_existing_snapshot_orders = false
 
 skip_history_bars = false
 skip_history_positions = false

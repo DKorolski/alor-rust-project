@@ -215,7 +215,7 @@ async fn connect_and_run(
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
-                        debug!(payload = %txt, "ws recv text");
+                        tracing::trace!(payload = %txt, "ws recv text");
                         if let Ok(val) = serde_json::from_str::<Value>(&txt) {
                             let val = attach_symbol(val, &bars_guid_map);
                             if event_tx.send(WsEvent::Raw(val)).await.is_err() {
@@ -381,7 +381,7 @@ async fn read_until_guid(
         while let Some(msg) = stream.next().await {
             let msg = msg?;
             if let Message::Text(txt) = msg {
-                debug!(payload = %txt, "ws recv text (awaiting guid)");
+                tracing::trace!(payload = %txt, "ws recv text (awaiting guid)");
                 if let Ok(val) = serde_json::from_str::<Value>(&txt) {
                     if guid_of(&val).as_deref() == Some(guid) {
                         return Ok(val);

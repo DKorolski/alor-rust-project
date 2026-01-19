@@ -114,8 +114,16 @@ impl Supervisor {
 
         let (positions_tx, positions_rx) = mpsc::channel(1024);
         let (orders_tx, orders_rx) = mpsc::channel(1024);
-        let positions_manager = PositionsManager::start(positions_rx);
-        let orders_manager = OrdersManager::start(orders_rx);
+        let positions_manager = PositionsManager::start(
+            positions_rx,
+            cfg.log_positions_filter.clone(),
+            cfg.log_cash_positions,
+            cfg.cash_symbols.clone(),
+        );
+        let orders_manager = OrdersManager::start(
+            orders_rx,
+            cfg.log_existing_snapshot_orders,
+        );
         let cws_handle = CwsClient::start(cfg.clone(), self.token_provider.clone());
 
         tokio::spawn({
@@ -227,12 +235,17 @@ impl Supervisor {
                         );
                         live_symbols.write().insert(bar.symbol.clone());
                     }
-                    let live_ready =
-                        live_symbols.read().len() >= symbols_len
-                            && positions_manager.synced()
-                            && orders_manager.synced();
+                    let bars_live_seen = live_symbols.read().len() >= symbols_len;
+                    let positions_synced = positions_manager.synced();
+                    let orders_synced = orders_manager.synced();
+                    let live_ready = bars_live_seen && positions_synced && orders_synced;
                     if live_ready && *phase_tx.borrow() != GatewayPhase::LiveReady {
-                        info!("gateway phase transition: LiveReady");
+                        info!(
+                            bars_live_seen,
+                            positions_synced,
+                            orders_synced,
+                            "gateway phase transition: LiveReady"
+                        );
                         let _ = phase_tx.send(GatewayPhase::LiveReady);
                     }
                     let _ = bars_tx.send(bar).await;

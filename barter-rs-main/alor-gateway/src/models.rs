@@ -31,8 +31,12 @@ pub struct OrderEvent {
     pub order_id: i64,
     pub symbol: String,
     pub status: String,
+    pub side: String,
+    pub order_type: String,
+    pub qty: f64,
     pub filled: f64,
     pub price: f64,
+    pub existing: bool,
     pub ts_utc: i64,
 }
 

@@ -32,6 +32,10 @@ pub struct AlorGatewayConfig {
     pub health_listen_addr: String,
     pub price_step: f64,
     pub volume_step: f64,
+    pub log_positions_filter: Vec<String>,
+    pub log_cash_positions: bool,
+    pub cash_symbols: Vec<String>,
+    pub log_existing_snapshot_orders: bool,
 }
 
 impl AlorGatewayConfig {
@@ -73,6 +77,25 @@ impl AlorGatewayConfig {
                 .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
             price_step: parse_f64("ALOR_PRICE_STEP", 0.0)?,
             volume_step: parse_f64("ALOR_VOLUME_STEP", 0.0)?,
+            log_positions_filter: {
+                let raw = env::var("ALOR_LOG_POSITIONS_FILTER").unwrap_or_default();
+                if raw.trim().is_empty() {
+                    parse_list(
+                        &env::var("ALOR_SYMBOLS").unwrap_or_else(|_| "USDRUBF".to_string()),
+                    )
+                } else {
+                    parse_list(&raw)
+                }
+            },
+            log_cash_positions: parse_bool("ALOR_LOG_CASH_POSITIONS", false),
+            cash_symbols: {
+                let raw = env::var("ALOR_CASH_SYMBOLS").unwrap_or_else(|_| "RUB,SUR".to_string());
+                parse_list(&raw)
+            },
+            log_existing_snapshot_orders: parse_bool(
+                "ALOR_LOG_EXISTING_SNAPSHOT_ORDERS",
+                false,
+            ),
         })
     }
 
@@ -84,6 +107,13 @@ impl AlorGatewayConfig {
         let file_cfg: FileConfig = toml::from_str(&contents)
             .map_err(|err| ConfigError::ParseToml { path: path.clone(), source: err })?;
 
+        let symbols = file_cfg
+            .symbols
+            .clone()
+            .unwrap_or_else(|| vec!["USDRUBF".to_string()]);
+        let log_positions_filter = file_cfg
+            .log_positions_filter
+            .unwrap_or_else(|| symbols.clone());
         Ok(Self {
             portfolio: file_cfg
                 .portfolio
@@ -92,7 +122,7 @@ impl AlorGatewayConfig {
             instrument_group: file_cfg
                 .instrument_group
                 .unwrap_or_else(|| "RFUD".to_string()),
-            symbols: file_cfg.symbols.unwrap_or_else(|| vec!["USDRUBF".to_string()]),
+            symbols: symbols.clone(),
             tf_sec: file_cfg.tf_sec.unwrap_or(60),
             from_ts: file_cfg.from_ts.unwrap_or(0),
             ws_url: file_cfg
@@ -135,6 +165,12 @@ impl AlorGatewayConfig {
                 .and_then(|general| general.volume_step)
                 .or(file_cfg.volume_step)
                 .unwrap_or(0.0),
+            log_positions_filter,
+            log_cash_positions: file_cfg.log_cash_positions.unwrap_or(false),
+            cash_symbols: file_cfg
+                .cash_symbols
+                .unwrap_or_else(|| vec!["RUB".to_string(), "SUR".to_string()]),
+            log_existing_snapshot_orders: file_cfg.log_existing_snapshot_orders.unwrap_or(false),
         })
     }
 }
@@ -184,6 +220,10 @@ struct FileConfig {
     health_listen_addr: Option<String>,
     price_step: Option<f64>,
     volume_step: Option<f64>,
+    log_positions_filter: Option<Vec<String>>,
+    log_cash_positions: Option<bool>,
+    cash_symbols: Option<Vec<String>>,
+    log_existing_snapshot_orders: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
