@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
+use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
@@ -13,6 +13,7 @@ use crate::cws_client::CwsClient;
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::{GatewayPhase, HealthState, ResyncMode};
 use crate::router::{Router, RouterCommand, RouterControl};
+use crate::models::{BarEvent, DataOrigin};
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
@@ -58,8 +59,9 @@ impl Supervisor {
         let (raw_tx, raw_rx) = mpsc::channel(1024);
         let last_bar_instant = Arc::new(RwLock::new(Instant::now()));
         let last_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));
-        let last_delivered_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));
+        let last_emitted_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));
         let live_symbols = Arc::new(RwLock::new(HashSet::<String>::new()));
+        let resync_in_progress = Arc::new(AtomicBool::new(false));
         let (phase_tx, phase_rx) = watch::channel(GatewayPhase::SyncingHistory);
 
         let (router_cmd_tx, streams) = Router::start(raw_rx, cfg.tf_sec);
@@ -79,9 +81,10 @@ impl Supervisor {
             let router_cmd_tx = router_cmd_tx.clone();
             let positions_manager = positions_manager.clone();
             let orders_manager = orders_manager.clone();
-            let last_delivered_bar_ts = last_delivered_bar_ts.clone();
+            let last_emitted_bar_ts = last_emitted_bar_ts.clone();
             let hub_handle = hub_handle.clone();
             let symbols = cfg.symbols.clone();
+            let phase_tx = phase_tx.clone();
             let tf_sec = cfg.tf_sec;
             let warm_reconnect_max_gap_sec = cfg.warm_reconnect_max_gap_sec;
             let gap_backfill_padding_bars = cfg.gap_backfill_padding_bars;
@@ -111,12 +114,21 @@ impl Supervisor {
                                 ConnEvent::Reconnecting => {
                                     guard.ws_connected = false;
                                     guard.ws_reconnects_total += 1;
+                                    if *phase_tx.borrow() != GatewayPhase::SyncingHistory {
+                                        transition_phase(
+                                            &phase_tx,
+                                            GatewayPhase::Reconnecting,
+                                            Some("ws_reconnect"),
+                                            None,
+                                            None,
+                                        );
+                                    }
                                     let (plan, mode) = compute_backfill_plan(
                                         &symbols,
                                         tf_sec,
                                         warm_reconnect_max_gap_sec,
                                         gap_backfill_padding_bars,
-                                        &last_delivered_bar_ts.read(),
+                                        &last_emitted_bar_ts.read(),
                                     );
                                     hub_handle.set_backfill_plan(plan);
                                     guard.last_resync_mode = mode;
@@ -129,18 +141,38 @@ impl Supervisor {
                         WsEvent::Subscribed {
                             wallclock_ts,
                             history_origin,
+                            bars_from_ts,
+                            skip_history,
                         } => {
                             let live_cutoff_ts = wallclock_ts - (2 * cfg.tf_sec);
                             debug!(
-                                from_ts = cfg.from_ts,
-                                from_ts_rfc3339 = %format_ts(cfg.from_ts),
+                                from_ts = bars_from_ts,
+                                from_ts_rfc3339 = %format_ts(bars_from_ts),
                                 wallclock_ts,
                                 wallclock_ts_rfc3339 = %format_ts(wallclock_ts),
                                 live_cutoff_ts,
                                 live_cutoff_ts_rfc3339 = %format_ts(live_cutoff_ts),
                                 tf_sec = cfg.tf_sec,
+                                skip_history,
                                 "history backfill window computed"
                             );
+                            match history_origin {
+                                DataOrigin::HistoryGap => transition_phase(
+                                    &phase_tx,
+                                    GatewayPhase::SyncingGap,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                                DataOrigin::History => transition_phase(
+                                    &phase_tx,
+                                    GatewayPhase::SyncingHistory,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                                DataOrigin::Live => {}
+                            }
                             let _ = router_cmd_tx
                                 .send(RouterCommand::UpdateSubscribeWallclock {
                                     wallclock_ts,
@@ -218,18 +250,21 @@ impl Supervisor {
             let health = self.health.clone();
             let last_bar_instant = last_bar_instant.clone();
             let last_bar_ts = last_bar_ts.clone();
-            let last_delivered_bar_ts = last_delivered_bar_ts.clone();
+            let last_emitted_bar_ts = last_emitted_bar_ts.clone();
             let live_symbols = live_symbols.clone();
             let phase_tx = phase_tx.clone();
             let positions_manager = positions_manager.clone();
             let orders_manager = orders_manager.clone();
             let symbols_len = cfg.symbols.len();
+            let hub_handle = hub_handle.clone();
+            let resync_in_progress = resync_in_progress.clone();
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
                 let mut history_min: Option<i64> = None;
                 let mut history_max: Option<i64> = None;
                 let mut history_count: u64 = 0;
                 let mut logged_live_start = false;
+                let mut pending_live_updates: HashMap<String, Vec<BarEvent>> = HashMap::new();
                 while let Some(bar) = bars_rx_inner.recv().await {
                     {
                         let mut guard = health.write();
@@ -239,79 +274,117 @@ impl Supervisor {
                     last_bar_ts
                         .write()
                         .insert(bar.symbol.clone(), bar.close_time_utc);
-                    if bar.origin == crate::models::DataOrigin::History
-                        || bar.origin == crate::models::DataOrigin::HistoryGap
-                    {
-                        history_count += 1;
-                        history_min = Some(history_min.map_or(bar.close_time_utc, |min| {
-                            min.min(bar.close_time_utc)
-                        }));
-                        history_max = Some(history_max.map_or(bar.close_time_utc, |max| {
-                            max.max(bar.close_time_utc)
-                        }));
-                        debug!(
-                            symbol = %bar.symbol,
-                            close_time_utc = bar.close_time_utc,
-                            open = bar.o,
-                            high = bar.h,
-                            low = bar.l,
-                            close = bar.c,
-                            volume = bar.v,
-                            "history bar"
-                        );
-                    } else {
-                        if !logged_live_start {
-                            info!(
-                                history_start_ts = history_min,
-                                history_end_ts = history_max,
-                                history_count,
-                                live_start_ts = bar.close_time_utc,
-                                "history backfill complete; live stream started"
-                            );
-                            logged_live_start = true;
-                        }
-                        debug!(
-                            symbol = %bar.symbol,
-                            close_time_utc = bar.close_time_utc,
-                            open = bar.o,
-                            high = bar.h,
-                            low = bar.l,
-                            close = bar.c,
-                            volume = bar.v,
-                            "live bar"
-                        );
+                    if bar.origin == DataOrigin::Live {
                         live_symbols.write().insert(bar.symbol.clone());
+                    }
+                    let mut buffered_live = false;
+                    if *phase_tx.borrow() == GatewayPhase::SyncingGap
+                        && bar.origin == DataOrigin::Live
+                    {
+                        pending_live_updates
+                            .entry(bar.symbol.clone())
+                            .or_default()
+                            .push(bar.clone());
+                        buffered_live = true;
                     }
                     let bars_live_seen = live_symbols.read().len() >= symbols_len;
                     let positions_synced = positions_manager.synced();
                     let orders_synced = orders_manager.synced();
-                    let live_ready = bars_live_seen && positions_synced && orders_synced;
-                    if live_ready && *phase_tx.borrow() != GatewayPhase::LiveReady {
-                        info!(
-                            bars_live_seen,
-                            positions_synced,
-                            orders_synced,
-                            "gateway phase transition: LiveReady"
-                        );
-                        let _ = phase_tx.send(GatewayPhase::LiveReady);
+                    let subscriptions_ready = {
+                        let guard = health.read();
+                        guard.active_subscriptions_count >= guard.desired_subscriptions_count
+                    };
+                    let live_ready =
+                        bars_live_seen && positions_synced && orders_synced && subscriptions_ready;
+                    if !buffered_live {
+                        let emitted =
+                            emit_bar(&bars_tx, &last_emitted_bar_ts, &bar).await;
+                        if !emitted {
+                            continue;
+                        }
+                        match bar.origin {
+                            DataOrigin::History | DataOrigin::HistoryGap => {
+                                history_count += 1;
+                                history_min = Some(history_min.map_or(bar.close_time_utc, |min| {
+                                    min.min(bar.close_time_utc)
+                                }));
+                                history_max = Some(history_max.map_or(bar.close_time_utc, |max| {
+                                    max.max(bar.close_time_utc)
+                                }));
+                                debug!(
+                                    symbol = %bar.symbol,
+                                    close_time_utc = bar.close_time_utc,
+                                    open = bar.o,
+                                    high = bar.h,
+                                    low = bar.l,
+                                    close = bar.c,
+                                    volume = bar.v,
+                                    "history bar"
+                                );
+                                if matches!(bar.origin, DataOrigin::HistoryGap) {
+                                    let mut guard = health.write();
+                                    guard.last_gap_backfill_bars =
+                                        guard.last_gap_backfill_bars.saturating_add(1);
+                                }
+                            }
+                            DataOrigin::Live => {
+                                if !logged_live_start {
+                                    info!(
+                                        history_start_ts = history_min,
+                                        history_end_ts = history_max,
+                                        history_count,
+                                        live_start_ts = bar.close_time_utc,
+                                        "history backfill complete; live stream started"
+                                    );
+                                    logged_live_start = true;
+                                }
+                                debug!(
+                                    symbol = %bar.symbol,
+                                    close_time_utc = bar.close_time_utc,
+                                    open = bar.o,
+                                    high = bar.h,
+                                    low = bar.l,
+                                    close = bar.c,
+                                    volume = bar.v,
+                                    "live bar"
+                                );
+                            }
+                        }
                     }
-                    let last_delivered = last_delivered_bar_ts
-                        .read()
-                        .get(&bar.symbol)
-                        .copied();
-                    if matches!(bar.origin, crate::models::DataOrigin::HistoryGap)
-                        && last_delivered.map_or(false, |ts| bar.close_time_utc <= ts)
-                    {
-                        continue;
+                    if live_ready {
+                        if *phase_tx.borrow() == GatewayPhase::SyncingGap {
+                            flush_pending_live(
+                                &bars_tx,
+                                &last_emitted_bar_ts,
+                                &mut pending_live_updates,
+                                &mut logged_live_start,
+                                history_min,
+                                history_max,
+                                history_count,
+                            )
+                            .await;
+                            let gap_sec = hub_handle.backfill_plan().gap_sec;
+                            let bars_backfilled = health.read().last_gap_backfill_bars;
+                            transition_phase(
+                                &phase_tx,
+                                GatewayPhase::LiveReady,
+                                None,
+                                Some(gap_sec),
+                                Some(bars_backfilled),
+                            );
+                            resync_in_progress.store(false, Ordering::SeqCst);
+                        } else if *phase_tx.borrow() != GatewayPhase::LiveReady {
+                            transition_phase(
+                                &phase_tx,
+                                GatewayPhase::LiveReady,
+                                None,
+                                None,
+                                None,
+                            );
+                            resync_in_progress.store(false, Ordering::SeqCst);
+                        }
                     }
-                    if matches!(bar.origin, crate::models::DataOrigin::HistoryGap) {
-                        let mut guard = health.write();
-                        guard.last_gap_backfill_bars = guard.last_gap_backfill_bars.saturating_add(1);
-                    }
-                    last_delivered_bar_ts
-                        .write()
-                        .insert(bar.symbol.clone(), bar.close_time_utc);
-                    let _ = bars_tx.send(bar).await;
+
                 }
             }
         });
@@ -361,6 +434,14 @@ impl Supervisor {
             }
 
             if last_bar_instant.read().elapsed() > silence_threshold {
+                let phase = *phase_tx.borrow();
+                let ws_connected = self.health.read().ws_connected;
+                if phase != GatewayPhase::LiveReady
+                    || !ws_connected
+                    || resync_in_progress.load(Ordering::SeqCst)
+                {
+                    continue;
+                }
                 warn!("bar silence detected; resubscribing");
                 log_event(GatewayEvent::ResyncStarted {
                     mode: ResyncMode::Warm,
@@ -371,7 +452,7 @@ impl Supervisor {
                     cfg.tf_sec,
                     cfg.warm_reconnect_max_gap_sec,
                     cfg.gap_backfill_padding_bars,
-                    &last_delivered_bar_ts.read(),
+                    &last_emitted_bar_ts.read(),
                 );
                 hub_handle.set_backfill_plan(plan);
                 {
@@ -380,6 +461,17 @@ impl Supervisor {
                     guard.last_gap_backfill_sec = hub_handle.backfill_plan().gap_sec;
                     guard.last_gap_backfill_bars = 0;
                 }
+                transition_phase(
+                    &phase_tx,
+                    match mode {
+                        ResyncMode::Warm => GatewayPhase::SyncingGap,
+                        ResyncMode::Cold => GatewayPhase::SyncingHistory,
+                    },
+                    Some("bar_silence"),
+                    None,
+                    None,
+                );
+                resync_in_progress.store(true, Ordering::SeqCst);
                 if let Some(from_ts) = hub_handle.backfill_plan().from_ts {
                     hub_handle.resubscribe_from(from_ts).await;
                 } else {
@@ -411,12 +503,12 @@ fn compute_backfill_plan(
     tf_sec: i64,
     warm_reconnect_max_gap_sec: u64,
     gap_backfill_padding_bars: u8,
-    last_delivered: &HashMap<String, i64>,
+    last_emitted: &HashMap<String, i64>,
 ) -> (BackfillPlan, ResyncMode) {
     let now_aligned = Utc::now().timestamp() / tf_sec * tf_sec;
     let mut min_from: Option<i64> = None;
     for symbol in symbols {
-        let Some(last) = last_delivered.get(symbol) else {
+        let Some(last) = last_emitted.get(symbol) else {
             return (BackfillPlan::cold(), ResyncMode::Cold);
         };
         let from = *last - (gap_backfill_padding_bars as i64 * tf_sec);
@@ -437,4 +529,112 @@ fn compute_backfill_plan(
         },
         ResyncMode::Warm,
     )
+}
+async fn emit_bar(
+    bars_tx: &mpsc::Sender<BarEvent>,
+    last_emitted: &Arc<RwLock<HashMap<String, i64>>>,
+    bar: &BarEvent,
+) -> bool {
+    let last_emitted_ts = last_emitted.read().get(&bar.symbol).copied();
+    if last_emitted_ts.map_or(false, |ts| bar.close_time_utc <= ts) {
+        debug!(
+            symbol = %bar.symbol,
+            close_time_utc = bar.close_time_utc,
+            last_emitted = last_emitted_ts,
+            origin = ?bar.origin,
+            "bar duplicate/old dropped"
+        );
+        return false;
+    }
+
+    if bars_tx.send(bar.clone()).await.is_ok() {
+        last_emitted
+            .write()
+            .insert(bar.symbol.clone(), bar.close_time_utc);
+        return true;
+    }
+
+    false
+}
+
+async fn flush_pending_live(
+    bars_tx: &mpsc::Sender<BarEvent>,
+    last_emitted: &Arc<RwLock<HashMap<String, i64>>>,
+    pending: &mut HashMap<String, Vec<BarEvent>>,
+    logged_live_start: &mut bool,
+    history_min: Option<i64>,
+    history_max: Option<i64>,
+    history_count: u64,
+) {
+    for bars in pending.values_mut() {
+        bars.sort_by_key(|bar| bar.close_time_utc);
+    }
+
+    let mut symbols: Vec<String> = pending.keys().cloned().collect();
+    symbols.sort();
+    for symbol in symbols {
+        if let Some(bars) = pending.remove(&symbol) {
+            for bar in bars {
+                let emitted = emit_bar(bars_tx, last_emitted, &bar).await;
+                if !emitted {
+                    continue;
+                }
+                if !*logged_live_start {
+                    info!(
+                        history_start_ts = history_min,
+                        history_end_ts = history_max,
+                        history_count,
+                        live_start_ts = bar.close_time_utc,
+                        "history backfill complete; live stream started"
+                    );
+                    *logged_live_start = true;
+                }
+                debug!(
+                    symbol = %bar.symbol,
+                    close_time_utc = bar.close_time_utc,
+                    open = bar.o,
+                    high = bar.h,
+                    low = bar.l,
+                    close = bar.c,
+                    volume = bar.v,
+                    "live bar"
+                );
+            }
+        }
+    }
+}
+
+fn transition_phase(
+    phase_tx: &watch::Sender<GatewayPhase>,
+    next: GatewayPhase,
+    reason: Option<&str>,
+    gap_sec: Option<u64>,
+    bars_backfilled: Option<u64>,
+) {
+    let current = *phase_tx.borrow();
+    if current == next {
+        return;
+    }
+    match (current, next) {
+        (GatewayPhase::LiveReady, GatewayPhase::Reconnecting) => {
+            info!(
+                reason = reason.unwrap_or("unknown"),
+                "gateway phase transition: LiveReady -> Reconnecting"
+            );
+        }
+        (GatewayPhase::Reconnecting, GatewayPhase::SyncingGap) => {
+            info!("gateway phase transition: Reconnecting -> SyncingGap");
+        }
+        (GatewayPhase::SyncingGap, GatewayPhase::LiveReady) => {
+            info!(
+                gap_sec = gap_sec.unwrap_or_default(),
+                bars_backfilled = bars_backfilled.unwrap_or_default(),
+                "gateway phase transition: SyncingGap -> LiveReady"
+            );
+        }
+        _ => {
+            info!(?current, ?next, "gateway phase transition");
+        }
+    }
+    let _ = phase_tx.send(next);
 }

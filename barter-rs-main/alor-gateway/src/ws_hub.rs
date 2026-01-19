@@ -23,7 +23,12 @@ use crate::ws_subscriptions::{
 pub enum WsEvent {
     Raw(Value),
     Conn(ConnEvent),
-    Subscribed { wallclock_ts: i64, history_origin: DataOrigin },
+    Subscribed {
+        wallclock_ts: i64,
+        history_origin: DataOrigin,
+        bars_from_ts: i64,
+        skip_history: bool,
+    },
     SubscriptionAck { subscription_type: String },
     SubscriptionStats { desired: u32, active: u32 },
     WsRx { ts: i64 },
@@ -219,10 +224,15 @@ async fn connect_and_run(
         ResyncMode::Warm => DataOrigin::HistoryGap,
         ResyncMode::Cold => DataOrigin::History,
     };
+    let plan = backfill_plan.read().clone();
+    let bars_from_ts = plan.from_ts.unwrap_or(cfg.from_ts);
+    let skip_history = plan.from_ts.is_none() && cfg.skip_history_bars;
     let _ = event_tx
         .send(WsEvent::Subscribed {
             wallclock_ts: subscribe_wallclock_ts,
             history_origin,
+            bars_from_ts,
+            skip_history,
         })
         .await;
     subscription_manager.reset();
@@ -232,13 +242,14 @@ async fn connect_and_run(
             active: subscription_manager.active_count(),
         })
         .await;
-    let plan = backfill_plan.read().clone();
     let mut bars_guid_map = subscribe_all(
         cfg,
         &token,
         &mut ws_sink,
         &mut ws_stream,
         plan.from_ts,
+        bars_from_ts,
+        skip_history,
         event_tx,
         &mut subscription_manager,
         &last_ws_rx_ts,
@@ -262,10 +273,14 @@ async fn connect_and_run(
                             ResyncMode::Warm => DataOrigin::HistoryGap,
                             ResyncMode::Cold => DataOrigin::History,
                         };
+                        let bars_from_ts = from_ts.unwrap_or(cfg.from_ts);
+                        let skip_history = from_ts.is_none() && cfg.skip_history_bars;
                         let _ = event_tx
                             .send(WsEvent::Subscribed {
                                 wallclock_ts: subscribe_wallclock_ts,
                                 history_origin,
+                                bars_from_ts,
+                                skip_history,
                             })
                             .await;
                         subscription_manager.reset();
@@ -281,6 +296,8 @@ async fn connect_and_run(
                             &mut ws_sink,
                             &mut ws_stream,
                             from_ts,
+                            bars_from_ts,
+                            skip_history,
                             event_tx,
                             &mut subscription_manager,
                             &last_ws_rx_ts,
@@ -359,6 +376,8 @@ async fn subscribe_all(
     ws_sink: &mut (impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
     ws_stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
     from_ts: Option<i64>,
+    bars_from_ts: i64,
+    skip_history: bool,
     event_tx: &mpsc::Sender<WsEvent>,
     subscription_manager: &mut SubscriptionManager,
     last_ws_rx_ts: &Arc<AtomicI64>,
@@ -366,8 +385,6 @@ async fn subscribe_all(
     subscribe_ack_retries: u8,
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut bars_guid_map = HashMap::new();
-    let bars_from_ts = from_ts.unwrap_or(cfg.from_ts);
-    let skip_history = from_ts.is_none() && cfg.skip_history_bars;
     debug!(
         bars_from_ts,
         bars_from_ts_rfc3339 = %format_ts(bars_from_ts),
@@ -526,7 +543,8 @@ async fn send_and_ack(
     subscribe_ack_timeout_ms: u64,
 ) -> anyhow::Result<()> {
     info!(guid, label, "ws subscribe send");
-    debug!(payload = %msg, guid, label, "ws subscribe payload");
+    let redacted_payload = redact_token(msg);
+    debug!(payload = %redacted_payload, guid, label, "ws subscribe payload");
     ws_sink.send(Message::Text(msg.to_string().into())).await?;
 
     let ack = read_until_guid(
@@ -616,7 +634,17 @@ fn guid_of(value: &Value) -> Option<String> {
         .or_else(|| value.get("requestGuid").and_then(Value::as_str))
         .map(|value| value.to_string())
 }
-
+fn redact_token(payload: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(payload) else {
+        return "<unparseable payload>".to_string();
+    };
+    if let Some(obj) = value.as_object_mut() {
+        if obj.contains_key("token") {
+            obj.insert("token".to_string(), Value::String("***".to_string()));
+        }
+    }
+    value.to_string()
+}
 fn attach_symbol(mut value: Value, bars_guid_map: &HashMap<String, String>) -> Value {
     let Some(guid) = guid_of(&value) else {
         return value;

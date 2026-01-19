@@ -3,6 +3,8 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum GatewayPhase {
     SyncingHistory,
+    Reconnecting,
+    SyncingGap,
     LiveReady,
 }
 
