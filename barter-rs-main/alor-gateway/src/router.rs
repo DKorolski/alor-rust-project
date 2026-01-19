@@ -169,6 +169,19 @@ fn parse_bar_item(data: &Value, live_cutoff_ts: Option<i64>) -> Option<BarEvent>
 
 fn parse_position(value: &Value) -> Option<PositionEvent> {
     let data = value.get("data")?;
+    if data.get("status").is_some()
+        || data.get("orderId").is_some()
+        || data.get("id").is_some()
+        || data.get("price").is_some()
+        || data.get("side").is_some()
+        || data.get("type").is_some()
+    {
+        return None;
+    }
+    let avg_price = data
+        .get("avgPrice")
+        .or_else(|| data.get("avg_price"))
+        .and_then(Value::as_f64)?;
     let symbol = data
         .get("symbol")
         .or_else(|| data.get("code"))
@@ -177,11 +190,7 @@ fn parse_position(value: &Value) -> Option<PositionEvent> {
     Some(PositionEvent {
         symbol,
         qty: data.get("qty").and_then(Value::as_f64).unwrap_or_default(),
-        avg_price: data
-            .get("avgPrice")
-            .or_else(|| data.get("avg_price"))
-            .and_then(Value::as_f64)
-            .unwrap_or_default(),
+        avg_price,
         ts_utc: data
             .get("timestamp")
             .and_then(to_i64)
@@ -295,6 +304,23 @@ mod tests {
         assert_eq!(position.qty, 2.0);
         assert_eq!(position.avg_price, 100.0);
         assert_eq!(position.ts_utc, 1700000000);
+    }
+
+    #[test]
+    fn parse_position_ignores_orders() {
+        let value = json!({
+            "data": {
+                "id": "2033125883136551700",
+                "symbol": "IMOEXF",
+                "type": "limit",
+                "side": "buy",
+                "status": "working",
+                "qty": 1.0,
+                "filled": 0.0,
+                "price": 2738.0
+            }
+        });
+        assert!(parse_position(&value).is_none());
     }
 
     #[test]

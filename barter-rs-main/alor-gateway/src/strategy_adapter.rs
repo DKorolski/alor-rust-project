@@ -96,27 +96,29 @@ where
                     history_buffer.push_back(bar.clone());
                 }
 
+                let should_trade = phase == GatewayPhase::LiveReady && bar.origin == DataOrigin::Live;
+                if !should_trade {
+                    continue;
+                }
+
                 let ctx = StrategyContext {
                     positions: map_positions(self.positions.snapshot()),
                     orders: map_orders(self.orders.snapshot()),
                 };
-                let should_trade = phase == GatewayPhase::LiveReady && bar.origin == DataOrigin::Live;
                 let bar = map_bar(bar);
                 let actions = self.strategy.on_bar(bar, ctx);
-                if should_trade {
-                    for action in actions {
-                        if let Err(error) = execute_action(
-                            &self.cws,
-                            &self.portfolio,
-                            &self.exchange,
-                            self.price_step,
-                            self.volume_step,
-                            action,
-                        )
-                        .await
-                        {
-                            warn!(?error, "strategy action failed");
-                        }
+                for action in actions {
+                    if let Err(error) = execute_action(
+                        &self.cws,
+                        &self.portfolio,
+                        &self.exchange,
+                        self.price_step,
+                        self.volume_step,
+                        action,
+                    )
+                    .await
+                    {
+                        warn!(?error, "strategy action failed");
                     }
                 }
             }

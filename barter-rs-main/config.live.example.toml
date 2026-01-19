@@ -1,0 +1,35 @@
+# Example configuration for alor-gateway against production
+#[general]
+price_step = 0.5
+volume_step = 1
+
+portfolio = "7502T0U"
+exchange = "MOEX"
+instrument_group = "RFUD"
+symbols = ["IMOEXF"]
+
+tf_sec = 60
+from_ts = 0
+
+ws_url = "wss://api.alor.ru/ws"
+cws_url = "wss://api.alor.ru/cws"
+oauth_url = "https://oauth.alor.ru/refresh"
+refresh_token = ""
+
+skip_history_bars = false
+skip_history_positions = false
+skip_history_orders = false
+split_adjust = true
+format = "Simple"
+frequency_ms = 250
+
+backoff_initial_ms = 1000
+backoff_max_ms = 30000
+backoff_multiplier = 2
+
+max_silence_bars_sec = 180
+
+history_sessions = 2
+history_days_back = 5
+session_rollover_hour_utc = 7
+health_listen_addr = "127.0.0.1:8082"

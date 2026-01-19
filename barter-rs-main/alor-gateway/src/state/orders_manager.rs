@@ -30,11 +30,7 @@ impl OrdersManager {
             while let Some(event) = rx.recv().await {
                 debug!(order_id = event.order_id, status = %event.status, "order update");
                 let ts = event.ts_utc;
-                if is_terminal(&event.status) {
-                    store_clone.write().remove(&event.order_id);
-                } else {
-                    store_clone.write().insert(event.order_id, event);
-                }
+                store_clone.write().insert(event.order_id, event);
                 synced_clone.store(true, Ordering::SeqCst);
                 last_ts_clone.store(ts, Ordering::SeqCst);
             }
@@ -59,7 +55,7 @@ impl OrdersManagerHandle {
             .read()
             .iter()
             .filter_map(|(id, order)| {
-                if order.symbol == symbol {
+                if order.symbol == symbol && !is_terminal(&order.status) {
                     Some(*id)
                 } else {
                     None
@@ -78,5 +74,8 @@ impl OrdersManagerHandle {
 }
 
 fn is_terminal(status: &str) -> bool {
-    matches!(status.to_ascii_lowercase().as_str(), "filled" | "cancelled" | "rejected")
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "filled" | "cancelled" | "canceled" | "rejected"
+    )
 }

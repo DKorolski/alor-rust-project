@@ -215,6 +215,7 @@ async fn connect_and_run(
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
+                        debug!(payload = %txt, "ws recv text");
                         if let Ok(val) = serde_json::from_str::<Value>(&txt) {
                             let val = attach_symbol(val, &bars_guid_map);
                             if event_tx.send(WsEvent::Raw(val)).await.is_err() {
@@ -346,6 +347,7 @@ async fn send_and_ack(
     subscription_manager: &mut SubscriptionManager,
 ) -> anyhow::Result<()> {
     info!(guid, label, "ws subscribe send");
+    debug!(payload = %msg, guid, label, "ws subscribe payload");
     ws_sink.send(Message::Text(msg.to_string().into())).await?;
 
     let ack = read_until_guid(
@@ -363,7 +365,7 @@ async fn send_and_ack(
             subscription_type: subscription.subscription_type,
         });
     }
-    debug!(?ack, guid, label, "ws subscribe ack");
+    debug!(payload = %ack, guid, label, "ws subscribe ack");
     Ok(())
 }
 
@@ -379,6 +381,7 @@ async fn read_until_guid(
         while let Some(msg) = stream.next().await {
             let msg = msg?;
             if let Message::Text(txt) = msg {
+                debug!(payload = %txt, "ws recv text (awaiting guid)");
                 if let Ok(val) = serde_json::from_str::<Value>(&txt) {
                     if guid_of(&val).as_deref() == Some(guid) {
                         return Ok(val);
