@@ -1,4 +1,4 @@
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::health::ResyncMode;
 
@@ -14,6 +14,11 @@ pub enum GatewayEvent {
         mode: ResyncMode,
         gap_sec: u64,
         bars_backfilled: u64,
+    },
+    CwsAuthorization {
+        success: bool,
+        status: Option<i64>,
+        message: Option<String>,
     },
 }
 
@@ -46,6 +51,25 @@ pub fn log_event(event: GatewayEvent) {
                 bars_backfilled,
                 "Resync completed"
             )
+        }
+        GatewayEvent::CwsAuthorization {
+            success,
+            status,
+            message,
+        } => {
+            if success {
+                info!(
+                    status = status.unwrap_or_default(),
+                    message = message.as_deref().unwrap_or(""),
+                    "CWS authorization successful, connection ready"
+                );
+            } else {
+                error!(
+                    status = status.unwrap_or_default(),
+                    message = message.as_deref().unwrap_or(""),
+                    "CWS authorization failed, retrying..."
+                );
+            }
         }
     }
 }

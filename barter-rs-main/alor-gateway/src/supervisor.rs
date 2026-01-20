@@ -200,7 +200,11 @@ impl Supervisor {
                 }
             }
         });
-        let cws_handle = CwsClient::start(cfg.clone(), self.token_provider.clone());
+        let cws_handle = CwsClient::start(
+            cfg.clone(),
+            self.token_provider.clone(),
+            self.health.clone(),
+        );
 
         tokio::spawn({
             let health = self.health.clone();
@@ -294,8 +298,12 @@ impl Supervisor {
                         let guard = health.read();
                         guard.active_subscriptions_count >= guard.desired_subscriptions_count
                     };
-                    let live_ready =
-                        bars_live_seen && positions_synced && orders_synced && subscriptions_ready;
+                    let cws_authorized = health.read().cws_authorized;
+                    let live_ready = bars_live_seen
+                        && positions_synced
+                        && orders_synced
+                        && subscriptions_ready
+                        && cws_authorized;
                     if !buffered_live {
                         let emitted =
                             emit_bar(&bars_tx, &last_emitted_bar_ts, &bar).await;
@@ -353,6 +361,13 @@ impl Supervisor {
                     }
                     if live_ready {
                         if *phase_tx.borrow() == GatewayPhase::SyncingGap {
+                            info!(
+                                bars_live_seen,
+                                positions_synced,
+                                orders_synced,
+                                cws_authorization = cws_authorized,
+                                "bars live_seen=true, positions_synced=true, orders_synced=true, cws_authorization=true"
+                            );
                             flush_pending_live(
                                 &bars_tx,
                                 &last_emitted_bar_ts,
@@ -374,6 +389,13 @@ impl Supervisor {
                             );
                             resync_in_progress.store(false, Ordering::SeqCst);
                         } else if *phase_tx.borrow() != GatewayPhase::LiveReady {
+                            info!(
+                                bars_live_seen,
+                                positions_synced,
+                                orders_synced,
+                                cws_authorization = cws_authorized,
+                                "bars live_seen=true, positions_synced=true, orders_synced=true, cws_authorization=true"
+                            );
                             transition_phase(
                                 &phase_tx,
                                 GatewayPhase::LiveReady,
@@ -430,7 +452,8 @@ impl Supervisor {
                     && guard.ws_connected
                     && !guard.backpressure_lagged
                     && guard.ws_last_rx_age_sec <= cfg.ws_idle_timeout_sec
-                    && guard.active_subscriptions_count >= guard.desired_subscriptions_count;
+                    && guard.active_subscriptions_count >= guard.desired_subscriptions_count
+                    && guard.cws_authorized;
             }
 
             if last_bar_instant.read().elapsed() > silence_threshold {
@@ -614,6 +637,9 @@ fn transition_phase(
     let current = *phase_tx.borrow();
     if current == next {
         return;
+    }
+    if next == GatewayPhase::LiveReady {
+        info!("gateway phase transition: LiveReady");
     }
     match (current, next) {
         (GatewayPhase::LiveReady, GatewayPhase::Reconnecting) => {
