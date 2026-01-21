@@ -12,7 +12,8 @@ use crate::auth::TokenProvider;
 use crate::config::{AlorGatewayConfig, derive_config};
 use crate::cws_client::CwsClient;
 use crate::data_quality::{
-    BarQualityStats, BarValidationConfig, BarValidator, write_data_report,
+    BarQualityStats, BarValidationConfig, BarValidator, IgnoredReason, PendingAcks, PendingReport,
+    RejectReason, build_data_report, write_data_report,
 };
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::{GatewayPhase, HealthState, ResyncMode};
@@ -69,6 +70,8 @@ impl Supervisor {
         let resync_in_progress = Arc::new(AtomicBool::new(false));
         let bar_validator = BarValidator::new(BarValidationConfig::new(cfg.tf_sec));
         let bar_quality_stats = Arc::new(RwLock::new(BarQualityStats::default()));
+        let buffered_bars = Arc::new(RwLock::new(HashMap::<String, u64>::new()));
+        let pending_acks = Arc::new(RwLock::new(PendingAcks::default()));
         let bar_dump = Arc::new(Mutex::new(open_bar_dump(cfg.bar_dump_path.as_deref())));
         let initial_phase = if derived.skip_history_effective {
             GatewayPhase::Reconnecting
@@ -101,12 +104,19 @@ impl Supervisor {
             let tf_sec = cfg.tf_sec;
             let warm_reconnect_max_gap_sec = cfg.warm_reconnect_max_gap_sec;
             let gap_backfill_padding_bars = cfg.gap_backfill_padding_bars;
+            let bar_quality_stats = bar_quality_stats.clone();
+            let pending_acks = pending_acks.clone();
             async move {
                 let mut current_generation: u64 = 0;
                 while let Some(event) = ws_events.recv().await {
                     match event {
                         WsEvent::Raw { value, generation } => {
                             if generation != current_generation {
+                                if let Some(symbol) = extract_symbol(&value) {
+                                    bar_quality_stats
+                                        .write()
+                                        .record_ignored(&symbol, IgnoredReason::OldGeneration);
+                                }
                                 continue;
                             }
                             match raw_tx.try_send(value) {
@@ -218,13 +228,14 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        WsEvent::SubscriptionStats { desired, active, generation } => {
+                        WsEvent::SubscriptionStats { desired, active, pending_acks: pending, generation } => {
                             if generation != current_generation {
                                 continue;
                             }
                             let mut guard = health.write();
                             guard.desired_subscriptions_count = desired;
                             guard.active_subscriptions_count = active;
+                            *pending_acks.write() = pending;
                         }
                         WsEvent::WsRx { ts, generation } => {
                             if generation != current_generation {
@@ -232,6 +243,13 @@ impl Supervisor {
                             }
                             let mut guard = health.write();
                             guard.ws_last_rx_ts = ts;
+                        }
+                        WsEvent::Ignored { symbol, reason, generation } => {
+                            if generation != current_generation {
+                                continue;
+                            }
+                            let symbol = symbol.unwrap_or_else(|| "<unknown>".to_string());
+                            bar_quality_stats.write().record_ignored(&symbol, reason);
                         }
                     }
                 }
@@ -302,6 +320,7 @@ impl Supervisor {
             let bar_dump = bar_dump.clone();
             let bar_validator = bar_validator.clone();
             let bar_quality_stats = bar_quality_stats.clone();
+            let buffered_bars = buffered_bars.clone();
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
                 let mut history_min: Option<i64> = None;
@@ -332,6 +351,10 @@ impl Supervisor {
                             .entry(bar.symbol.clone())
                             .or_default()
                             .push(bar.clone());
+                        *buffered_bars
+                            .write()
+                            .entry(bar.symbol.clone())
+                            .or_insert(0) += 1;
                         buffered_live = true;
                     }
                     let bars_live_seen = live_symbols.read().len() >= symbols_len;
@@ -364,12 +387,23 @@ impl Supervisor {
                             );
                             continue;
                         }
-                        let emitted =
-                            emit_bar(&bars_tx, &last_emitted_bar_ts, &bar).await;
-                        if !emitted {
-                            continue;
+                        match emit_bar(&bars_tx, &last_emitted_bar_ts, &bar).await {
+                            EmitResult::Emitted => {
+                                record_emitted(&bar, &bar_quality_stats, &bar_dump);
+                            }
+                            EmitResult::DuplicateOrOld => {
+                                bar_quality_stats
+                                    .write()
+                                    .record_dropped(&bar.symbol, RejectReason::DuplicateOrOld);
+                                continue;
+                            }
+                            EmitResult::SendFailed => {
+                                bar_quality_stats
+                                    .write()
+                                    .record_dropped(&bar.symbol, RejectReason::EmitFailed);
+                                continue;
+                            }
                         }
-                        record_emitted(&bar, &bar_quality_stats, &bar_dump);
                         match bar.origin {
                             DataOrigin::History | DataOrigin::HistoryGap => {
                                 history_count += 1;
@@ -440,6 +474,7 @@ impl Supervisor {
                                 &last_emitted_bar_ts,
                                 &bar_quality_stats,
                                 &bar_dump,
+                                &buffered_bars,
                                 &mut pending_live_updates,
                                 &mut logged_live_start,
                                 history_min,
@@ -512,7 +547,14 @@ impl Supervisor {
                 _ = ticker.tick() => {}
                 _ = tokio::signal::ctrl_c() => {
                     info!("shutdown signal received");
-                    handle_shutdown(&hub_handle, &bar_quality_stats, self.cfg.data_report_path.as_deref()).await;
+                    handle_shutdown(
+                        &hub_handle,
+                        &bar_quality_stats,
+                        &buffered_bars,
+                        &pending_acks,
+                        self.cfg.data_report_path.as_deref(),
+                    )
+                    .await;
                     break;
                 }
                 _ = async {
@@ -526,7 +568,14 @@ impl Supervisor {
                     }
                 } => {
                     info!("termination signal received");
-                    handle_shutdown(&hub_handle, &bar_quality_stats, self.cfg.data_report_path.as_deref()).await;
+                    handle_shutdown(
+                        &hub_handle,
+                        &bar_quality_stats,
+                        &buffered_bars,
+                        &pending_acks,
+                        self.cfg.data_report_path.as_deref(),
+                    )
+                    .await;
                     break;
                 }
             }
@@ -614,11 +663,30 @@ impl Supervisor {
 async fn handle_shutdown(
     hub_handle: &WsHubHandle,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
+    buffered_bars: &Arc<RwLock<HashMap<String, u64>>>,
+    pending_acks: &Arc<RwLock<PendingAcks>>,
     data_report_path: Option<&str>,
 ) {
     if let Some(path) = data_report_path {
         let snapshot = bar_quality_stats.read();
-        if let Err(error) = write_data_report(path, &snapshot) {
+        let pending = PendingReport {
+            buffered_bars: buffered_bars.read().clone(),
+            pending_acks: pending_acks.read().clone(),
+        };
+        let (report, imbalances) = build_data_report(&snapshot, pending);
+        for imbalance in imbalances {
+            warn!(
+                sym = imbalance.symbol,
+                received = imbalance.received,
+                emitted = imbalance.emitted,
+                dropped = imbalance.dropped,
+                ignored = imbalance.ignored,
+                pending = imbalance.pending,
+                delta = imbalance.delta,
+                "data report imbalance"
+            );
+        }
+        if let Err(error) = write_data_report(path, &report) {
             warn!(?error, "data report write failed");
         } else {
             info!(path, "data report written");
@@ -678,6 +746,17 @@ fn format_ts(ts: i64) -> String {
         .to_rfc3339()
 }
 
+fn extract_symbol(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("data")
+        .and_then(|data| {
+            data.get("symbol")
+                .or_else(|| data.get("code"))
+                .and_then(|val| val.as_str())
+        })
+        .map(|s| s.to_string())
+}
+
 fn compute_backfill_plan(
     symbols: &[String],
     tf_sec: i64,
@@ -710,11 +789,17 @@ fn compute_backfill_plan(
         ResyncMode::Warm,
     )
 }
+enum EmitResult {
+    Emitted,
+    DuplicateOrOld,
+    SendFailed,
+}
+
 async fn emit_bar(
     bars_tx: &mpsc::Sender<BarEvent>,
     last_emitted: &Arc<RwLock<HashMap<String, i64>>>,
     bar: &BarEvent,
-) -> bool {
+) -> EmitResult {
     let last_emitted_ts = last_emitted.read().get(&bar.symbol).copied();
     if last_emitted_ts.map_or(false, |ts| bar.close_time_utc <= ts) {
         debug!(
@@ -724,17 +809,17 @@ async fn emit_bar(
             origin = ?bar.origin,
             "bar duplicate/old dropped"
         );
-        return false;
+        return EmitResult::DuplicateOrOld;
     }
 
     if bars_tx.send(bar.clone()).await.is_ok() {
         last_emitted
             .write()
             .insert(bar.symbol.clone(), bar.close_time_utc);
-        return true;
+        return EmitResult::Emitted;
     }
 
-    false
+    EmitResult::SendFailed
 }
 
 async fn flush_pending_live(
@@ -742,6 +827,7 @@ async fn flush_pending_live(
     last_emitted: &Arc<RwLock<HashMap<String, i64>>>,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    buffered_bars: &Arc<RwLock<HashMap<String, u64>>>,
     pending: &mut HashMap<String, Vec<BarEvent>>,
     logged_live_start: &mut bool,
     history_min: Option<i64>,
@@ -756,12 +842,27 @@ async fn flush_pending_live(
     symbols.sort();
     for symbol in symbols {
         if let Some(bars) = pending.remove(&symbol) {
+            if let Some(count) = buffered_bars.write().get_mut(&symbol) {
+                *count = count.saturating_sub(bars.len() as u64);
+            }
             for bar in bars {
-                let emitted = emit_bar(bars_tx, last_emitted, &bar).await;
-                if !emitted {
-                    continue;
+                match emit_bar(bars_tx, last_emitted, &bar).await {
+                    EmitResult::Emitted => {
+                        record_emitted(&bar, bar_quality_stats, bar_dump);
+                    }
+                    EmitResult::DuplicateOrOld => {
+                        bar_quality_stats
+                            .write()
+                            .record_dropped(&bar.symbol, RejectReason::DuplicateOrOld);
+                        continue;
+                    }
+                    EmitResult::SendFailed => {
+                        bar_quality_stats
+                            .write()
+                            .record_dropped(&bar.symbol, RejectReason::EmitFailed);
+                        continue;
+                    }
                 }
-                record_emitted(&bar, bar_quality_stats, bar_dump);
                 if !*logged_live_start {
                     info!(
                         history_start_ts = history_min,

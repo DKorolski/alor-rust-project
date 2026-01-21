@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
+use crate::data_quality::{IgnoredReason, PendingAcks};
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::ResyncMode;
 use crate::models::DataOrigin;
@@ -31,8 +32,9 @@ pub enum WsEvent {
         generation: u64,
     },
     SubscriptionAck { subscription_type: String, generation: u64 },
-    SubscriptionStats { desired: u32, active: u32, generation: u64 },
+    SubscriptionStats { desired: u32, active: u32, pending_acks: PendingAcks, generation: u64 },
     WsRx { ts: i64, generation: u64 },
+    Ignored { symbol: Option<String>, reason: IgnoredReason, generation: u64 },
 }
 
 #[derive(Debug)]
@@ -103,6 +105,19 @@ impl SubscriptionManager {
 
     fn is_active_guid(&self, guid: &str) -> bool {
         self.active_subscriptions.contains_key(guid)
+    }
+
+    fn pending_counts(&self) -> PendingAcks {
+        let mut pending = PendingAcks::default();
+        for subscription in self.desired_subscriptions.values() {
+            match subscription.subscription_type.as_str() {
+                "bars" => pending.bars += 1,
+                "positions" => pending.positions += 1,
+                "orders" => pending.orders += 1,
+                _ => {}
+            }
+        }
+        pending
     }
 }
 
@@ -272,6 +287,7 @@ async fn connect_and_run(
         .send(WsEvent::SubscriptionStats {
             desired: subscription_manager.desired_count(),
             active: subscription_manager.active_count(),
+            pending_acks: subscription_manager.pending_counts(),
             generation,
         })
         .await;
@@ -328,6 +344,7 @@ async fn connect_and_run(
                             .send(WsEvent::SubscriptionStats {
                                 desired: subscription_manager.desired_count(),
                                 active: subscription_manager.active_count(),
+                                pending_acks: subscription_manager.pending_counts(),
                                 generation,
                             })
                             .await;
@@ -383,19 +400,39 @@ async fn connect_and_run(
                             .send(WsEvent::WsRx { ts: now, generation })
                             .await;
                         tracing::trace!(payload = %txt, "ws recv text");
-                        if let Ok(val) = serde_json::from_str::<Value>(&txt) {
-                            let val = attach_symbol(val, &bars_guid_map);
-                            if let Some(guid) = guid_of(&val) {
-                                if !subscription_manager.is_active_guid(&guid) {
-                                    continue;
+                        match serde_json::from_str::<Value>(&txt) {
+                            Ok(val) => {
+                                let val = attach_symbol(val, &bars_guid_map);
+                                if let Some(guid) = guid_of(&val) {
+                                    let symbol = bars_guid_map.get(&guid).cloned();
+                                    if !subscription_manager.is_active_guid(&guid) {
+                                        let reason = if symbol.is_some() {
+                                            IgnoredReason::InactiveGuid
+                                        } else {
+                                            IgnoredReason::UnknownGuid
+                                        };
+                                        let _ = event_tx
+                                            .send(WsEvent::Ignored { symbol, reason, generation })
+                                            .await;
+                                        continue;
+                                    }
+                                }
+                                if event_tx
+                                    .send(WsEvent::Raw { value: val, generation })
+                                    .await
+                                    .is_err()
+                                {
+                                    return Ok(());
                                 }
                             }
-                            if event_tx
-                                .send(WsEvent::Raw { value: val, generation })
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
+                            Err(_) => {
+                                let _ = event_tx
+                                    .send(WsEvent::Ignored {
+                                        symbol: None,
+                                        reason: IgnoredReason::JsonParseError,
+                                        generation,
+                                    })
+                                    .await;
                             }
                         }
                     }
@@ -467,13 +504,14 @@ async fn subscribe_all(
                 is_active: false,
                 epoch: subscription_manager.subscription_epoch,
             });
-    let _ = event_tx
-        .send(WsEvent::SubscriptionStats {
-            desired: subscription_manager.desired_count(),
-            active: subscription_manager.active_count(),
-            generation,
-        })
-        .await;
+            let _ = event_tx
+                .send(WsEvent::SubscriptionStats {
+                    desired: subscription_manager.desired_count(),
+                    active: subscription_manager.active_count(),
+                    pending_acks: subscription_manager.pending_counts(),
+                    generation,
+                })
+                .await;
             if send_and_ack(
                 ws_sink,
                 ws_stream,
@@ -518,6 +556,7 @@ async fn subscribe_all(
             .send(WsEvent::SubscriptionStats {
                 desired: subscription_manager.desired_count(),
                 active: subscription_manager.active_count(),
+                pending_acks: subscription_manager.pending_counts(),
                 generation,
             })
             .await;
@@ -564,6 +603,7 @@ async fn subscribe_all(
             .send(WsEvent::SubscriptionStats {
                 desired: subscription_manager.desired_count(),
                 active: subscription_manager.active_count(),
+                pending_acks: subscription_manager.pending_counts(),
                 generation,
             })
             .await;
@@ -639,6 +679,7 @@ async fn send_and_ack(
             .send(WsEvent::SubscriptionStats {
                 desired: subscription_manager.desired_count(),
                 active: subscription_manager.active_count(),
+                pending_acks: subscription_manager.pending_counts(),
                 generation,
             })
             .await;
@@ -665,17 +706,37 @@ async fn read_until_guid(
                 last_ws_rx_ts.store(now, Ordering::SeqCst);
                 let _ = event_tx.send(WsEvent::WsRx { ts: now, generation }).await;
                 tracing::trace!(payload = %txt, "ws recv text (awaiting guid)");
-                if let Ok(val) = serde_json::from_str::<Value>(&txt) {
-                    if guid_of(&val).as_deref() == Some(guid) {
-                        return Ok(val);
-                    }
-                    let val = attach_symbol(val, bars_guid_map);
-                    if let Some(guid) = guid_of(&val) {
-                        if !subscription_manager.is_active_guid(&guid) {
-                            continue;
+                match serde_json::from_str::<Value>(&txt) {
+                    Ok(val) => {
+                        if guid_of(&val).as_deref() == Some(guid) {
+                            return Ok(val);
                         }
+                        let val = attach_symbol(val, bars_guid_map);
+                        if let Some(guid) = guid_of(&val) {
+                            let symbol = bars_guid_map.get(&guid).cloned();
+                            if !subscription_manager.is_active_guid(&guid) {
+                                let reason = if symbol.is_some() {
+                                    IgnoredReason::InactiveGuid
+                                } else {
+                                    IgnoredReason::UnknownGuid
+                                };
+                                let _ = event_tx
+                                    .send(WsEvent::Ignored { symbol, reason, generation })
+                                    .await;
+                                continue;
+                            }
+                        }
+                        let _ = event_tx.send(WsEvent::Raw { value: val, generation }).await;
                     }
-                    let _ = event_tx.send(WsEvent::Raw { value: val, generation }).await;
+                    Err(_) => {
+                        let _ = event_tx
+                            .send(WsEvent::Ignored {
+                                symbol: None,
+                                reason: IgnoredReason::JsonParseError,
+                                generation,
+                            })
+                            .await;
+                    }
                 }
             }
         }

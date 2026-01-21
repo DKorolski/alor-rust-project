@@ -14,6 +14,15 @@ pub enum RejectReason {
     NegativeVolume,
     FourPriceDoji,
     NotClosedYet,
+    EmitFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum IgnoredReason {
+    OldGeneration,
+    InactiveGuid,
+    UnknownGuid,
+    JsonParseError,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +47,7 @@ pub struct BarQualityStats {
     pub received: HashMap<String, u64>,
     pub emitted: HashMap<String, u64>,
     pub dropped: HashMap<(String, RejectReason), u64>,
+    pub ignored: HashMap<(String, IgnoredReason), u64>,
     pub last_close_time: HashMap<String, i64>,
 }
 
@@ -49,11 +59,45 @@ pub struct DropReasonCount {
 }
 
 #[derive(Debug, Serialize)]
+pub struct IgnoredReasonCount {
+    pub symbol: String,
+    pub reason: IgnoredReason,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PendingAcks {
+    pub bars: u64,
+    pub positions: u64,
+    pub orders: u64,
+    pub authorize: u64,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct PendingReport {
+    pub buffered_bars: HashMap<String, u64>,
+    pub pending_acks: PendingAcks,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DataQualityReport {
     pub received: HashMap<String, u64>,
     pub emitted: HashMap<String, u64>,
     pub dropped: Vec<DropReasonCount>,
+    pub ignored: Vec<IgnoredReasonCount>,
+    pub pending: PendingReport,
     pub last_close_time: HashMap<String, i64>,
+}
+
+#[derive(Debug)]
+pub struct ReportImbalance {
+    pub symbol: String,
+    pub received: u64,
+    pub emitted: u64,
+    pub dropped: u64,
+    pub ignored: u64,
+    pub pending: u64,
+    pub delta: i64,
 }
 
 impl BarQualityStats {
@@ -73,7 +117,14 @@ impl BarQualityStats {
             .or_insert(0) += 1;
     }
 
-    pub fn to_report(&self) -> DataQualityReport {
+    pub fn record_ignored(&mut self, symbol: &str, reason: IgnoredReason) {
+        *self
+            .ignored
+            .entry((symbol.to_string(), reason))
+            .or_insert(0) += 1;
+    }
+
+    pub fn to_report(&self, pending: PendingReport) -> DataQualityReport {
         let mut dropped: Vec<DropReasonCount> = self
             .dropped
             .iter()
@@ -84,22 +135,77 @@ impl BarQualityStats {
             })
             .collect();
         dropped.sort_by(|a, b| b.count.cmp(&a.count));
+        let mut ignored: Vec<IgnoredReasonCount> = self
+            .ignored
+            .iter()
+            .map(|((symbol, reason), count)| IgnoredReasonCount {
+                symbol: symbol.clone(),
+                reason: *reason,
+                count: *count,
+            })
+            .collect();
+        ignored.sort_by(|a, b| b.count.cmp(&a.count));
         DataQualityReport {
             received: self.received.clone(),
             emitted: self.emitted.clone(),
             dropped,
+            ignored,
+            pending,
             last_close_time: self.last_close_time.clone(),
         }
     }
 }
 
+pub fn build_data_report(
+    stats: &BarQualityStats,
+    pending: PendingReport,
+) -> (DataQualityReport, Vec<ReportImbalance>) {
+    let report = stats.to_report(pending);
+    let mut imbalances = Vec::new();
+    for (symbol, received) in &report.received {
+        let emitted = report.emitted.get(symbol).copied().unwrap_or(0);
+        let dropped = report
+            .dropped
+            .iter()
+            .filter(|entry| entry.symbol == *symbol)
+            .map(|entry| entry.count)
+            .sum::<u64>();
+        let ignored = report
+            .ignored
+            .iter()
+            .filter(|entry| entry.symbol == *symbol)
+            .map(|entry| entry.count)
+            .sum::<u64>();
+        let pending_buffered = report
+            .pending
+            .buffered_bars
+            .get(symbol)
+            .copied()
+            .unwrap_or(0);
+        let pending_total = pending_buffered;
+        let rhs = emitted + dropped + ignored + pending_total;
+        if *received != rhs {
+            let delta = *received as i64 - rhs as i64;
+            imbalances.push(ReportImbalance {
+                symbol: symbol.clone(),
+                received: *received,
+                emitted,
+                dropped,
+                ignored,
+                pending: pending_total,
+                delta,
+            });
+        }
+    }
+    (report, imbalances)
+}
+
 pub fn write_data_report(
     path: &str,
-    stats: &BarQualityStats,
+    report: &DataQualityReport,
 ) -> anyhow::Result<()> {
-    let report = stats.to_report();
     let file = std::fs::File::create(path)?;
-    serde_json::to_writer_pretty(file, &report)?;
+    serde_json::to_writer_pretty(file, report)?;
     Ok(())
 }
 
