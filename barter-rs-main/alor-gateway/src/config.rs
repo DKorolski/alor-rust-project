@@ -47,6 +47,8 @@ pub struct AlorGatewayConfig {
     pub warm_reconnect_max_gap_sec: u64,
     pub gap_backfill_padding_bars: u8,
     pub cold_start_history_days_back: u8,
+    pub bar_silence_resync_min_sec: u64,
+    pub data_report_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +145,11 @@ impl AlorGatewayConfig {
             warm_reconnect_max_gap_sec: parse_u64("ALOR_WARM_RECONNECT_MAX_GAP_SEC", 21_600)?,
             gap_backfill_padding_bars: parse_u8("ALOR_GAP_BACKFILL_PADDING_BARS", 2)?,
             cold_start_history_days_back: parse_u8("ALOR_COLD_START_HISTORY_DAYS_BACK", 4)?,
+            bar_silence_resync_min_sec: parse_u64(
+                "ALOR_BAR_SILENCE_RESYNC_MIN_SEC",
+                300,
+            )?,
+            data_report_path: env::var("DATA_REPORT_PATH").ok(),
         })
     }
 
@@ -287,9 +294,23 @@ impl AlorGatewayConfig {
                 4,
                 &mut sources,
             )?,
+            bar_silence_resync_min_sec: parse_u64_with_source(
+                "ALOR_BAR_SILENCE_RESYNC_MIN_SEC",
+                300,
+                &mut sources,
+            )?,
+            data_report_path: env::var("DATA_REPORT_PATH").ok(),
         };
 
         let derived = derive_config(&config);
+        sources.insert(
+            "data_report_path",
+            if env::var("DATA_REPORT_PATH").is_ok() {
+                "env".to_string()
+            } else {
+                "default".to_string()
+            },
+        );
         Ok(ResolvedConfig {
             config,
             sources,
@@ -417,6 +438,12 @@ impl AlorGatewayConfig {
                 .as_ref()
                 .and_then(|reconnect| reconnect.cold_start_history_days_back)
                 .unwrap_or(4),
+            bar_silence_resync_min_sec: file_cfg
+                .reconnect
+                .as_ref()
+                .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
+                .unwrap_or(300),
+            data_report_path: env::var("DATA_REPORT_PATH").ok(),
         })
     }
 
@@ -589,6 +616,12 @@ impl AlorGatewayConfig {
                 .as_ref()
                 .and_then(|reconnect| reconnect.cold_start_history_days_back)
                 .unwrap_or(4),
+            bar_silence_resync_min_sec: file_cfg
+                .reconnect
+                .as_ref()
+                .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
+                .unwrap_or(300),
+            data_report_path: env::var("DATA_REPORT_PATH").ok(),
         };
 
         track_file_sources(&file_cfg, &mut sources);
@@ -676,6 +709,7 @@ struct ReconnectConfig {
     warm_reconnect_max_gap_sec: Option<u64>,
     gap_backfill_padding_bars: Option<u8>,
     cold_start_history_days_back: Option<u8>,
+    bar_silence_resync_min_sec: Option<u64>,
 }
 
 fn get_required(key: &'static str) -> Result<String, ConfigError> {
@@ -971,6 +1005,23 @@ fn track_file_sources(file_cfg: &FileConfig, sources: &mut BTreeMap<&'static str
             .and_then(|reconnect| reconnect.cold_start_history_days_back)
             .is_some(),
     );
+    set_source(
+        sources,
+        "bar_silence_resync_min_sec",
+        file_cfg
+            .reconnect
+            .as_ref()
+            .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
+            .is_some(),
+    );
+    sources.insert(
+        "data_report_path",
+        if env::var("DATA_REPORT_PATH").is_ok() {
+            "env".to_string()
+        } else {
+            "default".to_string()
+        },
+    );
 }
 
 pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>) {
@@ -1018,6 +1069,8 @@ pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>)
         warm_reconnect_max_gap_sec = cfg.warm_reconnect_max_gap_sec,
         gap_backfill_padding_bars = cfg.gap_backfill_padding_bars,
         cold_start_history_days_back = cfg.cold_start_history_days_back,
+        bar_silence_resync_min_sec = cfg.bar_silence_resync_min_sec,
+        data_report_path = ?cfg.data_report_path,
         "Resolved config"
     );
     info!(

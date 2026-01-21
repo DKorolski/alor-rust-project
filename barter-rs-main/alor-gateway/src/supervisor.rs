@@ -10,6 +10,9 @@ use tracing::{debug, info, warn};
 use crate::auth::TokenProvider;
 use crate::config::{AlorGatewayConfig, derive_config};
 use crate::cws_client::CwsClient;
+use crate::data_quality::{
+    BarQualityStats, BarValidationConfig, BarValidator, write_data_report,
+};
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::{GatewayPhase, HealthState, ResyncMode};
 use crate::router::{Router, RouterCommand, RouterControl};
@@ -17,7 +20,7 @@ use crate::models::{BarEvent, DataOrigin};
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
-use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub};
+use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -63,6 +66,8 @@ impl Supervisor {
         let last_emitted_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));
         let live_symbols = Arc::new(RwLock::new(HashSet::<String>::new()));
         let resync_in_progress = Arc::new(AtomicBool::new(false));
+        let bar_validator = BarValidator::new(BarValidationConfig::new(cfg.tf_sec));
+        let bar_quality_stats = Arc::new(RwLock::new(BarQualityStats::default()));
         let initial_phase = if derived.skip_history_effective {
             GatewayPhase::Reconnecting
         } else {
@@ -95,9 +100,13 @@ impl Supervisor {
             let warm_reconnect_max_gap_sec = cfg.warm_reconnect_max_gap_sec;
             let gap_backfill_padding_bars = cfg.gap_backfill_padding_bars;
             async move {
+                let mut current_generation: u64 = 0;
                 while let Some(event) = ws_events.recv().await {
                     match event {
-                        WsEvent::Raw(value) => {
+                        WsEvent::Raw { value, generation } => {
+                            if generation != current_generation {
+                                continue;
+                            }
                             match raw_tx.try_send(value) {
                                 Ok(()) => {
                                     let mut guard = health.write();
@@ -112,7 +121,12 @@ impl Supervisor {
                                 }
                             }
                         }
-                        WsEvent::Conn(conn) => {
+                        WsEvent::Conn { event: conn, generation } => {
+                            if matches!(conn, ConnEvent::Reconnecting) {
+                                current_generation = generation;
+                            } else if generation != current_generation {
+                                continue;
+                            }
                             let mut guard = health.write();
                             match conn {
                                 ConnEvent::Connected => guard.ws_connected = true,
@@ -149,7 +163,11 @@ impl Supervisor {
                             history_origin,
                             bars_from_ts,
                             skip_history,
+                            generation,
                         } => {
+                            if generation != current_generation {
+                                continue;
+                            }
                             let live_cutoff_ts = wallclock_ts - (2 * cfg.tf_sec);
                             if !skip_history {
                                 debug!(
@@ -188,19 +206,28 @@ impl Supervisor {
                                 })
                                 .await;
                         }
-                        WsEvent::SubscriptionAck { subscription_type } => {
+                        WsEvent::SubscriptionAck { subscription_type, generation } => {
+                            if generation != current_generation {
+                                continue;
+                            }
                             match subscription_type.as_str() {
                                 "positions" => positions_manager.mark_synced(),
                                 "orders" => orders_manager.mark_synced(),
                                 _ => {}
                             }
                         }
-                        WsEvent::SubscriptionStats { desired, active } => {
+                        WsEvent::SubscriptionStats { desired, active, generation } => {
+                            if generation != current_generation {
+                                continue;
+                            }
                             let mut guard = health.write();
                             guard.desired_subscriptions_count = desired;
                             guard.active_subscriptions_count = active;
                         }
-                        WsEvent::WsRx { ts } => {
+                        WsEvent::WsRx { ts, generation } => {
+                            if generation != current_generation {
+                                continue;
+                            }
                             let mut guard = health.write();
                             guard.ws_last_rx_ts = ts;
                         }
@@ -270,6 +297,8 @@ impl Supervisor {
             let symbols_len = cfg.symbols.len();
             let hub_handle = hub_handle.clone();
             let resync_in_progress = resync_in_progress.clone();
+            let bar_validator = bar_validator.clone();
+            let bar_quality_stats = bar_quality_stats.clone();
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
                 let mut history_min: Option<i64> = None;
@@ -278,6 +307,9 @@ impl Supervisor {
                 let mut logged_live_start = false;
                 let mut pending_live_updates: HashMap<String, Vec<BarEvent>> = HashMap::new();
                 while let Some(bar) = bars_rx_inner.recv().await {
+                    bar_quality_stats
+                        .write()
+                        .record_received(&bar.symbol);
                     {
                         let mut guard = health.write();
                         guard.last_bar_ts = bar.close_time_utc;
@@ -313,11 +345,30 @@ impl Supervisor {
                         && subscriptions_ready
                         && cws_authorized;
                     if !buffered_live {
+                        let last_emitted_ts = last_emitted_bar_ts
+                            .read()
+                            .get(&bar.symbol)
+                            .copied();
+                        if let Err(reason) = bar_validator.validate(&bar, last_emitted_ts) {
+                            bar_quality_stats
+                                .write()
+                                .record_dropped(&bar.symbol, reason);
+                            debug!(
+                                symbol = %bar.symbol,
+                                reason = ?reason,
+                                close_time_utc = bar.close_time_utc,
+                                "bar rejected by validator"
+                            );
+                            continue;
+                        }
                         let emitted =
                             emit_bar(&bars_tx, &last_emitted_bar_ts, &bar).await;
                         if !emitted {
                             continue;
                         }
+                        bar_quality_stats
+                            .write()
+                            .record_emitted(&bar.symbol, bar.close_time_utc);
                         match bar.origin {
                             DataOrigin::History | DataOrigin::HistoryGap => {
                                 history_count += 1;
@@ -442,14 +493,37 @@ impl Supervisor {
         .start(bars_rx);
 
         let silence_threshold = Duration::from_secs(cfg.max_silence_bars_sec);
+        let silence_rate_limit = Duration::from_secs(cfg.bar_silence_resync_min_sec);
         let mut ticker = tokio::time::interval(Duration::from_secs(5));
+        let mut last_bar_silence_resync = Instant::now()
+            .checked_sub(silence_rate_limit)
+            .unwrap_or_else(Instant::now);
+
+        #[cfg(unix)]
+        let mut term_signal = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )?;
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
                 _ = tokio::signal::ctrl_c() => {
                     info!("shutdown signal received");
-                    hub_handle.shutdown().await;
+                    handle_shutdown(&hub_handle, &bar_quality_stats, self.cfg.data_report_path.as_deref()).await;
+                    break;
+                }
+                _ = async {
+                    #[cfg(unix)]
+                    {
+                        term_signal.recv().await;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    info!("termination signal received");
+                    handle_shutdown(&hub_handle, &bar_quality_stats, self.cfg.data_report_path.as_deref()).await;
                     break;
                 }
             }
@@ -472,6 +546,9 @@ impl Supervisor {
             }
 
             if last_bar_instant.read().elapsed() > silence_threshold {
+                if last_bar_silence_resync.elapsed() < silence_rate_limit {
+                    continue;
+                }
                 let phase = *phase_tx.borrow();
                 let ws_connected = self.health.read().ws_connected;
                 if phase != GatewayPhase::LiveReady
@@ -516,6 +593,7 @@ impl Supervisor {
                     hub_handle.resubscribe_all().await;
                 }
                 *last_bar_instant.write() = Instant::now();
+                last_bar_silence_resync = Instant::now();
                 let plan = hub_handle.backfill_plan();
                 log_event(GatewayEvent::ResyncDone {
                     mode: plan.mode,
@@ -528,6 +606,22 @@ impl Supervisor {
         Ok(())
     }
 
+}
+
+async fn handle_shutdown(
+    hub_handle: &WsHubHandle,
+    bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
+    data_report_path: Option<&str>,
+) {
+    if let Some(path) = data_report_path {
+        let snapshot = bar_quality_stats.read();
+        if let Err(error) = write_data_report(path, &snapshot) {
+            warn!(?error, "data report write failed");
+        } else {
+            info!(path, "data report written");
+        }
+    }
+    hub_handle.shutdown().await;
 }
 
 fn format_ts(ts: i64) -> String {
@@ -549,7 +643,7 @@ fn compute_backfill_plan(
         let Some(last) = last_emitted.get(symbol) else {
             return (BackfillPlan::cold(), ResyncMode::Cold);
         };
-        let from = *last - (gap_backfill_padding_bars as i64 * tf_sec);
+        let from = (*last - (gap_backfill_padding_bars as i64 * tf_sec)).max(0);
         min_from = Some(min_from.map_or(from, |min| min.min(from)));
     }
     let Some(from_ts) = min_from else {
