@@ -5,7 +5,7 @@ use std::{fs::OpenOptions, io::Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -30,9 +30,48 @@ pub struct Supervisor {
     health: Arc<RwLock<HealthState>>,
 }
 
+pub struct GatewayHandle {
+    stop_tx: oneshot::Sender<()>,
+    emitted_tx: broadcast::Sender<BarEvent>,
+    health: Arc<RwLock<HealthState>>,
+    join_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl GatewayHandle {
+    pub async fn stop(self) -> anyhow::Result<()> {
+        let _ = self.stop_tx.send(());
+        match self.join_handle.await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::anyhow!("gateway task join error: {error}")),
+        }
+    }
+
+    pub fn subscribe_emitted_bars(&self) -> broadcast::Receiver<BarEvent> {
+        self.emitted_tx.subscribe()
+    }
+
+    pub fn state_snapshot(&self) -> HealthState {
+        self.health.read().clone()
+    }
+}
+
 impl Supervisor {
     pub fn new(cfg: AlorGatewayConfig) -> Self {
         let token_provider = TokenProvider::new(cfg.oauth_url.clone(), cfg.refresh_token.clone());
+        let health = Arc::new(RwLock::new(HealthState::default()));
+        Self {
+            cfg,
+            token_provider,
+            health,
+        }
+    }
+
+    pub fn new_with_token(cfg: AlorGatewayConfig, token: String) -> Self {
+        let token_provider = TokenProvider::new_with_token(
+            cfg.oauth_url.clone(),
+            cfg.refresh_token.clone(),
+            token,
+        );
         let health = Arc::new(RwLock::new(HealthState::default()));
         Self {
             cfg,
@@ -45,7 +84,46 @@ impl Supervisor {
         self.health.clone()
     }
 
+    pub fn start_with_handle<S>(&self, strategy: S) -> GatewayHandle
+    where
+        S: alor_scalping::strategy::StrategyCore + Send + 'static,
+    {
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let (emitted_tx, _) = broadcast::channel(1024);
+        let supervisor = Self {
+            cfg: self.cfg.clone(),
+            token_provider: self.token_provider.clone(),
+            health: self.health.clone(),
+        };
+        let health = supervisor.health.clone();
+        let emitted_tx_clone = emitted_tx.clone();
+        let join_handle = tokio::spawn(async move {
+            supervisor
+                .run_with_hooks(strategy, Some(emitted_tx_clone), Some(stop_rx))
+                .await
+        });
+
+        GatewayHandle {
+            stop_tx,
+            emitted_tx,
+            health,
+            join_handle,
+        }
+    }
+
     pub async fn run<S>(&self, strategy: S) -> anyhow::Result<()>
+    where
+        S: alor_scalping::strategy::StrategyCore + Send + 'static,
+    {
+        self.run_with_hooks(strategy, None, None).await
+    }
+
+    async fn run_with_hooks<S>(
+        &self,
+        strategy: S,
+        emitted_tx: Option<broadcast::Sender<BarEvent>>,
+        mut stop_rx: Option<oneshot::Receiver<()>>,
+    ) -> anyhow::Result<()>
     where
         S: alor_scalping::strategy::StrategyCore + Send + 'static,
     {
@@ -73,6 +151,7 @@ impl Supervisor {
         let buffered_bars = Arc::new(RwLock::new(HashMap::<String, u64>::new()));
         let pending_acks = Arc::new(RwLock::new(PendingAcks::default()));
         let bar_dump = Arc::new(Mutex::new(open_bar_dump(cfg.bar_dump_path.as_deref())));
+        let emitted_tx = emitted_tx;
         let initial_phase = if derived.skip_history_effective {
             GatewayPhase::Reconnecting
         } else {
@@ -389,7 +468,7 @@ impl Supervisor {
                         }
                         match emit_bar(&bars_tx, &last_emitted_bar_ts, &bar).await {
                             EmitResult::Emitted => {
-                                record_emitted(&bar, &bar_quality_stats, &bar_dump);
+                                record_emitted(&bar, &bar_quality_stats, &bar_dump, &emitted_tx);
                             }
                             EmitResult::DuplicateOrOld => {
                                 bar_quality_stats
@@ -474,6 +553,7 @@ impl Supervisor {
                                 &last_emitted_bar_ts,
                                 &bar_quality_stats,
                                 &bar_dump,
+                                &emitted_tx,
                                 &buffered_bars,
                                 &mut pending_live_updates,
                                 &mut logged_live_start,
@@ -545,6 +625,24 @@ impl Supervisor {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
+                _ = async {
+                    if let Some(rx) = &mut stop_rx {
+                        let _ = rx.await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    info!("shutdown requested");
+                    handle_shutdown(
+                        &hub_handle,
+                        &bar_quality_stats,
+                        &buffered_bars,
+                        &pending_acks,
+                        self.cfg.data_report_path.as_deref(),
+                    )
+                    .await;
+                    break;
+                }
                 _ = tokio::signal::ctrl_c() => {
                     info!("shutdown signal received");
                     handle_shutdown(
@@ -720,10 +818,14 @@ fn record_emitted(
     bar: &BarEvent,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    emitted_tx: &Option<broadcast::Sender<BarEvent>>,
 ) {
     bar_quality_stats
         .write()
         .record_emitted(&bar.symbol, bar.close_time_utc);
+    if let Some(sender) = emitted_tx.as_ref() {
+        let _ = sender.send(bar.clone());
+    }
     if let Some(writer) = bar_dump.lock().as_mut() {
         let _ = writeln!(
             writer,
@@ -827,6 +929,7 @@ async fn flush_pending_live(
     last_emitted: &Arc<RwLock<HashMap<String, i64>>>,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    emitted_tx: &Option<broadcast::Sender<BarEvent>>,
     buffered_bars: &Arc<RwLock<HashMap<String, u64>>>,
     pending: &mut HashMap<String, Vec<BarEvent>>,
     logged_live_start: &mut bool,
@@ -848,7 +951,7 @@ async fn flush_pending_live(
             for bar in bars {
                 match emit_bar(bars_tx, last_emitted, &bar).await {
                     EmitResult::Emitted => {
-                        record_emitted(&bar, bar_quality_stats, bar_dump);
+                        record_emitted(&bar, bar_quality_stats, bar_dump, emitted_tx);
                     }
                     EmitResult::DuplicateOrOld => {
                         bar_quality_stats

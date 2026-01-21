@@ -41,6 +41,24 @@ impl TokenProvider {
         }
     }
 
+    pub fn new_with_token(
+        oauth_url: impl Into<String>,
+        refresh_token: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        let token = token.into();
+        Self {
+            oauth_url: oauth_url.into(),
+            refresh_token: refresh_token.into(),
+            client: reqwest::Client::new(),
+            state: std::sync::Arc::new(RwLock::new(TokenState {
+                token: Some(token),
+                expires_at: Some(Instant::now() + Duration::from_secs(60 * 60)),
+                refresh_count: 0,
+            })),
+        }
+    }
+
     pub async fn access_token(&self) -> anyhow::Result<String> {
         {
             let guard = self.state.read().await;

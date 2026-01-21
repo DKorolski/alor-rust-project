@@ -150,7 +150,7 @@ impl StrategyCore for LimitCancelStrategy {
                 status_bar_ts,
             } => match ctx.orders.orders.get(&order_id) {
                 Some(order) => {
-                    let mut next_status = Self::normalize_status(&order.status);
+                    let next_status = Self::normalize_status(&order.status);
                     let mut next_status_bar_ts = status_bar_ts;
                     if next_status != status {
                         info!(
@@ -214,7 +214,7 @@ impl StrategyCore for LimitCancelStrategy {
                 requested_bar_ts,
             } => match ctx.orders.orders.get(&order_id) {
                 Some(order) => {
-                    let mut next_status = Self::normalize_status(&order.status);
+                    let next_status = Self::normalize_status(&order.status);
                     let mut next_status_bar_ts = status_bar_ts;
                     if next_status != status {
                         info!(

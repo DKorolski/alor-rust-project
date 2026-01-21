@@ -59,6 +59,14 @@ and back-testing systems. It is made up of several easy-to-use, extensible crate
 * See [here][barter-examples] for the compilable example including imports.
 * See sub-crates for further examples of each library.
 
+## Tests
+Run the Alor gateway WebSocket integration tests:
+
+```bash
+cargo test -p alor-gateway --tests ws_integration
+RUST_LOG=debug cargo test -p alor-gateway --tests ws_integration -- --nocapture
+```
+
 #### Paper Trading With Live Market Data & Mock Execution
 
 ```rust,no_run
