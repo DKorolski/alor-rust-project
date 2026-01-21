@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
-use crate::config::AlorGatewayConfig;
+use crate::config::{AlorGatewayConfig, derive_config};
 use crate::cws_client::CwsClient;
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::{GatewayPhase, HealthState, ResyncMode};
@@ -45,15 +45,16 @@ impl Supervisor {
         S: alor_scalping::strategy::StrategyCore + Send + 'static,
     {
         let mut cfg = self.cfg.clone();
-        if cfg.from_ts == 0 {
-            cfg.from_ts =
-                Utc::now().timestamp() - (cfg.cold_start_history_days_back as i64 * 86_400);
+        let derived = derive_config(&cfg);
+        cfg.from_ts = derived.computed_from_ts;
+        cfg.skip_history_bars = derived.skip_history_effective;
+        if !derived.skip_history_effective {
+            debug!(
+                from_ts = cfg.from_ts,
+                history_days_back = cfg.history_days_back,
+                "history backfill start configured"
+            );
         }
-        debug!(
-            from_ts = cfg.from_ts,
-            history_days_back = cfg.history_days_back,
-            "history backfill start configured"
-        );
 
         let (hub_handle, mut ws_events) = WsHub::start(cfg.clone(), self.token_provider.clone());
         let (raw_tx, raw_rx) = mpsc::channel(1024);
@@ -62,7 +63,12 @@ impl Supervisor {
         let last_emitted_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));
         let live_symbols = Arc::new(RwLock::new(HashSet::<String>::new()));
         let resync_in_progress = Arc::new(AtomicBool::new(false));
-        let (phase_tx, phase_rx) = watch::channel(GatewayPhase::SyncingHistory);
+        let initial_phase = if derived.skip_history_effective {
+            GatewayPhase::Reconnecting
+        } else {
+            GatewayPhase::SyncingHistory
+        };
+        let (phase_tx, phase_rx) = watch::channel(initial_phase);
 
         let (router_cmd_tx, streams) = Router::start(raw_rx, cfg.tf_sec);
 
@@ -145,17 +151,19 @@ impl Supervisor {
                             skip_history,
                         } => {
                             let live_cutoff_ts = wallclock_ts - (2 * cfg.tf_sec);
-                            debug!(
-                                from_ts = bars_from_ts,
-                                from_ts_rfc3339 = %format_ts(bars_from_ts),
-                                wallclock_ts,
-                                wallclock_ts_rfc3339 = %format_ts(wallclock_ts),
-                                live_cutoff_ts,
-                                live_cutoff_ts_rfc3339 = %format_ts(live_cutoff_ts),
-                                tf_sec = cfg.tf_sec,
-                                skip_history,
-                                "history backfill window computed"
-                            );
+                            if !skip_history {
+                                debug!(
+                                    from_ts = bars_from_ts,
+                                    from_ts_rfc3339 = %format_ts(bars_from_ts),
+                                    wallclock_ts,
+                                    wallclock_ts_rfc3339 = %format_ts(wallclock_ts),
+                                    live_cutoff_ts,
+                                    live_cutoff_ts_rfc3339 = %format_ts(live_cutoff_ts),
+                                    tf_sec = cfg.tf_sec,
+                                    skip_history,
+                                    "history backfill window computed"
+                                );
+                            }
                             match history_origin {
                                 DataOrigin::HistoryGap => transition_phase(
                                     &phase_tx,
@@ -337,13 +345,20 @@ impl Supervisor {
                             }
                             DataOrigin::Live => {
                                 if !logged_live_start {
-                                    info!(
-                                        history_start_ts = history_min,
-                                        history_end_ts = history_max,
-                                        history_count,
-                                        live_start_ts = bar.close_time_utc,
-                                        "history backfill complete; live stream started"
-                                    );
+                                    if cfg.skip_history_bars {
+                                        info!(
+                                            live_start_ts = bar.close_time_utc,
+                                            "live stream started (history skipped)"
+                                        );
+                                    } else {
+                                        info!(
+                                            history_start_ts = history_min,
+                                            history_end_ts = history_max,
+                                            history_count,
+                                            live_start_ts = bar.close_time_utc,
+                                            "history backfill complete; live stream started"
+                                        );
+                                    }
                                     logged_live_start = true;
                                 }
                                 debug!(

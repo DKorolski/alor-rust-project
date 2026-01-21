@@ -220,9 +220,14 @@ async fn connect_and_run(
     let _ = event_tx.send(WsEvent::Conn(ConnEvent::Connected)).await;
 
     let subscribe_wallclock_ts = Utc::now().timestamp();
-    let history_origin = match backfill_plan.read().mode {
-        ResyncMode::Warm => DataOrigin::HistoryGap,
-        ResyncMode::Cold => DataOrigin::History,
+    let skip_history = backfill_plan.read().from_ts.is_none() && cfg.skip_history_bars;
+    let history_origin = if skip_history {
+        DataOrigin::Live
+    } else {
+        match backfill_plan.read().mode {
+            ResyncMode::Warm => DataOrigin::HistoryGap,
+            ResyncMode::Cold => DataOrigin::History,
+        }
     };
     let plan = backfill_plan.read().clone();
     let bars_from_ts = plan.from_ts.unwrap_or(cfg.from_ts);
@@ -269,9 +274,14 @@ async fn connect_and_run(
                             reason: "resubscribe",
                         });
                         let subscribe_wallclock_ts = Utc::now().timestamp();
-                        let history_origin = match backfill_plan.read().mode {
-                            ResyncMode::Warm => DataOrigin::HistoryGap,
-                            ResyncMode::Cold => DataOrigin::History,
+                        let skip_history = backfill_plan.read().from_ts.is_none() && cfg.skip_history_bars;
+                        let history_origin = if skip_history {
+                            DataOrigin::Live
+                        } else {
+                            match backfill_plan.read().mode {
+                                ResyncMode::Warm => DataOrigin::HistoryGap,
+                                ResyncMode::Cold => DataOrigin::History,
+                            }
                         };
                         let bars_from_ts = from_ts.unwrap_or(cfg.from_ts);
                         let skip_history = from_ts.is_none() && cfg.skip_history_bars;
@@ -575,7 +585,7 @@ async fn send_and_ack(
             })
             .await;
     }
-    debug!(payload = %ack, guid, label, "ws subscribe ack");
+    info!(payload = %ack, guid, label, "ws subscribe ack");
     Ok(())
 }
 
