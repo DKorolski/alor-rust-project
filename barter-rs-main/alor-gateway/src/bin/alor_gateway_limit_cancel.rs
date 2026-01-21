@@ -264,6 +264,8 @@ async fn main() -> anyhow::Result<()> {
     let config_path = detect_config_path(&args);
     let data_report_path = detect_data_report_path(&args)
         .or_else(|| env::var("DATA_REPORT_PATH").ok());
+    let bar_dump_path = detect_bar_dump_path(&args)
+        .or_else(|| env::var("BAR_DUMP_PATH").ok());
     let resolved = if let Some(path) = config_path.clone() {
         AlorGatewayConfig::from_file_with_sources(path)?
     } else {
@@ -274,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
     cfg.from_ts = resolved.derived.computed_from_ts;
     cfg.skip_history_bars = resolved.derived.skip_history_effective;
     cfg.data_report_path = data_report_path.clone();
+    cfg.bar_dump_path = bar_dump_path.clone();
     let supervisor = Supervisor::new(cfg.clone());
     let health_state = supervisor.health_state();
     let health_addr = cfg.health_listen_addr.clone();
@@ -313,6 +316,19 @@ fn detect_data_report_path(args: &[String]) -> Option<String> {
             return iter.next().cloned();
         }
         if let Some(path) = arg.strip_prefix("--data-report=") {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+fn detect_bar_dump_path(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--bar-dump" {
+            return iter.next().cloned();
+        }
+        if let Some(path) = arg.strip_prefix("--bar-dump=") {
             return Some(path.to_string());
         }
     }

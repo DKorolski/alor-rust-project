@@ -49,6 +49,7 @@ pub struct AlorGatewayConfig {
     pub cold_start_history_days_back: u8,
     pub bar_silence_resync_min_sec: u64,
     pub data_report_path: Option<String>,
+    pub bar_dump_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +151,7 @@ impl AlorGatewayConfig {
                 300,
             )?,
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
+            bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         })
     }
 
@@ -300,12 +302,21 @@ impl AlorGatewayConfig {
                 &mut sources,
             )?,
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
+            bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         };
 
         let derived = derive_config(&config);
         sources.insert(
             "data_report_path",
             if env::var("DATA_REPORT_PATH").is_ok() {
+                "env".to_string()
+            } else {
+                "default".to_string()
+            },
+        );
+        sources.insert(
+            "bar_dump_path",
+            if env::var("BAR_DUMP_PATH").is_ok() {
                 "env".to_string()
             } else {
                 "default".to_string()
@@ -444,6 +455,7 @@ impl AlorGatewayConfig {
                 .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
                 .unwrap_or(300),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
+            bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         })
     }
 
@@ -622,6 +634,7 @@ impl AlorGatewayConfig {
                 .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
                 .unwrap_or(300),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
+            bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         };
 
         track_file_sources(&file_cfg, &mut sources);
@@ -1022,6 +1035,14 @@ fn track_file_sources(file_cfg: &FileConfig, sources: &mut BTreeMap<&'static str
             "default".to_string()
         },
     );
+    sources.insert(
+        "bar_dump_path",
+        if env::var("BAR_DUMP_PATH").is_ok() {
+            "env".to_string()
+        } else {
+            "default".to_string()
+        },
+    );
 }
 
 pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>) {
@@ -1071,6 +1092,7 @@ pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>)
         cold_start_history_days_back = cfg.cold_start_history_days_back,
         bar_silence_resync_min_sec = cfg.bar_silence_resync_min_sec,
         data_report_path = ?cfg.data_report_path,
+        bar_dump_path = ?cfg.bar_dump_path,
         "Resolved config"
     );
     info!(

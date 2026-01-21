@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{fs::OpenOptions, io::Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, TimeZone, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
@@ -68,6 +69,7 @@ impl Supervisor {
         let resync_in_progress = Arc::new(AtomicBool::new(false));
         let bar_validator = BarValidator::new(BarValidationConfig::new(cfg.tf_sec));
         let bar_quality_stats = Arc::new(RwLock::new(BarQualityStats::default()));
+        let bar_dump = Arc::new(Mutex::new(open_bar_dump(cfg.bar_dump_path.as_deref())));
         let initial_phase = if derived.skip_history_effective {
             GatewayPhase::Reconnecting
         } else {
@@ -297,6 +299,7 @@ impl Supervisor {
             let symbols_len = cfg.symbols.len();
             let hub_handle = hub_handle.clone();
             let resync_in_progress = resync_in_progress.clone();
+            let bar_dump = bar_dump.clone();
             let bar_validator = bar_validator.clone();
             let bar_quality_stats = bar_quality_stats.clone();
             async move {
@@ -366,9 +369,7 @@ impl Supervisor {
                         if !emitted {
                             continue;
                         }
-                        bar_quality_stats
-                            .write()
-                            .record_emitted(&bar.symbol, bar.close_time_utc);
+                        record_emitted(&bar, &bar_quality_stats, &bar_dump);
                         match bar.origin {
                             DataOrigin::History | DataOrigin::HistoryGap => {
                                 history_count += 1;
@@ -437,6 +438,8 @@ impl Supervisor {
                             flush_pending_live(
                                 &bars_tx,
                                 &last_emitted_bar_ts,
+                                &bar_quality_stats,
+                                &bar_dump,
                                 &mut pending_live_updates,
                                 &mut logged_live_start,
                                 history_min,
@@ -624,6 +627,51 @@ async fn handle_shutdown(
     hub_handle.shutdown().await;
 }
 
+fn open_bar_dump(path: Option<&str>) -> Option<std::io::BufWriter<std::fs::File>> {
+    let Some(path) = path else {
+        return None;
+    };
+    let file = OpenOptions::new().create(true).append(true).open(path);
+    match file {
+        Ok(file) => {
+            let mut writer = std::io::BufWriter::new(file);
+            let _ = writeln!(
+                writer,
+                "symbol,close_time_utc,open,high,low,close,volume,origin"
+            );
+            Some(writer)
+        }
+        Err(error) => {
+            warn!(?error, path, "failed to open bar dump file");
+            None
+        }
+    }
+}
+
+fn record_emitted(
+    bar: &BarEvent,
+    bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
+    bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+) {
+    bar_quality_stats
+        .write()
+        .record_emitted(&bar.symbol, bar.close_time_utc);
+    if let Some(writer) = bar_dump.lock().as_mut() {
+        let _ = writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{}",
+            bar.symbol,
+            bar.close_time_utc,
+            bar.o,
+            bar.h,
+            bar.l,
+            bar.c,
+            bar.v,
+            format!("{:?}", bar.origin)
+        );
+    }
+}
+
 fn format_ts(ts: i64) -> String {
     DateTime::<Utc>::from_timestamp(ts, 0)
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
@@ -692,6 +740,8 @@ async fn emit_bar(
 async fn flush_pending_live(
     bars_tx: &mpsc::Sender<BarEvent>,
     last_emitted: &Arc<RwLock<HashMap<String, i64>>>,
+    bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
+    bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     pending: &mut HashMap<String, Vec<BarEvent>>,
     logged_live_start: &mut bool,
     history_min: Option<i64>,
@@ -711,6 +761,7 @@ async fn flush_pending_live(
                 if !emitted {
                     continue;
                 }
+                record_emitted(&bar, bar_quality_stats, bar_dump);
                 if !*logged_live_start {
                     info!(
                         history_start_ts = history_min,

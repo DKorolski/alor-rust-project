@@ -1,18 +1,18 @@
 {
   "received": {
-    "IMOEXF": 18
+    "IMOEXF": 3226
   },
   "emitted": {
-    "IMOEXF": 10
+    "IMOEXF": 3223
   },
   "dropped": [
     {
       "symbol": "IMOEXF",
       "reason": "DuplicateOrOld",
-      "count": 4
+      "count": 2
     }
   ],
   "last_close_time": {
-    "IMOEXF": 1768994340
+    "IMOEXF": 1768997520
   }
 }
