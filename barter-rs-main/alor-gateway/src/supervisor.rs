@@ -5,7 +5,7 @@ use std::{fs::OpenOptions, io::Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -34,6 +34,7 @@ pub struct GatewayHandle {
     stop_tx: oneshot::Sender<()>,
     emitted_tx: broadcast::Sender<BarEvent>,
     health: Arc<RwLock<HealthState>>,
+    hub_handle: Arc<TokioMutex<Option<WsHubHandle>>>,
     join_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
@@ -52,6 +53,17 @@ impl GatewayHandle {
 
     pub fn state_snapshot(&self) -> HealthState {
         self.health.read().clone()
+    }
+
+    pub async fn request_reconnect(&self) -> anyhow::Result<()> {
+        let hub_handle = self.hub_handle.lock().await.clone();
+        match hub_handle {
+            Some(handle) => {
+                handle.reconnect().await;
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("ws hub handle not ready")),
+        }
     }
 }
 
@@ -90,6 +102,7 @@ impl Supervisor {
     {
         let (stop_tx, stop_rx) = oneshot::channel();
         let (emitted_tx, _) = broadcast::channel(1024);
+        let hub_handle = Arc::new(TokioMutex::new(None));
         let supervisor = Self {
             cfg: self.cfg.clone(),
             token_provider: self.token_provider.clone(),
@@ -97,9 +110,15 @@ impl Supervisor {
         };
         let health = supervisor.health.clone();
         let emitted_tx_clone = emitted_tx.clone();
+        let hub_handle_clone = hub_handle.clone();
         let join_handle = tokio::spawn(async move {
             supervisor
-                .run_with_hooks(strategy, Some(emitted_tx_clone), Some(stop_rx))
+                .run_with_hooks(
+                    strategy,
+                    Some(emitted_tx_clone),
+                    Some(stop_rx),
+                    Some(hub_handle_clone),
+                )
                 .await
         });
 
@@ -107,6 +126,7 @@ impl Supervisor {
             stop_tx,
             emitted_tx,
             health,
+            hub_handle,
             join_handle,
         }
     }
@@ -115,7 +135,7 @@ impl Supervisor {
     where
         S: alor_scalping::strategy::StrategyCore + Send + 'static,
     {
-        self.run_with_hooks(strategy, None, None).await
+        self.run_with_hooks(strategy, None, None, None).await
     }
 
     async fn run_with_hooks<S>(
@@ -123,6 +143,7 @@ impl Supervisor {
         strategy: S,
         emitted_tx: Option<broadcast::Sender<BarEvent>>,
         mut stop_rx: Option<oneshot::Receiver<()>>,
+        hub_handle_slot: Option<Arc<TokioMutex<Option<WsHubHandle>>>>,
     ) -> anyhow::Result<()>
     where
         S: alor_scalping::strategy::StrategyCore + Send + 'static,
@@ -140,6 +161,9 @@ impl Supervisor {
         }
 
         let (hub_handle, mut ws_events) = WsHub::start(cfg.clone(), self.token_provider.clone());
+        if let Some(slot) = hub_handle_slot {
+            *slot.lock().await = Some(hub_handle.clone());
+        }
         let (raw_tx, raw_rx) = mpsc::channel(1024);
         let last_bar_instant = Arc::new(RwLock::new(Instant::now()));
         let last_bar_ts = Arc::new(RwLock::new(HashMap::<String, i64>::new()));

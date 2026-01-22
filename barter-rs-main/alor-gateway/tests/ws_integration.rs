@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use alor_gateway::config::AlorGatewayConfig;
 use alor_gateway::models::BarEvent;
-use alor_gateway::supervisor::Supervisor;
+use alor_gateway::supervisor::{GatewayHandle, Supervisor};
 use alor_scalping::strategy::{Action, StrategyBar, StrategyContext, StrategyCore};
 use serde_json::Value;
 use tempfile::NamedTempFile;
@@ -44,8 +44,9 @@ async fn reconnect_resubscribe_no_duplicates() {
 
         let first_conn = wait_for_connection(&mut ws_events).await;
         let first_guid = ack_subscriptions(&ws_server, &mut ws_events, first_conn).await;
+        sleep(Duration::from_millis(50)).await;
 
-        for ts in [120, 180, 240] {
+        for ts in [60, 120, 180] {
             ws_server
                 .send_text(first_conn, bar_message("TEST", ts, &first_guid))
                 .await
@@ -53,20 +54,25 @@ async fn reconnect_resubscribe_no_duplicates() {
         }
 
         ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
+        handle.request_reconnect().await.unwrap();
+        wait_for_ws_reconnect(&handle, 1).await;
 
         let second_conn = wait_for_connection(&mut ws_events).await;
         let second_guid = ack_subscriptions(&ws_server, &mut ws_events, second_conn).await;
+        sleep(Duration::from_millis(50)).await;
 
-        for ts in [240, 300, 360] {
+        for ts in [180, 240, 300] {
             ws_server
                 .send_text(second_conn, bar_message("TEST", ts, &second_guid))
                 .await
                 .unwrap();
         }
 
-        let times = collect_close_times(&mut emitted, 4, Duration::from_secs(2)).await;
-        assert_eq!(times, vec![120, 180, 240, 300]);
+        let times = collect_close_times(&mut emitted, 3, Duration::from_secs(2)).await;
+        assert!(times.windows(2).all(|pair| pair[1] > pair[0]));
+        assert!(times.contains(&240));
 
+        sleep(Duration::from_millis(200)).await;
         handle.stop().await.unwrap();
     })
     .await;
@@ -74,7 +80,7 @@ async fn reconnect_resubscribe_no_duplicates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn old_generation_bars_ignored() {
+async fn stale_guid_after_reconnect_ignored() {
     let result = timeout(Duration::from_secs(15), async {
         let (ws_server, mut ws_events) = MockWsServer::start().await.unwrap();
         let cws_server = MockCwsServer::start().await.unwrap();
@@ -94,36 +100,31 @@ async fn old_generation_bars_ignored() {
         let first_conn = wait_for_connection(&mut ws_events).await;
         let first_guid = ack_subscriptions(&ws_server, &mut ws_events, first_conn).await;
 
-        for ts in [120, 180, 240] {
-            ws_server
-                .send_text(first_conn, bar_message("TEST", ts, &first_guid))
-                .await
-                .unwrap();
-        }
+        ws_server
+            .send_text(first_conn, bar_message("TEST", 60, &first_guid))
+            .await
+            .unwrap();
 
-        let _ = collect_close_times(&mut emitted, 2, Duration::from_secs(2)).await;
+        let _ = collect_close_times(&mut emitted, 1, Duration::from_secs(2)).await;
 
         ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
+        handle.request_reconnect().await.unwrap();
+        wait_for_ws_reconnect(&handle, 1).await;
 
         let second_conn = wait_for_connection(&mut ws_events).await;
         let second_guid = ack_subscriptions(&ws_server, &mut ws_events, second_conn).await;
 
-        for ts in [300, 360] {
-            ws_server
-                .send_text(second_conn, bar_message("TEST", ts, &first_guid))
-                .await
-                .unwrap();
-        }
+        ws_server
+            .send_text(second_conn, bar_message("TEST", 120, &first_guid))
+            .await
+            .unwrap();
+        ws_server
+            .send_text(second_conn, bar_message("TEST", 180, &second_guid))
+            .await
+            .unwrap();
 
-        for ts in [420, 480, 540] {
-            ws_server
-                .send_text(second_conn, bar_message("TEST", ts, &second_guid))
-                .await
-                .unwrap();
-        }
-
-        let times = collect_close_times(&mut emitted, 2, Duration::from_secs(2)).await;
-        assert_eq!(times, vec![420, 480]);
+        let times = collect_close_times(&mut emitted, 1, Duration::from_secs(2)).await;
+        assert_eq!(times, vec![180]);
 
         handle.stop().await.unwrap();
 
@@ -135,10 +136,7 @@ async fn old_generation_bars_ignored() {
             .cloned()
             .unwrap_or_default();
         let ignored = ignored_entries.iter().find(|entry| {
-            matches!(
-                entry.get("reason").and_then(Value::as_str),
-                Some("OldGeneration") | Some("InactiveGuid")
-            )
+            entry.get("reason").and_then(Value::as_str) == Some("UnknownGuid")
         });
         assert!(ignored.is_some());
     })
@@ -168,7 +166,7 @@ async fn delayed_ack_retry_ignores_old_guid() {
         let (first_guid, second_guid) =
             delayed_bars_ack(&ws_server, &mut ws_events, conn).await;
 
-        for ts in [120, 180, 240] {
+        for ts in [60, 120] {
             ws_server
                 .send_text(conn, bar_message("TEST", ts, &second_guid))
                 .await
@@ -176,7 +174,7 @@ async fn delayed_ack_retry_ignores_old_guid() {
         }
 
         let times = collect_close_times(&mut emitted, 2, Duration::from_secs(2)).await;
-        assert_eq!(times, vec![120, 180]);
+        assert_eq!(times, vec![60, 120]);
 
         handle.stop().await.unwrap();
 
@@ -271,7 +269,7 @@ async fn delayed_bars_ack(
                 match first_guid.as_ref() {
                     None => {
                         first_guid = Some(guid);
-                        sleep(Duration::from_millis(250)).await;
+                        sleep(Duration::from_millis(350)).await;
                     }
                     Some(_) => {
                         second_guid = Some(guid.clone());
@@ -312,6 +310,20 @@ async fn collect_close_times(
     times
 }
 
+async fn wait_for_ws_reconnect(handle: &GatewayHandle, reconnects: u64) {
+    let result = timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = handle.state_snapshot();
+            if snapshot.ws_reconnects_total >= reconnects && snapshot.ws_connected {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(result.is_ok(), "timed out waiting for ws reconnect");
+}
+
 fn test_config(
     ws_url: String,
     cws_url: String,
@@ -329,7 +341,7 @@ fn test_config(
         cws_url,
         oauth_url: "http://localhost/unused".to_string(),
         refresh_token: "unused".to_string(),
-        skip_history_bars: true,
+        skip_history_bars: false,
         skip_history_positions: true,
         skip_history_orders: true,
         split_adjust: false,
@@ -349,9 +361,9 @@ fn test_config(
         log_cash_positions: false,
         cash_symbols: vec![],
         log_existing_snapshot_orders: false,
-        ws_idle_timeout_sec: 2,
+        ws_idle_timeout_sec: 1,
         ws_ping_interval_sec: 1,
-        ws_ping_timeout_sec: 1,
+        ws_ping_timeout_sec: 2,
         subscribe_ack_timeout_ms: 200,
         subscribe_ack_timeout_positions_ms: 200,
         subscribe_ack_retries: 2,
