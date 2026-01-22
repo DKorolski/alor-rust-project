@@ -53,9 +53,10 @@ async fn reconnect_resubscribe_no_duplicates() {
                 .unwrap();
         }
 
+        let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
         ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
         handle.request_reconnect().await.unwrap();
-        wait_for_ws_reconnect(&handle, 1).await;
+        wait_for_ws_reconnect(&handle, reconnect_target).await;
 
         let second_conn = wait_for_connection(&mut ws_events).await;
         let second_guid = ack_subscriptions(&ws_server, &mut ws_events, second_conn).await;
@@ -71,6 +72,78 @@ async fn reconnect_resubscribe_no_duplicates() {
         let times = collect_close_times(&mut emitted, 3, Duration::from_secs(2)).await;
         assert!(times.windows(2).all(|pair| pair[1] > pair[0]));
         assert!(times.contains(&240));
+
+        sleep(Duration::from_millis(200)).await;
+        handle.stop().await.unwrap();
+    })
+    .await;
+    assert!(result.is_ok(), "test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_reconnect_opens_new_connection() {
+    let result = timeout(Duration::from_secs(15), async {
+        let (ws_server, mut ws_events) = MockWsServer::start().await.unwrap();
+        let cws_server = MockCwsServer::start().await.unwrap();
+
+        let report = NamedTempFile::new().unwrap();
+        let bar_dump = NamedTempFile::new().unwrap();
+        let cfg = test_config(
+            ws_server.ws_url(),
+            cws_server.ws_url(),
+            report.path().to_string_lossy().to_string(),
+            bar_dump.path().to_string_lossy().to_string(),
+        );
+        let supervisor = Supervisor::new_with_token(cfg, "test-token".to_string());
+        let handle = supervisor.start_with_handle(TestStrategy::default());
+
+        let first_conn = wait_for_connection(&mut ws_events).await;
+        let _ = ack_subscriptions(&ws_server, &mut ws_events, first_conn).await;
+
+        let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
+        handle.request_reconnect().await.unwrap();
+        wait_for_ws_reconnect(&handle, reconnect_target).await;
+
+        let second_conn = wait_for_connection(&mut ws_events).await;
+        let _ = ack_subscriptions(&ws_server, &mut ws_events, second_conn).await;
+
+        assert_ne!(first_conn, second_conn);
+
+        handle.stop().await.unwrap();
+    })
+    .await;
+    assert!(result.is_ok(), "test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "ping timeout reconnect is timing dependent; enable in stress runs"]
+async fn ping_timeout_triggers_reconnect() {
+    let result = timeout(Duration::from_secs(15), async {
+        let (ws_server, mut ws_events) = MockWsServer::start().await.unwrap();
+        let cws_server = MockCwsServer::start().await.unwrap();
+
+        let report = NamedTempFile::new().unwrap();
+        let bar_dump = NamedTempFile::new().unwrap();
+        let cfg = test_config(
+            ws_server.ws_url(),
+            cws_server.ws_url(),
+            report.path().to_string_lossy().to_string(),
+            bar_dump.path().to_string_lossy().to_string(),
+        );
+        let supervisor = Supervisor::new_with_token(cfg, "test-token".to_string());
+        let handle = supervisor.start_with_handle(TestStrategy::default());
+
+        let first_conn = wait_for_connection(&mut ws_events).await;
+        let _ = ack_subscriptions(&ws_server, &mut ws_events, first_conn).await;
+
+        let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
+        ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
+        wait_for_ws_reconnect(&handle, reconnect_target).await;
+
+        let second_conn = wait_for_connection(&mut ws_events).await;
+        let _ = ack_subscriptions(&ws_server, &mut ws_events, second_conn).await;
+
+        assert_ne!(first_conn, second_conn);
 
         sleep(Duration::from_millis(200)).await;
         handle.stop().await.unwrap();
@@ -107,9 +180,10 @@ async fn stale_guid_after_reconnect_ignored() {
 
         let _ = collect_close_times(&mut emitted, 1, Duration::from_secs(2)).await;
 
+        let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
         ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
         handle.request_reconnect().await.unwrap();
-        wait_for_ws_reconnect(&handle, 1).await;
+        wait_for_ws_reconnect(&handle, reconnect_target).await;
 
         let second_conn = wait_for_connection(&mut ws_events).await;
         let second_guid = ack_subscriptions(&ws_server, &mut ws_events, second_conn).await;

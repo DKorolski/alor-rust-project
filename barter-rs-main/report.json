@@ -1,9 +1,9 @@
 {
   "received": {
-    "IMOEXF": 11
+    "IMOEXF": 3371
   },
   "emitted": {
-    "IMOEXF": 8
+    "IMOEXF": 3368
   },
   "dropped": [
     {
@@ -25,6 +25,6 @@
     }
   },
   "last_close_time": {
-    "IMOEXF": 1769001180
+    "IMOEXF": 1769083080
   }
 }
