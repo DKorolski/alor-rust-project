@@ -18,6 +18,30 @@ pub enum EventMessage {
     SnapshotPositions(PositionsSnapshot),
 }
 
+#[derive(Debug, Clone)]
+pub struct TransportConfig {
+    pub redis_url: String,
+    pub source: String,
+    pub streams: StreamNames,
+    pub consumer_group: String,
+    pub consumer_name: String,
+    pub trim_maxlen: usize,
+    pub block_ms: usize,
+    pub claim_idle_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamNames {
+    pub bars: String,
+    pub orders: String,
+    pub positions: String,
+    pub snapshots: String,
+    pub commands: String,
+    pub acks: String,
+    pub health: String,
+    pub dlq_prefix: String,
+}
+
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn publish_bar(&self, event: BarEvent) -> Result<()>;
@@ -30,13 +54,20 @@ pub trait EventSink: Send + Sync {
 
 #[async_trait]
 pub trait CommandSource: Send + Sync {
-    async fn next_command(&mut self) -> Option<OrderCommand>;
+    async fn next_command(&mut self) -> Option<CommandEnvelope>;
+    async fn ack(&self, message_id: &str) -> Result<()>;
 }
 
 #[async_trait]
 pub trait CommandSink: Send + Sync {
     async fn publish_command(&self, command: OrderCommand) -> Result<()>;
     async fn publish_ack(&self, ack: CommandAck) -> Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandEnvelope {
+    pub command: OrderCommand,
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,8 +103,11 @@ impl InprocEventSource {
 }
 
 impl InprocCommandSource {
-    pub async fn next_command(&mut self) -> Option<OrderCommand> {
-        self.rx.recv().await
+    pub async fn next_command(&mut self) -> Option<CommandEnvelope> {
+        self.rx.recv().await.map(|command| CommandEnvelope {
+            command,
+            message_id: None,
+        })
     }
 }
 
@@ -176,8 +210,15 @@ impl EventSink for InprocEventSink {
 
 #[async_trait]
 impl CommandSource for InprocCommandSource {
-    async fn next_command(&mut self) -> Option<OrderCommand> {
-        self.rx.recv().await
+    async fn next_command(&mut self) -> Option<CommandEnvelope> {
+        self.rx.recv().await.map(|command| CommandEnvelope {
+            command,
+            message_id: None,
+        })
+    }
+
+    async fn ack(&self, _message_id: &str) -> Result<()> {
+        Ok(())
     }
 }
 

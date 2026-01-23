@@ -12,6 +12,7 @@ pub mod ws_hub;
 pub mod ws_subscriptions;
 pub mod health_server;
 pub mod transport;
+pub mod transport_redis;
 
 pub mod state {
     pub mod orders_manager;

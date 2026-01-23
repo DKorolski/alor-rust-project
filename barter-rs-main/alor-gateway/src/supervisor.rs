@@ -23,7 +23,7 @@ use crate::models::{BarEvent, DataOrigin};
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
-use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
+use crate::transport::{CommandEnvelope, CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
 use alor_protocol::{CommandAck, CommandAction, OrderCommand, Side};
 use uuid::Uuid;
@@ -1183,25 +1183,34 @@ async fn run_command_consumer(
                     break;
                 }
             }
-            command = source.next_command() => {
-                let Some(command) = command else {
+            envelope = source.next_command() => {
+                let Some(CommandEnvelope { command, message_id }) = envelope else {
                     break;
                 };
                 let request_id = command.request_id;
                 if !idempotency.insert_if_new(request_id) {
                     sink.publish_ack(CommandAck::duplicate(request_id)).await?;
+                    if let Some(message_id) = message_id.as_deref() {
+                        source.ack(message_id).await?;
+                    }
                     continue;
                 }
 
                 if let Some(error_code) = validate_command(&command, price_step, volume_step, &health) {
                     sink.publish_ack(CommandAck::error(request_id, error_code, "validation failed"))
                         .await?;
+                    if let Some(message_id) = message_id.as_deref() {
+                        source.ack(message_id).await?;
+                    }
                     continue;
                 }
 
                 if is_command_expired(&command) {
                     sink.publish_ack(CommandAck::error(request_id, "expired", "command expired"))
                         .await?;
+                    if let Some(message_id) = message_id.as_deref() {
+                        source.ack(message_id).await?;
+                    }
                     continue;
                 }
 
@@ -1209,6 +1218,9 @@ async fn run_command_consumer(
                     Ok(order_id) => {
                         sink.publish_ack(CommandAck::success(request_id, order_id))
                             .await?;
+                        if let Some(message_id) = message_id.as_deref() {
+                            source.ack(message_id).await?;
+                        }
                     }
                     Err(error) => {
                         sink.publish_ack(CommandAck::error(
@@ -1217,6 +1229,9 @@ async fn run_command_consumer(
                             format!("{error}"),
                         ))
                         .await?;
+                        if let Some(message_id) = message_id.as_deref() {
+                            source.ack(message_id).await?;
+                        }
                     }
                 }
             }

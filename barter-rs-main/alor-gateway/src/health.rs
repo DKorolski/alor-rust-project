@@ -26,7 +26,7 @@ impl Default for GatewayPhase {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct HealthState {
     pub ws_connected: bool,
     pub cws_authorized: bool,
