@@ -452,11 +452,12 @@ impl Supervisor {
                         let mut guard = health.write();
                         guard.last_positions_ts = position.ts_utc;
                     }
-                    enqueue_event(
+                    enqueue_event_critical(
                         event_tx.as_ref(),
                         &health,
                         EventMessage::Position(position.clone()),
-                    );
+                    )
+                    .await;
                     let _ = positions_tx.send(position).await;
                 }
             }
@@ -472,11 +473,12 @@ impl Supervisor {
                         let mut guard = health.write();
                         guard.last_orders_ts = order.ts_utc;
                     }
-                    enqueue_event(
+                    enqueue_event_critical(
                         event_tx.as_ref(),
                         &health,
                         EventMessage::Order(order.clone()),
-                    );
+                    )
+                    .await;
                     let _ = orders_tx.send(order).await;
                 }
             }
@@ -499,19 +501,25 @@ impl Supervisor {
                         }
                         _ = health_tick.tick() => {
                             let snapshot = health.read().clone();
-                            enqueue_event(Some(&event_tx), &health, EventMessage::Health(snapshot));
+                            enqueue_event_lossy(
+                                Some(&event_tx),
+                                &health,
+                                EventMessage::Health(snapshot),
+                            );
                         }
                         _ = snapshot_tick.tick() => {
-                            enqueue_event(
+                            enqueue_event_critical(
                                 Some(&event_tx),
                                 &health,
                                 EventMessage::SnapshotOrders(orders_manager.snapshot()),
-                            );
-                            enqueue_event(
+                            )
+                            .await;
+                            enqueue_event_critical(
                                 Some(&event_tx),
                                 &health,
                                 EventMessage::SnapshotPositions(positions_manager.snapshot()),
-                            );
+                            )
+                            .await;
                         }
                     }
                 }
@@ -626,7 +634,8 @@ impl Supervisor {
                                     &emitted_tx,
                                     event_tx.as_ref(),
                                     &health,
-                                );
+                                )
+                                .await;
                             }
                             EmitResult::DuplicateOrOld => {
                                 bar_quality_stats
@@ -989,7 +998,7 @@ fn open_bar_dump(path: Option<&str>) -> Option<std::io::BufWriter<std::fs::File>
     }
 }
 
-fn enqueue_event(
+fn enqueue_event_lossy(
     event_tx: Option<&mpsc::Sender<EventMessage>>,
     health: &Arc<RwLock<HealthState>>,
     event: EventMessage,
@@ -998,9 +1007,7 @@ fn enqueue_event(
         return;
     };
     match tx.try_send(event) {
-        Ok(()) => {
-            health.write().backpressure_lagged = false;
-        }
+        Ok(()) => {}
         Err(TrySendError::Full(_)) => {
             health.write().backpressure_lagged = true;
             warn!("event queue full; dropping event");
@@ -1011,7 +1018,21 @@ fn enqueue_event(
     }
 }
 
-fn record_emitted(
+async fn enqueue_event_critical(
+    event_tx: Option<&mpsc::Sender<EventMessage>>,
+    health: &Arc<RwLock<HealthState>>,
+    event: EventMessage,
+) {
+    let Some(tx) = event_tx else {
+        return;
+    };
+    if let Err(error) = tx.send(event).await {
+        health.write().backpressure_lagged = true;
+        warn!(?error, "event queue closed; dropping event");
+    }
+}
+
+async fn record_emitted(
     bar: &BarEvent,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
@@ -1025,7 +1046,7 @@ fn record_emitted(
     if let Some(sender) = emitted_tx.as_ref() {
         let _ = sender.send(bar.clone());
     }
-    enqueue_event(event_tx, health, EventMessage::Bar(bar.clone()));
+    enqueue_event_critical(event_tx, health, EventMessage::Bar(bar.clone())).await;
     if let Some(writer) = bar_dump.lock().as_mut() {
         let _ = writeln!(
             writer,
@@ -1047,10 +1068,26 @@ async fn run_event_publisher(
     sink: Arc<dyn EventSink>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
+    let drain_timeout = Duration::from_millis(300);
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
+                    let deadline = Instant::now() + drain_timeout;
+                    loop {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        match tokio::time::timeout(remaining.min(Duration::from_millis(50)), rx.recv()).await {
+                            Ok(Some(msg)) => {
+                                if let Err(error) = publish_event(&sink, msg).await {
+                                    warn!(?error, "event publish failed");
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
                     break;
                 }
             }
@@ -1058,19 +1095,22 @@ async fn run_event_publisher(
                 let Some(msg) = msg else {
                     break;
                 };
-                let result = match msg {
-                    EventMessage::Bar(event) => sink.publish_bar(event).await,
-                    EventMessage::Order(event) => sink.publish_order(event).await,
-                    EventMessage::Position(event) => sink.publish_position(event).await,
-                    EventMessage::Health(event) => sink.publish_health(event).await,
-                    EventMessage::SnapshotOrders(event) => sink.publish_snapshot_orders(event).await,
-                    EventMessage::SnapshotPositions(event) => sink.publish_snapshot_positions(event).await,
-                };
-                if let Err(error) = result {
+                if let Err(error) = publish_event(&sink, msg).await {
                     warn!(?error, "event publish failed");
                 }
             }
         }
+    }
+}
+
+async fn publish_event(sink: &Arc<dyn EventSink>, msg: EventMessage) -> anyhow::Result<()> {
+    match msg {
+        EventMessage::Bar(event) => sink.publish_bar(event).await,
+        EventMessage::Order(event) => sink.publish_order(event).await,
+        EventMessage::Position(event) => sink.publish_position(event).await,
+        EventMessage::Health(event) => sink.publish_health(event).await,
+        EventMessage::SnapshotOrders(event) => sink.publish_snapshot_orders(event).await,
+        EventMessage::SnapshotPositions(event) => sink.publish_snapshot_positions(event).await,
     }
 }
 
@@ -1193,8 +1233,8 @@ async fn execute_command(
 ) -> anyhow::Result<Option<i64>> {
     match &command.action {
         CommandAction::Place(payload) => {
-            let price = normalize_step(payload.price, price_step);
-            let qty = normalize_step(payload.qty, volume_step);
+            let price = normalize_price(payload.price, price_step, payload.side);
+            let qty = normalize_qty(payload.qty, volume_step);
             let response = cws
                 .create_limit(
                     &command.portfolio,
@@ -1212,8 +1252,8 @@ async fn execute_command(
             Ok(response.get("orderId").and_then(|value| value.as_i64()))
         }
         CommandAction::Replace(payload) => {
-            let new_price = normalize_step(payload.new_price, price_step);
-            let new_qty = normalize_step(payload.new_qty, volume_step);
+            let new_price = normalize_step_round(payload.new_price, price_step);
+            let new_qty = normalize_qty(payload.new_qty, volume_step);
             let response = cws
                 .replace(payload.order_id, new_price, new_qty)
                 .await?;
@@ -1243,8 +1283,8 @@ fn validate_command(
             if payload.price <= 0.0 || payload.qty <= 0.0 {
                 return Some("validation_failed");
             }
-            let price = normalize_step(payload.price, price_step);
-            let qty = normalize_step(payload.qty, volume_step);
+            let price = normalize_price(payload.price, price_step, payload.side);
+            let qty = normalize_qty(payload.qty, volume_step);
             if price <= 0.0 || qty <= 0.0 {
                 return Some("validation_failed");
             }
@@ -1258,8 +1298,8 @@ fn validate_command(
             if payload.order_id <= 0 || payload.new_price <= 0.0 || payload.new_qty <= 0.0 {
                 return Some("validation_failed");
             }
-            let price = normalize_step(payload.new_price, price_step);
-            let qty = normalize_step(payload.new_qty, volume_step);
+            let price = normalize_step_round(payload.new_price, price_step);
+            let qty = normalize_qty(payload.new_qty, volume_step);
             if price <= 0.0 || qty <= 0.0 {
                 return Some("validation_failed");
             }
@@ -1277,11 +1317,31 @@ fn is_command_expired(command: &OrderCommand) -> bool {
     now_ms > deadline_ms
 }
 
-fn normalize_step(value: f64, step: f64) -> f64 {
+fn normalize_price(price: f64, step: f64, side: Side) -> f64 {
+    if step <= 0.0 {
+        return price;
+    }
+    let scaled = price / step;
+    let adjusted = match side {
+        Side::Buy => scaled.floor(),
+        Side::Sell => scaled.ceil(),
+    };
+    adjusted * step
+}
+
+fn normalize_step_round(value: f64, step: f64) -> f64 {
     if step <= 0.0 {
         value
     } else {
         (value / step).round() * step
+    }
+}
+
+fn normalize_qty(value: f64, step: f64) -> f64 {
+    if step <= 0.0 {
+        value
+    } else {
+        (value / step).floor() * step
     }
 }
 
@@ -1403,7 +1463,8 @@ async fn flush_pending_live(
                             emitted_tx,
                             event_tx,
                             health,
-                        );
+                        )
+                        .await;
                     }
                     EmitResult::DuplicateOrOld => {
                         bar_quality_stats
