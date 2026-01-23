@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot, watch};
+use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -22,10 +23,11 @@ use crate::models::{BarEvent, DataOrigin};
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
-use crate::transport::{CommandSink, CommandSource, EventSink};
+use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
 use alor_protocol::{CommandAck, CommandAction, OrderCommand, Side};
 use uuid::Uuid;
+use alor_scalping::strategy::{Action, StrategyBar, StrategyContext, StrategyCore};
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -122,7 +124,7 @@ impl Supervisor {
         let join_handle = tokio::spawn(async move {
             supervisor
                 .run_with_hooks(
-                    strategy,
+                    Some(strategy),
                     Some(emitted_tx_clone),
                     None,
                     None,
@@ -145,7 +147,7 @@ impl Supervisor {
     where
         S: alor_scalping::strategy::StrategyCore + Send + 'static,
     {
-        self.run_with_hooks(strategy, None, None, None, None, None)
+        self.run_with_hooks(Some(strategy), None, None, None, None, None)
             .await
     }
 
@@ -158,13 +160,29 @@ impl Supervisor {
     where
         S: alor_scalping::strategy::StrategyCore + Send + 'static,
     {
-        self.run_with_hooks(strategy, None, event_sink, command_transport, None, None)
+        self.run_with_hooks(
+            Some(strategy),
+            None,
+            event_sink,
+            command_transport,
+            None,
+            None,
+        )
+            .await
+    }
+
+    pub async fn run_transport_only(
+        &self,
+        event_sink: Option<Arc<dyn EventSink>>,
+        command_transport: Option<CommandTransport>,
+    ) -> anyhow::Result<()> {
+        self.run_with_hooks::<NoopStrategy>(None, None, event_sink, command_transport, None, None)
             .await
     }
 
     async fn run_with_hooks<S>(
         &self,
-        strategy: S,
+        strategy: Option<S>,
         emitted_tx: Option<broadcast::Sender<BarEvent>>,
         event_sink: Option<Arc<dyn EventSink>>,
         command_transport: Option<CommandTransport>,
@@ -203,6 +221,16 @@ impl Supervisor {
         let bar_dump = Arc::new(Mutex::new(open_bar_dump(cfg.bar_dump_path.as_deref())));
         let emitted_tx = emitted_tx;
         let event_sink = event_sink;
+        let (shutdown_tx, _) = watch::channel(false);
+        let event_capacity = 2048;
+        let (event_tx, event_rx) = mpsc::channel(event_capacity);
+        let event_tx = event_sink.as_ref().map(|_| event_tx);
+        if let Some(sink) = event_sink.clone() {
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                run_event_publisher(event_rx, sink, &mut shutdown_rx).await;
+            });
+        }
         let initial_phase = if derived.skip_history_effective {
             GatewayPhase::Reconnecting
         } else {
@@ -393,9 +421,21 @@ impl Supervisor {
 
         if let Some(transport) = command_transport {
             let cws_handle = cws_handle.clone();
+            let price_step = cfg.price_step;
+            let volume_step = cfg.volume_step;
+            let health = self.health.clone();
+            let mut shutdown_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
-                if let Err(error) =
-                    run_command_consumer(transport.source, transport.sink, cws_handle).await
+                if let Err(error) = run_command_consumer(
+                    transport.source,
+                    transport.sink,
+                    cws_handle,
+                    price_step,
+                    volume_step,
+                    health,
+                    &mut shutdown_rx,
+                )
+                .await
                 {
                     warn!(?error, "command consumer stopped");
                 }
@@ -404,7 +444,7 @@ impl Supervisor {
 
         tokio::spawn({
             let health = self.health.clone();
-            let event_sink = event_sink.clone();
+            let event_tx = event_tx.clone();
             async move {
                 let mut positions_rx = streams.positions_rx;
                 while let Some(position) = positions_rx.recv().await {
@@ -412,15 +452,11 @@ impl Supervisor {
                         let mut guard = health.write();
                         guard.last_positions_ts = position.ts_utc;
                     }
-                    if let Some(sink) = event_sink.as_ref() {
-                        let sink = Arc::clone(sink);
-                        let position_clone = position.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = sink.publish_position(position_clone).await {
-                                warn!(?error, "position publish failed");
-                            }
-                        });
-                    }
+                    enqueue_event(
+                        event_tx.as_ref(),
+                        &health,
+                        EventMessage::Position(position.clone()),
+                    );
                     let _ = positions_tx.send(position).await;
                 }
             }
@@ -428,7 +464,7 @@ impl Supervisor {
 
         tokio::spawn({
             let health = self.health.clone();
-            let event_sink = event_sink.clone();
+            let event_tx = event_tx.clone();
             async move {
                 let mut orders_rx = streams.orders_rx;
                 while let Some(order) = orders_rx.recv().await {
@@ -436,19 +472,51 @@ impl Supervisor {
                         let mut guard = health.write();
                         guard.last_orders_ts = order.ts_utc;
                     }
-                    if let Some(sink) = event_sink.as_ref() {
-                        let sink = Arc::clone(sink);
-                        let order_clone = order.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = sink.publish_order(order_clone).await {
-                                warn!(?error, "order publish failed");
-                            }
-                        });
-                    }
+                    enqueue_event(
+                        event_tx.as_ref(),
+                        &health,
+                        EventMessage::Order(order.clone()),
+                    );
                     let _ = orders_tx.send(order).await;
                 }
             }
         });
+
+        if let Some(event_tx) = event_tx.clone() {
+            let health = self.health.clone();
+            let orders_manager = orders_manager.clone();
+            let positions_manager = positions_manager.clone();
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let mut health_tick = tokio::time::interval(Duration::from_secs(5));
+                let mut snapshot_tick = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                        _ = health_tick.tick() => {
+                            let snapshot = health.read().clone();
+                            enqueue_event(Some(&event_tx), &health, EventMessage::Health(snapshot));
+                        }
+                        _ = snapshot_tick.tick() => {
+                            enqueue_event(
+                                Some(&event_tx),
+                                &health,
+                                EventMessage::SnapshotOrders(orders_manager.snapshot()),
+                            );
+                            enqueue_event(
+                                Some(&event_tx),
+                                &health,
+                                EventMessage::SnapshotPositions(positions_manager.snapshot()),
+                            );
+                        }
+                    }
+                }
+            });
+        }
 
         tokio::spawn({
             let mut control_rx = streams.control_rx;
@@ -482,7 +550,7 @@ impl Supervisor {
             let bar_validator = bar_validator.clone();
             let bar_quality_stats = bar_quality_stats.clone();
             let buffered_bars = buffered_bars.clone();
-            let event_sink = event_sink.clone();
+            let event_tx = event_tx.clone();
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
                 let mut history_min: Option<i64> = None;
@@ -556,7 +624,8 @@ impl Supervisor {
                                     &bar_quality_stats,
                                     &bar_dump,
                                     &emitted_tx,
-                                    event_sink.as_ref(),
+                                    event_tx.as_ref(),
+                                    &health,
                                 );
                             }
                             EmitResult::DuplicateOrOld => {
@@ -643,7 +712,8 @@ impl Supervisor {
                                 &bar_quality_stats,
                                 &bar_dump,
                                 &emitted_tx,
-                                event_sink.as_ref(),
+                                event_tx.as_ref(),
+                                &health,
                                 &buffered_bars,
                                 &mut pending_live_updates,
                                 &mut logged_live_start,
@@ -685,20 +755,24 @@ impl Supervisor {
             }
         });
 
-        StrategyRunner::new(
-            strategy,
-            positions_manager.clone(),
-            orders_manager.clone(),
-            cws_handle,
-            cfg.portfolio.clone(),
-            cfg.exchange.clone(),
-            phase_rx,
-            cfg.history_sessions,
-            cfg.session_rollover_hour_utc,
-            cfg.price_step,
-            cfg.volume_step,
-        )
-        .start(bars_rx);
+        if let Some(strategy) = strategy {
+            StrategyRunner::new(
+                strategy,
+                positions_manager.clone(),
+                orders_manager.clone(),
+                cws_handle,
+                cfg.portfolio.clone(),
+                cfg.exchange.clone(),
+                phase_rx,
+                cfg.history_sessions,
+                cfg.session_rollover_hour_utc,
+                cfg.price_step,
+                cfg.volume_step,
+            )
+            .start(bars_rx);
+        } else {
+            drop(bars_rx);
+        }
 
         let silence_threshold = Duration::from_secs(cfg.max_silence_bars_sec);
         let silence_rate_limit = Duration::from_secs(cfg.bar_silence_resync_min_sec);
@@ -723,6 +797,7 @@ impl Supervisor {
                     }
                 } => {
                     info!("shutdown requested");
+                    let _ = shutdown_tx.send(true);
                     handle_shutdown(
                         &hub_handle,
                         &bar_quality_stats,
@@ -735,6 +810,7 @@ impl Supervisor {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("shutdown signal received");
+                    let _ = shutdown_tx.send(true);
                     handle_shutdown(
                         &hub_handle,
                         &bar_quality_stats,
@@ -756,6 +832,7 @@ impl Supervisor {
                     }
                 } => {
                     info!("termination signal received");
+                    let _ = shutdown_tx.send(true);
                     handle_shutdown(
                         &hub_handle,
                         &bar_quality_stats,
@@ -848,6 +925,14 @@ impl Supervisor {
 
 }
 
+struct NoopStrategy;
+
+impl StrategyCore for NoopStrategy {
+    fn on_bar(&mut self, _bar: StrategyBar, _ctx: StrategyContext) -> Vec<Action> {
+        Vec::new()
+    }
+}
+
 async fn handle_shutdown(
     hub_handle: &WsHubHandle,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
@@ -904,12 +989,35 @@ fn open_bar_dump(path: Option<&str>) -> Option<std::io::BufWriter<std::fs::File>
     }
 }
 
+fn enqueue_event(
+    event_tx: Option<&mpsc::Sender<EventMessage>>,
+    health: &Arc<RwLock<HealthState>>,
+    event: EventMessage,
+) {
+    let Some(tx) = event_tx else {
+        return;
+    };
+    match tx.try_send(event) {
+        Ok(()) => {
+            health.write().backpressure_lagged = false;
+        }
+        Err(TrySendError::Full(_)) => {
+            health.write().backpressure_lagged = true;
+            warn!("event queue full; dropping event");
+        }
+        Err(TrySendError::Closed(_)) => {
+            warn!("event queue closed; dropping event");
+        }
+    }
+}
+
 fn record_emitted(
     bar: &BarEvent,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     emitted_tx: &Option<broadcast::Sender<BarEvent>>,
-    event_sink: Option<&Arc<dyn EventSink>>,
+    event_tx: Option<&mpsc::Sender<EventMessage>>,
+    health: &Arc<RwLock<HealthState>>,
 ) {
     bar_quality_stats
         .write()
@@ -917,15 +1025,7 @@ fn record_emitted(
     if let Some(sender) = emitted_tx.as_ref() {
         let _ = sender.send(bar.clone());
     }
-    if let Some(sink) = event_sink {
-        let bar_clone = bar.clone();
-        let sink = Arc::clone(sink);
-        tokio::spawn(async move {
-            if let Err(error) = sink.publish_bar(bar_clone).await {
-                warn!(?error, "bar publish failed");
-            }
-        });
-    }
+    enqueue_event(event_tx, health, EventMessage::Bar(bar.clone()));
     if let Some(writer) = bar_dump.lock().as_mut() {
         let _ = writeln!(
             writer,
@@ -939,6 +1039,38 @@ fn record_emitted(
             bar.v,
             format!("{:?}", bar.origin)
         );
+    }
+}
+
+async fn run_event_publisher(
+    mut rx: mpsc::Receiver<EventMessage>,
+    sink: Arc<dyn EventSink>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            msg = rx.recv() => {
+                let Some(msg) = msg else {
+                    break;
+                };
+                let result = match msg {
+                    EventMessage::Bar(event) => sink.publish_bar(event).await,
+                    EventMessage::Order(event) => sink.publish_order(event).await,
+                    EventMessage::Position(event) => sink.publish_position(event).await,
+                    EventMessage::Health(event) => sink.publish_health(event).await,
+                    EventMessage::SnapshotOrders(event) => sink.publish_snapshot_orders(event).await,
+                    EventMessage::SnapshotPositions(event) => sink.publish_snapshot_positions(event).await,
+                };
+                if let Err(error) = result {
+                    warn!(?error, "event publish failed");
+                }
+            }
+        }
     }
 }
 
@@ -998,27 +1130,55 @@ async fn run_command_consumer(
     mut source: Box<dyn CommandSource>,
     sink: Arc<dyn CommandSink>,
     cws: crate::cws_client::CwsHandle,
+    price_step: f64,
+    volume_step: f64,
+    health: Arc<RwLock<HealthState>>,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut idempotency = IdempotencyStore::new();
-    while let Some(command) = source.next_command().await {
-        let request_id = command.request_id;
-        if !idempotency.insert_if_new(request_id) {
-            sink.publish_ack(CommandAck::duplicate(request_id)).await?;
-            continue;
-        }
-
-        match execute_command(&cws, &command).await {
-            Ok(order_id) => {
-                sink.publish_ack(CommandAck::success(request_id, order_id))
-                    .await?;
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
             }
-            Err(error) => {
-                sink.publish_ack(CommandAck::error(
-                    request_id,
-                    "command_failed",
-                    format!("{error}"),
-                ))
-                .await?;
+            command = source.next_command() => {
+                let Some(command) = command else {
+                    break;
+                };
+                let request_id = command.request_id;
+                if !idempotency.insert_if_new(request_id) {
+                    sink.publish_ack(CommandAck::duplicate(request_id)).await?;
+                    continue;
+                }
+
+                if let Some(error_code) = validate_command(&command, price_step, volume_step, &health) {
+                    sink.publish_ack(CommandAck::error(request_id, error_code, "validation failed"))
+                        .await?;
+                    continue;
+                }
+
+                if is_command_expired(&command) {
+                    sink.publish_ack(CommandAck::error(request_id, "expired", "command expired"))
+                        .await?;
+                    continue;
+                }
+
+                match execute_command(&cws, &command, price_step, volume_step).await {
+                    Ok(order_id) => {
+                        sink.publish_ack(CommandAck::success(request_id, order_id))
+                            .await?;
+                    }
+                    Err(error) => {
+                        sink.publish_ack(CommandAck::error(
+                            request_id,
+                            "command_failed",
+                            format!("{error}"),
+                        ))
+                        .await?;
+                    }
+                }
             }
         }
     }
@@ -1028,16 +1188,20 @@ async fn run_command_consumer(
 async fn execute_command(
     cws: &crate::cws_client::CwsHandle,
     command: &OrderCommand,
+    price_step: f64,
+    volume_step: f64,
 ) -> anyhow::Result<Option<i64>> {
     match &command.action {
         CommandAction::Place(payload) => {
+            let price = normalize_step(payload.price, price_step);
+            let qty = normalize_step(payload.qty, volume_step);
             let response = cws
                 .create_limit(
                     &command.portfolio,
                     &command.exchange,
                     &command.symbol,
-                    payload.price,
-                    payload.qty,
+                    price,
+                    qty,
                     side_str(payload.side),
                 )
                 .await?;
@@ -1048,8 +1212,10 @@ async fn execute_command(
             Ok(response.get("orderId").and_then(|value| value.as_i64()))
         }
         CommandAction::Replace(payload) => {
+            let new_price = normalize_step(payload.new_price, price_step);
+            let new_qty = normalize_step(payload.new_qty, volume_step);
             let response = cws
-                .replace(payload.order_id, payload.new_price, payload.new_qty)
+                .replace(payload.order_id, new_price, new_qty)
                 .await?;
             Ok(response.get("orderId").and_then(|value| value.as_i64()))
         }
@@ -1060,6 +1226,62 @@ fn side_str(side: Side) -> &'static str {
     match side {
         Side::Buy => "buy",
         Side::Sell => "sell",
+    }
+}
+
+fn validate_command(
+    command: &OrderCommand,
+    price_step: f64,
+    volume_step: f64,
+    health: &Arc<RwLock<HealthState>>,
+) -> Option<&'static str> {
+    if health.read().gateway_phase != GatewayPhase::LiveReady {
+        return Some("gateway_not_ready");
+    }
+    match &command.action {
+        CommandAction::Place(payload) => {
+            if payload.price <= 0.0 || payload.qty <= 0.0 {
+                return Some("validation_failed");
+            }
+            let price = normalize_step(payload.price, price_step);
+            let qty = normalize_step(payload.qty, volume_step);
+            if price <= 0.0 || qty <= 0.0 {
+                return Some("validation_failed");
+            }
+        }
+        CommandAction::Cancel(payload) => {
+            if payload.order_id <= 0 {
+                return Some("validation_failed");
+            }
+        }
+        CommandAction::Replace(payload) => {
+            if payload.order_id <= 0 || payload.new_price <= 0.0 || payload.new_qty <= 0.0 {
+                return Some("validation_failed");
+            }
+            let price = normalize_step(payload.new_price, price_step);
+            let qty = normalize_step(payload.new_qty, volume_step);
+            if price <= 0.0 || qty <= 0.0 {
+                return Some("validation_failed");
+            }
+        }
+    }
+    None
+}
+
+fn is_command_expired(command: &OrderCommand) -> bool {
+    let Some(ttl_ms) = command.ttl_ms else {
+        return false;
+    };
+    let now_ms = Utc::now().timestamp_millis();
+    let deadline_ms = command.created_ts_utc.saturating_mul(1_000) + ttl_ms as i64;
+    now_ms > deadline_ms
+}
+
+fn normalize_step(value: f64, step: f64) -> f64 {
+    if step <= 0.0 {
+        value
+    } else {
+        (value / step).round() * step
     }
 }
 
@@ -1151,7 +1373,8 @@ async fn flush_pending_live(
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     emitted_tx: &Option<broadcast::Sender<BarEvent>>,
-    event_sink: Option<&Arc<dyn EventSink>>,
+    event_tx: Option<&mpsc::Sender<EventMessage>>,
+    health: &Arc<RwLock<HealthState>>,
     buffered_bars: &Arc<RwLock<HashMap<String, u64>>>,
     pending: &mut HashMap<String, Vec<BarEvent>>,
     logged_live_start: &mut bool,
@@ -1178,7 +1401,8 @@ async fn flush_pending_live(
                             bar_quality_stats,
                             bar_dump,
                             emitted_tx,
-                            event_sink,
+                            event_tx,
+                            health,
                         );
                     }
                     EmitResult::DuplicateOrOld => {

@@ -1,3 +1,4 @@
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -48,6 +49,7 @@ pub enum CommandAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OrderCommand {
     pub request_id: Uuid,
+    pub created_ts_utc: i64,
     pub strategy_id: String,
     pub portfolio: String,
     pub exchange: String,
@@ -66,6 +68,7 @@ impl OrderCommand {
     ) -> Self {
         Self {
             request_id: Uuid::new_v4(),
+            created_ts_utc: Utc::now().timestamp(),
             strategy_id: strategy_id.into(),
             portfolio: portfolio.into(),
             exchange: exchange.into(),
@@ -159,4 +162,3 @@ pub enum Side {
     Buy,
     Sell,
 }
-

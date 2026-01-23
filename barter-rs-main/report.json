@@ -1,22 +1,14 @@
 {
   "received": {
-    "IMOEXF": 3371
+    "IMOEXF": 3828
   },
   "emitted": {
-    "IMOEXF": 3368
+    "IMOEXF": 3828
   },
-  "dropped": [
-    {
-      "symbol": "IMOEXF",
-      "reason": "DuplicateOrOld",
-      "count": 3
-    }
-  ],
+  "dropped": [],
   "ignored": [],
   "pending": {
-    "buffered_bars": {
-      "IMOEXF": 0
-    },
+    "buffered_bars": {},
     "pending_acks": {
       "bars": 0,
       "positions": 0,
@@ -25,6 +17,6 @@
     }
   },
   "last_close_time": {
-    "IMOEXF": 1769083080
+    "IMOEXF": 1769151420
   }
 }
