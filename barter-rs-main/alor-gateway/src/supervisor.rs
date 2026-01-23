@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs::OpenOptions, io::Write};
@@ -22,7 +22,10 @@ use crate::models::{BarEvent, DataOrigin};
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
+use crate::transport::{CommandSink, CommandSource, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
+use alor_protocol::{CommandAck, CommandAction, OrderCommand, Side};
+use uuid::Uuid;
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -36,6 +39,11 @@ pub struct GatewayHandle {
     health: Arc<RwLock<HealthState>>,
     hub_handle: Arc<TokioMutex<Option<WsHubHandle>>>,
     join_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+pub struct CommandTransport {
+    pub source: Box<dyn CommandSource>,
+    pub sink: Arc<dyn CommandSink>,
 }
 
 impl GatewayHandle {
@@ -116,6 +124,8 @@ impl Supervisor {
                 .run_with_hooks(
                     strategy,
                     Some(emitted_tx_clone),
+                    None,
+                    None,
                     Some(stop_rx),
                     Some(hub_handle_clone),
                 )
@@ -135,13 +145,29 @@ impl Supervisor {
     where
         S: alor_scalping::strategy::StrategyCore + Send + 'static,
     {
-        self.run_with_hooks(strategy, None, None, None).await
+        self.run_with_hooks(strategy, None, None, None, None, None)
+            .await
+    }
+
+    pub async fn run_with_transport<S>(
+        &self,
+        strategy: S,
+        event_sink: Option<Arc<dyn EventSink>>,
+        command_transport: Option<CommandTransport>,
+    ) -> anyhow::Result<()>
+    where
+        S: alor_scalping::strategy::StrategyCore + Send + 'static,
+    {
+        self.run_with_hooks(strategy, None, event_sink, command_transport, None, None)
+            .await
     }
 
     async fn run_with_hooks<S>(
         &self,
         strategy: S,
         emitted_tx: Option<broadcast::Sender<BarEvent>>,
+        event_sink: Option<Arc<dyn EventSink>>,
+        command_transport: Option<CommandTransport>,
         mut stop_rx: Option<oneshot::Receiver<()>>,
         hub_handle_slot: Option<Arc<TokioMutex<Option<WsHubHandle>>>>,
     ) -> anyhow::Result<()>
@@ -176,6 +202,7 @@ impl Supervisor {
         let pending_acks = Arc::new(RwLock::new(PendingAcks::default()));
         let bar_dump = Arc::new(Mutex::new(open_bar_dump(cfg.bar_dump_path.as_deref())));
         let emitted_tx = emitted_tx;
+        let event_sink = event_sink;
         let initial_phase = if derived.skip_history_effective {
             GatewayPhase::Reconnecting
         } else {
@@ -364,14 +391,35 @@ impl Supervisor {
             self.health.clone(),
         );
 
+        if let Some(transport) = command_transport {
+            let cws_handle = cws_handle.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    run_command_consumer(transport.source, transport.sink, cws_handle).await
+                {
+                    warn!(?error, "command consumer stopped");
+                }
+            });
+        }
+
         tokio::spawn({
             let health = self.health.clone();
+            let event_sink = event_sink.clone();
             async move {
                 let mut positions_rx = streams.positions_rx;
                 while let Some(position) = positions_rx.recv().await {
                     {
                         let mut guard = health.write();
                         guard.last_positions_ts = position.ts_utc;
+                    }
+                    if let Some(sink) = event_sink.as_ref() {
+                        let sink = Arc::clone(sink);
+                        let position_clone = position.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) = sink.publish_position(position_clone).await {
+                                warn!(?error, "position publish failed");
+                            }
+                        });
                     }
                     let _ = positions_tx.send(position).await;
                 }
@@ -380,12 +428,22 @@ impl Supervisor {
 
         tokio::spawn({
             let health = self.health.clone();
+            let event_sink = event_sink.clone();
             async move {
                 let mut orders_rx = streams.orders_rx;
                 while let Some(order) = orders_rx.recv().await {
                     {
                         let mut guard = health.write();
                         guard.last_orders_ts = order.ts_utc;
+                    }
+                    if let Some(sink) = event_sink.as_ref() {
+                        let sink = Arc::clone(sink);
+                        let order_clone = order.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) = sink.publish_order(order_clone).await {
+                                warn!(?error, "order publish failed");
+                            }
+                        });
                     }
                     let _ = orders_tx.send(order).await;
                 }
@@ -424,6 +482,7 @@ impl Supervisor {
             let bar_validator = bar_validator.clone();
             let bar_quality_stats = bar_quality_stats.clone();
             let buffered_bars = buffered_bars.clone();
+            let event_sink = event_sink.clone();
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
                 let mut history_min: Option<i64> = None;
@@ -492,7 +551,13 @@ impl Supervisor {
                         }
                         match emit_bar(&bars_tx, &last_emitted_bar_ts, &bar).await {
                             EmitResult::Emitted => {
-                                record_emitted(&bar, &bar_quality_stats, &bar_dump, &emitted_tx);
+                                record_emitted(
+                                    &bar,
+                                    &bar_quality_stats,
+                                    &bar_dump,
+                                    &emitted_tx,
+                                    event_sink.as_ref(),
+                                );
                             }
                             EmitResult::DuplicateOrOld => {
                                 bar_quality_stats
@@ -578,6 +643,7 @@ impl Supervisor {
                                 &bar_quality_stats,
                                 &bar_dump,
                                 &emitted_tx,
+                                event_sink.as_ref(),
                                 &buffered_bars,
                                 &mut pending_live_updates,
                                 &mut logged_live_start,
@@ -843,12 +909,22 @@ fn record_emitted(
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     emitted_tx: &Option<broadcast::Sender<BarEvent>>,
+    event_sink: Option<&Arc<dyn EventSink>>,
 ) {
     bar_quality_stats
         .write()
         .record_emitted(&bar.symbol, bar.close_time_utc);
     if let Some(sender) = emitted_tx.as_ref() {
         let _ = sender.send(bar.clone());
+    }
+    if let Some(sink) = event_sink {
+        let bar_clone = bar.clone();
+        let sink = Arc::clone(sink);
+        tokio::spawn(async move {
+            if let Err(error) = sink.publish_bar(bar_clone).await {
+                warn!(?error, "bar publish failed");
+            }
+        });
     }
     if let Some(writer) = bar_dump.lock().as_mut() {
         let _ = writeln!(
@@ -863,6 +939,127 @@ fn record_emitted(
             bar.v,
             format!("{:?}", bar.origin)
         );
+    }
+}
+
+const IDEMPOTENCY_TTL: Duration = Duration::from_secs(300);
+const IDEMPOTENCY_MAX: usize = 10_000;
+
+struct IdempotencyStore {
+    entries: HashMap<Uuid, Instant>,
+    order: VecDeque<Uuid>,
+}
+
+impl IdempotencyStore {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn insert_if_new(&mut self, request_id: Uuid) -> bool {
+        self.evict_expired();
+        if self.entries.contains_key(&request_id) {
+            return false;
+        }
+        self.entries.insert(request_id, Instant::now());
+        self.order.push_back(request_id);
+        self.evict_overflow();
+        true
+    }
+
+    fn evict_expired(&mut self) {
+        let now = Instant::now();
+        while let Some(front) = self.order.front().copied() {
+            let Some(ts) = self.entries.get(&front) else {
+                self.order.pop_front();
+                continue;
+            };
+            if now.duration_since(*ts) > IDEMPOTENCY_TTL {
+                self.entries.remove(&front);
+                self.order.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn evict_overflow(&mut self) {
+        while self.order.len() > IDEMPOTENCY_MAX {
+            if let Some(front) = self.order.pop_front() {
+                self.entries.remove(&front);
+            }
+        }
+    }
+}
+
+async fn run_command_consumer(
+    mut source: Box<dyn CommandSource>,
+    sink: Arc<dyn CommandSink>,
+    cws: crate::cws_client::CwsHandle,
+) -> anyhow::Result<()> {
+    let mut idempotency = IdempotencyStore::new();
+    while let Some(command) = source.next_command().await {
+        let request_id = command.request_id;
+        if !idempotency.insert_if_new(request_id) {
+            sink.publish_ack(CommandAck::duplicate(request_id)).await?;
+            continue;
+        }
+
+        match execute_command(&cws, &command).await {
+            Ok(order_id) => {
+                sink.publish_ack(CommandAck::success(request_id, order_id))
+                    .await?;
+            }
+            Err(error) => {
+                sink.publish_ack(CommandAck::error(
+                    request_id,
+                    "command_failed",
+                    format!("{error}"),
+                ))
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn execute_command(
+    cws: &crate::cws_client::CwsHandle,
+    command: &OrderCommand,
+) -> anyhow::Result<Option<i64>> {
+    match &command.action {
+        CommandAction::Place(payload) => {
+            let response = cws
+                .create_limit(
+                    &command.portfolio,
+                    &command.exchange,
+                    &command.symbol,
+                    payload.price,
+                    payload.qty,
+                    side_str(payload.side),
+                )
+                .await?;
+            Ok(response.get("orderId").and_then(|value| value.as_i64()))
+        }
+        CommandAction::Cancel(payload) => {
+            let response = cws.cancel(payload.order_id).await?;
+            Ok(response.get("orderId").and_then(|value| value.as_i64()))
+        }
+        CommandAction::Replace(payload) => {
+            let response = cws
+                .replace(payload.order_id, payload.new_price, payload.new_qty)
+                .await?;
+            Ok(response.get("orderId").and_then(|value| value.as_i64()))
+        }
+    }
+}
+
+fn side_str(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "buy",
+        Side::Sell => "sell",
     }
 }
 
@@ -954,6 +1151,7 @@ async fn flush_pending_live(
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     emitted_tx: &Option<broadcast::Sender<BarEvent>>,
+    event_sink: Option<&Arc<dyn EventSink>>,
     buffered_bars: &Arc<RwLock<HashMap<String, u64>>>,
     pending: &mut HashMap<String, Vec<BarEvent>>,
     logged_live_start: &mut bool,
@@ -975,7 +1173,13 @@ async fn flush_pending_live(
             for bar in bars {
                 match emit_bar(bars_tx, last_emitted, &bar).await {
                     EmitResult::Emitted => {
-                        record_emitted(&bar, bar_quality_stats, bar_dump, emitted_tx);
+                        record_emitted(
+                            &bar,
+                            bar_quality_stats,
+                            bar_dump,
+                            emitted_tx,
+                            event_sink,
+                        );
                     }
                     EmitResult::DuplicateOrOld => {
                         bar_quality_stats

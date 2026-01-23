@@ -26,6 +26,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 alor-scalping = { path = "../alor-scalping" }
+alor-protocol = { path = "../alor-protocol" }
 
 [dev-dependencies]
 tempfile = "3"
