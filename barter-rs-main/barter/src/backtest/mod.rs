@@ -13,7 +13,7 @@ use crate::{
         execution_tx::MultiExchangeTxMap,
         state::{
             EngineState,
-            instrument::{data::InstrumentDataState, filter::InstrumentFilter},
+            instrument::data::InstrumentDataState,
         },
     },
     error::BarterError,

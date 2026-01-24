@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
 use alor_scalping::strategy::{Bar, StrategyConfig, StrategyState, TradeLogger};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;

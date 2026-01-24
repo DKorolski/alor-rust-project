@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs::OpenOptions, io::Write};
@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot, watch};
-use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -23,11 +22,14 @@ use crate::models::{BarEvent, DataOrigin};
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
-use crate::transport::{CommandEnvelope, CommandSink, CommandSource, EventMessage, EventSink};
+use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
-use alor_protocol::{CommandAck, CommandAction, OrderCommand, Side};
-use uuid::Uuid;
 use alor_scalping::strategy::{Action, StrategyBar, StrategyContext, StrategyCore};
+use crate::services::command_consumer::{run_command_consumer, CommandConsumerConfig};
+use crate::services::event_publisher::{
+    EventPublisherConfig, EventPublisherHandle, start_event_publisher,
+};
+use crate::services::health_reporter::run_health_reporter;
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -46,6 +48,7 @@ pub struct GatewayHandle {
 pub struct CommandTransport {
     pub source: Box<dyn CommandSource>,
     pub sink: Arc<dyn CommandSink>,
+    pub idempotency: Arc<dyn crate::services::command_consumer::IdempotencyStore>,
 }
 
 impl GatewayHandle {
@@ -222,15 +225,12 @@ impl Supervisor {
         let emitted_tx = emitted_tx;
         let event_sink = event_sink;
         let (shutdown_tx, _) = watch::channel(false);
-        let event_capacity = 2048;
-        let (event_tx, event_rx) = mpsc::channel(event_capacity);
-        let event_tx = event_sink.as_ref().map(|_| event_tx);
-        if let Some(sink) = event_sink.clone() {
-            let mut shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
-                run_event_publisher(event_rx, sink, &mut shutdown_rx).await;
-            });
-        }
+        let publisher = event_sink.clone().map(|sink| {
+            let config = EventPublisherConfig::default();
+            let (publisher, _join_handle) =
+                start_event_publisher(sink, self.health.clone(), shutdown_tx.subscribe(), config);
+            publisher
+        });
         let initial_phase = if derived.skip_history_effective {
             GatewayPhase::Reconnecting
         } else {
@@ -429,11 +429,13 @@ impl Supervisor {
                 if let Err(error) = run_command_consumer(
                     transport.source,
                     transport.sink,
+                    transport.idempotency,
                     cws_handle,
                     price_step,
                     volume_step,
                     health,
                     &mut shutdown_rx,
+                    CommandConsumerConfig::default(),
                 )
                 .await
                 {
@@ -444,7 +446,7 @@ impl Supervisor {
 
         tokio::spawn({
             let health = self.health.clone();
-            let event_tx = event_tx.clone();
+            let publisher = publisher.clone();
             async move {
                 let mut positions_rx = streams.positions_rx;
                 while let Some(position) = positions_rx.recv().await {
@@ -452,12 +454,11 @@ impl Supervisor {
                         let mut guard = health.write();
                         guard.last_positions_ts = position.ts_utc;
                     }
-                    enqueue_event_critical(
-                        event_tx.as_ref(),
-                        &health,
-                        EventMessage::Position(position.clone()),
-                    )
-                    .await;
+                    if let Some(publisher) = publisher.as_ref() {
+                        publisher
+                            .publish_critical(EventMessage::Position(position.clone()))
+                            .await;
+                    }
                     let _ = positions_tx.send(position).await;
                 }
             }
@@ -465,7 +466,7 @@ impl Supervisor {
 
         tokio::spawn({
             let health = self.health.clone();
-            let event_tx = event_tx.clone();
+            let publisher = publisher.clone();
             async move {
                 let mut orders_rx = streams.orders_rx;
                 while let Some(order) = orders_rx.recv().await {
@@ -473,56 +474,32 @@ impl Supervisor {
                         let mut guard = health.write();
                         guard.last_orders_ts = order.ts_utc;
                     }
-                    enqueue_event_critical(
-                        event_tx.as_ref(),
-                        &health,
-                        EventMessage::Order(order.clone()),
-                    )
-                    .await;
+                    if let Some(publisher) = publisher.as_ref() {
+                        publisher
+                            .publish_critical(EventMessage::Order(order.clone()))
+                            .await;
+                    }
                     let _ = orders_tx.send(order).await;
                 }
             }
         });
 
-        if let Some(event_tx) = event_tx.clone() {
+        if let Some(publisher) = publisher.clone() {
             let health = self.health.clone();
             let orders_manager = orders_manager.clone();
             let positions_manager = positions_manager.clone();
-            let mut shutdown_rx = shutdown_tx.subscribe();
+            let shutdown_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
-                let mut health_tick = tokio::time::interval(Duration::from_secs(5));
-                let mut snapshot_tick = tokio::time::interval(Duration::from_secs(30));
-                loop {
-                    tokio::select! {
-                        _ = shutdown_rx.changed() => {
-                            if *shutdown_rx.borrow() {
-                                break;
-                            }
-                        }
-                        _ = health_tick.tick() => {
-                            let snapshot = health.read().clone();
-                            enqueue_event_lossy(
-                                Some(&event_tx),
-                                &health,
-                                EventMessage::Health(snapshot),
-                            );
-                        }
-                        _ = snapshot_tick.tick() => {
-                            enqueue_event_critical(
-                                Some(&event_tx),
-                                &health,
-                                EventMessage::SnapshotOrders(orders_manager.snapshot()),
-                            )
-                            .await;
-                            enqueue_event_critical(
-                                Some(&event_tx),
-                                &health,
-                                EventMessage::SnapshotPositions(positions_manager.snapshot()),
-                            )
-                            .await;
-                        }
-                    }
-                }
+                run_health_reporter(
+                    publisher,
+                    health,
+                    orders_manager,
+                    positions_manager,
+                    shutdown_rx,
+                    Duration::from_secs(5),
+                    Duration::from_secs(30),
+                )
+                .await;
             });
         }
 
@@ -558,7 +535,7 @@ impl Supervisor {
             let bar_validator = bar_validator.clone();
             let bar_quality_stats = bar_quality_stats.clone();
             let buffered_bars = buffered_bars.clone();
-            let event_tx = event_tx.clone();
+            let publisher = publisher.clone();
             async move {
                 let mut bars_rx_inner = streams.bars_rx;
                 let mut history_min: Option<i64> = None;
@@ -632,8 +609,7 @@ impl Supervisor {
                                     &bar_quality_stats,
                                     &bar_dump,
                                     &emitted_tx,
-                                    event_tx.as_ref(),
-                                    &health,
+                                    publisher.as_ref(),
                                 )
                                 .await;
                             }
@@ -721,8 +697,7 @@ impl Supervisor {
                                 &bar_quality_stats,
                                 &bar_dump,
                                 &emitted_tx,
-                                event_tx.as_ref(),
-                                &health,
+                                publisher.as_ref(),
                                 &buffered_bars,
                                 &mut pending_live_updates,
                                 &mut logged_live_start,
@@ -998,47 +973,12 @@ fn open_bar_dump(path: Option<&str>) -> Option<std::io::BufWriter<std::fs::File>
     }
 }
 
-fn enqueue_event_lossy(
-    event_tx: Option<&mpsc::Sender<EventMessage>>,
-    health: &Arc<RwLock<HealthState>>,
-    event: EventMessage,
-) {
-    let Some(tx) = event_tx else {
-        return;
-    };
-    match tx.try_send(event) {
-        Ok(()) => {}
-        Err(TrySendError::Full(_)) => {
-            health.write().backpressure_lagged = true;
-            warn!("event queue full; dropping event");
-        }
-        Err(TrySendError::Closed(_)) => {
-            warn!("event queue closed; dropping event");
-        }
-    }
-}
-
-async fn enqueue_event_critical(
-    event_tx: Option<&mpsc::Sender<EventMessage>>,
-    health: &Arc<RwLock<HealthState>>,
-    event: EventMessage,
-) {
-    let Some(tx) = event_tx else {
-        return;
-    };
-    if let Err(error) = tx.send(event).await {
-        health.write().backpressure_lagged = true;
-        warn!(?error, "event queue closed; dropping event");
-    }
-}
-
 async fn record_emitted(
     bar: &BarEvent,
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     emitted_tx: &Option<broadcast::Sender<BarEvent>>,
-    event_tx: Option<&mpsc::Sender<EventMessage>>,
-    health: &Arc<RwLock<HealthState>>,
+    publisher: Option<&EventPublisherHandle>,
 ) {
     bar_quality_stats
         .write()
@@ -1046,7 +986,11 @@ async fn record_emitted(
     if let Some(sender) = emitted_tx.as_ref() {
         let _ = sender.send(bar.clone());
     }
-    enqueue_event_critical(event_tx, health, EventMessage::Bar(bar.clone())).await;
+    if let Some(publisher) = publisher {
+        publisher
+            .publish_critical(EventMessage::Bar(bar.clone()))
+            .await;
+    }
     if let Some(writer) = bar_dump.lock().as_mut() {
         let _ = writeln!(
             writer,
@@ -1062,304 +1006,6 @@ async fn record_emitted(
         );
     }
 }
-
-async fn run_event_publisher(
-    mut rx: mpsc::Receiver<EventMessage>,
-    sink: Arc<dyn EventSink>,
-    shutdown_rx: &mut watch::Receiver<bool>,
-) {
-    let drain_timeout = Duration::from_millis(300);
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    let deadline = Instant::now() + drain_timeout;
-                    loop {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            break;
-                        }
-                        match tokio::time::timeout(remaining.min(Duration::from_millis(50)), rx.recv()).await {
-                            Ok(Some(msg)) => {
-                                if let Err(error) = publish_event(&sink, msg).await {
-                                    warn!(?error, "event publish failed");
-                                }
-                            }
-                            _ => break,
-                        }
-                    }
-                    break;
-                }
-            }
-            msg = rx.recv() => {
-                let Some(msg) = msg else {
-                    break;
-                };
-                if let Err(error) = publish_event(&sink, msg).await {
-                    warn!(?error, "event publish failed");
-                }
-            }
-        }
-    }
-}
-
-async fn publish_event(sink: &Arc<dyn EventSink>, msg: EventMessage) -> anyhow::Result<()> {
-    match msg {
-        EventMessage::Bar(event) => sink.publish_bar(event).await,
-        EventMessage::Order(event) => sink.publish_order(event).await,
-        EventMessage::Position(event) => sink.publish_position(event).await,
-        EventMessage::Health(event) => sink.publish_health(event).await,
-        EventMessage::SnapshotOrders(event) => sink.publish_snapshot_orders(event).await,
-        EventMessage::SnapshotPositions(event) => sink.publish_snapshot_positions(event).await,
-    }
-}
-
-const IDEMPOTENCY_TTL: Duration = Duration::from_secs(300);
-const IDEMPOTENCY_MAX: usize = 10_000;
-
-struct IdempotencyStore {
-    entries: HashMap<Uuid, Instant>,
-    order: VecDeque<Uuid>,
-}
-
-impl IdempotencyStore {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn insert_if_new(&mut self, request_id: Uuid) -> bool {
-        self.evict_expired();
-        if self.entries.contains_key(&request_id) {
-            return false;
-        }
-        self.entries.insert(request_id, Instant::now());
-        self.order.push_back(request_id);
-        self.evict_overflow();
-        true
-    }
-
-    fn evict_expired(&mut self) {
-        let now = Instant::now();
-        while let Some(front) = self.order.front().copied() {
-            let Some(ts) = self.entries.get(&front) else {
-                self.order.pop_front();
-                continue;
-            };
-            if now.duration_since(*ts) > IDEMPOTENCY_TTL {
-                self.entries.remove(&front);
-                self.order.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn evict_overflow(&mut self) {
-        while self.order.len() > IDEMPOTENCY_MAX {
-            if let Some(front) = self.order.pop_front() {
-                self.entries.remove(&front);
-            }
-        }
-    }
-}
-
-async fn run_command_consumer(
-    mut source: Box<dyn CommandSource>,
-    sink: Arc<dyn CommandSink>,
-    cws: crate::cws_client::CwsHandle,
-    price_step: f64,
-    volume_step: f64,
-    health: Arc<RwLock<HealthState>>,
-    shutdown_rx: &mut watch::Receiver<bool>,
-) -> anyhow::Result<()> {
-    let mut idempotency = IdempotencyStore::new();
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-            }
-            envelope = source.next_command() => {
-                let Some(CommandEnvelope { command, message_id }) = envelope else {
-                    break;
-                };
-                let request_id = command.request_id;
-                if !idempotency.insert_if_new(request_id) {
-                    sink.publish_ack(CommandAck::duplicate(request_id)).await?;
-                    if let Some(message_id) = message_id.as_deref() {
-                        source.ack(message_id).await?;
-                    }
-                    continue;
-                }
-
-                if let Some(error_code) = validate_command(&command, price_step, volume_step, &health) {
-                    sink.publish_ack(CommandAck::error(request_id, error_code, "validation failed"))
-                        .await?;
-                    if let Some(message_id) = message_id.as_deref() {
-                        source.ack(message_id).await?;
-                    }
-                    continue;
-                }
-
-                if is_command_expired(&command) {
-                    sink.publish_ack(CommandAck::error(request_id, "expired", "command expired"))
-                        .await?;
-                    if let Some(message_id) = message_id.as_deref() {
-                        source.ack(message_id).await?;
-                    }
-                    continue;
-                }
-
-                match execute_command(&cws, &command, price_step, volume_step).await {
-                    Ok(order_id) => {
-                        sink.publish_ack(CommandAck::success(request_id, order_id))
-                            .await?;
-                        if let Some(message_id) = message_id.as_deref() {
-                            source.ack(message_id).await?;
-                        }
-                    }
-                    Err(error) => {
-                        sink.publish_ack(CommandAck::error(
-                            request_id,
-                            "command_failed",
-                            format!("{error}"),
-                        ))
-                        .await?;
-                        if let Some(message_id) = message_id.as_deref() {
-                            source.ack(message_id).await?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn execute_command(
-    cws: &crate::cws_client::CwsHandle,
-    command: &OrderCommand,
-    price_step: f64,
-    volume_step: f64,
-) -> anyhow::Result<Option<i64>> {
-    match &command.action {
-        CommandAction::Place(payload) => {
-            let price = normalize_price(payload.price, price_step, payload.side);
-            let qty = normalize_qty(payload.qty, volume_step);
-            let response = cws
-                .create_limit(
-                    &command.portfolio,
-                    &command.exchange,
-                    &command.symbol,
-                    price,
-                    qty,
-                    side_str(payload.side),
-                )
-                .await?;
-            Ok(response.get("orderId").and_then(|value| value.as_i64()))
-        }
-        CommandAction::Cancel(payload) => {
-            let response = cws.cancel(payload.order_id).await?;
-            Ok(response.get("orderId").and_then(|value| value.as_i64()))
-        }
-        CommandAction::Replace(payload) => {
-            let new_price = normalize_step_round(payload.new_price, price_step);
-            let new_qty = normalize_qty(payload.new_qty, volume_step);
-            let response = cws
-                .replace(payload.order_id, new_price, new_qty)
-                .await?;
-            Ok(response.get("orderId").and_then(|value| value.as_i64()))
-        }
-    }
-}
-
-fn side_str(side: Side) -> &'static str {
-    match side {
-        Side::Buy => "buy",
-        Side::Sell => "sell",
-    }
-}
-
-fn validate_command(
-    command: &OrderCommand,
-    price_step: f64,
-    volume_step: f64,
-    health: &Arc<RwLock<HealthState>>,
-) -> Option<&'static str> {
-    if health.read().gateway_phase != GatewayPhase::LiveReady {
-        return Some("gateway_not_ready");
-    }
-    match &command.action {
-        CommandAction::Place(payload) => {
-            if payload.price <= 0.0 || payload.qty <= 0.0 {
-                return Some("validation_failed");
-            }
-            let price = normalize_price(payload.price, price_step, payload.side);
-            let qty = normalize_qty(payload.qty, volume_step);
-            if price <= 0.0 || qty <= 0.0 {
-                return Some("validation_failed");
-            }
-        }
-        CommandAction::Cancel(payload) => {
-            if payload.order_id <= 0 {
-                return Some("validation_failed");
-            }
-        }
-        CommandAction::Replace(payload) => {
-            if payload.order_id <= 0 || payload.new_price <= 0.0 || payload.new_qty <= 0.0 {
-                return Some("validation_failed");
-            }
-            let price = normalize_step_round(payload.new_price, price_step);
-            let qty = normalize_qty(payload.new_qty, volume_step);
-            if price <= 0.0 || qty <= 0.0 {
-                return Some("validation_failed");
-            }
-        }
-    }
-    None
-}
-
-fn is_command_expired(command: &OrderCommand) -> bool {
-    let Some(ttl_ms) = command.ttl_ms else {
-        return false;
-    };
-    let now_ms = Utc::now().timestamp_millis();
-    let deadline_ms = command.created_ts_utc.saturating_mul(1_000) + ttl_ms as i64;
-    now_ms > deadline_ms
-}
-
-fn normalize_price(price: f64, step: f64, side: Side) -> f64 {
-    if step <= 0.0 {
-        return price;
-    }
-    let scaled = price / step;
-    let adjusted = match side {
-        Side::Buy => scaled.floor(),
-        Side::Sell => scaled.ceil(),
-    };
-    adjusted * step
-}
-
-fn normalize_step_round(value: f64, step: f64) -> f64 {
-    if step <= 0.0 {
-        value
-    } else {
-        (value / step).round() * step
-    }
-}
-
-fn normalize_qty(value: f64, step: f64) -> f64 {
-    if step <= 0.0 {
-        value
-    } else {
-        (value / step).floor() * step
-    }
-}
-
 fn format_ts(ts: i64) -> String {
     DateTime::<Utc>::from_timestamp(ts, 0)
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
@@ -1448,8 +1094,7 @@ async fn flush_pending_live(
     bar_quality_stats: &Arc<RwLock<BarQualityStats>>,
     bar_dump: &Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     emitted_tx: &Option<broadcast::Sender<BarEvent>>,
-    event_tx: Option<&mpsc::Sender<EventMessage>>,
-    health: &Arc<RwLock<HealthState>>,
+    publisher: Option<&EventPublisherHandle>,
     buffered_bars: &Arc<RwLock<HashMap<String, u64>>>,
     pending: &mut HashMap<String, Vec<BarEvent>>,
     logged_live_start: &mut bool,
@@ -1471,14 +1116,7 @@ async fn flush_pending_live(
             for bar in bars {
                 match emit_bar(bars_tx, last_emitted, &bar).await {
                     EmitResult::Emitted => {
-                        record_emitted(
-                            &bar,
-                            bar_quality_stats,
-                            bar_dump,
-                            emitted_tx,
-                            event_tx,
-                            health,
-                        )
+                        record_emitted(&bar, bar_quality_stats, bar_dump, emitted_tx, publisher)
                         .await;
                     }
                     EmitResult::DuplicateOrOld => {

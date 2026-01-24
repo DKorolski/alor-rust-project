@@ -11,7 +11,7 @@ use barter_instrument::instrument::market_data::kind::MarketDataInstrumentKind;
 use futures_util::{StreamExt, stream::BoxStream};
 use num_traits::ToPrimitive;
 use serde_json::Value;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
 const OAUTH_URL: &str = "https://oauth.alor.ru/refresh";
