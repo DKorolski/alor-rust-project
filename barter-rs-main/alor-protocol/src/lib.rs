@@ -49,6 +49,7 @@ pub enum CommandAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OrderCommand {
     pub request_id: Uuid,
+    #[serde(default = "default_created_ts_utc")]
     pub created_ts_utc: i64,
     pub strategy_id: String,
     pub portfolio: String,
@@ -56,6 +57,10 @@ pub struct OrderCommand {
     pub symbol: String,
     pub action: CommandAction,
     pub ttl_ms: Option<u64>,
+}
+
+fn default_created_ts_utc() -> i64 {
+    0
 }
 
 impl OrderCommand {
@@ -99,6 +104,8 @@ pub struct CommandAck {
     pub broker_order_id: Option<i64>,
     pub error_code: Option<String>,
     pub error_msg: Option<String>,
+    #[serde(default = "default_processed_ts_utc")]
+    pub processed_ts_utc: i64,
 }
 
 impl CommandAck {
@@ -109,6 +116,7 @@ impl CommandAck {
             broker_order_id,
             error_code: None,
             error_msg: None,
+            processed_ts_utc: Utc::now().timestamp(),
         }
     }
 
@@ -119,6 +127,7 @@ impl CommandAck {
             broker_order_id: None,
             error_code: None,
             error_msg: None,
+            processed_ts_utc: Utc::now().timestamp(),
         }
     }
 
@@ -133,8 +142,13 @@ impl CommandAck {
             broker_order_id: None,
             error_code: Some(error_code.into()),
             error_msg: Some(error_msg.into()),
+            processed_ts_utc: Utc::now().timestamp(),
         }
     }
+}
+
+fn default_processed_ts_utc() -> i64 {
+    0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

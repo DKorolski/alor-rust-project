@@ -118,6 +118,19 @@ impl CwsHandle {
     }
 }
 
+#[cfg(test)]
+impl CwsHandle {
+    pub fn new_test() -> Self {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<CwsCommand>(8);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let _ = cmd.resp_tx.send(Ok(serde_json::json!({})));
+            }
+        });
+        CwsHandle { cmd_tx }
+    }
+}
+
 async fn run_session(
     cfg: &AlorGatewayConfig,
     token_provider: &TokenProvider,

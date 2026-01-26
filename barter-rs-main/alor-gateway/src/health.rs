@@ -39,6 +39,7 @@ pub struct HealthState {
     pub gateway_phase: GatewayPhase,
     pub readiness: bool,
     pub backpressure_lagged: bool,
+    pub event_backpressure_lagged: bool,
     pub event_sink_degraded: bool,
     pub event_publish_retries_total: u64,
     pub event_publish_timeout_total: u64,
