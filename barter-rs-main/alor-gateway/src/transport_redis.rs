@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use redis::RedisResult;
 use serde::de::DeserializeOwned;
+use tracing::warn;
+use uuid::Uuid;
 
 use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, SCHEMA_VERSION};
 
@@ -27,27 +29,20 @@ impl RedisEventSink {
         msg_type: MessageType,
         payload: &T,
     ) -> Result<()> {
-        let envelope = Envelope::new(
-            Utc::now().timestamp(),
-            self.config.source.clone(),
-            msg_type,
-            payload,
-        );
-        let payload = serde_json::to_string(&envelope)?;
         let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let envelope = Envelope::new(Utc::now().timestamp(), &self.config.source, msg_type, payload);
+        let json = serde_json::to_string(&envelope)?;
         let _: redis::Value = redis::cmd("XADD")
             .arg(stream)
             .arg("MAXLEN")
-            .arg("~")
             .arg(self.config.trim_maxlen)
             .arg("*")
             .arg("payload")
-            .arg(payload)
+            .arg(json)
             .query_async(&mut conn)
             .await?;
         Ok(())
     }
-
 }
 
 #[async_trait]
@@ -98,12 +93,63 @@ impl EventSink for RedisEventSink {
 pub struct RedisCommandSource {
     client: redis::Client,
     config: TransportConfig,
+    group_initialized: bool,
+    dlq_key: String,
+}
+
+struct StreamEntry {
+    message_id: String,
+    payload: Option<String>,
 }
 
 impl RedisCommandSource {
     pub fn new(config: TransportConfig) -> Result<Self> {
+        let mut config = config;
+        if config.consumer_name.trim().is_empty() || config.consumer_name == "auto" {
+            config.consumer_name = format!("consumer-{}", Uuid::new_v4());
+        }
         let client = redis::Client::open(config.redis_url.clone())?;
-        Ok(Self { client, config })
+        // tests ожидают dlq_stream = "{dlq_prefix}.{commands_stream}"
+        let dlq_key = format!("{}.{}", config.streams.dlq_prefix, config.streams.commands);
+
+        Ok(Self {
+            client,
+            config,
+            group_initialized: false,
+            dlq_key,
+        })
+    }
+
+    // P0.1: гарантируем, что группа создана (иначе XREADGROUP даст NOGROUP)
+    async fn ensure_group(&mut self) -> Result<()> {
+        if self.group_initialized {
+            return Ok(());
+        }
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let result: RedisResult<redis::Value> = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(&self.config.streams.commands)
+            .arg(&self.config.consumer_group)
+            // Важно: "0" (а не "$"), чтобы уже существующие записи стали доставляемыми.
+            .arg("0")
+            .arg("MKSTREAM")
+            .query_async(&mut conn)
+            .await;
+
+        match result {
+            Ok(_) => {
+                self.group_initialized = true;
+                Ok(())
+            }
+            Err(err) => {
+                if err.to_string().contains("BUSYGROUP") {
+                    self.group_initialized = true;
+                    Ok(())
+                } else {
+                    Err(err.into())
+                }
+            }
+        }
     }
 
     async fn read_group(&self) -> RedisResult<redis::Value> {
@@ -123,50 +169,90 @@ impl RedisCommandSource {
             .await
     }
 
-    async fn write_dlq(&self, stream: &str, payload: &str, reason: &str) -> Result<()> {
+    // P0.2: подбираем pending (idle) сообщения у других consumer’ов
+    async fn claim_idle(&self) -> RedisResult<redis::Value> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let dlq_stream = format!("{}.{}", self.config.streams.dlq_prefix, stream);
+        redis::cmd("XAUTOCLAIM")
+            .arg(&self.config.streams.commands)
+            .arg(&self.config.consumer_group)
+            .arg(&self.config.consumer_name)
+            .arg(self.config.claim_idle_ms)
+            .arg("0-0")
+            .arg("COUNT")
+            .arg(1)
+            .query_async(&mut conn)
+            .await
+    }
+
+    // P0.3: DLQ + ACK «poison» сообщений
+    async fn write_dlq(
+        &self,
+        stream: &str,
+        message_id: &str,
+        payload: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
         let _: redis::Value = redis::cmd("XADD")
-            .arg(dlq_stream)
+            .arg(&self.dlq_key)
             .arg("MAXLEN")
             .arg("~")
             .arg(self.config.trim_maxlen)
             .arg("*")
+            .arg("original_stream")
+            .arg(stream)
+            .arg("original_id")
+            .arg(message_id)
             .arg("reason")
             .arg(reason)
-            .arg("payload")
+            .arg("raw")
             .arg(payload)
+            .arg("ts_utc")
+            .arg(Utc::now().timestamp())
             .query_async(&mut conn)
             .await?;
         Ok(())
     }
 
-    async fn parse_message<T: DeserializeOwned>(
-        &self,
-        payload: &str,
-    ) -> Result<Envelope<T>> {
+    fn parse_message<T: DeserializeOwned>(&self, payload: &str) -> Result<Envelope<T>> {
         let envelope: Envelope<T> = serde_json::from_str(payload)?;
         Ok(envelope)
     }
-}
 
-#[async_trait]
-impl CommandSource for RedisCommandSource {
-    async fn next_command(&mut self) -> Option<CommandEnvelope> {
-        let reply = self.read_group().await.ok()?;
+    fn extract_payload(&self, fields: &redis::Value) -> Option<String> {
+        let fields = match fields {
+            redis::Value::Bulk(values) => values,
+            _ => return None,
+        };
+        for chunk in fields.chunks(2) {
+            if let [key, value] = chunk {
+                if let redis::Value::Data(key) = key {
+                    if key == b"payload" {
+                        if let redis::Value::Data(value) = value {
+                            return Some(String::from_utf8_lossy(value).to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn parse_read_group_entry(&self, reply: redis::Value) -> Option<StreamEntry> {
+        // [[ stream_name, [[ id, [k,v,k,v...] ], ... ] ]]
         let streams = match reply {
             redis::Value::Bulk(streams) => streams,
             _ => return None,
         };
         let stream = streams.first()?;
-        let entries = match stream {
+        let items = match stream {
             redis::Value::Bulk(values) => values,
             _ => return None,
         };
-        if entries.len() < 2 {
+        if items.len() < 2 {
             return None;
         }
-        let entries = match &entries[1] {
+        let entries = match &items[1] {
             redis::Value::Bulk(entries) => entries,
             _ => return None,
         };
@@ -179,45 +265,148 @@ impl CommandSource for RedisCommandSource {
             return None;
         }
         let message_id = match &entry[0] {
-            redis::Value::Data(bytes) => String::from_utf8_lossy(bytes).to_string(),
+            redis::Value::Data(data) => String::from_utf8_lossy(data).to_string(),
             _ => return None,
         };
-        let fields = match &entry[1] {
+        let payload = self.extract_payload(&entry[1]);
+        Some(StreamEntry { message_id, payload })
+    }
+
+    fn parse_autoclaim_entry(&self, reply: redis::Value) -> Option<StreamEntry> {
+        // [ next_start_id, [[ id, [k,v,...] ], ...], [deleted_ids...] ]
+        let parts = match reply {
             redis::Value::Bulk(values) => values,
             _ => return None,
         };
-        let mut payload = None;
-        for chunk in fields.chunks(2) {
-            if let [key, value] = chunk {
-                if let redis::Value::Data(key) = key {
-                    if key == b"payload" {
-                        if let redis::Value::Data(value) = value {
-                            payload = Some(String::from_utf8_lossy(value).to_string());
-                        }
-                    }
-                }
-            }
+        if parts.len() < 2 {
+            return None;
         }
-        let payload = payload?;
-        match self.parse_message::<OrderCommand>(&payload).await {
+        let entries = match &parts[1] {
+            redis::Value::Bulk(values) => values,
+            _ => return None,
+        };
+        let entry = entries.first()?;
+        let entry = match entry {
+            redis::Value::Bulk(values) => values,
+            _ => return None,
+        };
+        if entry.len() < 2 {
+            return None;
+        }
+        let message_id = match &entry[0] {
+            redis::Value::Data(data) => String::from_utf8_lossy(data).to_string(),
+            _ => return None,
+        };
+        let payload = self.extract_payload(&entry[1]);
+        Some(StreamEntry { message_id, payload })
+    }
+
+    async fn handle_payload(&self, entry: StreamEntry) -> Option<CommandEnvelope> {
+        let message_id = entry.message_id;
+
+        let Some(payload) = entry.payload else {
+            if let Err(error) = self
+                .write_dlq(
+                    &self.config.streams.commands,
+                    &message_id,
+                    "",
+                    "missing_payload",
+                )
+                .await
+            {
+                warn!(?error, "dlq write failed");
+            }
+            let _ = self.ack(&message_id).await;
+            return None;
+        };
+
+        match self.parse_message::<OrderCommand>(&payload) {
             Ok(envelope) => {
                 if envelope.schema_version > SCHEMA_VERSION {
-                    if let Err(error) = self.write_dlq(&self.config.streams.commands, &payload, "unsupported_schema").await {
-                        tracing::warn!(?error, "dlq write failed");
+                    if let Err(error) = self
+                        .write_dlq(
+                            &self.config.streams.commands,
+                            &message_id,
+                            &payload,
+                            "unsupported_schema",
+                        )
+                        .await
+                    {
+                        warn!(?error, "dlq write failed");
                     }
                     let _ = self.ack(&message_id).await;
                     return None;
                 }
+
+                if envelope.msg_type != MessageType::Command {
+                    if let Err(error) = self
+                        .write_dlq(
+                            &self.config.streams.commands,
+                            &message_id,
+                            &payload,
+                            "unexpected_msg_type",
+                        )
+                        .await
+                    {
+                        warn!(?error, "dlq write failed");
+                    }
+                    let _ = self.ack(&message_id).await;
+                    return None;
+                }
+
                 Some(CommandEnvelope {
                     command: envelope.payload,
                     message_id: Some(message_id),
                 })
             }
             Err(error) => {
-                tracing::warn!(?error, "command decode failed");
+                warn!(?error, "command decode failed");
+                if let Err(error) = self
+                    .write_dlq(
+                        &self.config.streams.commands,
+                        &message_id,
+                        &payload,
+                        "parse_error",
+                    )
+                    .await
+                {
+                    warn!(?error, "dlq write failed");
+                }
+                let _ = self.ack(&message_id).await;
                 None
             }
         }
+    }
+}
+
+#[async_trait]
+impl CommandSource for RedisCommandSource {
+    async fn next_command(&mut self) -> Option<CommandEnvelope> {
+        if let Err(error) = self.ensure_group().await {
+            warn!(?error, "command group init failed");
+            return None;
+        }
+
+        // P0.2: сначала пытаемся вернуть pending (idle) сообщение
+        match self.claim_idle().await {
+            Ok(reply) => {
+                if let Some(entry) = self.parse_autoclaim_entry(reply) {
+                    return self.handle_payload(entry).await;
+                }
+            }
+            Err(error) => {
+                warn!(?error, "command autoclaim failed");
+            }
+        }
+
+        // затем читаем новые
+        if let Ok(reply) = self.read_group().await {
+            if let Some(entry) = self.parse_read_group_entry(reply) {
+                return self.handle_payload(entry).await;
+            }
+        }
+
+        None
     }
 
     async fn ack(&self, message_id: &str) -> Result<()> {
@@ -243,20 +432,15 @@ impl RedisCommandSink {
         Ok(Self { client, config })
     }
 
-    async fn publish_envelope<T: serde::Serialize>(
+    async fn publish<T: serde::Serialize>(
         &self,
         stream: &str,
         msg_type: MessageType,
         payload: &T,
     ) -> Result<()> {
-        let envelope = Envelope::new(
-            Utc::now().timestamp(),
-            self.config.source.clone(),
-            msg_type,
-            payload,
-        );
-        let payload = serde_json::to_string(&envelope)?;
         let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let envelope = Envelope::new(Utc::now().timestamp(), &self.config.source, msg_type, payload);
+        let json = serde_json::to_string(&envelope)?;
         let _: redis::Value = redis::cmd("XADD")
             .arg(stream)
             .arg("MAXLEN")
@@ -264,7 +448,7 @@ impl RedisCommandSink {
             .arg(self.config.trim_maxlen)
             .arg("*")
             .arg("payload")
-            .arg(payload)
+            .arg(json)
             .query_async(&mut conn)
             .await?;
         Ok(())
@@ -274,43 +458,16 @@ impl RedisCommandSink {
 #[async_trait]
 impl CommandSink for RedisCommandSink {
     async fn publish_command(&self, command: OrderCommand) -> Result<()> {
-        self.publish_envelope(&self.config.streams.commands, MessageType::Command, &command)
-            .await
+        self.publish(
+            &self.config.streams.commands,
+            MessageType::Command,
+            &command,
+        )
+        .await
     }
 
     async fn publish_ack(&self, ack: CommandAck) -> Result<()> {
-        self.publish_envelope(&self.config.streams.acks, MessageType::CommandAck, &ack)
+        self.publish(&self.config.streams.acks, MessageType::CommandAck, &ack)
             .await
     }
-}
-
-pub async fn claim_pending(
-    config: &TransportConfig,
-    idle_ms: u64,
-) -> Result<Vec<String>> {
-    let client = redis::Client::open(config.redis_url.clone())?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
-    let reply: redis::Value = redis::cmd("XAUTOCLAIM")
-        .arg(&config.streams.commands)
-        .arg(&config.consumer_group)
-        .arg(&config.consumer_name)
-        .arg(idle_ms)
-        .arg("0-0")
-        .arg("COUNT")
-        .arg(10)
-        .query_async(&mut conn)
-        .await?;
-    let mut ids = Vec::new();
-    if let redis::Value::Bulk(values) = reply {
-        if let Some(redis::Value::Bulk(entries)) = values.get(1) {
-            for entry in entries {
-                if let redis::Value::Bulk(entry) = entry {
-                    if let Some(redis::Value::Data(id)) = entry.first() {
-                        ids.push(String::from_utf8_lossy(id).to_string());
-                    }
-                }
-            }
-        }
-    }
-    Ok(ids)
 }
