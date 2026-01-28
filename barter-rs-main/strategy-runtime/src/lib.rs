@@ -1,4 +1,5 @@
 pub mod redis_transport;
+pub mod runtime;
 pub mod state;
 pub mod strategy_limit_cancel;
 
@@ -39,6 +40,8 @@ pub struct PositionEvent {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    pub redis_url: String,
+    pub source: String,
     pub strategy_id: String,
     pub portfolio: String,
     pub exchange: String,

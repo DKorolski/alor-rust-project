@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{OrderEvent, PositionEvent};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StrategyState {
     Idle,
     Placed {
@@ -32,7 +33,7 @@ impl Default for StrategyState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RuntimeState {
     pub last_processed_bar_ts: HashMap<String, i64>,
     pub strategy_state: StrategyState,
