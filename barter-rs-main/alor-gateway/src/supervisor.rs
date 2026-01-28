@@ -755,7 +755,10 @@ impl Supervisor {
             )
             .start(bars_rx);
         } else {
-            drop(bars_rx);
+            tokio::spawn(async move {
+                let mut bars_rx = bars_rx;
+                while bars_rx.recv().await.is_some() {}
+            });
         }
 
         let silence_threshold = Duration::from_secs(cfg.max_silence_bars_sec);

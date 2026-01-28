@@ -15,13 +15,24 @@ use crate::strategy_limit_cancel::LimitCancelConfig;
 pub struct BarEvent {
     pub symbol: String,
     pub close_time_utc: i64,
+    #[serde(default, alias = "c")]
     pub close: f64,
+    #[serde(default)]
+    pub o: f64,
+    #[serde(default)]
+    pub h: f64,
+    #[serde(default)]
+    pub l: f64,
+    #[serde(default)]
+    pub v: f64,
     pub origin: DataOrigin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DataOrigin {
+    History,
+    HistoryGap,
     Live,
     Replay,
 }

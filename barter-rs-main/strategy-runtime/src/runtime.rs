@@ -3,8 +3,8 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tokio::time::sleep;
-use tracing::{info, warn};
+use tokio::time::{sleep, Instant};
+use tracing::{info, warn, error};
 
 use alor_protocol::MessageType;
 
@@ -27,6 +27,18 @@ pub struct StrategyRuntime {
     transport: RedisRuntimeTransport,
     state: RuntimeState,
     machine: LimitCancelStateMachine,
+    metrics: RuntimeMetrics,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeMetrics {
+    bars_read_total: u64,
+    bars_decoded_ok_total: u64,
+    bars_decode_failed_total: u64,
+    bars_acked_total: u64,
+    bars_last_seen_close_time_utc: Option<i64>,
+    redis_read_timeouts_total: u64,
+    last_log: Option<Instant>,
 }
 
 impl StrategyRuntime {
@@ -43,6 +55,7 @@ impl StrategyRuntime {
             transport,
             state: RuntimeState::default(),
             machine,
+            metrics: RuntimeMetrics::default(),
         })
     }
 
@@ -198,6 +211,7 @@ impl StrategyRuntime {
             .await?;
         self.drain_stream(&streams.bars, MessageType::Bar, trim_bars, 10)
             .await?;
+        self.log_metrics_if_due().await?;
         Ok(())
     }
 
@@ -216,6 +230,13 @@ impl StrategyRuntime {
             }
         };
         let entries = self.transport.parse_read_group_entries(stream, reply);
+        if entries.is_empty() {
+            self.metrics.redis_read_timeouts_total = self.metrics.redis_read_timeouts_total.saturating_add(1);
+            return Ok(());
+        }
+        if msg_type == MessageType::Bar {
+            self.metrics.bars_read_total = self.metrics.bars_read_total.saturating_add(entries.len() as u64);
+        }
         for entry in entries {
             if let Some(message) = self
                 .transport
@@ -223,6 +244,12 @@ impl StrategyRuntime {
                 .await
             {
                 self.dispatch_message(message).await?;
+                if msg_type == MessageType::Bar {
+                    self.metrics.bars_decoded_ok_total = self.metrics.bars_decoded_ok_total.saturating_add(1);
+                }
+            } else if msg_type == MessageType::Bar {
+                self.metrics.bars_decode_failed_total =
+                    self.metrics.bars_decode_failed_total.saturating_add(1);
             }
         }
         Ok(())
@@ -301,15 +328,26 @@ impl StrategyRuntime {
         message_id: String,
         bar: crate::BarEvent,
     ) -> Result<()> {
+        if bar.origin != crate::DataOrigin::Live {
+            self.state.update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+            self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
+            self.persist_state(None).await?;
+            self.transport.xack(&stream, &message_id).await?;
+            self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
+            return Ok(());
+        }
         if self.state.is_duplicate_bar(&bar.symbol, bar.close_time_utc) {
             self.transport.xack(&stream, &message_id).await?;
+            self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
             return Ok(());
         }
         let maybe_cmd = self.machine.on_bar(&bar);
         self.state.strategy_state = self.machine.state.clone();
         self.state.update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         self.persist_state(maybe_cmd.as_ref()).await?;
         self.transport.xack(&stream, &message_id).await?;
+        self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
         Ok(())
     }
 
@@ -332,6 +370,40 @@ impl StrategyRuntime {
                     self.config.trim_maxlen_runtime_state,
                 )
                 .await?;
+        }
+        Ok(())
+    }
+
+    async fn log_metrics_if_due(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let log_due = match self.metrics.last_log {
+            Some(last) => now.duration_since(last) >= Duration::from_secs(5),
+            None => true,
+        };
+        if !log_due {
+            return Ok(());
+        }
+        self.metrics.last_log = Some(now);
+        info!(
+            bars_read_total = self.metrics.bars_read_total,
+            bars_decoded_ok_total = self.metrics.bars_decoded_ok_total,
+            bars_decode_failed_total = self.metrics.bars_decode_failed_total,
+            bars_acked_total = self.metrics.bars_acked_total,
+            bars_last_seen_close_time_utc = self.metrics.bars_last_seen_close_time_utc,
+            redis_read_timeouts_total = self.metrics.redis_read_timeouts_total,
+            "runtime bars metrics"
+        );
+        if self.metrics.bars_read_total == 0 {
+            let xlen = self.transport.xlen(&self.config.streams.bars).await.unwrap_or(0);
+            if xlen > 0 {
+                error!(
+                    bars_stream = self.config.streams.bars,
+                    consumer_group = self.config.consumer_group,
+                    consumer_name = self.config.consumer_name,
+                    xlen,
+                    "bars stream has data but runtime reads none — check group/consumer and start id"
+                );
+            }
         }
         Ok(())
     }

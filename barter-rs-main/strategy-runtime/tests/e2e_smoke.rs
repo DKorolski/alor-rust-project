@@ -74,6 +74,10 @@ async fn publish_bar(redis_url: &str, stream: &str, symbol: &str, ts: i64, close
         symbol: symbol.to_string(),
         close_time_utc: ts,
         close,
+        o: close,
+        h: close,
+        l: close,
+        v: 0.0,
         origin: DataOrigin::Live,
     };
     let envelope = Envelope::new(Utc::now().timestamp(), "test", MessageType::Bar, bar);

@@ -176,6 +176,15 @@ impl RedisRuntimeTransport {
         Ok(values)
     }
 
+    pub async fn xlen(&self, stream: &str) -> Result<i64> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let len: i64 = redis::cmd("XLEN")
+            .arg(stream)
+            .query_async(&mut conn)
+            .await?;
+        Ok(len)
+    }
+
     pub async fn xrevrange_last(&self, stream: &str) -> Result<Option<String>> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let reply: redis::Value = redis::cmd("XREVRANGE")
@@ -270,6 +279,10 @@ impl RedisRuntimeTransport {
             .arg("original_stream")
             .arg(original_stream)
             .arg("original_id")
+            .arg(message_id)
+            .arg("stream")
+            .arg(original_stream)
+            .arg("message_id")
             .arg(message_id)
             .arg("reason")
             .arg(reason)

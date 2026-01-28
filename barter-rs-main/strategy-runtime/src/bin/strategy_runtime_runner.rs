@@ -5,7 +5,7 @@ use tokio::signal;
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
 
-use strategy_runtime::runtime::{default_limit_cancel, StrategyRuntime};
+use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{RuntimeConfig, StreamNames};
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -23,6 +23,15 @@ async fn main() -> Result<()> {
     let portfolio = env_or_default("PORTFOLIO", "demo");
     let exchange = env_or_default("EXCHANGE", "alor");
     let symbol = env_or_default("SYMBOL", "SBER");
+    let side = env_or_default("SIDE", "buy").to_lowercase();
+    let side = match side.as_str() {
+        "sell" => alor_protocol::Side::Sell,
+        _ => alor_protocol::Side::Buy,
+    };
+    let offset_ticks: i64 = env_or_default("PLACE_OFFSET_TICKS", "1")
+        .parse()
+        .unwrap_or(1);
+    let qty: f64 = env_or_default("QTY", "1.0").parse().unwrap_or(1.0);
 
     let config = RuntimeConfig {
         redis_url,
@@ -74,7 +83,16 @@ async fn main() -> Result<()> {
         trim_maxlen_health: env_or_default("TRIM_MAXLEN_HEALTH", "10000")
             .parse()
             .unwrap_or(10000),
-        limit_cancel: default_limit_cancel(symbol),
+        limit_cancel: strategy_runtime::strategy_limit_cancel::LimitCancelConfig {
+            symbol,
+            tick_size: 0.01,
+            offset_ticks,
+            qty,
+            side,
+            max_wait_bars_for_ack: env_or_default("MAX_WAIT_BARS_FOR_ACK", "3")
+                .parse()
+                .unwrap_or(3),
+        },
     };
 
     info!(
