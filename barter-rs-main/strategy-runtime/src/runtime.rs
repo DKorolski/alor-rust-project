@@ -263,10 +263,7 @@ impl StrategyRuntime {
     ) -> Result<()> {
         let maybe_cmd = self.machine.on_ack(&ack);
         self.state.strategy_state = self.machine.state.clone();
-        if let Some(cmd) = maybe_cmd {
-            self.transport.publish_command(&cmd).await?;
-        }
-        self.persist_state().await?;
+        self.persist_state(maybe_cmd.as_ref()).await?;
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
     }
@@ -277,12 +274,9 @@ impl StrategyRuntime {
         message_id: String,
         order: OrderEvent,
     ) -> Result<()> {
-        if let Some(cmd) = self.machine.on_order_event(&order) {
-            self.transport.publish_command(&cmd).await?;
-            self.state.strategy_state = self.machine.state.clone();
-        }
+        let maybe_cmd = self.machine.on_order_event(&order);
         self.state.strategy_state = self.machine.state.clone();
-        self.persist_state().await?;
+        self.persist_state(maybe_cmd.as_ref()).await?;
         self.state.orders.insert(order.order_id, order);
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
@@ -314,28 +308,31 @@ impl StrategyRuntime {
         let maybe_cmd = self.machine.on_bar(&bar);
         self.state.strategy_state = self.machine.state.clone();
         self.state.update_last_bar_ts(&bar.symbol, bar.close_time_utc);
-        if let Some(cmd) = maybe_cmd {
-            self.transport.publish_command(&cmd).await?;
-        }
-        self.persist_state().await?;
+        self.persist_state(maybe_cmd.as_ref()).await?;
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
     }
 
-    async fn persist_state(&self) -> Result<()> {
+    async fn persist_state(&self, maybe_cmd: Option<&alor_protocol::OrderCommand>) -> Result<()> {
         let snapshot = RuntimeStateSnapshot {
             ts_utc: Utc::now().timestamp(),
             last_processed_bar_ts: self.state.last_processed_bar_ts.clone(),
             strategy_state: self.state.strategy_state.clone(),
         };
         let payload = serde_json::to_string(&snapshot)?;
-        self.transport
-            .xadd_state(
-                &self.config.runtime_state_stream,
-                &payload,
-                self.config.trim_maxlen_runtime_state,
-            )
-            .await?;
+        if let Some(command) = maybe_cmd {
+            self.transport
+                .publish_command_and_state(command, &payload)
+                .await?;
+        } else {
+            self.transport
+                .xadd_state(
+                    &self.config.runtime_state_stream,
+                    &payload,
+                    self.config.trim_maxlen_runtime_state,
+                )
+                .await?;
+        }
         Ok(())
     }
 }

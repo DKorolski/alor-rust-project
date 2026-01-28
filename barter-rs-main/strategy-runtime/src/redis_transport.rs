@@ -131,6 +131,42 @@ impl RedisRuntimeTransport {
         Ok(())
     }
 
+    pub async fn publish_command_and_state(
+        &self,
+        command: &OrderCommand,
+        state_payload: &str,
+    ) -> Result<()> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let envelope = Envelope::new(
+            Utc::now().timestamp(),
+            &self.config.source,
+            MessageType::Command,
+            command,
+        );
+        let command_json = serde_json::to_string(&envelope)?;
+        redis::pipe()
+            .atomic()
+            .cmd("XADD")
+            .arg(&self.config.streams.commands)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(self.config.trim_maxlen_commands)
+            .arg("*")
+            .arg(PAYLOAD_FIELD)
+            .arg(command_json)
+            .cmd("XADD")
+            .arg(&self.config.runtime_state_stream)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(self.config.trim_maxlen_runtime_state)
+            .arg("*")
+            .arg(PAYLOAD_FIELD)
+            .arg(state_payload)
+            .query_async::<_, ()>(&mut conn)
+            .await?;
+        Ok(())
+    }
+
     pub async fn hgetall(&self, key: &str) -> Result<Vec<(String, String)>> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let values: Vec<(String, String)> = redis::cmd("HGETALL")
