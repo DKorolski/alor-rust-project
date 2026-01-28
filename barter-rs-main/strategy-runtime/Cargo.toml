@@ -1,0 +1,18 @@
+[package]
+name = "strategy-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alor-protocol = { path = "../alor-protocol" }
+anyhow = "1"
+chrono = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+tokio = { workspace = true }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -9,7 +9,8 @@ members = [
     "barter-instrument",
     "alor-scalping",
     "alor-protocol",
-    "alor-gateway"
+    "alor-gateway",
+    "strategy-runtime"
 ]
 
 [workspace.dependencies]
