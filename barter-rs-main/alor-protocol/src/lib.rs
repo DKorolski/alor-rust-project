@@ -92,9 +92,9 @@ impl OrderCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AckStatus {
-    Success,
     Accepted,
-    Error,
+    Confirmed,
+    Rejected,
     Duplicate,
 }
 
@@ -110,10 +110,10 @@ pub struct CommandAck {
 }
 
 impl CommandAck {
-    pub fn success(request_id: Uuid, broker_order_id: Option<i64>) -> Self {
+    pub fn confirmed(request_id: Uuid, broker_order_id: Option<i64>) -> Self {
         Self {
             request_id,
-            status: AckStatus::Success,
+            status: AckStatus::Confirmed,
             broker_order_id,
             error_code: None,
             error_msg: None,
@@ -132,14 +132,14 @@ impl CommandAck {
         }
     }
 
-    pub fn error(
+    pub fn rejected(
         request_id: Uuid,
         error_code: impl Into<String>,
         error_msg: impl Into<String>,
     ) -> Self {
         Self {
             request_id,
-            status: AckStatus::Error,
+            status: AckStatus::Rejected,
             broker_order_id: None,
             error_code: Some(error_code.into()),
             error_msg: Some(error_msg.into()),

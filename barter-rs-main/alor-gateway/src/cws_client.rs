@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
@@ -14,6 +14,9 @@ use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::HealthState;
+
+const CWS_TIME_IN_FORCE: &str = "BookOrCancel";
+const CWS_ALLOW_MARGIN: bool = true;
 
 #[derive(Debug, Clone)]
 pub struct CwsHandle {
@@ -69,38 +72,75 @@ impl CwsHandle {
         side: &str,
     ) -> anyhow::Result<Value> {
         let guid = new_guid();
+        let qty = qty.round() as i64;
         let payload = serde_json::json!({
-            "opcode": "CreateLimitOrder",
+            "opcode": "create:limit",
             "guid": guid,
-            "portfolio": portfolio,
-            "exchange": exchange,
-            "symbol": symbol,
-            "price": price,
-            "quantity": qty,
             "side": side,
+            "quantity": qty,
+            "price": price,
+            "instrument": {"symbol": symbol, "exchange": exchange},
+            "user": {"portfolio": portfolio},
+            "timeInForce": CWS_TIME_IN_FORCE,
+            "allowMargin": CWS_ALLOW_MARGIN,
         });
         self.send(payload).await
     }
 
-    pub async fn cancel(&self, order_id: i64) -> anyhow::Result<Value> {
+    pub async fn cancel(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        order_id: i64,
+    ) -> anyhow::Result<Value> {
         let guid = new_guid();
         let payload = serde_json::json!({
-            "opcode": "CancelOrder",
+            "opcode": "delete:limit",
             "guid": guid,
             "orderId": order_id,
+            "exchange": exchange,
+            "user": {"portfolio": portfolio},
+            "checkDuplicates": true,
         });
         self.send(payload).await
     }
 
-    pub async fn replace(&self, order_id: i64, new_price: f64, new_qty: f64) -> anyhow::Result<Value> {
+    pub async fn replace(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        symbol: Option<&str>,
+        side: Option<&str>,
+        order_id: i64,
+        new_price: f64,
+        new_qty: f64,
+    ) -> anyhow::Result<Value> {
         let guid = new_guid();
-        let payload = serde_json::json!({
-            "opcode": "ReplaceOrder",
-            "guid": guid,
-            "orderId": order_id,
-            "price": new_price,
-            "quantity": new_qty,
-        });
+        let new_qty = new_qty.round() as i64;
+        let mut payload = Map::new();
+        payload.insert("opcode".to_string(), Value::String("update:limit".to_string()));
+        payload.insert("guid".to_string(), Value::String(guid));
+        payload.insert("orderId".to_string(), Value::from(order_id));
+        payload.insert("exchange".to_string(), Value::String(exchange.to_string()));
+        payload.insert("user".to_string(), serde_json::json!({"portfolio": portfolio}));
+        payload.insert("price".to_string(), Value::from(new_price));
+        payload.insert("quantity".to_string(), Value::from(new_qty));
+        payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
+        payload.insert(
+            "timeInForce".to_string(),
+            Value::String(CWS_TIME_IN_FORCE.to_string()),
+        );
+        payload.insert("checkDuplicates".to_string(), Value::from(true));
+        if let Some(symbol) = symbol {
+            payload.insert(
+                "instrument".to_string(),
+                serde_json::json!({"symbol": symbol, "exchange": exchange}),
+            );
+        }
+        if let Some(side) = side {
+            payload.insert("side".to_string(), Value::String(side.to_string()));
+        }
+        let payload = Value::Object(payload);
         self.send(payload).await
     }
 
@@ -166,6 +206,10 @@ async fn run_session(
                             map.insert("guid".to_string(), Value::String(guid.clone()));
                             map.insert("token".to_string(), Value::String(token.clone()));
                         });
+                        let opcode = payload.get("opcode").and_then(Value::as_str).unwrap_or("unknown");
+                        info!(opcode, guid, "cws send");
+                        let redacted_payload = redact_token(&payload.to_string());
+                        debug!(opcode, guid, payload = %redacted_payload, "cws send payload");
                         ws_sink
                             .send(Message::Text(payload.to_string().into()))
                             .await?;
@@ -177,11 +221,20 @@ async fn run_session(
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
                         if let Ok(value) = serde_json::from_str::<Value>(&txt) {
-                            if let Some(guid) = guid_of(&value) {
+                            let guid = guid_of(&value);
+                            let opcode = value.get("opcode").and_then(Value::as_str).unwrap_or("unknown");
+                            debug!(opcode, guid = ?guid, payload = %value, "cws recv payload");
+                            if let Some(guid) = guid {
                                 if let Some(tx) = pending.remove(&guid) {
                                     let _ = tx.send(Ok(value));
+                                } else {
+                                    warn!(opcode, guid, "cws recv without pending request");
                                 }
+                            } else {
+                                warn!(opcode, "cws recv without guid");
                             }
+                        } else {
+                            warn!(payload = %txt, "cws recv non-json payload");
                         }
                     }
                     Some(Ok(Message::Close(frame))) => {

@@ -249,7 +249,7 @@ pub async fn run_command_consumer(
 
                 if let Some(error_code) = validate_command(&command, price_step, volume_step, &health, config.pause_when_degraded) {
                     increment_counter(&health, |h| h.command_validation_failed_total = h.command_validation_failed_total.saturating_add(1));
-                    let ack = CommandAck::error(request_id, error_code, "validation failed");
+                    let ack = CommandAck::rejected(request_id, error_code, "validation failed");
                     sink.publish_ack(ack.clone()).await?;
                     info!(
                         request_id = %ack.request_id,
@@ -265,7 +265,7 @@ pub async fn run_command_consumer(
 
                 if is_command_expired(&command) {
                     increment_counter(&health, |h| h.command_expired_total = h.command_expired_total.saturating_add(1));
-                    let ack = CommandAck::error(request_id, "expired", "command expired");
+                    let ack = CommandAck::rejected(request_id, "expired", "command expired");
                     sink.publish_ack(ack.clone()).await?;
                     info!(
                         request_id = %ack.request_id,
@@ -286,7 +286,7 @@ pub async fn run_command_consumer(
                             request_map.write().insert(order_id, request_id);
                         }
                         let ack = match order_id {
-                            Some(order_id) => CommandAck::success(request_id, Some(order_id)),
+                            Some(order_id) => CommandAck::confirmed(request_id, Some(order_id)),
                             None => CommandAck::accepted(request_id),
                         };
                         sink.publish_ack(ack.clone()).await?;
@@ -301,7 +301,7 @@ pub async fn run_command_consumer(
                         }
                     }
                     Err(error) => {
-                        let ack = CommandAck::error(
+                        let ack = CommandAck::rejected(
                             request_id,
                             "command_failed",
                             format!("{error}"),
@@ -424,19 +424,30 @@ async fn execute_command(
             Ok(response.get("orderId").and_then(|value| value.as_i64()))
         }
         CommandAction::Cancel(payload) => {
-            let response = cws.cancel(payload.order_id).await?;
+            let response = cws
+                .cancel(&command.portfolio, &command.exchange, payload.order_id)
+                .await?;
             Ok(response.get("orderId").and_then(|value| value.as_i64()))
         }
         CommandAction::Replace(payload) => {
             let new_price = normalize_step_round(payload.new_price, price_step);
             let new_qty = normalize_qty(payload.new_qty, volume_step);
             let response = cws
-                .replace(payload.order_id, new_price, new_qty)
+                .replace(
+                    &command.portfolio,
+                    &command.exchange,
+                    Some(&command.symbol),
+                    None,
+                    payload.order_id,
+                    new_price,
+                    new_qty,
+                )
                 .await?;
             Ok(response.get("orderId").and_then(|value| value.as_i64()))
         }
     }
 }
+
 
 fn side_str(side: Side) -> &'static str {
     match side {

@@ -244,7 +244,7 @@ async fn e2e_limit_cancel_happy_path() -> Result<()> {
     publish_ack(
         &redis_url,
         &config.streams.acks,
-        CommandAck::success(place_cmd.request_id, Some(123)),
+        CommandAck::confirmed(place_cmd.request_id, Some(123)),
     )
     .await?;
 
@@ -330,7 +330,7 @@ async fn e2e_restart_without_duplicate_place() -> Result<()> {
         &config_b.streams.acks,
         CommandAck {
             request_id: place_request_id,
-            status: AckStatus::Success,
+            status: AckStatus::Confirmed,
             broker_order_id: Some(456),
             error_code: None,
             error_msg: None,

@@ -131,7 +131,7 @@ impl LimitCancelStateMachine {
                     return None;
                 }
                 match ack.status {
-                    AckStatus::Success | AckStatus::Accepted | AckStatus::Duplicate => {
+                    AckStatus::Confirmed | AckStatus::Accepted | AckStatus::Duplicate => {
                         if let Some(broker_order_id) = ack.broker_order_id {
                             *order_id = Some(broker_order_id);
                         }
@@ -156,7 +156,7 @@ impl LimitCancelStateMachine {
                         }
                         None
                     }
-                    AckStatus::Error => {
+                    AckStatus::Rejected => {
                         self.state = StrategyState::Done {
                             last_bar_ts: self.last_processed_bar_ts.unwrap_or(ack.processed_ts_utc),
                         };
@@ -281,7 +281,7 @@ mod tests {
         let bar2 = bar(20, 101.0);
         assert!(machine.on_bar(&bar2).is_none());
 
-        let ack_place = CommandAck::success(place_cmd.request_id, Some(123));
+        let ack_place = CommandAck::confirmed(place_cmd.request_id, Some(123));
         let cancel_cmd = machine.on_ack(&ack_place).expect("cancel cmd");
         match cancel_cmd.action {
             CommandAction::Cancel(_) => {}
@@ -301,7 +301,7 @@ mod tests {
         let bar2 = bar(20, 101.0);
         assert!(machine.on_bar(&bar2).is_none());
 
-        let ack_place = CommandAck::success(place_cmd.request_id, Some(555));
+        let ack_place = CommandAck::confirmed(place_cmd.request_id, Some(555));
         let cancel_cmd = machine.on_ack(&ack_place).expect("cancel cmd");
         assert!(matches!(cancel_cmd.action, CommandAction::Cancel(_)));
     }

@@ -208,7 +208,7 @@ async fn execute_action(
         }
         Action::Cancel { order_id } => {
             info!(order_id, "strategy cancel order");
-            let _ = cws.cancel(order_id).await?;
+            let _ = cws.cancel(portfolio, exchange, order_id).await?;
         }
         Action::Replace {
             order_id,
@@ -218,7 +218,9 @@ async fn execute_action(
             info!(order_id, new_price, new_qty, "strategy replace order");
             let new_price = normalize_step(new_price, price_step);
             let new_qty = normalize_step(new_qty, volume_step);
-            let _ = cws.replace(order_id, new_price, new_qty).await?;
+            let _ = cws
+                .replace(portfolio, exchange, None, None, order_id, new_price, new_qty)
+                .await?;
         }
         Action::Noop => {}
     }
