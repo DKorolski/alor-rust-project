@@ -136,6 +136,10 @@ impl StrategyRuntime {
     }
 
     async fn load_runtime_state(&mut self) -> Result<()> {
+        if self.config.reset_state_on_start {
+            info!("reset_state_on_start enabled; skipping runtime state restore");
+            return Ok(());
+        }
         if let Some(payload) = self
             .transport
             .xrevrange_last(&self.config.runtime_state_stream)

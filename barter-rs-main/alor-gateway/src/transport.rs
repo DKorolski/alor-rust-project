@@ -54,7 +54,7 @@ pub trait EventSink: Send + Sync {
 
 #[async_trait]
 pub trait CommandSource: Send + Sync {
-    async fn next_command(&mut self) -> Option<CommandEnvelope>;
+    async fn next_command(&mut self) -> Result<Option<CommandEnvelope>>;
     async fn ack(&self, message_id: &str) -> Result<()>;
 }
 
@@ -103,11 +103,11 @@ impl InprocEventSource {
 }
 
 impl InprocCommandSource {
-    pub async fn next_command(&mut self) -> Option<CommandEnvelope> {
-        self.rx.recv().await.map(|command| CommandEnvelope {
+    pub async fn next_command(&mut self) -> Result<Option<CommandEnvelope>> {
+        Ok(self.rx.recv().await.map(|command| CommandEnvelope {
             command,
             message_id: None,
-        })
+        }))
     }
 }
 
@@ -210,11 +210,11 @@ impl EventSink for InprocEventSink {
 
 #[async_trait]
 impl CommandSource for InprocCommandSource {
-    async fn next_command(&mut self) -> Option<CommandEnvelope> {
-        self.rx.recv().await.map(|command| CommandEnvelope {
+    async fn next_command(&mut self) -> Result<Option<CommandEnvelope>> {
+        Ok(self.rx.recv().await.map(|command| CommandEnvelope {
             command,
             message_id: None,
-        })
+        }))
     }
 
     async fn ack(&self, _message_id: &str) -> Result<()> {

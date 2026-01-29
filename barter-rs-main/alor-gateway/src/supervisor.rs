@@ -25,7 +25,7 @@ use crate::strategy_adapter::StrategyRunner;
 use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
 use alor_scalping::strategy::{Action, StrategyBar, StrategyContext, StrategyCore};
-use crate::services::command_consumer::{run_command_consumer, CommandConsumerConfig};
+use crate::services::command_consumer::{run_command_consumer, CommandConsumerConfig, CommandConsumerInfo};
 use crate::services::event_publisher::{
     EventPublisherConfig, EventPublisherHandle, start_event_publisher,
 };
@@ -49,6 +49,7 @@ pub struct CommandTransport {
     pub source: Box<dyn CommandSource>,
     pub sink: Arc<dyn CommandSink>,
     pub idempotency: Arc<dyn crate::services::command_consumer::IdempotencyStore>,
+    pub info: CommandConsumerInfo,
 }
 
 impl GatewayHandle {
@@ -418,23 +419,27 @@ impl Supervisor {
             self.token_provider.clone(),
             self.health.clone(),
         );
+        let request_map = Arc::new(RwLock::new(HashMap::<i64, uuid::Uuid>::new()));
 
         if let Some(transport) = command_transport {
             let cws_handle = cws_handle.clone();
             let price_step = cfg.price_step;
             let volume_step = cfg.volume_step;
             let health = self.health.clone();
+            let request_map_consumer = request_map.clone();
             let mut shutdown_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
                 if let Err(error) = run_command_consumer(
                     transport.source,
                     transport.sink,
                     transport.idempotency,
+                    request_map_consumer,
                     cws_handle,
                     price_step,
                     volume_step,
                     health,
                     &mut shutdown_rx,
+                    transport.info,
                     CommandConsumerConfig::default(),
                 )
                 .await
@@ -467,9 +472,14 @@ impl Supervisor {
         tokio::spawn({
             let health = self.health.clone();
             let publisher = publisher.clone();
+            let request_map_orders = request_map.clone();
             async move {
                 let mut orders_rx = streams.orders_rx;
                 while let Some(order) = orders_rx.recv().await {
+                    let mut order = order;
+                    if let Some(request_id) = request_map_orders.read().get(&order.order_id).copied() {
+                        order.request_id = Some(request_id);
+                    }
                     {
                         let mut guard = health.write();
                         guard.last_orders_ts = order.ts_utc;

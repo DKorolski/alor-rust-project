@@ -93,6 +93,7 @@ impl OrderCommand {
 #[serde(rename_all = "snake_case")]
 pub enum AckStatus {
     Success,
+    Accepted,
     Error,
     Duplicate,
 }
@@ -142,6 +143,17 @@ impl CommandAck {
             broker_order_id: None,
             error_code: Some(error_code.into()),
             error_msg: Some(error_msg.into()),
+            processed_ts_utc: Utc::now().timestamp(),
+        }
+    }
+
+    pub fn accepted(request_id: Uuid) -> Self {
+        Self {
+            request_id,
+            status: AckStatus::Accepted,
+            broker_order_id: None,
+            error_code: None,
+            error_msg: None,
             processed_ts_utc: Utc::now().timestamp(),
         }
     }

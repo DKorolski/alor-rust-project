@@ -381,32 +381,22 @@ impl RedisCommandSource {
 
 #[async_trait]
 impl CommandSource for RedisCommandSource {
-    async fn next_command(&mut self) -> Option<CommandEnvelope> {
-        if let Err(error) = self.ensure_group().await {
-            warn!(?error, "command group init failed");
-            return None;
-        }
+    async fn next_command(&mut self) -> Result<Option<CommandEnvelope>> {
+        self.ensure_group().await?;
 
         // P0.2: сначала пытаемся вернуть pending (idle) сообщение
-        match self.claim_idle().await {
-            Ok(reply) => {
-                if let Some(entry) = self.parse_autoclaim_entry(reply) {
-                    return self.handle_payload(entry).await;
-                }
-            }
-            Err(error) => {
-                warn!(?error, "command autoclaim failed");
-            }
+        let reply = self.claim_idle().await?;
+        if let Some(entry) = self.parse_autoclaim_entry(reply) {
+            return Ok(self.handle_payload(entry).await);
         }
 
         // затем читаем новые
-        if let Ok(reply) = self.read_group().await {
-            if let Some(entry) = self.parse_read_group_entry(reply) {
-                return self.handle_payload(entry).await;
-            }
+        let reply = self.read_group().await?;
+        if let Some(entry) = self.parse_read_group_entry(reply) {
+            return Ok(self.handle_payload(entry).await);
         }
 
-        None
+        Ok(None)
     }
 
     async fn ack(&self, message_id: &str) -> Result<()> {

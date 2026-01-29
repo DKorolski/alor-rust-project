@@ -32,6 +32,8 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(1);
     let qty: f64 = env_or_default("QTY", "1.0").parse().unwrap_or(1.0);
+    let tick_size: f64 = env_or_default("TICK_SIZE", "0.01").parse().unwrap_or(0.01);
+    let reset_state_on_start = env_or_default("RESET_STATE_ON_START", "0") == "1";
 
     let config = RuntimeConfig {
         redis_url,
@@ -85,7 +87,7 @@ async fn main() -> Result<()> {
             .unwrap_or(10000),
         limit_cancel: strategy_runtime::strategy_limit_cancel::LimitCancelConfig {
             symbol,
-            tick_size: 0.01,
+            tick_size,
             offset_ticks,
             qty,
             side,
@@ -93,6 +95,7 @@ async fn main() -> Result<()> {
                 .parse()
                 .unwrap_or(3),
         },
+        reset_state_on_start,
     };
 
     info!(

@@ -131,7 +131,7 @@ impl LimitCancelStateMachine {
                     return None;
                 }
                 match ack.status {
-                    AckStatus::Success | AckStatus::Duplicate => {
+                    AckStatus::Success | AckStatus::Accepted | AckStatus::Duplicate => {
                         if let Some(broker_order_id) = ack.broker_order_id {
                             *order_id = Some(broker_order_id);
                         }
@@ -261,6 +261,10 @@ mod tests {
             symbol: "SBER".to_string(),
             close_time_utc: ts,
             close,
+            o: close,
+            h: close,
+            l: close,
+            v: 0.0,
             origin: DataOrigin::Live,
         }
     }
@@ -284,7 +288,7 @@ mod tests {
             _ => panic!("expected cancel"),
         }
 
-        let ack_cancel = CommandAck::success(cancel_cmd.request_id, None);
+        let ack_cancel = CommandAck::accepted(cancel_cmd.request_id);
         machine.on_ack(&ack_cancel);
         matches!(machine.state, StrategyState::Done { .. });
     }

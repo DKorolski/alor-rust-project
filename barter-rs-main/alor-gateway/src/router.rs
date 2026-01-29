@@ -221,6 +221,7 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
         .to_string();
     Some(OrderEvent {
         order_id,
+        request_id: None,
         symbol,
         status: data
             .get("status")

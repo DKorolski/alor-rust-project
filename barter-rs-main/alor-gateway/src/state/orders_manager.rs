@@ -38,6 +38,7 @@ impl OrdersManager {
                     let recv_ts = Utc::now().timestamp();
                     debug!(
                         order_id = event.order_id,
+                        request_id = ?event.request_id,
                         status = %event.status,
                         side = %event.side,
                         order_type = %event.order_type,

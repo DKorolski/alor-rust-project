@@ -59,6 +59,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             side: alor_protocol::Side::Buy,
             max_wait_bars_for_ack: 3,
         },
+        reset_state_on_start: false,
     }
 }
 
@@ -272,7 +273,7 @@ async fn e2e_limit_cancel_happy_path() -> Result<()> {
     publish_ack(
         &redis_url,
         &config.streams.acks,
-        CommandAck::success(cancel_cmd.request_id, None),
+        CommandAck::accepted(cancel_cmd.request_id),
     )
     .await?;
 

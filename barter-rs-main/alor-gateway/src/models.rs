@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +34,7 @@ pub struct PositionEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderEvent {
     pub order_id: i64,
+    pub request_id: Option<Uuid>,
     pub symbol: String,
     pub status: String,
     pub side: String,

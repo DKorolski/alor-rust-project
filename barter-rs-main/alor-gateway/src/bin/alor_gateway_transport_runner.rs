@@ -75,6 +75,12 @@ async fn main() -> anyhow::Result<()> {
         source: Box::new(command_source),
         sink: command_sink,
         idempotency,
+        info: alor_gateway::services::command_consumer::CommandConsumerInfo {
+            consumer_group: transport.consumer_group.clone(),
+            consumer_name: transport.consumer_name.clone(),
+            stream: transport.streams.commands.clone(),
+            block_ms: transport.block_ms,
+        },
     };
 
     info!("starting alor gateway transport-only runner");

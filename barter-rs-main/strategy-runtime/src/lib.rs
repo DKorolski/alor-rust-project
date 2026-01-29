@@ -72,6 +72,7 @@ pub struct RuntimeConfig {
     pub trim_maxlen_acks: usize,
     pub trim_maxlen_health: usize,
     pub limit_cancel: LimitCancelConfig,
+    pub reset_state_on_start: bool,
 }
 
 #[derive(Debug, Clone)]

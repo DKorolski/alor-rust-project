@@ -80,10 +80,14 @@ async fn command_path_acknowledges_and_publishes_ack() {
     );
     sink.publish_command(command.clone()).await.unwrap();
 
-    let envelope = source.next_command().await.expect("command missing");
+    let envelope = source
+        .next_command()
+        .await
+        .expect("command read failed")
+        .expect("command missing");
     assert_eq!(envelope.command.request_id, command.request_id);
     source.ack(envelope.message_id.as_ref().unwrap()).await.unwrap();
-    sink.publish_ack(CommandAck::success(command.request_id, None))
+    sink.publish_ack(CommandAck::accepted(command.request_id))
         .await
         .unwrap();
 
@@ -121,13 +125,18 @@ async fn pending_recovery_claims_idle_message() {
     );
     sink.publish_command(command.clone()).await.unwrap();
 
-    let envelope = source_a.next_command().await.expect("command missing");
+    let envelope = source_a
+        .next_command()
+        .await
+        .expect("command read failed")
+        .expect("command missing");
     assert_eq!(envelope.command.request_id, command.request_id);
 
     sleep(Duration::from_millis(10)).await;
     let reclaimed = source_b
         .next_command()
         .await
+        .expect("command read failed")
         .expect("reclaimed command missing");
     assert_eq!(reclaimed.command.request_id, command.request_id);
     source_b
@@ -157,7 +166,7 @@ async fn poison_messages_go_to_dlq() {
         .query_async(&mut conn)
         .await
         .unwrap();
-    let _ = source.next_command().await;
+    let _ = source.next_command().await.expect("command read failed");
 
     let bad_envelope = Envelope {
         schema_version: SCHEMA_VERSION + 1,
@@ -185,7 +194,7 @@ async fn poison_messages_go_to_dlq() {
         .query_async(&mut conn)
         .await
         .unwrap();
-    let _ = source.next_command().await;
+    let _ = source.next_command().await.expect("command read failed");
 
     let dlq_stream = format!("{}.{}", config.streams.dlq_prefix, config.streams.commands);
     let dlq_len: i64 = conn.xlen(dlq_stream).await.unwrap();

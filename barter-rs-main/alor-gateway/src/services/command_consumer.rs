@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
+use tracing::{debug, info, warn};
 
 use alor_protocol::{CommandAck, CommandAction, OrderCommand, Side};
 
@@ -14,6 +15,9 @@ pub struct CommandConsumerConfig {
     pub pause_when_degraded: bool,
     pub idempotency_ttl: Duration,
     pub idempotency_max: usize,
+    pub error_backoff_base: Duration,
+    pub error_backoff_max: Duration,
+    pub no_message_log_interval: Duration,
 }
 
 impl Default for CommandConsumerConfig {
@@ -22,8 +26,19 @@ impl Default for CommandConsumerConfig {
             pause_when_degraded: true,
             idempotency_ttl: Duration::from_secs(300),
             idempotency_max: 10_000,
+            error_backoff_base: Duration::from_millis(50),
+            error_backoff_max: Duration::from_secs(2),
+            no_message_log_interval: Duration::from_secs(20),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandConsumerInfo {
+    pub consumer_group: String,
+    pub consumer_name: String,
+    pub stream: String,
+    pub block_ms: usize,
 }
 
 #[async_trait::async_trait]
@@ -135,13 +150,29 @@ pub async fn run_command_consumer(
     mut source: Box<dyn CommandSource>,
     sink: Arc<dyn CommandSink>,
     idempotency: Arc<dyn IdempotencyStore>,
+    request_map: Arc<parking_lot::RwLock<HashMap<i64, uuid::Uuid>>>,
     cws: crate::cws_client::CwsHandle,
     price_step: f64,
     volume_step: f64,
     health: Arc<parking_lot::RwLock<HealthState>>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    info: CommandConsumerInfo,
     config: CommandConsumerConfig,
 ) -> anyhow::Result<()> {
+    let mut error_backoff = config.error_backoff_base;
+    let mut last_no_message_log = Instant::now().checked_sub(config.no_message_log_interval);
+    {
+        let mut guard = health.write();
+        guard.command_consumer_alive = true;
+        guard.command_consumer_last_poll_ts_utc = chrono::Utc::now().timestamp();
+    }
+    info!(
+        consumer_group = %info.consumer_group,
+        consumer_name = %info.consumer_name,
+        stream = %info.stream,
+        block_ms = info.block_ms,
+        "command consumer started"
+    );
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
@@ -149,14 +180,67 @@ pub async fn run_command_consumer(
                     break;
                 }
             }
-            envelope = source.next_command() => {
-                let Some(CommandEnvelope { command, message_id }) = envelope else {
-                    break;
+            result = source.next_command() => {
+                let now_ts = chrono::Utc::now().timestamp();
+                {
+                    let mut guard = health.write();
+                    guard.command_consumer_alive = true;
+                    guard.command_consumer_last_poll_ts_utc = now_ts;
+                }
+                let envelope = match result {
+                    Ok(Some(envelope)) => {
+                        error_backoff = config.error_backoff_base;
+                        envelope
+                    }
+                    Ok(None) => {
+                        increment_counter(&health, |h| h.command_consumer_redis_timeouts_total = h.command_consumer_redis_timeouts_total.saturating_add(1));
+                        if last_no_message_log
+                            .map(|last| last.elapsed() >= config.no_message_log_interval)
+                            .unwrap_or(true)
+                        {
+                            debug!(
+                                consumer_group = %info.consumer_group,
+                                consumer_name = %info.consumer_name,
+                                stream = %info.stream,
+                                "command consumer poll timeout (no messages)"
+                            );
+                            last_no_message_log = Some(Instant::now());
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        increment_counter(&health, |h| h.command_consumer_errors_total = h.command_consumer_errors_total.saturating_add(1));
+                        warn!(?error, "command consumer poll failed; backing off");
+                        tokio::time::sleep(error_backoff).await;
+                        error_backoff = (error_backoff * 2).min(config.error_backoff_max);
+                        continue;
+                    }
                 };
+                let CommandEnvelope { command, message_id } = envelope;
                 let request_id = command.request_id;
+                if let Some(message_id) = message_id.as_deref() {
+                    let mut guard = health.write();
+                    guard.command_consumer_last_message_id = Some(message_id.to_string());
+                }
+                info!(
+                    request_id = %request_id,
+                    strategy_id = %command.strategy_id,
+                    symbol = %command.symbol,
+                    action = %command_action_label(&command.action),
+                    ttl_ms = ?command.ttl_ms,
+                    stream_id = ?message_id,
+                    "command received"
+                );
                 if !idempotency.check_and_set(request_id).await? {
                     increment_counter(&health, |h| h.command_duplicate_total = h.command_duplicate_total.saturating_add(1));
-                    sink.publish_ack(CommandAck::duplicate(request_id)).await?;
+                    let ack = CommandAck::duplicate(request_id);
+                    sink.publish_ack(ack.clone()).await?;
+                    info!(
+                        request_id = %ack.request_id,
+                        status = ?ack.status,
+                        processed_ts_utc = ack.processed_ts_utc,
+                        "command ack published"
+                    );
                     if let Some(message_id) = message_id.as_deref() {
                         source.ack(message_id).await?;
                     }
@@ -165,8 +249,14 @@ pub async fn run_command_consumer(
 
                 if let Some(error_code) = validate_command(&command, price_step, volume_step, &health, config.pause_when_degraded) {
                     increment_counter(&health, |h| h.command_validation_failed_total = h.command_validation_failed_total.saturating_add(1));
-                    sink.publish_ack(CommandAck::error(request_id, error_code, "validation failed"))
-                        .await?;
+                    let ack = CommandAck::error(request_id, error_code, "validation failed");
+                    sink.publish_ack(ack.clone()).await?;
+                    info!(
+                        request_id = %ack.request_id,
+                        status = ?ack.status,
+                        processed_ts_utc = ack.processed_ts_utc,
+                        "command ack published"
+                    );
                     if let Some(message_id) = message_id.as_deref() {
                         source.ack(message_id).await?;
                     }
@@ -175,8 +265,14 @@ pub async fn run_command_consumer(
 
                 if is_command_expired(&command) {
                     increment_counter(&health, |h| h.command_expired_total = h.command_expired_total.saturating_add(1));
-                    sink.publish_ack(CommandAck::error(request_id, "expired", "command expired"))
-                        .await?;
+                    let ack = CommandAck::error(request_id, "expired", "command expired");
+                    sink.publish_ack(ack.clone()).await?;
+                    info!(
+                        request_id = %ack.request_id,
+                        status = ?ack.status,
+                        processed_ts_utc = ack.processed_ts_utc,
+                        "command ack published"
+                    );
                     if let Some(message_id) = message_id.as_deref() {
                         source.ack(message_id).await?;
                     }
@@ -186,19 +282,37 @@ pub async fn run_command_consumer(
                 match execute_command(&cws, &command, price_step, volume_step).await {
                     Ok(order_id) => {
                         increment_counter(&health, |h| h.command_processed_total = h.command_processed_total.saturating_add(1));
-                        sink.publish_ack(CommandAck::success(request_id, order_id))
-                            .await?;
+                        if let Some(order_id) = order_id {
+                            request_map.write().insert(order_id, request_id);
+                        }
+                        let ack = match order_id {
+                            Some(order_id) => CommandAck::success(request_id, Some(order_id)),
+                            None => CommandAck::accepted(request_id),
+                        };
+                        sink.publish_ack(ack.clone()).await?;
+                        info!(
+                            request_id = %ack.request_id,
+                            status = ?ack.status,
+                            processed_ts_utc = ack.processed_ts_utc,
+                            "command ack published"
+                        );
                         if let Some(message_id) = message_id.as_deref() {
                             source.ack(message_id).await?;
                         }
                     }
                     Err(error) => {
-                        sink.publish_ack(CommandAck::error(
+                        let ack = CommandAck::error(
                             request_id,
                             "command_failed",
                             format!("{error}"),
-                        ))
-                        .await?;
+                        );
+                        sink.publish_ack(ack.clone()).await?;
+                        info!(
+                            request_id = %ack.request_id,
+                            status = ?ack.status,
+                            processed_ts_utc = ack.processed_ts_utc,
+                            "command ack published"
+                        );
                         if let Some(message_id) = message_id.as_deref() {
                             source.ack(message_id).await?;
                         }
@@ -207,7 +321,25 @@ pub async fn run_command_consumer(
             }
         }
     }
+    {
+        let mut guard = health.write();
+        guard.command_consumer_alive = false;
+    }
+    info!(
+        consumer_group = %info.consumer_group,
+        consumer_name = %info.consumer_name,
+        stream = %info.stream,
+        "command consumer stopped: shutdown"
+    );
     Ok(())
+}
+
+fn command_action_label(action: &CommandAction) -> &'static str {
+    match action {
+        CommandAction::Place(_) => "place",
+        CommandAction::Cancel(_) => "cancel",
+        CommandAction::Replace(_) => "replace",
+    }
 }
 
 fn increment_counter(health: &Arc<parking_lot::RwLock<HealthState>>, update: impl FnOnce(&mut HealthState)) {
@@ -340,4 +472,3 @@ fn normalize_qty(value: f64, step: f64) -> f64 {
         (value / step).floor() * step
     }
 }
-
