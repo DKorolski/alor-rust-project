@@ -215,7 +215,7 @@ impl StrategyRuntime {
             .await?;
         self.drain_stream(&streams.positions, MessageType::Position, trim_positions, 10)
             .await?;
-        self.drain_stream(&streams.bars, MessageType::Bar, trim_bars, 10)
+        self.drain_stream(&streams.bars, MessageType::Bar, trim_bars, 100)
             .await?;
         self.log_metrics_if_due().await?;
         Ok(())
