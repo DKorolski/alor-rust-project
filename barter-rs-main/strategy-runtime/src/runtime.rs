@@ -38,6 +38,8 @@ struct RuntimeMetrics {
     bars_acked_total: u64,
     bars_last_seen_close_time_utc: Option<i64>,
     redis_read_timeouts_total: u64,
+    commands_sent_total: u64,
+    publish_failures_total: u64,
     last_log: Option<Instant>,
 }
 
@@ -351,7 +353,10 @@ impl StrategyRuntime {
         Ok(())
     }
 
-    async fn persist_state(&self, maybe_cmd: Option<&alor_protocol::OrderCommand>) -> Result<()> {
+    async fn persist_state(
+        &mut self,
+        maybe_cmd: Option<&alor_protocol::OrderCommand>,
+    ) -> Result<()> {
         let snapshot = RuntimeStateSnapshot {
             ts_utc: Utc::now().timestamp(),
             last_processed_bar_ts: self.state.last_processed_bar_ts.clone(),
@@ -359,17 +364,37 @@ impl StrategyRuntime {
         };
         let payload = serde_json::to_string(&snapshot)?;
         if let Some(command) = maybe_cmd {
-            self.transport
+            if let Err(error) = self
+                .transport
                 .publish_command_and_state(command, &payload)
-                .await?;
+                .await
+            {
+                self.metrics.publish_failures_total =
+                    self.metrics.publish_failures_total.saturating_add(1);
+                error!(
+                    ?error,
+                    request_id = %command.request_id,
+                    "failed to publish command and state"
+                );
+                return Err(error);
+            }
+            self.metrics.commands_sent_total =
+                self.metrics.commands_sent_total.saturating_add(1);
         } else {
-            self.transport
+            if let Err(error) = self
+                .transport
                 .xadd_state(
                     &self.config.runtime_state_stream,
                     &payload,
                     self.config.trim_maxlen_runtime_state,
                 )
-                .await?;
+                .await
+            {
+                self.metrics.publish_failures_total =
+                    self.metrics.publish_failures_total.saturating_add(1);
+                error!(?error, "failed to persist runtime state");
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -391,6 +416,8 @@ impl StrategyRuntime {
             bars_acked_total = self.metrics.bars_acked_total,
             bars_last_seen_close_time_utc = self.metrics.bars_last_seen_close_time_utc,
             redis_read_timeouts_total = self.metrics.redis_read_timeouts_total,
+            commands_sent_total = self.metrics.commands_sent_total,
+            publish_failures_total = self.metrics.publish_failures_total,
             "runtime bars metrics"
         );
         if self.metrics.bars_read_total == 0 {
