@@ -1,3 +1,4 @@
+pub mod config;
 pub mod redis_transport;
 pub mod runtime;
 pub mod state;
@@ -49,33 +50,22 @@ pub struct PositionEvent {
     pub qty: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     pub redis_url: String,
     pub source: String,
-    pub strategy_id: String,
     pub portfolio: String,
     pub exchange: String,
     pub streams: StreamNames,
-    pub runtime_state_stream: String,
-    pub trim_maxlen_runtime_state: usize,
     pub consumer_group: String,
     pub consumer_name: String,
-    pub block_ms: usize,
-    pub claim_idle_ms: usize,
-    pub claim_batch: usize,
-    pub poll_interval_ms: u64,
-    pub trim_maxlen_bars: usize,
-    pub trim_maxlen_orders: usize,
-    pub trim_maxlen_positions: usize,
-    pub trim_maxlen_commands: usize,
-    pub trim_maxlen_acks: usize,
-    pub trim_maxlen_health: usize,
-    pub limit_cancel: LimitCancelConfig,
+    pub read: ReadConfig,
+    pub trim: TrimConfig,
+    pub strategy: StrategyConfig,
     pub reset_state_on_start: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StreamNames {
     pub bars: String,
     pub orders: String,
@@ -84,6 +74,50 @@ pub struct StreamNames {
     pub acks: String,
     pub health: Option<String>,
     pub dlq_prefix: String,
+    pub runtime_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadConfig {
+    pub block_ms: usize,
+    pub claim_idle_ms: usize,
+    pub claim_batch: usize,
+    pub poll_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrimConfig {
+    pub bars: usize,
+    pub orders: usize,
+    pub positions: usize,
+    pub commands: usize,
+    pub acks: usize,
+    pub health: usize,
+    pub runtime_state: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StrategyConfig {
+    pub strategy_id: String,
+    pub symbol: String,
+    pub qty: f64,
+    pub side: Side,
+    pub place_offset_ticks: i64,
+    pub tick_size: f64,
+    pub max_wait_bars_for_ack: u32,
+}
+
+impl StrategyConfig {
+    pub fn to_limit_cancel_config(&self) -> LimitCancelConfig {
+        LimitCancelConfig {
+            symbol: self.symbol.clone(),
+            tick_size: self.tick_size,
+            offset_ticks: self.place_offset_ticks,
+            qty: self.qty,
+            side: self.side,
+            max_wait_bars_for_ack: self.max_wait_bars_for_ack,
+        }
+    }
 }
 
 pub fn deterministic_request_id(
@@ -94,9 +128,7 @@ pub fn deterministic_request_id(
     bar_ts: i64,
     seq: u8,
 ) -> Uuid {
-    let name = format!(
-        "{strategy_id}|{portfolio}|{symbol}|{action}|{bar_ts}|{seq}"
-    );
+    let name = format!("{strategy_id}|{portfolio}|{symbol}|{action}|{bar_ts}|{seq}");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
 }
 

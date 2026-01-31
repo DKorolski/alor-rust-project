@@ -1,0 +1,41 @@
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502T0U"
+exchange = "alor"
+source = "strategy-runtime"
+consumer_group = "strategy-runtime"
+consumer_name = "auto"
+
+[streams]
+bars = "md.bars.7502T0U.1m"
+orders = "broker.orders.7502T0U"
+positions = "broker.positions.7502T0U"
+commands = "cmd.orders.7502T0U"
+acks = "cmd.acks.7502T0U"
+health = "events.health"
+dlq_prefix = "dlq"
+runtime_state = "runtime.state.limit_cancel.7502T0U"
+health = "events.health"
+
+[read]
+block_ms = 500
+claim_idle_ms = 5000
+claim_batch = 50
+poll_interval_ms = 100
+
+[trim]
+bars = 200000
+orders = 100000
+positions = 50000
+commands = 50000
+acks = 100000
+health = 10000
+runtime_state = 2000
+
+[strategy]
+strategy_id = "limit_cancel"
+symbol = "IMOEXF"
+qty = 1.0
+side = "buy"
+place_offset_ticks = 2
+tick_size = 0.5
+max_wait_bars_for_ack = 3

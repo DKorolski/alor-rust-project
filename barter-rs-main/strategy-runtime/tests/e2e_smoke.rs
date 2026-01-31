@@ -9,8 +9,10 @@ use uuid::Uuid;
 
 use alor_protocol::{AckStatus, CommandAck, Envelope, MessageType, OrderCommand};
 use strategy_runtime::runtime::StrategyRuntime;
-use strategy_runtime::strategy_limit_cancel::LimitCancelConfig;
-use strategy_runtime::{deterministic_request_id, BarEvent, DataOrigin, RuntimeConfig, StreamNames};
+use strategy_runtime::{
+    deterministic_request_id, BarEvent, DataOrigin, ReadConfig, RuntimeConfig, StrategyConfig,
+    StreamNames, TrimConfig,
+};
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
 
@@ -25,7 +27,6 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
     RuntimeConfig {
         redis_url,
         source: "test-runtime".to_string(),
-        strategy_id: strategy_id.clone(),
         portfolio: portfolio.clone(),
         exchange: "alor".to_string(),
         streams: StreamNames {
@@ -36,27 +37,32 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             acks: format!("{prefix}:acks"),
             health: None,
             dlq_prefix: format!("{prefix}:dlq"),
+            runtime_state: format!("{prefix}:runtime-state"),
         },
-        runtime_state_stream: format!("{prefix}:runtime-state"),
-        trim_maxlen_runtime_state: 1_000,
         consumer_group: format!("{prefix}:group"),
         consumer_name: consumer_name.to_string(),
-        block_ms: 100,
-        claim_idle_ms: 200,
-        claim_batch: 10,
-        poll_interval_ms: 50,
-        trim_maxlen_bars: 1_000,
-        trim_maxlen_orders: 1_000,
-        trim_maxlen_positions: 1_000,
-        trim_maxlen_commands: 1_000,
-        trim_maxlen_acks: 1_000,
-        trim_maxlen_health: 1_000,
-        limit_cancel: LimitCancelConfig {
+        read: ReadConfig {
+            block_ms: 100,
+            claim_idle_ms: 200,
+            claim_batch: 10,
+            poll_interval_ms: 50,
+        },
+        trim: TrimConfig {
+            bars: 1_000,
+            orders: 1_000,
+            positions: 1_000,
+            commands: 1_000,
+            acks: 1_000,
+            health: 1_000,
+            runtime_state: 1_000,
+        },
+        strategy: StrategyConfig {
+            strategy_id: strategy_id.clone(),
             symbol,
-            tick_size: 0.01,
-            offset_ticks: 50,
             qty: 1.0,
             side: alor_protocol::Side::Buy,
+            place_offset_ticks: 50,
+            tick_size: 0.01,
             max_wait_bars_for_ack: 3,
         },
         reset_state_on_start: false,
@@ -70,7 +76,13 @@ async fn spawn_runtime(config: RuntimeConfig) -> tokio::task::JoinHandle<()> {
     })
 }
 
-async fn publish_bar(redis_url: &str, stream: &str, symbol: &str, ts: i64, close: f64) -> Result<()> {
+async fn publish_bar(
+    redis_url: &str,
+    stream: &str,
+    symbol: &str,
+    ts: i64,
+    close: f64,
+) -> Result<()> {
     let bar = BarEvent {
         symbol: symbol.to_string(),
         close_time_utc: ts,
@@ -153,11 +165,7 @@ where
         let remaining = deadline
             .checked_duration_since(tokio::time::Instant::now())
             .ok_or_else(|| anyhow::anyhow!("timeout waiting for command"))?;
-        let result = timeout(
-            remaining,
-            read_next_command(redis_url, stream, &last_id),
-        )
-        .await??;
+        let result = timeout(remaining, read_next_command(redis_url, stream, &last_id)).await??;
         if predicate(&result.1) {
             return Ok(result);
         }
@@ -219,7 +227,7 @@ async fn e2e_limit_cancel_happy_path() -> Result<()> {
     publish_bar(
         &redis_url,
         &config.streams.bars,
-        &config.limit_cancel.symbol,
+        &config.strategy.symbol,
         1_000,
         100.0,
     )
@@ -232,9 +240,9 @@ async fn e2e_limit_cancel_happy_path() -> Result<()> {
     .await??;
 
     let expected_request_id = deterministic_request_id(
-        &config.strategy_id,
+        &config.strategy.strategy_id,
         &config.portfolio,
-        &config.limit_cancel.symbol,
+        &config.strategy.symbol,
         "place",
         1_000,
         0,
@@ -251,7 +259,7 @@ async fn e2e_limit_cancel_happy_path() -> Result<()> {
     publish_bar(
         &redis_url,
         &config.streams.bars,
-        &config.limit_cancel.symbol,
+        &config.strategy.symbol,
         2_000,
         101.0,
     )
@@ -306,7 +314,7 @@ async fn e2e_restart_without_duplicate_place() -> Result<()> {
     publish_bar(
         &redis_url,
         &config_a.streams.bars,
-        &config_a.limit_cancel.symbol,
+        &config_a.strategy.symbol,
         3_000,
         100.0,
     )
@@ -342,7 +350,7 @@ async fn e2e_restart_without_duplicate_place() -> Result<()> {
     publish_bar(
         &redis_url,
         &config_b.streams.bars,
-        &config_b.limit_cancel.symbol,
+        &config_b.strategy.symbol,
         4_000,
         101.0,
     )

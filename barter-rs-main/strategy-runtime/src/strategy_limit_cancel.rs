@@ -1,7 +1,7 @@
 use alor_protocol::{AckStatus, CommandAck, OrderCommand, Side};
 
-use crate::{build_cancel_command, build_place_command, BarEvent, OrderEvent};
 use crate::state::StrategyState;
+use crate::{build_cancel_command, build_place_command, BarEvent, OrderEvent};
 
 #[derive(Debug, Clone)]
 pub struct LimitCancelConfig {
@@ -165,8 +165,7 @@ impl LimitCancelStateMachine {
                 }
             }
             StrategyState::CancelSent {
-                cancel_request_id,
-                ..
+                cancel_request_id, ..
             } => {
                 if *cancel_request_id != ack.request_id {
                     return None;
@@ -234,16 +233,15 @@ impl LimitCancelStateMachine {
             )
         })
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alor_protocol::{CommandAction, CommandAck, PlaceOrder, Side};
+    use alor_protocol::{CommandAck, CommandAction, PlaceOrder, Side};
     use uuid::Uuid;
 
-    use crate::{BarEvent, DataOrigin, deterministic_request_id};
+    use crate::{deterministic_request_id, BarEvent, DataOrigin};
 
     fn config() -> LimitCancelConfig {
         LimitCancelConfig {
@@ -318,9 +316,7 @@ mod tests {
             order_id: 999,
             request_id: Some(place_cmd.request_id),
         };
-        let cancel_cmd = machine
-            .on_order_event(&order_event)
-            .expect("cancel cmd");
+        let cancel_cmd = machine.on_order_event(&order_event).expect("cancel cmd");
         assert!(matches!(cancel_cmd.action, CommandAction::Cancel(_)));
     }
 

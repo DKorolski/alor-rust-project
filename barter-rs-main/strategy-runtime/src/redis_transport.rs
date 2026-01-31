@@ -122,7 +122,7 @@ impl RedisRuntimeTransport {
             .arg(&self.config.streams.commands)
             .arg("MAXLEN")
             .arg("~")
-            .arg(self.config.trim_maxlen_commands)
+            .arg(self.config.trim.commands)
             .arg("*")
             .arg(PAYLOAD_FIELD)
             .arg(json)
@@ -150,15 +150,15 @@ impl RedisRuntimeTransport {
             .arg(&self.config.streams.commands)
             .arg("MAXLEN")
             .arg("~")
-            .arg(self.config.trim_maxlen_commands)
+            .arg(self.config.trim.commands)
             .arg("*")
             .arg(PAYLOAD_FIELD)
             .arg(command_json)
             .cmd("XADD")
-            .arg(&self.config.runtime_state_stream)
+            .arg(&self.config.streams.runtime_state)
             .arg("MAXLEN")
             .arg("~")
-            .arg(self.config.trim_maxlen_runtime_state)
+            .arg(self.config.trim.runtime_state)
             .arg("*")
             .arg(PAYLOAD_FIELD)
             .arg(state_payload)
@@ -231,7 +231,7 @@ impl RedisRuntimeTransport {
             .arg(&self.config.consumer_group)
             .arg(&self.config.consumer_name)
             .arg("BLOCK")
-            .arg(self.config.block_ms)
+            .arg(self.config.read.block_ms)
             .arg("COUNT")
             .arg(count)
             .arg("STREAMS")
@@ -252,7 +252,7 @@ impl RedisRuntimeTransport {
             .arg(stream)
             .arg(&self.config.consumer_group)
             .arg(&self.config.consumer_name)
-            .arg(self.config.claim_idle_ms)
+            .arg(self.config.read.claim_idle_ms)
             .arg(start)
             .arg("COUNT")
             .arg(count)
@@ -296,25 +296,37 @@ impl RedisRuntimeTransport {
     }
 
     pub async fn next_bar(&self) -> Option<RuntimeMessage<BarEvent>> {
-        self.next_message(&self.config.streams.bars, MessageType::Bar, self.config.trim_maxlen_bars)
-            .await
+        self.next_message(
+            &self.config.streams.bars,
+            MessageType::Bar,
+            self.config.trim.bars,
+        )
+        .await
     }
 
     pub async fn next_ack(&self) -> Option<RuntimeMessage<CommandAck>> {
-        self.next_message(&self.config.streams.acks, MessageType::CommandAck, self.config.trim_maxlen_acks)
-            .await
+        self.next_message(
+            &self.config.streams.acks,
+            MessageType::CommandAck,
+            self.config.trim.acks,
+        )
+        .await
     }
 
     pub async fn next_order(&self) -> Option<RuntimeMessage<OrderEvent>> {
-        self.next_message(&self.config.streams.orders, MessageType::Order, self.config.trim_maxlen_orders)
-            .await
+        self.next_message(
+            &self.config.streams.orders,
+            MessageType::Order,
+            self.config.trim.orders,
+        )
+        .await
     }
 
     pub async fn next_position(&self) -> Option<RuntimeMessage<PositionEvent>> {
         self.next_message(
             &self.config.streams.positions,
             MessageType::Position,
-            self.config.trim_maxlen_positions,
+            self.config.trim.positions,
         )
         .await
     }
@@ -328,7 +340,8 @@ impl RedisRuntimeTransport {
         let reply = self.read_group(stream, 1).await.ok()?;
         let mut entries = self.parse_read_group_entries(stream, reply);
         let entry = entries.pop()?;
-        self.decode_entry(stream, msg_type, trim_maxlen, entry).await
+        self.decode_entry(stream, msg_type, trim_maxlen, entry)
+            .await
     }
 
     pub fn parse_autoclaim_entries(
@@ -438,7 +451,13 @@ impl RedisRuntimeTransport {
         let payload = entry.payload;
         if payload.is_empty() {
             if let Err(error) = self
-                .write_dlq(stream, &message_id, &payload, "missing_payload", trim_maxlen)
+                .write_dlq(
+                    stream,
+                    &message_id,
+                    &payload,
+                    "missing_payload",
+                    trim_maxlen,
+                )
                 .await
             {
                 warn!(?error, stream, message_id, "dlq write failed");
@@ -471,8 +490,8 @@ impl RedisRuntimeTransport {
         payload: &str,
         expected: MessageType,
     ) -> Result<Envelope<T>, String> {
-        let envelope: Envelope<T> = serde_json::from_str(payload)
-            .map_err(|error| format!("parse_error: {error}"))?;
+        let envelope: Envelope<T> =
+            serde_json::from_str(payload).map_err(|error| format!("parse_error: {error}"))?;
         if envelope.schema_version > SCHEMA_VERSION {
             return Err("unsupported_schema".to_string());
         }

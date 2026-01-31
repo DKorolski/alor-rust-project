@@ -4,13 +4,13 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Instant};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use alor_protocol::MessageType;
 
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
-use crate::strategy_limit_cancel::{LimitCancelStateMachine, LimitCancelConfig};
+use crate::strategy_limit_cancel::LimitCancelStateMachine;
 use crate::{OrderEvent, PositionEvent, RuntimeConfig};
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -47,10 +47,10 @@ impl StrategyRuntime {
     pub async fn new(config: RuntimeConfig) -> Result<Self> {
         let transport = RedisRuntimeTransport::new(config.clone())?;
         let machine = LimitCancelStateMachine::new(
-            config.strategy_id.clone(),
+            config.strategy.strategy_id.clone(),
             config.portfolio.clone(),
             config.exchange.clone(),
-            config.limit_cancel.clone(),
+            config.strategy.to_limit_cancel_config(),
         );
         Ok(Self {
             config,
@@ -65,7 +65,7 @@ impl StrategyRuntime {
         self.bootstrap().await?;
         loop {
             self.poll_once().await?;
-            sleep(Duration::from_millis(self.config.poll_interval_ms)).await;
+            sleep(Duration::from_millis(self.config.read.poll_interval_ms)).await;
         }
     }
 
@@ -83,10 +83,10 @@ impl StrategyRuntime {
         self.load_runtime_state().await?;
 
         let streams = self.config.streams.clone();
-        let trim_acks = self.config.trim_maxlen_acks;
-        let trim_orders = self.config.trim_maxlen_orders;
-        let trim_positions = self.config.trim_maxlen_positions;
-        let trim_bars = self.config.trim_maxlen_bars;
+        let trim_acks = self.config.trim.acks;
+        let trim_orders = self.config.trim.orders;
+        let trim_positions = self.config.trim.positions;
+        let trim_bars = self.config.trim.bars;
 
         self.recover_pending(&streams.acks, MessageType::CommandAck, trim_acks)
             .await?;
@@ -142,7 +142,7 @@ impl StrategyRuntime {
         }
         if let Some(payload) = self
             .transport
-            .xrevrange_last(&self.config.runtime_state_stream)
+            .xrevrange_last(&self.config.streams.runtime_state)
             .await?
         {
             match serde_json::from_str::<RuntimeStateSnapshot>(&payload) {
@@ -153,7 +153,7 @@ impl StrategyRuntime {
                     self.machine.last_processed_bar_ts = self
                         .state
                         .last_processed_bar_ts
-                        .get(&self.config.limit_cancel.symbol)
+                        .get(&self.config.strategy.symbol)
                         .copied();
                     info!("runtime state restored");
                 }
@@ -175,7 +175,7 @@ impl StrategyRuntime {
         for _ in 0..MAX_PENDING_LOOPS {
             let reply = match self
                 .transport
-                .claim_idle(stream, &start, self.config.claim_batch)
+                .claim_idle(stream, &start, self.config.read.claim_batch)
                 .await
             {
                 Ok(reply) => reply,
@@ -204,17 +204,22 @@ impl StrategyRuntime {
 
     async fn poll_once(&mut self) -> Result<()> {
         let streams = self.config.streams.clone();
-        let trim_acks = self.config.trim_maxlen_acks;
-        let trim_orders = self.config.trim_maxlen_orders;
-        let trim_positions = self.config.trim_maxlen_positions;
-        let trim_bars = self.config.trim_maxlen_bars;
+        let trim_acks = self.config.trim.acks;
+        let trim_orders = self.config.trim.orders;
+        let trim_positions = self.config.trim.positions;
+        let trim_bars = self.config.trim.bars;
 
         self.drain_stream(&streams.acks, MessageType::CommandAck, trim_acks, 10)
             .await?;
         self.drain_stream(&streams.orders, MessageType::Order, trim_orders, 10)
             .await?;
-        self.drain_stream(&streams.positions, MessageType::Position, trim_positions, 10)
-            .await?;
+        self.drain_stream(
+            &streams.positions,
+            MessageType::Position,
+            trim_positions,
+            10,
+        )
+        .await?;
         self.drain_stream(&streams.bars, MessageType::Bar, trim_bars, 100)
             .await?;
         self.log_metrics_if_due().await?;
@@ -237,11 +242,15 @@ impl StrategyRuntime {
         };
         let entries = self.transport.parse_read_group_entries(stream, reply);
         if entries.is_empty() {
-            self.metrics.redis_read_timeouts_total = self.metrics.redis_read_timeouts_total.saturating_add(1);
+            self.metrics.redis_read_timeouts_total =
+                self.metrics.redis_read_timeouts_total.saturating_add(1);
             return Ok(());
         }
         if msg_type == MessageType::Bar {
-            self.metrics.bars_read_total = self.metrics.bars_read_total.saturating_add(entries.len() as u64);
+            self.metrics.bars_read_total = self
+                .metrics
+                .bars_read_total
+                .saturating_add(entries.len() as u64);
         }
         for entry in entries {
             if let Some(message) = self
@@ -251,7 +260,8 @@ impl StrategyRuntime {
             {
                 self.dispatch_message(message).await?;
                 if msg_type == MessageType::Bar {
-                    self.metrics.bars_decoded_ok_total = self.metrics.bars_decoded_ok_total.saturating_add(1);
+                    self.metrics.bars_decoded_ok_total =
+                        self.metrics.bars_decoded_ok_total.saturating_add(1);
                 }
             } else if msg_type == MessageType::Bar {
                 self.metrics.bars_decode_failed_total =
@@ -265,11 +275,13 @@ impl StrategyRuntime {
         match message.stream.as_str() {
             stream if stream == self.config.streams.acks => {
                 let ack = serde_json::from_value(message.payload)?;
-                self.handle_ack(message.stream, message.message_id, ack).await?;
+                self.handle_ack(message.stream, message.message_id, ack)
+                    .await?;
             }
             stream if stream == self.config.streams.orders => {
                 let order = serde_json::from_value(message.payload)?;
-                self.handle_order(message.stream, message.message_id, order).await?;
+                self.handle_order(message.stream, message.message_id, order)
+                    .await?;
             }
             stream if stream == self.config.streams.positions => {
                 let position = serde_json::from_value(message.payload)?;
@@ -278,11 +290,15 @@ impl StrategyRuntime {
             }
             stream if stream == self.config.streams.bars => {
                 let bar = serde_json::from_value(message.payload)?;
-                self.handle_bar(message.stream, message.message_id, bar).await?;
+                self.handle_bar(message.stream, message.message_id, bar)
+                    .await?;
             }
             _ => {
                 warn!(stream = message.stream, "unknown stream message");
-                let _ = self.transport.xack(&message.stream, &message.message_id).await;
+                let _ = self
+                    .transport
+                    .xack(&message.stream, &message.message_id)
+                    .await;
             }
         }
         Ok(())
@@ -335,7 +351,8 @@ impl StrategyRuntime {
         bar: crate::BarEvent,
     ) -> Result<()> {
         if bar.origin != crate::DataOrigin::Live {
-            self.state.update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+            self.state
+                .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
             self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
             self.persist_state(None).await?;
             self.transport.xack(&stream, &message_id).await?;
@@ -349,7 +366,8 @@ impl StrategyRuntime {
         }
         let maybe_cmd = self.machine.on_bar(&bar);
         self.state.strategy_state = self.machine.state.clone();
-        self.state.update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        self.state
+            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         self.persist_state(maybe_cmd.as_ref()).await?;
         self.transport.xack(&stream, &message_id).await?;
@@ -382,15 +400,14 @@ impl StrategyRuntime {
                 );
                 return Err(error);
             }
-            self.metrics.commands_sent_total =
-                self.metrics.commands_sent_total.saturating_add(1);
+            self.metrics.commands_sent_total = self.metrics.commands_sent_total.saturating_add(1);
         } else {
             if let Err(error) = self
                 .transport
                 .xadd_state(
-                    &self.config.runtime_state_stream,
+                    &self.config.streams.runtime_state,
                     &payload,
-                    self.config.trim_maxlen_runtime_state,
+                    self.config.trim.runtime_state,
                 )
                 .await
             {
@@ -425,7 +442,11 @@ impl StrategyRuntime {
             "runtime bars metrics"
         );
         if self.metrics.bars_read_total == 0 {
-            let xlen = self.transport.xlen(&self.config.streams.bars).await.unwrap_or(0);
+            let xlen = self
+                .transport
+                .xlen(&self.config.streams.bars)
+                .await
+                .unwrap_or(0);
             if xlen > 0 {
                 error!(
                     bars_stream = self.config.streams.bars,
@@ -437,16 +458,5 @@ impl StrategyRuntime {
             }
         }
         Ok(())
-    }
-}
-
-pub fn default_limit_cancel(symbol: String) -> LimitCancelConfig {
-    LimitCancelConfig {
-        symbol,
-        tick_size: 0.01,
-        offset_ticks: 1,
-        qty: 1.0,
-        side: alor_protocol::Side::Buy,
-        max_wait_bars_for_ack: 3,
     }
 }
