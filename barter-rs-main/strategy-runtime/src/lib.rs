@@ -2,7 +2,7 @@ pub mod config;
 pub mod redis_transport;
 pub mod runtime;
 pub mod state;
-pub mod strategy_limit_cancel;
+pub mod strategies;
 
 use std::collections::HashMap;
 
@@ -10,7 +10,49 @@ use alor_protocol::{CommandAction, OrderCommand, PlaceOrder, Side};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::strategy_limit_cancel::LimitCancelConfig;
+use crate::strategies::limit_cancel::LimitCancelConfig;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Intent {
+    Place {
+        price: f64,
+        qty: f64,
+        side: Side,
+    },
+    Cancel {
+        order_id: i64,
+    },
+    Replace {
+        order_id: i64,
+        new_price: f64,
+        new_qty: f64,
+    },
+}
+
+pub trait Strategy {
+    fn on_bar(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent>;
+    fn on_ack(&mut self, ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent>;
+    fn on_order(&mut self, ctx: &StrategyCtx, ord: &OrderEvent) -> Vec<Intent>;
+    fn on_position(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent>;
+    fn state(&self) -> &crate::state::StrategyState;
+    fn set_state(&mut self, state: crate::state::StrategyState);
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyCtx {
+    pub strategy_id: String,
+    pub portfolio: String,
+    pub exchange: String,
+    pub symbol: String,
+    pub tick_size: f64,
+    last_bar_ts: Option<i64>,
+}
+
+impl StrategyCtx {
+    pub fn last_bar_ts(&self) -> Option<i64> {
+        self.last_bar_ts
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BarEvent {

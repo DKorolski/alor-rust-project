@@ -10,8 +10,8 @@ use alor_protocol::MessageType;
 
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
-use crate::strategy_limit_cancel::LimitCancelStateMachine;
-use crate::{OrderEvent, PositionEvent, RuntimeConfig};
+use crate::strategies::limit_cancel::LimitCancelStrategy;
+use crate::{Intent, OrderEvent, PositionEvent, RuntimeConfig, Strategy, StrategyCtx};
 
 const MAX_PENDING_LOOPS: usize = 10;
 
@@ -26,7 +26,7 @@ pub struct StrategyRuntime {
     config: RuntimeConfig,
     transport: RedisRuntimeTransport,
     state: RuntimeState,
-    machine: LimitCancelStateMachine,
+    strategy: Box<dyn Strategy + Send>,
     metrics: RuntimeMetrics,
 }
 
@@ -46,17 +46,14 @@ struct RuntimeMetrics {
 impl StrategyRuntime {
     pub async fn new(config: RuntimeConfig) -> Result<Self> {
         let transport = RedisRuntimeTransport::new(config.clone())?;
-        let machine = LimitCancelStateMachine::new(
-            config.strategy.strategy_id.clone(),
-            config.portfolio.clone(),
-            config.exchange.clone(),
+        let strategy = Box::new(LimitCancelStrategy::new(
             config.strategy.to_limit_cancel_config(),
-        );
+        ));
         Ok(Self {
             config,
             transport,
             state: RuntimeState::default(),
-            machine,
+            strategy,
             metrics: RuntimeMetrics::default(),
         })
     }
@@ -149,12 +146,7 @@ impl StrategyRuntime {
                 Ok(snapshot) => {
                     self.state.last_processed_bar_ts = snapshot.last_processed_bar_ts;
                     self.state.strategy_state = snapshot.strategy_state.clone();
-                    self.machine.state = snapshot.strategy_state;
-                    self.machine.last_processed_bar_ts = self
-                        .state
-                        .last_processed_bar_ts
-                        .get(&self.config.strategy.symbol)
-                        .copied();
+                    self.strategy.set_state(snapshot.strategy_state);
                     info!("runtime state restored");
                 }
                 Err(error) => {
@@ -310,9 +302,11 @@ impl StrategyRuntime {
         message_id: String,
         ack: alor_protocol::CommandAck,
     ) -> Result<()> {
-        let maybe_cmd = self.machine.on_ack(&ack);
-        self.state.strategy_state = self.machine.state.clone();
-        self.persist_state(maybe_cmd.as_ref()).await?;
+        let ctx = self.strategy_ctx();
+        let intents = self.strategy.on_ack(&ctx, &ack);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.apply_intents(&ctx, ack.processed_ts_utc, intents)
+            .await?;
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
     }
@@ -323,9 +317,11 @@ impl StrategyRuntime {
         message_id: String,
         order: OrderEvent,
     ) -> Result<()> {
-        let maybe_cmd = self.machine.on_order_event(&order);
-        self.state.strategy_state = self.machine.state.clone();
-        self.persist_state(maybe_cmd.as_ref()).await?;
+        let ctx = self.strategy_ctx();
+        let created_ts = ctx.last_bar_ts().unwrap_or(0);
+        let intents = self.strategy.on_order(&ctx, &order);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.apply_intents(&ctx, created_ts, intents).await?;
         self.state.orders.insert(order.order_id, order);
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
@@ -337,6 +333,11 @@ impl StrategyRuntime {
         message_id: String,
         position: PositionEvent,
     ) -> Result<()> {
+        let ctx = self.strategy_ctx();
+        let created_ts = ctx.last_bar_ts().unwrap_or(0);
+        let intents = self.strategy.on_position(&ctx, &position);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.apply_intents(&ctx, created_ts, intents).await?;
         self.state
             .positions
             .insert(position.symbol.clone(), position);
@@ -364,12 +365,14 @@ impl StrategyRuntime {
             self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
             return Ok(());
         }
-        let maybe_cmd = self.machine.on_bar(&bar);
-        self.state.strategy_state = self.machine.state.clone();
         self.state
             .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        let ctx = self.strategy_ctx();
+        let intents = self.strategy.on_bar(&ctx, &bar);
+        self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
-        self.persist_state(maybe_cmd.as_ref()).await?;
+        self.apply_intents(&ctx, bar.close_time_utc, intents)
+            .await?;
         self.transport.xack(&stream, &message_id).await?;
         self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
         Ok(())
@@ -418,6 +421,89 @@ impl StrategyRuntime {
             }
         }
         Ok(())
+    }
+
+    fn strategy_ctx(&self) -> StrategyCtx {
+        StrategyCtx {
+            strategy_id: self.config.strategy.strategy_id.clone(),
+            portfolio: self.config.portfolio.clone(),
+            exchange: self.config.exchange.clone(),
+            symbol: self.config.strategy.symbol.clone(),
+            tick_size: self.config.strategy.tick_size,
+            last_bar_ts: self
+                .state
+                .last_processed_bar_ts
+                .get(&self.config.strategy.symbol)
+                .copied(),
+        }
+    }
+
+    async fn apply_intents(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intents: Vec<Intent>,
+    ) -> Result<()> {
+        if intents.is_empty() {
+            self.persist_state(None).await?;
+            return Ok(());
+        }
+        for intent in intents {
+            let command = self.intent_to_command(ctx, created_ts_utc, intent);
+            self.persist_state(Some(&command)).await?;
+        }
+        Ok(())
+    }
+
+    fn intent_to_command(
+        &self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent: Intent,
+    ) -> alor_protocol::OrderCommand {
+        let (action, seq, action_name) = match intent {
+            Intent::Place { price, qty, side } => (
+                alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder { price, qty, side }),
+                0,
+                "place",
+            ),
+            Intent::Cancel { order_id } => (
+                alor_protocol::CommandAction::Cancel(alor_protocol::CancelOrder { order_id }),
+                1,
+                "cancel",
+            ),
+            Intent::Replace {
+                order_id,
+                new_price,
+                new_qty,
+            } => (
+                alor_protocol::CommandAction::Replace(alor_protocol::ReplaceOrder {
+                    order_id,
+                    new_price,
+                    new_qty,
+                }),
+                2,
+                "replace",
+            ),
+        };
+        let request_id = crate::deterministic_request_id(
+            &ctx.strategy_id,
+            &ctx.portfolio,
+            &ctx.symbol,
+            action_name,
+            created_ts_utc,
+            seq,
+        );
+        alor_protocol::OrderCommand {
+            request_id,
+            created_ts_utc,
+            strategy_id: ctx.strategy_id.clone(),
+            portfolio: ctx.portfolio.clone(),
+            exchange: ctx.exchange.clone(),
+            symbol: ctx.symbol.clone(),
+            action,
+            ttl_ms: None,
+        }
     }
 
     async fn log_metrics_if_due(&mut self) -> Result<()> {

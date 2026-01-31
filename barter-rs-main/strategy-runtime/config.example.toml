@@ -1,6 +1,6 @@
 redis_url = "redis://127.0.0.1/"
 portfolio = "7502T0U"
-exchange = "alor"
+exchange = "MOEX"
 source = "strategy-runtime"
 consumer_group = "strategy-runtime"
 consumer_name = "auto"
@@ -14,7 +14,6 @@ acks = "cmd.acks.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
 runtime_state = "runtime.state.limit_cancel.7502T0U"
-health = "events.health"
 
 [read]
 block_ms = 500
