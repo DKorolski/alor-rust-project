@@ -342,6 +342,9 @@ async fn e2e_restart_without_duplicate_place() -> Result<()> {
             broker_order_id: Some(456),
             error_code: None,
             error_msg: None,
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: None,
             processed_ts_utc: Utc::now().timestamp(),
         },
     )

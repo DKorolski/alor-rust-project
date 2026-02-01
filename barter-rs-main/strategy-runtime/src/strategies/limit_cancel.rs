@@ -167,7 +167,7 @@ impl Strategy for LimitCancelStrategy {
                         }
                         Vec::new()
                     }
-                    AckStatus::Rejected => {
+                    AckStatus::Rejected | AckStatus::Expired | AckStatus::Error => {
                         self.state = StrategyState::Done {
                             last_bar_ts: self.last_processed_bar_ts.unwrap_or(ack.processed_ts_utc),
                         };

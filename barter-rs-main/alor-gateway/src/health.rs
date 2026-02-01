@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -47,9 +49,18 @@ pub struct HealthState {
     pub event_queue_full_drops_total: u64,
     pub last_event_publish_ts: i64,
     pub command_processed_total: u64,
+    pub commands_received_total: u64,
+    pub commands_accepted_total: u64,
+    pub commands_rejected_total: u64,
+    pub commands_duplicate_total: u64,
     pub command_duplicate_total: u64,
     pub command_expired_total: u64,
     pub command_validation_failed_total: u64,
+    pub commands_rejected_http_code_total: HashMap<i64, u64>,
+    pub cws_errors_total: u64,
+    pub cws_reconnects_total: u64,
+    pub orders_ws_events_total: u64,
+    pub orders_ws_status_total: HashMap<String, u64>,
     pub command_consumer_alive: bool,
     pub command_consumer_last_poll_ts_utc: i64,
     pub command_consumer_last_message_id: Option<String>,

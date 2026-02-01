@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::{fs::OpenOptions, io::Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use std::{fs::OpenOptions, io::Write};
 use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
@@ -17,19 +17,21 @@ use crate::data_quality::{
 };
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::{GatewayPhase, HealthState, ResyncMode};
-use crate::router::{Router, RouterCommand, RouterControl};
 use crate::models::{BarEvent, DataOrigin};
+use crate::router::{Router, RouterCommand, RouterControl};
+use crate::services::command_consumer::{
+    CommandConsumerConfig, CommandConsumerInfo, run_command_consumer,
+};
+use crate::services::event_publisher::{
+    EventPublisherConfig, EventPublisherHandle, start_event_publisher,
+};
+use crate::services::health_reporter::run_health_reporter;
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
 use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
 use alor_scalping::strategy::{Action, StrategyBar, StrategyContext, StrategyCore};
-use crate::services::command_consumer::{run_command_consumer, CommandConsumerConfig, CommandConsumerInfo};
-use crate::services::event_publisher::{
-    EventPublisherConfig, EventPublisherHandle, start_event_publisher,
-};
-use crate::services::health_reporter::run_health_reporter;
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -93,11 +95,8 @@ impl Supervisor {
     }
 
     pub fn new_with_token(cfg: AlorGatewayConfig, token: String) -> Self {
-        let token_provider = TokenProvider::new_with_token(
-            cfg.oauth_url.clone(),
-            cfg.refresh_token.clone(),
-            token,
-        );
+        let token_provider =
+            TokenProvider::new_with_token(cfg.oauth_url.clone(), cfg.refresh_token.clone(), token);
         let health = Arc::new(RwLock::new(HealthState::default()));
         Self {
             cfg,
@@ -172,7 +171,7 @@ impl Supervisor {
             None,
             None,
         )
-            .await
+        .await
     }
 
     pub async fn run_transport_only(
@@ -292,7 +291,10 @@ impl Supervisor {
                                 }
                             }
                         }
-                        WsEvent::Conn { event: conn, generation } => {
+                        WsEvent::Conn {
+                            event: conn,
+                            generation,
+                        } => {
                             if matches!(conn, ConnEvent::Reconnecting) {
                                 current_generation = generation;
                             } else if generation != current_generation {
@@ -377,7 +379,10 @@ impl Supervisor {
                                 })
                                 .await;
                         }
-                        WsEvent::SubscriptionAck { subscription_type, generation } => {
+                        WsEvent::SubscriptionAck {
+                            subscription_type,
+                            generation,
+                        } => {
                             if generation != current_generation {
                                 continue;
                             }
@@ -387,7 +392,12 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        WsEvent::SubscriptionStats { desired, active, pending_acks: pending, generation } => {
+                        WsEvent::SubscriptionStats {
+                            desired,
+                            active,
+                            pending_acks: pending,
+                            generation,
+                        } => {
                             if generation != current_generation {
                                 continue;
                             }
@@ -403,7 +413,11 @@ impl Supervisor {
                             let mut guard = health.write();
                             guard.ws_last_rx_ts = ts;
                         }
-                        WsEvent::Ignored { symbol, reason, generation } => {
+                        WsEvent::Ignored {
+                            symbol,
+                            reason,
+                            generation,
+                        } => {
                             if generation != current_generation {
                                 continue;
                             }
@@ -477,13 +491,30 @@ impl Supervisor {
                 let mut orders_rx = streams.orders_rx;
                 while let Some(order) = orders_rx.recv().await {
                     let mut order = order;
-                    if let Some(request_id) = request_map_orders.read().get(&order.order_id).copied() {
+                    if let Some(request_id) =
+                        request_map_orders.read().get(&order.order_id).copied()
+                    {
                         order.request_id = Some(request_id);
                     }
                     {
                         let mut guard = health.write();
                         guard.last_orders_ts = order.ts_utc;
+                        guard.orders_ws_events_total =
+                            guard.orders_ws_events_total.saturating_add(1);
+                        let entry = guard
+                            .orders_ws_status_total
+                            .entry(order.status.clone())
+                            .or_insert(0);
+                        *entry = entry.saturating_add(1);
                     }
+                    info!(
+                        order_id = order.order_id,
+                        symbol = order.symbol,
+                        status = order.status,
+                        existing = order.existing,
+                        request_id = ?order.request_id,
+                        "order event received"
+                    );
                     if let Some(publisher) = publisher.as_ref() {
                         publisher
                             .publish_critical(EventMessage::Order(order.clone()))
@@ -554,9 +585,7 @@ impl Supervisor {
                 let mut logged_live_start = false;
                 let mut pending_live_updates: HashMap<String, Vec<BarEvent>> = HashMap::new();
                 while let Some(bar) = bars_rx_inner.recv().await {
-                    bar_quality_stats
-                        .write()
-                        .record_received(&bar.symbol);
+                    bar_quality_stats.write().record_received(&bar.symbol);
                     {
                         let mut guard = health.write();
                         guard.last_bar_ts = bar.close_time_utc;
@@ -576,10 +605,7 @@ impl Supervisor {
                             .entry(bar.symbol.clone())
                             .or_default()
                             .push(bar.clone());
-                        *buffered_bars
-                            .write()
-                            .entry(bar.symbol.clone())
-                            .or_insert(0) += 1;
+                        *buffered_bars.write().entry(bar.symbol.clone()).or_insert(0) += 1;
                         buffered_live = true;
                     }
                     let bars_live_seen = live_symbols.read().len() >= symbols_len;
@@ -596,10 +622,7 @@ impl Supervisor {
                         && subscriptions_ready
                         && cws_authorized;
                     if !buffered_live {
-                        let last_emitted_ts = last_emitted_bar_ts
-                            .read()
-                            .get(&bar.symbol)
-                            .copied();
+                        let last_emitted_ts = last_emitted_bar_ts.read().get(&bar.symbol).copied();
                         if let Err(reason) = bar_validator.validate(&bar, last_emitted_ts) {
                             bar_quality_stats
                                 .write()
@@ -639,12 +662,14 @@ impl Supervisor {
                         match bar.origin {
                             DataOrigin::History | DataOrigin::HistoryGap => {
                                 history_count += 1;
-                                history_min = Some(history_min.map_or(bar.close_time_utc, |min| {
-                                    min.min(bar.close_time_utc)
-                                }));
-                                history_max = Some(history_max.map_or(bar.close_time_utc, |max| {
-                                    max.max(bar.close_time_utc)
-                                }));
+                                history_min =
+                                    Some(history_min.map_or(bar.close_time_utc, |min| {
+                                        min.min(bar.close_time_utc)
+                                    }));
+                                history_max =
+                                    Some(history_max.map_or(bar.close_time_utc, |max| {
+                                        max.max(bar.close_time_utc)
+                                    }));
                                 debug!(
                                     symbol = %bar.symbol,
                                     close_time_utc = bar.close_time_utc,
@@ -734,17 +759,10 @@ impl Supervisor {
                                 cws_authorization = cws_authorized,
                                 "bars live_seen=true, positions_synced=true, orders_synced=true, cws_authorization=true"
                             );
-                            transition_phase(
-                                &phase_tx,
-                                GatewayPhase::LiveReady,
-                                None,
-                                None,
-                                None,
-                            );
+                            transition_phase(&phase_tx, GatewayPhase::LiveReady, None, None, None);
                             resync_in_progress.store(false, Ordering::SeqCst);
                         }
                     }
-
                 }
             }
         });
@@ -779,9 +797,8 @@ impl Supervisor {
             .unwrap_or_else(Instant::now);
 
         #[cfg(unix)]
-        let mut term_signal = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )?;
+        let mut term_signal =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
         loop {
             tokio::select! {
@@ -919,7 +936,6 @@ impl Supervisor {
 
         Ok(())
     }
-
 }
 
 struct NoopStrategy;
@@ -1130,7 +1146,7 @@ async fn flush_pending_live(
                 match emit_bar(bars_tx, last_emitted, &bar).await {
                     EmitResult::Emitted => {
                         record_emitted(&bar, bar_quality_stats, bar_dump, emitted_tx, publisher)
-                        .await;
+                            .await;
                     }
                     EmitResult::DuplicateOrOld => {
                         bar_quality_stats

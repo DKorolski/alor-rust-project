@@ -96,6 +96,8 @@ pub enum AckStatus {
     Confirmed,
     Rejected,
     Duplicate,
+    Expired,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -105,6 +107,12 @@ pub struct CommandAck {
     pub broker_order_id: Option<i64>,
     pub error_code: Option<String>,
     pub error_msg: Option<String>,
+    #[serde(default)]
+    pub cws_http_code: Option<i64>,
+    #[serde(default)]
+    pub cws_message: Option<String>,
+    #[serde(default)]
+    pub cws_request_guid: Option<String>,
     #[serde(default = "default_processed_ts_utc")]
     pub processed_ts_utc: i64,
 }
@@ -117,6 +125,9 @@ impl CommandAck {
             broker_order_id,
             error_code: None,
             error_msg: None,
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: None,
             processed_ts_utc: Utc::now().timestamp(),
         }
     }
@@ -128,6 +139,9 @@ impl CommandAck {
             broker_order_id: None,
             error_code: None,
             error_msg: None,
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: None,
             processed_ts_utc: Utc::now().timestamp(),
         }
     }
@@ -143,6 +157,9 @@ impl CommandAck {
             broker_order_id: None,
             error_code: Some(error_code.into()),
             error_msg: Some(error_msg.into()),
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: None,
             processed_ts_utc: Utc::now().timestamp(),
         }
     }
@@ -154,6 +171,41 @@ impl CommandAck {
             broker_order_id: None,
             error_code: None,
             error_msg: None,
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: None,
+            processed_ts_utc: Utc::now().timestamp(),
+        }
+    }
+
+    pub fn expired(request_id: Uuid, error_msg: impl Into<String>) -> Self {
+        Self {
+            request_id,
+            status: AckStatus::Expired,
+            broker_order_id: None,
+            error_code: Some("expired".to_string()),
+            error_msg: Some(error_msg.into()),
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: None,
+            processed_ts_utc: Utc::now().timestamp(),
+        }
+    }
+
+    pub fn error(
+        request_id: Uuid,
+        error_code: impl Into<String>,
+        error_msg: impl Into<String>,
+    ) -> Self {
+        Self {
+            request_id,
+            status: AckStatus::Error,
+            broker_order_id: None,
+            error_code: Some(error_code.into()),
+            error_msg: Some(error_msg.into()),
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: None,
             processed_ts_utc: Utc::now().timestamp(),
         }
     }

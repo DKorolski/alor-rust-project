@@ -302,6 +302,36 @@ impl StrategyRuntime {
         message_id: String,
         ack: alor_protocol::CommandAck,
     ) -> Result<()> {
+        match ack.status {
+            alor_protocol::AckStatus::Rejected
+            | alor_protocol::AckStatus::Expired
+            | alor_protocol::AckStatus::Error => {
+                warn!(
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    error_code = ?ack.error_code,
+                    error_msg = ?ack.error_msg,
+                    cws_http_code = ?ack.cws_http_code,
+                    cws_request_guid = ?ack.cws_request_guid,
+                    "command rejected"
+                );
+            }
+            alor_protocol::AckStatus::Accepted | alor_protocol::AckStatus::Confirmed => {
+                info!(
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    broker_order_id = ack.broker_order_id,
+                    "command accepted"
+                );
+            }
+            alor_protocol::AckStatus::Duplicate => {
+                info!(
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    "command duplicate"
+                );
+            }
+        }
         let ctx = self.strategy_ctx();
         let intents = self.strategy.on_ack(&ctx, &ack);
         self.state.strategy_state = self.strategy.state().clone();

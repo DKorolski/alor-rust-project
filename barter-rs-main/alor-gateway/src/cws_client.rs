@@ -48,6 +48,8 @@ impl CwsClient {
                         {
                             let mut guard = health.write();
                             guard.cws_authorized = false;
+                            guard.cws_reconnects_total =
+                                guard.cws_reconnects_total.saturating_add(1);
                         }
                         warn!(?error, "cws session error; reconnecting");
                         tokio::time::sleep(jittered(backoff)).await;
@@ -118,11 +120,17 @@ impl CwsHandle {
         let guid = new_guid();
         let new_qty = new_qty.round() as i64;
         let mut payload = Map::new();
-        payload.insert("opcode".to_string(), Value::String("update:limit".to_string()));
+        payload.insert(
+            "opcode".to_string(),
+            Value::String("update:limit".to_string()),
+        );
         payload.insert("guid".to_string(), Value::String(guid));
         payload.insert("orderId".to_string(), Value::from(order_id));
         payload.insert("exchange".to_string(), Value::String(exchange.to_string()));
-        payload.insert("user".to_string(), serde_json::json!({"portfolio": portfolio}));
+        payload.insert(
+            "user".to_string(),
+            serde_json::json!({"portfolio": portfolio}),
+        );
         payload.insert("price".to_string(), Value::from(new_price));
         payload.insert("quantity".to_string(), Value::from(new_qty));
         payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
@@ -270,8 +278,15 @@ async fn run_session(
 }
 
 async fn authorize(
-    ws_sink: &mut (impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
-    ws_stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+    ws_sink: &mut (
+             impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+             + Unpin
+         ),
+    ws_stream: &mut (
+             impl futures_util::stream::Stream<
+        Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+    > + Unpin
+         ),
     token: &str,
     health: &Arc<RwLock<HealthState>>,
 ) -> anyhow::Result<()> {
@@ -284,7 +299,9 @@ async fn authorize(
     info!(guid, label = "authorize", "ws subscribe send");
     let redacted_payload = redact_token(&payload.to_string());
     debug!(payload = %redacted_payload, guid, label = "authorize", "ws subscribe payload");
-    ws_sink.send(Message::Text(payload.to_string().into())).await?;
+    ws_sink
+        .send(Message::Text(payload.to_string().into()))
+        .await?;
 
     let response = read_until_guid(ws_stream, &guid, Duration::from_secs(5)).await?;
     info!(payload = %response, guid, label = "authorize", "ws subscribe ack");
@@ -326,7 +343,11 @@ async fn authorize(
 }
 
 async fn read_until_guid(
-    stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+    stream: &mut (
+             impl futures_util::stream::Stream<
+        Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+    > + Unpin
+         ),
     guid: &str,
     timeout_dur: Duration,
 ) -> anyhow::Result<Value> {

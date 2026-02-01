@@ -218,6 +218,9 @@ pub async fn run_command_consumer(
                 };
                 let CommandEnvelope { command, message_id } = envelope;
                 let request_id = command.request_id;
+                increment_counter(&health, |h| {
+                    h.commands_received_total = h.commands_received_total.saturating_add(1)
+                });
                 if let Some(message_id) = message_id.as_deref() {
                     let mut guard = health.write();
                     guard.command_consumer_last_message_id = Some(message_id.to_string());
@@ -233,6 +236,9 @@ pub async fn run_command_consumer(
                 );
                 if !idempotency.check_and_set(request_id).await? {
                     increment_counter(&health, |h| h.command_duplicate_total = h.command_duplicate_total.saturating_add(1));
+                    increment_counter(&health, |h| {
+                        h.commands_duplicate_total = h.commands_duplicate_total.saturating_add(1)
+                    });
                     let ack = CommandAck::duplicate(request_id);
                     sink.publish_ack(ack.clone()).await?;
                     info!(
@@ -249,6 +255,9 @@ pub async fn run_command_consumer(
 
                 if let Some(error_code) = validate_command(&command, price_step, volume_step, &health, config.pause_when_degraded) {
                     increment_counter(&health, |h| h.command_validation_failed_total = h.command_validation_failed_total.saturating_add(1));
+                    increment_counter(&health, |h| {
+                        h.commands_rejected_total = h.commands_rejected_total.saturating_add(1)
+                    });
                     let ack = CommandAck::rejected(request_id, error_code, "validation failed");
                     sink.publish_ack(ack.clone()).await?;
                     info!(
@@ -265,7 +274,10 @@ pub async fn run_command_consumer(
 
                 if is_command_expired(&command) {
                     increment_counter(&health, |h| h.command_expired_total = h.command_expired_total.saturating_add(1));
-                    let ack = CommandAck::rejected(request_id, "expired", "command expired");
+                    increment_counter(&health, |h| {
+                        h.commands_rejected_total = h.commands_rejected_total.saturating_add(1)
+                    });
+                    let ack = CommandAck::expired(request_id, "command expired");
                     sink.publish_ack(ack.clone()).await?;
                     info!(
                         request_id = %ack.request_id,
@@ -280,20 +292,58 @@ pub async fn run_command_consumer(
                 }
 
                 match execute_command(&cws, &command, price_step, volume_step).await {
-                    Ok(order_id) => {
-                        increment_counter(&health, |h| h.command_processed_total = h.command_processed_total.saturating_add(1));
-                        if let Some(order_id) = order_id {
-                            request_map.write().insert(order_id, request_id);
-                        }
-                        let ack = match order_id {
-                            Some(order_id) => CommandAck::confirmed(request_id, Some(order_id)),
-                            None => CommandAck::accepted(request_id),
+                    Ok(response) => {
+                        let info = parse_cws_response(&response);
+                        let http_code = info.http_code.unwrap_or(0);
+                        info!(
+                            request_id = %request_id,
+                            action = %command_action_label(&command.action),
+                            cws_http_code = http_code,
+                            cws_message = ?info.message,
+                            cws_request_guid = ?info.request_guid,
+                            broker_order_id = info.order_id,
+                            "cws response"
+                        );
+                        let (status, error_code, error_msg) = if http_code == 200 {
+                            (alor_protocol::AckStatus::Accepted, None, None)
+                        } else if http_code > 0 {
+                            let error_code = format!("cws_http_{http_code}");
+                            (alor_protocol::AckStatus::Rejected, Some(error_code), info.message.clone())
+                        } else {
+                            (
+                                alor_protocol::AckStatus::Error,
+                                Some("cws_error".to_string()),
+                                Some("missing httpCode".to_string()),
+                            )
                         };
+                        if status == alor_protocol::AckStatus::Accepted {
+                            increment_counter(&health, |h| h.command_processed_total = h.command_processed_total.saturating_add(1));
+                            increment_counter(&health, |h| h.commands_accepted_total = h.commands_accepted_total.saturating_add(1));
+                            if let Some(order_id) = info.order_id {
+                                request_map.write().insert(order_id, request_id);
+                            }
+                        } else if status == alor_protocol::AckStatus::Rejected {
+                            increment_counter(&health, |h| h.commands_rejected_total = h.commands_rejected_total.saturating_add(1));
+                            increment_http_code(&health, http_code);
+                        } else if status == alor_protocol::AckStatus::Error {
+                            increment_counter(&health, |h| h.cws_errors_total = h.cws_errors_total.saturating_add(1));
+                        }
+                        let ack = build_cws_ack(
+                            request_id,
+                            status,
+                            info,
+                            error_code,
+                            error_msg,
+                        );
                         sink.publish_ack(ack.clone()).await?;
                         info!(
                             request_id = %ack.request_id,
                             status = ?ack.status,
                             processed_ts_utc = ack.processed_ts_utc,
+                            broker_order_id = ack.broker_order_id,
+                            error_code = ?ack.error_code,
+                            cws_http_code = ?ack.cws_http_code,
+                            cws_request_guid = ?ack.cws_request_guid,
                             "command ack published"
                         );
                         if let Some(message_id) = message_id.as_deref() {
@@ -301,11 +351,8 @@ pub async fn run_command_consumer(
                         }
                     }
                     Err(error) => {
-                        let ack = CommandAck::rejected(
-                            request_id,
-                            "command_failed",
-                            format!("{error}"),
-                        );
+                        increment_counter(&health, |h| h.cws_errors_total = h.cws_errors_total.saturating_add(1));
+                        let ack = CommandAck::error(request_id, "cws_error", format!("{error}"));
                         sink.publish_ack(ack.clone()).await?;
                         info!(
                             request_id = %ack.request_id,
@@ -342,9 +389,24 @@ fn command_action_label(action: &CommandAction) -> &'static str {
     }
 }
 
-fn increment_counter(health: &Arc<parking_lot::RwLock<HealthState>>, update: impl FnOnce(&mut HealthState)) {
+fn increment_counter(
+    health: &Arc<parking_lot::RwLock<HealthState>>,
+    update: impl FnOnce(&mut HealthState),
+) {
     let mut guard = health.write();
     update(&mut guard);
+}
+
+fn increment_http_code(health: &Arc<parking_lot::RwLock<HealthState>>, http_code: i64) {
+    if http_code <= 0 {
+        return;
+    }
+    let mut guard = health.write();
+    let entry = guard
+        .commands_rejected_http_code_total
+        .entry(http_code)
+        .or_insert(0);
+    *entry = entry.saturating_add(1);
 }
 
 fn validate_command(
@@ -406,7 +468,7 @@ async fn execute_command(
     command: &OrderCommand,
     price_step: f64,
     volume_step: f64,
-) -> anyhow::Result<Option<i64>> {
+) -> anyhow::Result<serde_json::Value> {
     match &command.action {
         CommandAction::Place(payload) => {
             let price = normalize_price(payload.price, price_step, payload.side);
@@ -421,13 +483,13 @@ async fn execute_command(
                     side_str(payload.side),
                 )
                 .await?;
-            Ok(response.get("orderId").and_then(|value| value.as_i64()))
+            Ok(response)
         }
         CommandAction::Cancel(payload) => {
             let response = cws
                 .cancel(&command.portfolio, &command.exchange, payload.order_id)
                 .await?;
-            Ok(response.get("orderId").and_then(|value| value.as_i64()))
+            Ok(response)
         }
         CommandAction::Replace(payload) => {
             let new_price = normalize_step_round(payload.new_price, price_step);
@@ -443,11 +505,82 @@ async fn execute_command(
                     new_qty,
                 )
                 .await?;
-            Ok(response.get("orderId").and_then(|value| value.as_i64()))
+            Ok(response)
         }
     }
 }
 
+#[derive(Debug, Clone)]
+struct CwsResponseInfo {
+    http_code: Option<i64>,
+    message: Option<String>,
+    request_guid: Option<String>,
+    order_id: Option<i64>,
+}
+
+fn parse_cws_response(value: &serde_json::Value) -> CwsResponseInfo {
+    let http_code = value.get("httpCode").and_then(to_i64);
+    let message = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| value.to_string());
+    let request_guid = value
+        .get("requestGuid")
+        .or_else(|| value.get("guid"))
+        .and_then(serde_json::Value::as_str)
+        .map(|value| value.to_string());
+    let order_id = extract_order_id(value);
+    CwsResponseInfo {
+        http_code,
+        message,
+        request_guid,
+        order_id,
+    }
+}
+
+fn extract_order_id(value: &serde_json::Value) -> Option<i64> {
+    value
+        .get("orderNumber")
+        .or_else(|| value.get("orderId"))
+        .and_then(to_i64)
+        .or_else(|| {
+            value.get("data").and_then(|data| {
+                data.get("orderNumber")
+                    .or_else(|| data.get("orderId"))
+                    .and_then(to_i64)
+            })
+        })
+}
+
+fn to_i64(value: &serde_json::Value) -> Option<i64> {
+    if let Some(v) = value.as_i64() {
+        return Some(v);
+    }
+    if let Some(v) = value.as_u64() {
+        return Some(v as i64);
+    }
+    value.as_str().and_then(|value| value.parse::<i64>().ok())
+}
+
+fn build_cws_ack(
+    request_id: uuid::Uuid,
+    status: alor_protocol::AckStatus,
+    info: CwsResponseInfo,
+    error_code: Option<String>,
+    error_msg: Option<String>,
+) -> CommandAck {
+    CommandAck {
+        request_id,
+        status,
+        broker_order_id: info.order_id,
+        error_code,
+        error_msg,
+        cws_http_code: info.http_code,
+        cws_message: info.message,
+        cws_request_guid: info.request_guid,
+        processed_ts_utc: chrono::Utc::now().timestamp(),
+    }
+}
 
 fn side_str(side: Side) -> &'static str {
     match side {
@@ -481,5 +614,41 @@ fn normalize_qty(value: f64, step: f64) -> f64 {
         value
     } else {
         (value / step).floor() * step
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_cws_response_success_with_order_number() {
+        let value = json!({
+            "httpCode": 200,
+            "message": "ok",
+            "requestGuid": "guid-123",
+            "orderNumber": 12345
+        });
+        let info = parse_cws_response(&value);
+        assert_eq!(info.http_code, Some(200));
+        assert_eq!(info.message.as_deref(), Some("ok"));
+        assert_eq!(info.request_guid.as_deref(), Some("guid-123"));
+        assert_eq!(info.order_id, Some(12345));
+    }
+
+    #[test]
+    fn parse_cws_response_reject_with_nested_order_id() {
+        let value = json!({
+            "httpCode": 400,
+            "message": "price out of limits",
+            "requestGuid": "guid-456",
+            "data": { "orderId": 987 }
+        });
+        let info = parse_cws_response(&value);
+        assert_eq!(info.http_code, Some(400));
+        assert_eq!(info.message.as_deref(), Some("price out of limits"));
+        assert_eq!(info.request_guid.as_deref(), Some("guid-456"));
+        assert_eq!(info.order_id, Some(987));
     }
 }

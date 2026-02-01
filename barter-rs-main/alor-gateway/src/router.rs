@@ -11,7 +11,10 @@ pub struct Router;
 
 #[derive(Debug)]
 pub enum RouterCommand {
-    UpdateSubscribeWallclock { wallclock_ts: i64, history_origin: DataOrigin },
+    UpdateSubscribeWallclock {
+        wallclock_ts: i64,
+        history_origin: DataOrigin,
+    },
 }
 
 #[derive(Debug)]
@@ -145,7 +148,9 @@ fn parse_bars(
             .collect();
     }
 
-    parse_bar_item(data, live_cutoff_ts, history_origin).into_iter().collect()
+    parse_bar_item(data, live_cutoff_ts, history_origin)
+        .into_iter()
+        .collect()
 }
 
 fn parse_bar_item(
@@ -171,8 +176,14 @@ fn parse_bar_item(
         o: data.get("open").and_then(Value::as_f64).unwrap_or_default(),
         h: data.get("high").and_then(Value::as_f64).unwrap_or_default(),
         l: data.get("low").and_then(Value::as_f64).unwrap_or_default(),
-        c: data.get("close").and_then(Value::as_f64).unwrap_or_default(),
-        v: data.get("volume").and_then(Value::as_f64).unwrap_or_default(),
+        c: data
+            .get("close")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        v: data
+            .get("volume")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
         origin,
     })
 }
@@ -227,7 +238,7 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
-            .to_string(),
+            .to_lowercase(),
         side: data
             .get("side")
             .and_then(Value::as_str)
@@ -251,8 +262,14 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
             .or_else(|| data.get("filledQtyBatch"))
             .and_then(Value::as_f64)
             .unwrap_or_default(),
-        price: data.get("price").and_then(Value::as_f64).unwrap_or_default(),
-        existing: data.get("existing").and_then(Value::as_bool).unwrap_or(false),
+        price: data
+            .get("price")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        existing: data
+            .get("existing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         ts_utc: data
             .get("updateTime")
             .or_else(|| data.get("transTime"))
@@ -336,6 +353,26 @@ mod tests {
         assert_eq!(position.qty, 2.0);
         assert_eq!(position.avg_price, 100.0);
         assert_eq!(position.ts_utc, 1700000000);
+    }
+
+    #[test]
+    fn parse_order_event_lowercases_status() {
+        let value = json!({
+            "data": {
+                "orderId": 42,
+                "symbol": "IMOEXF",
+                "status": "WORKING",
+                "side": "buy",
+                "type": "limit",
+                "qty": 1.0,
+                "filled": 0.0,
+                "price": 100.0,
+                "existing": false,
+                "updateTime": 1700000001
+            }
+        });
+        let order = parse_order(&value).expect("order");
+        assert_eq!(order.status, "working");
     }
 
     #[test]
