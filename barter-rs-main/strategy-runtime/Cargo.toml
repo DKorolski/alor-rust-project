@@ -18,3 +18,4 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = "3"

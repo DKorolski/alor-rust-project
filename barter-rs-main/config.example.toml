@@ -5,6 +5,7 @@ BAR_DUMP_PATH="./bars.csv"
 portfolio = "7502T0U"
 exchange = "MOEX"
 instrument_group = "RFUD"
+# used for market order routing in CWS (create:market)
 symbols = ["IMOEXF"]
 refresh_token = ""
 

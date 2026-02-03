@@ -67,6 +67,47 @@ cargo test -p alor-gateway --tests ws_integration
 RUST_LOG=debug cargo test -p alor-gateway --tests ws_integration -- --nocapture
 ```
 
+## Alor Trading Gateway + Strategy Runtime Runbook
+The `alor-gateway` streams bars/orders/positions and forwards order commands. The `strategy-runtime`
+consumes the event streams and executes the configured strategy. The MVP strategy is
+`market_buy_and_close` (market buy then close).
+
+### Configuration
+* `config.example.toml` is the gateway config (copy and fill refresh_token, portfolio, symbols).
+* `strategy-runtime/config.example.toml` is the runtime config; use:
+  * `strategy_kind = "market_buy_and_close"` to enable the MVP strategy.
+  * `close_trigger = "next_bar"` or `close_trigger = "position_update"`.
+  * `trade_mode`, `allow_live_orders`, `paper.enabled`, and `backtest.enabled` must match the runtime matrix.
+
+### Live mode (real CWS orders)
+```bash
+cp config.example.toml config.live.toml
+cp strategy-runtime/config.example.toml strategy-runtime.toml
+
+# gateway
+cargo run -p alor-gateway --bin alor_gateway_runner -- --config config.live.toml
+
+# runtime (enable Live + allow_live_orders + market_buy_and_close in strategy-runtime.toml)
+# also set paper.enabled=false and backtest.enabled=false for Live
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime.toml
+```
+
+### Paper mode (virtual fills; market fills at next bar open)
+```bash
+cp strategy-runtime/config.example.toml strategy-runtime.toml
+# set trade_mode="paper", allow_live_orders=false, strategy_kind="market_buy_and_close"
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime.toml
+```
+Paper mode writes `trades.csv` and `summary.json` (paths configurable in the `[paper]` section).
+
+### Backtest mode (virtual fills; market fills at next bar open)
+```bash
+cp strategy-runtime/config.example.toml strategy-runtime.toml
+# set trade_mode="backtest", allow_live_orders=false, strategy_kind="market_buy_and_close"
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime.toml
+```
+Backtest mode writes `trades.csv` and `summary.json` (paths configurable in the `[backtest]` section).
+
 #### Paper Trading With Live Market Data & Mock Execution
 
 ```rust,no_run

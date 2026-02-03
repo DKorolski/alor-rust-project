@@ -5,7 +5,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use alor_protocol::{Envelope, MessageType};
 
@@ -13,9 +13,11 @@ use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
+use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
+use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
-    BacktestConfig, Intent, OrderEvent, PaperConfig, PaperOutput, PositionEvent, RuntimeConfig,
-    Strategy, StrategyCtx, TradeMode,
+    BacktestConfig, BarEvent, Intent, OrderEvent, PaperConfig, PaperOutput, PositionEvent,
+    RuntimeConfig, Strategy, StrategyCtx, StrategyKind, TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -34,9 +36,12 @@ pub struct StrategyRuntime {
     config: RuntimeConfig,
     transport: RedisRuntimeTransport,
     state: RuntimeState,
-    strategy: Box<dyn Strategy + Send>,
+    strategy: Box<dyn Strategy + Send + Sync>,
     live_guard: LiveGuardState,
     metrics: RuntimeMetrics,
+    ledger: TradeLedger,
+    sim_orders: Vec<SimOrder>,
+    next_sim_order_id: i64,
 }
 
 #[derive(Debug)]
@@ -56,6 +61,23 @@ struct RuntimeMetrics {
     last_log: Option<Instant>,
     last_guard_log: Option<Instant>,
     last_health_poll: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct SimOrder {
+    order_id: i64,
+    symbol: String,
+    side: String,
+    order_type: SimOrderType,
+    qty: f64,
+    price: Option<f64>,
+    created_bar_ts: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SimOrderType {
+    Market,
+    Limit,
 }
 
 impl Default for RuntimeMetrics {
@@ -83,9 +105,14 @@ impl Default for RuntimeMetrics {
 impl StrategyRuntime {
     pub async fn new(config: RuntimeConfig) -> Result<Self> {
         let transport = RedisRuntimeTransport::new(config.clone())?;
-        let strategy = Box::new(LimitCancelStrategy::new(
-            config.strategy.to_limit_cancel_config(),
-        ));
+        let strategy: Box<dyn Strategy + Send + Sync> = match config.strategy.strategy_kind {
+            StrategyKind::LimitCancel => Box::new(LimitCancelStrategy::new(
+                config.strategy.to_limit_cancel_config(),
+            )),
+            StrategyKind::MarketBuyAndClose => Box::new(MarketBuyAndCloseStrategy::new(
+                config.strategy.to_market_buy_and_close_config(),
+            )),
+        };
         Ok(Self {
             config,
             transport,
@@ -93,6 +120,9 @@ impl StrategyRuntime {
             strategy,
             live_guard: LiveGuardState::default(),
             metrics: RuntimeMetrics::default(),
+            ledger: TradeLedger::default(),
+            sim_orders: Vec::new(),
+            next_sim_order_id: 1,
         })
     }
 
@@ -102,6 +132,10 @@ impl StrategyRuntime {
             self.poll_once().await?;
             sleep(Duration::from_millis(self.config.read.poll_interval_ms)).await;
         }
+    }
+
+    pub async fn flush_reports(&self) -> Result<()> {
+        self.persist_ledger_reports().await
     }
 
     async fn bootstrap(&mut self) -> Result<()> {
@@ -397,6 +431,7 @@ impl StrategyRuntime {
         let intents = self.strategy.on_order(&ctx, &order);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, created_ts, intents).await?;
+        self.update_ledger_from_order(&order)?;
         self.state.orders.insert(order.order_id, order);
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
@@ -437,8 +472,14 @@ impl StrategyRuntime {
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
-        self.apply_intents(&ctx, bar.close_time_utc, intents)
-            .await?;
+        if self.config.trade_mode != TradeMode::Live {
+            self.simulate_fills(&bar).await?;
+            self.simulate_intents(&bar, intents).await?;
+            self.persist_state(None).await?;
+        } else {
+            self.apply_intents(&ctx, bar.close_time_utc, intents)
+                .await?;
+        }
         self.transport.xack(&stream, &message_id).await?;
         self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
         Ok(())
@@ -489,6 +530,222 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    fn update_ledger_from_order(&mut self, order: &OrderEvent) -> Result<()> {
+        if order.order_id <= 0 {
+            return Ok(());
+        }
+        let status = order.status.to_lowercase();
+        let record = OrderRecord {
+            order_id: order.order_id,
+            symbol: order.symbol.clone(),
+            side: order.side.to_lowercase(),
+            qty: order.qty,
+            filled: order.filled,
+            price: order.price,
+            status: status.clone(),
+            ts_utc: order.ts_utc,
+        };
+        self.ledger.record_order(record);
+        if status == "filled" {
+            let fill_qty = if order.filled > 0.0 { order.filled } else { order.qty };
+            if fill_qty > 0.0 {
+                let trade = TradeRecord {
+                    ts_utc: order.ts_utc,
+                    order_id: order.order_id,
+                    symbol: order.symbol.clone(),
+                    side: order.side.to_lowercase(),
+                    qty: fill_qty,
+                    price: order.price,
+                    commission: 0.0,
+                };
+                self.ledger.record_fill(trade);
+                info!(
+                    order_id = order.order_id,
+                    symbol = order.symbol,
+                    qty = fill_qty,
+                    price = order.price,
+                    "order filled"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn simulate_intents(&mut self, bar: &BarEvent, intents: Vec<Intent>) -> Result<()> {
+        for intent in intents {
+            match intent {
+                Intent::Place { price, qty, side } => {
+                    let order_id = self.next_sim_order_id;
+                    self.next_sim_order_id += 1;
+                    let side = format!("{side:?}").to_lowercase();
+                    self.sim_orders.push(SimOrder {
+                        order_id,
+                        symbol: bar.symbol.clone(),
+                        side: side.clone(),
+                        order_type: SimOrderType::Limit,
+                        qty,
+                        price: Some(price),
+                        created_bar_ts: bar.close_time_utc,
+                    });
+                    self.ledger.record_order(OrderRecord {
+                        order_id,
+                        symbol: bar.symbol.clone(),
+                        side,
+                        qty,
+                        filled: 0.0,
+                        price,
+                        status: "working".to_string(),
+                        ts_utc: bar.close_time_utc,
+                    });
+                }
+                Intent::Market { qty, side, .. } => {
+                    let order_id = self.next_sim_order_id;
+                    self.next_sim_order_id += 1;
+                    let side = format!("{side:?}").to_lowercase();
+                    self.sim_orders.push(SimOrder {
+                        order_id,
+                        symbol: bar.symbol.clone(),
+                        side: side.clone(),
+                        order_type: SimOrderType::Market,
+                        qty,
+                        price: None,
+                        created_bar_ts: bar.close_time_utc,
+                    });
+                    self.ledger.record_order(OrderRecord {
+                        order_id,
+                        symbol: bar.symbol.clone(),
+                        side,
+                        qty,
+                        filled: 0.0,
+                        price: 0.0,
+                        status: "working".to_string(),
+                        ts_utc: bar.close_time_utc,
+                    });
+                }
+                Intent::Cancel { order_id } => {
+                    if let Some(pos) = self
+                        .sim_orders
+                        .iter()
+                        .position(|order| order.order_id == order_id)
+                    {
+                        let order = self.sim_orders.remove(pos);
+                        self.ledger.record_order(OrderRecord {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side,
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: order.price.unwrap_or(0.0),
+                            status: "canceled".to_string(),
+                            ts_utc: bar.close_time_utc,
+                        });
+                    }
+                }
+                Intent::Replace {
+                    order_id,
+                    new_price,
+                    new_qty,
+                } => {
+                    if let Some(order) = self
+                        .sim_orders
+                        .iter_mut()
+                        .find(|order| order.order_id == order_id)
+                    {
+                        order.price = Some(new_price);
+                        order.qty = new_qty;
+                        self.ledger.record_order(OrderRecord {
+                            order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.clone(),
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: new_price,
+                            status: "working".to_string(),
+                            ts_utc: bar.close_time_utc,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn simulate_fills(&mut self, bar: &BarEvent) -> Result<()> {
+        let mut filled = Vec::new();
+        for order in &self.sim_orders {
+            if bar.close_time_utc <= order.created_bar_ts {
+                continue;
+            }
+            let fill_price = match order.order_type {
+                SimOrderType::Market => Some(bar.o),
+                SimOrderType::Limit => {
+                    let price = order.price.unwrap_or(0.0);
+                    if order.side == "buy" && bar.l <= price {
+                        Some(price)
+                    } else if order.side == "sell" && bar.h >= price {
+                        Some(price)
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(price) = fill_price {
+                filled.push((order.order_id, price));
+            }
+        }
+        for (order_id, price) in filled {
+            if let Some(index) = self
+                .sim_orders
+                .iter()
+                .position(|order| order.order_id == order_id)
+            {
+                let order = self.sim_orders.remove(index);
+                let trade = TradeRecord {
+                    ts_utc: bar.close_time_utc,
+                    order_id: order.order_id,
+                    symbol: order.symbol.clone(),
+                    side: order.side.clone(),
+                    qty: order.qty,
+                    price,
+                    commission: 0.0,
+                };
+                self.ledger.record_fill(trade);
+                self.ledger.record_order(OrderRecord {
+                    order_id: order.order_id,
+                    symbol: order.symbol.clone(),
+                    side: order.side,
+                    qty: order.qty,
+                    filled: order.qty,
+                    price,
+                    status: "filled".to_string(),
+                    ts_utc: bar.close_time_utc,
+                });
+                self.persist_ledger_reports().await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn persist_ledger_reports(&self) -> Result<()> {
+        match self.config.trade_mode {
+            TradeMode::Paper => self
+                .ledger
+                .persist_reports(
+                    &self.config.strategy.strategy_id,
+                    &self.config.strategy.symbol,
+                    &self.config.paper.trades_csv,
+                    &self.config.paper.summary_json,
+                ),
+            TradeMode::Backtest => self.ledger.persist_reports(
+                &self.config.strategy.strategy_id,
+                &self.config.strategy.symbol,
+                &self.config.backtest.trades_csv,
+                &self.config.backtest.summary_json,
+            ),
+            TradeMode::Live => Ok(()),
+        }
+    }
+
     fn strategy_ctx(&self) -> StrategyCtx {
         let gateway_phase = self
             .live_guard
@@ -496,6 +753,11 @@ impl StrategyRuntime {
             .as_ref()
             .map(|health| health.gateway_phase)
             .unwrap_or_default();
+        let position_qty = self
+            .state
+            .positions
+            .get(&self.config.strategy.symbol)
+            .map(|pos| pos.qty);
         StrategyCtx {
             strategy_id: self.config.strategy.strategy_id.clone(),
             portfolio: self.config.portfolio.clone(),
@@ -505,6 +767,7 @@ impl StrategyRuntime {
             trade_mode: self.config.trade_mode,
             allow_live_orders: self.config.allow_live_orders,
             gateway_phase,
+            position_qty,
             last_bar_ts: self
                 .state
                 .last_processed_bar_ts
@@ -576,6 +839,15 @@ impl StrategyRuntime {
                 0,
                 "place",
             ),
+            Intent::Market {
+                qty,
+                side,
+                fill_price: _,
+            } => (
+                alor_protocol::CommandAction::Market(alor_protocol::MarketOrder { qty, side }),
+                if side == alor_protocol::Side::Buy { 3 } else { 4 },
+                "market",
+            ),
             Intent::Cancel { order_id } => (
                 alor_protocol::CommandAction::Cancel(alor_protocol::CancelOrder { order_id }),
                 1,
@@ -618,14 +890,14 @@ impl StrategyRuntime {
     async fn log_metrics_if_due(&mut self) -> Result<()> {
         let now = Instant::now();
         let log_due = match self.metrics.last_log {
-            Some(last) => now.duration_since(last) >= Duration::from_secs(5),
+            Some(last) => now.duration_since(last) >= Duration::from_secs(60),
             None => true,
         };
         if !log_due {
             return Ok(());
         }
         self.metrics.last_log = Some(now);
-        info!(
+        debug!(
             bars_read_total = self.metrics.bars_read_total,
             bars_decoded_ok_total = self.metrics.bars_decoded_ok_total,
             bars_decode_failed_total = self.metrics.bars_decode_failed_total,
@@ -814,6 +1086,23 @@ impl VirtualTradeLog {
                 action: "place".to_string(),
                 qty: Some(qty),
                 price: Some(price),
+                side: Some(format!("{side:?}")),
+                order_id: None,
+                new_price: None,
+                new_qty: None,
+            },
+            Intent::Market {
+                qty,
+                side,
+                fill_price,
+            } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "market".to_string(),
+                qty: Some(qty),
+                price: fill_price,
                 side: Some(format!("{side:?}")),
                 order_id: None,
                 new_price: None,

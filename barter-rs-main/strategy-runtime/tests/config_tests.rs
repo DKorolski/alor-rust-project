@@ -69,8 +69,12 @@ fn loads_toml_defaults() {
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
+        "PAPER_TRADES_CSV",
+        "PAPER_SUMMARY_JSON",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
+        "BACKTEST_TRADES_CSV",
+        "BACKTEST_SUMMARY_JSON",
         "STRATEGY_ID",
         "SYMBOL",
         "QTY",
@@ -105,8 +109,12 @@ fn env_overrides_take_precedence() {
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
+        "PAPER_TRADES_CSV",
+        "PAPER_SUMMARY_JSON",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
+        "BACKTEST_TRADES_CSV",
+        "BACKTEST_SUMMARY_JSON",
         "STRATEGY_ID",
         "SYMBOL",
         "QTY",
@@ -149,8 +157,12 @@ fn health_default_is_events_health() {
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
+        "PAPER_TRADES_CSV",
+        "PAPER_SUMMARY_JSON",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
+        "BACKTEST_TRADES_CSV",
+        "BACKTEST_SUMMARY_JSON",
     ]);
     let path = write_temp_config("redis_url = \"redis://example/\"\n");
 
@@ -172,14 +184,18 @@ fn loads_runtime_mode_settings() {
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
+        "PAPER_TRADES_CSV",
+        "PAPER_SUMMARY_JSON",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
+        "BACKTEST_TRADES_CSV",
+        "BACKTEST_SUMMARY_JSON",
     ]);
     let path = write_temp_config(
         r#"
 [runtime]
 trade_mode = "backtest"
-allow_live_orders = true
+allow_live_orders = false
 guard_log_interval_ms = 1234
 
 [paper]
@@ -199,7 +215,7 @@ trade_log = "./backtest.log"
         resolved.config.trade_mode,
         strategy_runtime::TradeMode::Backtest
     );
-    assert!(resolved.config.allow_live_orders);
+    assert!(!resolved.config.allow_live_orders);
     assert_eq!(resolved.config.guard_log_interval_ms, 1234);
     assert!(!resolved.config.paper.enabled);
     assert_eq!(
@@ -209,4 +225,29 @@ trade_log = "./backtest.log"
     assert_eq!(resolved.config.paper.file_path, "./paper.jsonl");
     assert!(resolved.config.backtest.enabled);
     assert_eq!(resolved.config.backtest.trade_log, "./backtest.log");
+}
+
+#[test]
+fn loads_paper_report_paths() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "PAPER_ENABLED",
+        "PAPER_OUTPUT",
+        "PAPER_FILE_PATH",
+        "PAPER_TRADES_CSV",
+        "PAPER_SUMMARY_JSON",
+    ]);
+    let path = write_temp_config(
+        r#"
+[paper]
+enabled = true
+trades_csv = "./custom_trades.csv"
+summary_json = "./custom_summary.json"
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(resolved.config.paper.trades_csv, "./custom_trades.csv");
+    assert_eq!(resolved.config.paper.summary_json, "./custom_summary.json");
 }

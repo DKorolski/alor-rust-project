@@ -7,12 +7,13 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::{
-    BacktestConfig, PaperConfig, PaperOutput, ReadConfig, RuntimeConfig, StrategyConfig,
-    StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, CloseTrigger, PaperConfig, PaperOutput, ReadConfig, RuntimeConfig,
+    StrategyConfig, StrategyKind, StreamNames, TradeMode, TrimConfig,
 };
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
 const DEFAULT_STRATEGY_ID: &str = "limit_cancel";
+const DEFAULT_STRATEGY_KIND: StrategyKind = StrategyKind::LimitCancel;
 const DEFAULT_PORTFOLIO: &str = "demo";
 const DEFAULT_EXCHANGE: &str = "alor";
 const DEFAULT_SOURCE: &str = "strategy-runtime";
@@ -22,18 +23,23 @@ const DEFAULT_PLACE_OFFSET_TICKS: i64 = 1;
 const DEFAULT_QTY: f64 = 1.0;
 const DEFAULT_TICK_SIZE: f64 = 0.01;
 const DEFAULT_MAX_WAIT_BARS_FOR_ACK: u32 = 3;
+const DEFAULT_CLOSE_TRIGGER: CloseTrigger = CloseTrigger::NextBar;
 const DEFAULT_CONSUMER_GROUP: &str = "strategy-runtime";
 const DEFAULT_CONSUMER_NAME: &str = "auto";
 const DEFAULT_HEALTH_STREAM: &str = "events.health";
 
-const DEFAULT_TRADE_MODE: TradeMode = TradeMode::Live;
+const DEFAULT_TRADE_MODE: TradeMode = TradeMode::Paper;
 const DEFAULT_ALLOW_LIVE_ORDERS: bool = false;
 const DEFAULT_GUARD_LOG_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_PAPER_ENABLED: bool = true;
 const DEFAULT_PAPER_OUTPUT: PaperOutput = PaperOutput::Stdout;
 const DEFAULT_PAPER_FILE_PATH: &str = "./paper_trades.jsonl";
+const DEFAULT_PAPER_TRADES_CSV: &str = "./trades.csv";
+const DEFAULT_PAPER_SUMMARY_JSON: &str = "./summary.json";
 const DEFAULT_BACKTEST_ENABLED: bool = true;
 const DEFAULT_BACKTEST_TRADE_LOG: &str = "./backtest_trades.log";
+const DEFAULT_BACKTEST_TRADES_CSV: &str = "./trades.csv";
+const DEFAULT_BACKTEST_SUMMARY_JSON: &str = "./summary.json";
 
 const DEFAULT_BLOCK_MS: usize = 500;
 const DEFAULT_CLAIM_IDLE_MS: usize = 5_000;
@@ -118,12 +124,14 @@ pub struct TrimSources {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategySources {
     pub strategy_id: ConfigSource,
+    pub strategy_kind: ConfigSource,
     pub symbol: ConfigSource,
     pub qty: ConfigSource,
     pub side: ConfigSource,
     pub place_offset_ticks: ConfigSource,
     pub tick_size: ConfigSource,
     pub max_wait_bars_for_ack: ConfigSource,
+    pub close_trigger: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,12 +146,16 @@ pub struct PaperSources {
     pub enabled: ConfigSource,
     pub output: ConfigSource,
     pub file_path: ConfigSource,
+    pub trades_csv: ConfigSource,
+    pub summary_json: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestSources {
     pub enabled: ConfigSource,
     pub trade_log: ConfigSource,
+    pub trades_csv: ConfigSource,
+    pub summary_json: ConfigSource,
 }
 
 impl Default for ConfigSources {
@@ -211,12 +223,14 @@ impl Default for StrategySources {
     fn default() -> Self {
         Self {
             strategy_id: ConfigSource::Default,
+            strategy_kind: ConfigSource::Default,
             symbol: ConfigSource::Default,
             qty: ConfigSource::Default,
             side: ConfigSource::Default,
             place_offset_ticks: ConfigSource::Default,
             tick_size: ConfigSource::Default,
             max_wait_bars_for_ack: ConfigSource::Default,
+            close_trigger: ConfigSource::Default,
         }
     }
 }
@@ -237,6 +251,8 @@ impl Default for PaperSources {
             enabled: ConfigSource::Default,
             output: ConfigSource::Default,
             file_path: ConfigSource::Default,
+            trades_csv: ConfigSource::Default,
+            summary_json: ConfigSource::Default,
         }
     }
 }
@@ -246,6 +262,8 @@ impl Default for BacktestSources {
         Self {
             enabled: ConfigSource::Default,
             trade_log: ConfigSource::Default,
+            trades_csv: ConfigSource::Default,
+            summary_json: ConfigSource::Default,
         }
     }
 }
@@ -317,12 +335,14 @@ struct TrimConfigFile {
 #[derive(Debug, Default, Deserialize)]
 struct StrategyConfigFile {
     strategy_id: Option<String>,
+    strategy_kind: Option<String>,
     symbol: Option<String>,
     qty: Option<f64>,
     side: Option<String>,
     place_offset_ticks: Option<i64>,
     tick_size: Option<f64>,
     max_wait_bars_for_ack: Option<u32>,
+    close_trigger: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -330,12 +350,16 @@ struct PaperConfigFile {
     enabled: Option<bool>,
     output: Option<String>,
     file_path: Option<String>,
+    trades_csv: Option<String>,
+    summary_json: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct BacktestConfigFile {
     enabled: Option<bool>,
     trade_log: Option<String>,
+    trades_csv: Option<String>,
+    summary_json: Option<String>,
 }
 
 pub fn load_runtime_config(
@@ -355,12 +379,14 @@ pub fn load_runtime_config(
 
     let mut strategy = StrategyConfig {
         strategy_id: DEFAULT_STRATEGY_ID.to_string(),
+        strategy_kind: DEFAULT_STRATEGY_KIND,
         symbol: DEFAULT_SYMBOL.to_string(),
         qty: DEFAULT_QTY,
         side: parse_side(DEFAULT_SIDE),
         place_offset_ticks: DEFAULT_PLACE_OFFSET_TICKS,
         tick_size: DEFAULT_TICK_SIZE,
         max_wait_bars_for_ack: DEFAULT_MAX_WAIT_BARS_FOR_ACK,
+        close_trigger: DEFAULT_CLOSE_TRIGGER,
     };
 
     let mut read = ReadConfig {
@@ -377,10 +403,14 @@ pub fn load_runtime_config(
         enabled: DEFAULT_PAPER_ENABLED,
         output: DEFAULT_PAPER_OUTPUT,
         file_path: DEFAULT_PAPER_FILE_PATH.to_string(),
+        trades_csv: DEFAULT_PAPER_TRADES_CSV.to_string(),
+        summary_json: DEFAULT_PAPER_SUMMARY_JSON.to_string(),
     };
     let mut backtest = BacktestConfig {
         enabled: DEFAULT_BACKTEST_ENABLED,
         trade_log: DEFAULT_BACKTEST_TRADE_LOG.to_string(),
+        trades_csv: DEFAULT_BACKTEST_TRADES_CSV.to_string(),
+        summary_json: DEFAULT_BACKTEST_SUMMARY_JSON.to_string(),
     };
 
     let mut trim = TrimConfig {
@@ -473,6 +503,10 @@ pub fn load_runtime_config(
                 strategy.strategy_id = value.clone();
                 sources.strategy.strategy_id = ConfigSource::File;
             }
+            if let Some(value) = &strategy_file.strategy_kind {
+                strategy.strategy_kind = parse_strategy_kind(value);
+                sources.strategy.strategy_kind = ConfigSource::File;
+            }
             if let Some(value) = &strategy_file.symbol {
                 strategy.symbol = value.clone();
                 sources.strategy.symbol = ConfigSource::File;
@@ -496,6 +530,10 @@ pub fn load_runtime_config(
             if let Some(value) = strategy_file.max_wait_bars_for_ack {
                 strategy.max_wait_bars_for_ack = value;
                 sources.strategy.max_wait_bars_for_ack = ConfigSource::File;
+            }
+            if let Some(value) = &strategy_file.close_trigger {
+                strategy.close_trigger = parse_close_trigger(value);
+                sources.strategy.close_trigger = ConfigSource::File;
             }
         }
         if let Some(runtime_file) = &file_config.runtime {
@@ -525,6 +563,14 @@ pub fn load_runtime_config(
                 paper.file_path = value.clone();
                 sources.paper.file_path = ConfigSource::File;
             }
+            if let Some(value) = &paper_file.trades_csv {
+                paper.trades_csv = value.clone();
+                sources.paper.trades_csv = ConfigSource::File;
+            }
+            if let Some(value) = &paper_file.summary_json {
+                paper.summary_json = value.clone();
+                sources.paper.summary_json = ConfigSource::File;
+            }
         }
         if let Some(backtest_file) = &file_config.backtest {
             if let Some(value) = backtest_file.enabled {
@@ -534,6 +580,14 @@ pub fn load_runtime_config(
             if let Some(value) = &backtest_file.trade_log {
                 backtest.trade_log = value.clone();
                 sources.backtest.trade_log = ConfigSource::File;
+            }
+            if let Some(value) = &backtest_file.trades_csv {
+                backtest.trades_csv = value.clone();
+                sources.backtest.trades_csv = ConfigSource::File;
+            }
+            if let Some(value) = &backtest_file.summary_json {
+                backtest.summary_json = value.clone();
+                sources.backtest.summary_json = ConfigSource::File;
             }
         }
         if let Some(value) = file_config.reset_state_on_start {
@@ -614,6 +668,10 @@ pub fn load_runtime_config(
         strategy.strategy_id = value;
         sources.strategy.strategy_id = ConfigSource::Env;
     }
+    if let Some(value) = env::var("STRATEGY_KIND").ok() {
+        strategy.strategy_kind = parse_strategy_kind(&value);
+        sources.strategy.strategy_kind = ConfigSource::Env;
+    }
     if let Some(value) = env::var("SYMBOL").ok() {
         strategy.symbol = value;
         sources.strategy.symbol = ConfigSource::Env;
@@ -637,6 +695,10 @@ pub fn load_runtime_config(
     if let Some(value) = env_parse("MAX_WAIT_BARS_FOR_ACK") {
         strategy.max_wait_bars_for_ack = value;
         sources.strategy.max_wait_bars_for_ack = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("CLOSE_TRIGGER").ok() {
+        strategy.close_trigger = parse_close_trigger(&value);
+        sources.strategy.close_trigger = ConfigSource::Env;
     }
     if let Some(value) = env::var("TRADE_MODE").ok() {
         trade_mode = parse_trade_mode(&value);
@@ -662,6 +724,14 @@ pub fn load_runtime_config(
         paper.file_path = value;
         sources.paper.file_path = ConfigSource::Env;
     }
+    if let Some(value) = env::var("PAPER_TRADES_CSV").ok() {
+        paper.trades_csv = value;
+        sources.paper.trades_csv = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("PAPER_SUMMARY_JSON").ok() {
+        paper.summary_json = value;
+        sources.paper.summary_json = ConfigSource::Env;
+    }
     if let Some(value) = env::var("BACKTEST_ENABLED").ok() {
         backtest.enabled = value == "1" || value.eq_ignore_ascii_case("true");
         sources.backtest.enabled = ConfigSource::Env;
@@ -669,6 +739,14 @@ pub fn load_runtime_config(
     if let Some(value) = env::var("BACKTEST_TRADE_LOG").ok() {
         backtest.trade_log = value;
         sources.backtest.trade_log = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("BACKTEST_TRADES_CSV").ok() {
+        backtest.trades_csv = value;
+        sources.backtest.trades_csv = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("BACKTEST_SUMMARY_JSON").ok() {
+        backtest.summary_json = value;
+        sources.backtest.summary_json = ConfigSource::Env;
     }
     if let Some(value) = env::var("RESET_STATE_ON_START").ok() {
         reset_state_on_start = value == "1" || value.eq_ignore_ascii_case("true");
@@ -763,6 +841,8 @@ pub fn load_runtime_config(
         reset_state_on_start,
     };
 
+    validate_trade_mode(&config)?;
+
     Ok(ResolvedRuntimeConfig {
         config,
         sources,
@@ -824,11 +904,55 @@ fn parse_trade_mode(value: &str) -> TradeMode {
     }
 }
 
+fn parse_strategy_kind(value: &str) -> StrategyKind {
+    match value.to_lowercase().as_str() {
+        "market_buy_and_close" | "marketbuyandclose" => StrategyKind::MarketBuyAndClose,
+        _ => StrategyKind::LimitCancel,
+    }
+}
+
+fn parse_close_trigger(value: &str) -> CloseTrigger {
+    match value.to_lowercase().as_str() {
+        "position_update" | "positionupdate" => CloseTrigger::PositionUpdate,
+        _ => CloseTrigger::NextBar,
+    }
+}
+
 fn parse_paper_output(value: &str) -> PaperOutput {
     match value.to_lowercase().as_str() {
         "file" => PaperOutput::File,
         _ => PaperOutput::Stdout,
     }
+}
+
+fn validate_trade_mode(config: &RuntimeConfig) -> Result<()> {
+    let mut conflicts = Vec::new();
+    match config.trade_mode {
+        TradeMode::Live => {
+            if config.paper.enabled {
+                conflicts.push("paper.enabled=true");
+            }
+            if config.backtest.enabled {
+                conflicts.push("backtest.enabled=true");
+            }
+            if !config.allow_live_orders {
+                conflicts.push("allow_live_orders=false");
+            }
+        }
+        TradeMode::Paper | TradeMode::Backtest => {
+            if config.allow_live_orders {
+                conflicts.push("allow_live_orders=true");
+            }
+        }
+    }
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "invalid runtime mode: trade_mode={:?} conflicts with {}",
+        config.trade_mode,
+        conflicts.join(", ")
+    );
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {

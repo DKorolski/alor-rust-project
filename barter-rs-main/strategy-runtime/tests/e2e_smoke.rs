@@ -62,21 +62,27 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
         },
         strategy: StrategyConfig {
             strategy_id: strategy_id.clone(),
+            strategy_kind: strategy_runtime::StrategyKind::LimitCancel,
             symbol,
             qty: 1.0,
             side: alor_protocol::Side::Buy,
             place_offset_ticks: 50,
             tick_size: 0.01,
             max_wait_bars_for_ack: 3,
+            close_trigger: strategy_runtime::CloseTrigger::NextBar,
         },
         paper: PaperConfig {
             enabled: true,
             output: PaperOutput::Stdout,
             file_path: format!("{prefix}-paper.jsonl"),
+            trades_csv: format!("{prefix}-trades.csv"),
+            summary_json: format!("{prefix}-summary.json"),
         },
         backtest: BacktestConfig {
             enabled: true,
             trade_log: format!("{prefix}-backtest.log"),
+            trades_csv: format!("{prefix}-trades.csv"),
+            summary_json: format!("{prefix}-summary.json"),
         },
         reset_state_on_start: false,
     }

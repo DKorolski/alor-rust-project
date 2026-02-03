@@ -384,6 +384,7 @@ pub async fn run_command_consumer(
 fn command_action_label(action: &CommandAction) -> &'static str {
     match action {
         CommandAction::Place(_) => "place",
+        CommandAction::Market(_) => "market",
         CommandAction::Cancel(_) => "cancel",
         CommandAction::Replace(_) => "replace",
     }
@@ -435,6 +436,15 @@ fn validate_command(
                 return Some("validation_failed");
             }
         }
+        CommandAction::Market(payload) => {
+            if payload.qty <= 0.0 {
+                return Some("validation_failed");
+            }
+            let qty = normalize_qty(payload.qty, volume_step);
+            if qty <= 0.0 {
+                return Some("validation_failed");
+            }
+        }
         CommandAction::Cancel(payload) => {
             if payload.order_id <= 0 {
                 return Some("validation_failed");
@@ -479,6 +489,19 @@ async fn execute_command(
                     &command.exchange,
                     &command.symbol,
                     price,
+                    qty,
+                    side_str(payload.side),
+                )
+                .await?;
+            Ok(response)
+        }
+        CommandAction::Market(payload) => {
+            let qty = normalize_qty(payload.qty, volume_step);
+            let response = cws
+                .create_market(
+                    &command.portfolio,
+                    &command.exchange,
+                    &command.symbol,
                     qty,
                     side_str(payload.side),
                 )
