@@ -42,8 +42,18 @@ async fn main() -> Result<()> {
         consumer_group_source = %sources.consumer_group,
         consumer_name = config.consumer_name,
         consumer_name_source = %sources.consumer_name,
+        trade_mode = ?config.trade_mode,
+        trade_mode_source = %sources.runtime.trade_mode,
+        allow_live_orders = config.allow_live_orders,
+        allow_live_orders_source = %sources.runtime.allow_live_orders,
+        guard_log_interval_ms = config.guard_log_interval_ms,
+        guard_log_interval_ms_source = %sources.runtime.guard_log_interval_ms,
         strategy = ?config.strategy,
         strategy_sources = ?sources.strategy,
+        paper = ?config.paper,
+        paper_sources = ?sources.paper,
+        backtest = ?config.backtest,
+        backtest_sources = ?sources.backtest,
         health_stream = ?config.streams.health,
         "resolved runtime config"
     );

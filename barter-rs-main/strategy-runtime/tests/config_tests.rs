@@ -63,6 +63,14 @@ fn loads_toml_defaults() {
         "SOURCE",
         "CONSUMER_GROUP",
         "CONSUMER_NAME",
+        "TRADE_MODE",
+        "ALLOW_LIVE_ORDERS",
+        "GUARD_LOG_INTERVAL_MS",
+        "PAPER_ENABLED",
+        "PAPER_OUTPUT",
+        "PAPER_FILE_PATH",
+        "BACKTEST_ENABLED",
+        "BACKTEST_TRADE_LOG",
         "STRATEGY_ID",
         "SYMBOL",
         "QTY",
@@ -91,6 +99,14 @@ fn env_overrides_take_precedence() {
         "SOURCE",
         "CONSUMER_GROUP",
         "CONSUMER_NAME",
+        "TRADE_MODE",
+        "ALLOW_LIVE_ORDERS",
+        "GUARD_LOG_INTERVAL_MS",
+        "PAPER_ENABLED",
+        "PAPER_OUTPUT",
+        "PAPER_FILE_PATH",
+        "BACKTEST_ENABLED",
+        "BACKTEST_TRADE_LOG",
         "STRATEGY_ID",
         "SYMBOL",
         "QTY",
@@ -125,7 +141,17 @@ strategy_id = "file-strategy"
 #[test]
 fn health_default_is_events_health() {
     let _env_guard = env_lock();
-    let _guards = clear_env_vars(&["STREAM_HEALTH"]);
+    let _guards = clear_env_vars(&[
+        "STREAM_HEALTH",
+        "TRADE_MODE",
+        "ALLOW_LIVE_ORDERS",
+        "GUARD_LOG_INTERVAL_MS",
+        "PAPER_ENABLED",
+        "PAPER_OUTPUT",
+        "PAPER_FILE_PATH",
+        "BACKTEST_ENABLED",
+        "BACKTEST_TRADE_LOG",
+    ]);
     let path = write_temp_config("redis_url = \"redis://example/\"\n");
 
     let resolved = load_runtime_config(path, false).expect("load config");
@@ -134,4 +160,53 @@ fn health_default_is_events_health() {
         resolved.config.streams.health.as_deref(),
         Some("events.health")
     );
+}
+
+#[test]
+fn loads_runtime_mode_settings() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "TRADE_MODE",
+        "ALLOW_LIVE_ORDERS",
+        "GUARD_LOG_INTERVAL_MS",
+        "PAPER_ENABLED",
+        "PAPER_OUTPUT",
+        "PAPER_FILE_PATH",
+        "BACKTEST_ENABLED",
+        "BACKTEST_TRADE_LOG",
+    ]);
+    let path = write_temp_config(
+        r#"
+[runtime]
+trade_mode = "backtest"
+allow_live_orders = true
+guard_log_interval_ms = 1234
+
+[paper]
+enabled = false
+output = "file"
+file_path = "./paper.jsonl"
+
+[backtest]
+enabled = true
+trade_log = "./backtest.log"
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(
+        resolved.config.trade_mode,
+        strategy_runtime::TradeMode::Backtest
+    );
+    assert!(resolved.config.allow_live_orders);
+    assert_eq!(resolved.config.guard_log_interval_ms, 1234);
+    assert!(!resolved.config.paper.enabled);
+    assert_eq!(
+        resolved.config.paper.output,
+        strategy_runtime::PaperOutput::File
+    );
+    assert_eq!(resolved.config.paper.file_path, "./paper.jsonl");
+    assert!(resolved.config.backtest.enabled);
+    assert_eq!(resolved.config.backtest.trade_log, "./backtest.log");
 }
