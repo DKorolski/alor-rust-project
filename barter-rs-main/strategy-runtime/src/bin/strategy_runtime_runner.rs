@@ -74,6 +74,9 @@ async fn main() -> Result<()> {
         }
         _ = signal::ctrl_c() => {
             info!("shutdown requested");
+            if let Err(error) = runtime.flush_reports().await {
+                tracing::warn!(?error, "failed to flush trade ledger reports");
+            }
         }
     }
 

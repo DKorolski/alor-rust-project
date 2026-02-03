@@ -126,6 +126,12 @@ impl Strategy for LimitCancelStrategy {
                 *last_bar_ts = bar.close_time_utc;
                 None
             }
+            StrategyState::MarketBuyPending { last_bar_ts, .. }
+            | StrategyState::MarketBuySent { last_bar_ts, .. }
+            | StrategyState::MarketCloseSent { last_bar_ts, .. } => {
+                *last_bar_ts = bar.close_time_utc;
+                None
+            }
             StrategyState::Done { last_bar_ts } => {
                 *last_bar_ts = bar.close_time_utc;
                 None
@@ -276,6 +282,7 @@ mod tests {
             trade_mode: TradeMode::Live,
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
+            position_qty: None,
             last_bar_ts: None,
         }
     }
@@ -357,6 +364,7 @@ mod tests {
             request_id: Some(deterministic_request_id(
                 "strat", "port", "SBER", "place", 10, 0,
             )),
+            ..OrderEvent::default()
         };
         let intents = strategy.on_order(&ctx, &order_event);
         assert_eq!(intents.len(), 1);

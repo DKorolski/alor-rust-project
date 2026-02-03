@@ -17,6 +17,25 @@ pub enum StrategyState {
         last_bar_ts: i64,
         bars_waited: u32,
     },
+    MarketBuyPending {
+        buy_request_id: Uuid,
+        baseline_qty: Option<f64>,
+        close_trigger: crate::CloseTrigger,
+        pending_bar_ts: i64,
+        last_bar_ts: i64,
+    },
+    MarketBuySent {
+        buy_request_id: Uuid,
+        baseline_qty: Option<f64>,
+        close_trigger: crate::CloseTrigger,
+        buy_bar_ts: i64,
+        last_bar_ts: i64,
+    },
+    MarketCloseSent {
+        close_request_id: Uuid,
+        baseline_qty: Option<f64>,
+        last_bar_ts: i64,
+    },
     CancelSent {
         cancel_request_id: Uuid,
         order_id: i64,

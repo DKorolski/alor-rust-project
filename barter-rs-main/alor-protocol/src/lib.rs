@@ -42,6 +42,7 @@ impl<T> Envelope<T> {
 #[serde(rename_all = "snake_case")]
 pub enum CommandAction {
     Place(PlaceOrder),
+    Market(MarketOrder),
     Cancel(CancelOrder),
     Replace(ReplaceOrder),
 }
@@ -218,6 +219,12 @@ fn default_processed_ts_utc() -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlaceOrder {
     pub price: f64,
+    pub qty: f64,
+    pub side: Side,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MarketOrder {
     pub qty: f64,
     pub side: Side,
 }

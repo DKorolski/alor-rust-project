@@ -17,10 +17,13 @@ use crate::health::HealthState;
 
 const CWS_TIME_IN_FORCE: &str = "BookOrCancel";
 const CWS_ALLOW_MARGIN: bool = true;
+const CWS_MARKET_TIME_IN_FORCE: &str = "oneday";
+const CWS_MARKET_ALLOW_MARGIN: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct CwsHandle {
     cmd_tx: mpsc::Sender<CwsCommand>,
+    instrument_group: String,
 }
 
 #[derive(Debug)]
@@ -38,6 +41,7 @@ impl CwsClient {
         health: Arc<RwLock<HealthState>>,
     ) -> CwsHandle {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
+        let instrument_group = cfg.instrument_group.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_millis(cfg.backoff_initial_ms);
@@ -59,7 +63,10 @@ impl CwsClient {
             }
         });
 
-        CwsHandle { cmd_tx }
+        CwsHandle {
+            cmd_tx,
+            instrument_group,
+        }
     }
 }
 
@@ -86,6 +93,26 @@ impl CwsHandle {
             "timeInForce": CWS_TIME_IN_FORCE,
             "allowMargin": CWS_ALLOW_MARGIN,
         });
+        self.send(payload).await
+    }
+
+    pub async fn create_market(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        symbol: &str,
+        qty: f64,
+        side: &str,
+    ) -> anyhow::Result<Value> {
+        let qty = qty.round() as i64;
+        let payload = build_create_market_payload(
+            portfolio,
+            exchange,
+            symbol,
+            &self.instrument_group,
+            qty,
+            side,
+        );
         self.send(payload).await
     }
 
@@ -175,8 +202,37 @@ impl CwsHandle {
                 let _ = cmd.resp_tx.send(Ok(serde_json::json!({})));
             }
         });
-        CwsHandle { cmd_tx }
+        CwsHandle {
+            cmd_tx,
+            instrument_group: "TEST".to_string(),
+        }
     }
+}
+
+fn build_create_market_payload(
+    portfolio: &str,
+    exchange: &str,
+    symbol: &str,
+    instrument_group: &str,
+    qty: i64,
+    side: &str,
+) -> Value {
+    let guid = new_guid();
+    serde_json::json!({
+        "opcode": "create:market",
+        "guid": guid,
+        "side": side,
+        "quantity": qty,
+        "instrument": {
+            "symbol": symbol,
+            "exchange": exchange,
+            "instrumentGroup": instrument_group
+        },
+        "user": {"portfolio": portfolio},
+        "timeInForce": CWS_MARKET_TIME_IN_FORCE,
+        "allowMargin": CWS_MARKET_ALLOW_MARGIN,
+        "checkDuplicates": true,
+    })
 }
 
 async fn run_session(
@@ -414,4 +470,53 @@ fn jittered(duration: Duration) -> Duration {
     let upper = millis + offset;
     let jittered = lower + (rand::random::<f64>() * (upper - lower));
     Duration::from_millis(jittered.max(0.0) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_create_market_payload_includes_required_fields() {
+        let payload = build_create_market_payload(
+            "D39004",
+            "MOEX",
+            "SBER",
+            "TQBR",
+            300,
+            "buy",
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert_eq!(obj.get("opcode").and_then(Value::as_str), Some("create:market"));
+        assert_eq!(obj.get("side").and_then(Value::as_str), Some("buy"));
+        assert_eq!(obj.get("quantity").and_then(Value::as_i64), Some(300));
+        assert_eq!(
+            obj.get("timeInForce").and_then(Value::as_str),
+            Some(CWS_MARKET_TIME_IN_FORCE)
+        );
+        assert_eq!(
+            obj.get("allowMargin").and_then(Value::as_bool),
+            Some(CWS_MARKET_ALLOW_MARGIN)
+        );
+        assert_eq!(
+            obj.get("checkDuplicates").and_then(Value::as_bool),
+            Some(true)
+        );
+        let instrument = obj
+            .get("instrument")
+            .and_then(Value::as_object)
+            .expect("instrument");
+        assert_eq!(
+            instrument.get("symbol").and_then(Value::as_str),
+            Some("SBER")
+        );
+        assert_eq!(
+            instrument.get("exchange").and_then(Value::as_str),
+            Some("MOEX")
+        );
+        assert_eq!(
+            instrument.get("instrumentGroup").and_then(Value::as_str),
+            Some("TQBR")
+        );
+    }
 }
