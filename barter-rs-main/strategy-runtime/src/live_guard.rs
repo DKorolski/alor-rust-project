@@ -55,6 +55,7 @@ pub fn evaluate_live_guard(
     allow_live_orders: bool,
     state: &LiveGuardState,
     has_bars: bool,
+    bars_stream_has_data: bool,
 ) -> LiveGuardDecision {
     let mut reasons = Vec::new();
     if trade_mode != TradeMode::Live {
@@ -64,7 +65,11 @@ pub fn evaluate_live_guard(
         reasons.push("allow_live_orders=false".to_string());
     }
     if trade_mode == TradeMode::Live && !has_bars {
-        reasons.push("bars_read_total=0".to_string());
+        if bars_stream_has_data {
+            reasons.push("waiting_for_next_bar_after_restart".to_string());
+        } else {
+            reasons.push("waiting_for_first_bar".to_string());
+        }
     }
     let phase = state
         .health

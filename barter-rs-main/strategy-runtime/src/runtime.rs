@@ -46,10 +46,13 @@ struct RuntimeMetrics {
     bars_decode_failed_total: u64,
     bars_acked_total: u64,
     bars_last_seen_close_time_utc: Option<i64>,
-    redis_read_timeouts_total: u64,
+    redis_empty_polls_total: u64,
+    redis_read_errors_total: u64,
     commands_sent_total: u64,
     publish_failures_total: u64,
     start_time: Instant,
+    waiting_for_first_bar_info_logged: bool,
+    bars_stream_xlen_last: Option<u64>,
     last_log: Option<Instant>,
     last_guard_log: Option<Instant>,
     last_health_poll: Option<Instant>,
@@ -63,10 +66,13 @@ impl Default for RuntimeMetrics {
             bars_decode_failed_total: 0,
             bars_acked_total: 0,
             bars_last_seen_close_time_utc: None,
-            redis_read_timeouts_total: 0,
+            redis_empty_polls_total: 0,
+            redis_read_errors_total: 0,
             commands_sent_total: 0,
             publish_failures_total: 0,
             start_time: Instant::now(),
+            waiting_for_first_bar_info_logged: false,
+            bars_stream_xlen_last: None,
             last_log: None,
             last_guard_log: None,
             last_health_poll: None,
@@ -266,13 +272,15 @@ impl StrategyRuntime {
             Ok(reply) => reply,
             Err(error) => {
                 warn!(?error, stream, "xreadgroup failed");
+                self.metrics.redis_read_errors_total =
+                    self.metrics.redis_read_errors_total.saturating_add(1);
                 return Ok(());
             }
         };
         let entries = self.transport.parse_read_group_entries(stream, reply);
         if entries.is_empty() {
-            self.metrics.redis_read_timeouts_total =
-                self.metrics.redis_read_timeouts_total.saturating_add(1);
+            self.metrics.redis_empty_polls_total =
+                self.metrics.redis_empty_polls_total.saturating_add(1);
             return Ok(());
         }
         if msg_type == MessageType::Bar {
@@ -623,7 +631,8 @@ impl StrategyRuntime {
             bars_decode_failed_total = self.metrics.bars_decode_failed_total,
             bars_acked_total = self.metrics.bars_acked_total,
             bars_last_seen_close_time_utc = self.metrics.bars_last_seen_close_time_utc,
-            redis_read_timeouts_total = self.metrics.redis_read_timeouts_total,
+            redis_empty_polls_total = self.metrics.redis_empty_polls_total,
+            redis_read_errors_total = self.metrics.redis_read_errors_total,
             commands_sent_total = self.metrics.commands_sent_total,
             publish_failures_total = self.metrics.publish_failures_total,
             "runtime bars metrics"
@@ -634,6 +643,7 @@ impl StrategyRuntime {
                 .xlen(&self.config.streams.bars)
                 .await
                 .unwrap_or(0);
+            self.metrics.bars_stream_xlen_last = Some(xlen.max(0) as u64);
             let elapsed = now.duration_since(self.metrics.start_time);
             match bars_stream_diagnostic(elapsed, xlen) {
                 BarsStreamDiagnostic::Empty => {
@@ -643,13 +653,21 @@ impl StrategyRuntime {
                     );
                 }
                 BarsStreamDiagnostic::WaitingInfo => {
-                    info!(
-                        bars_stream = self.config.streams.bars,
-                        consumer_group = self.config.consumer_group,
-                        consumer_name = self.config.consumer_name,
-                        xlen,
-                        "bars stream has data but no bars read yet; waiting for new bars"
-                    );
+                    if !self.metrics.waiting_for_first_bar_info_logged {
+                        info!(
+                            bars_stream = self.config.streams.bars,
+                            consumer_group = self.config.consumer_group,
+                            consumer_name = self.config.consumer_name,
+                            xlen,
+                            "waiting_for_next_bar_after_restart: bars stream has data; runtime reads only new entries (\">\")"
+                        );
+                        self.metrics.waiting_for_first_bar_info_logged = true;
+                    } else {
+                        tracing::debug!(
+                            bars_stream = self.config.streams.bars,
+                            "still waiting for next bar"
+                        );
+                    }
                 }
                 BarsStreamDiagnostic::WaitingDebug => {
                     tracing::debug!(
@@ -713,6 +731,7 @@ impl StrategyRuntime {
             self.config.allow_live_orders,
             &self.live_guard,
             self.metrics.bars_read_total > 0,
+            self.metrics.bars_stream_xlen_last.unwrap_or(0) > 0,
         );
         if decision.allowed {
             info!("live_guard=ALLOWED");
