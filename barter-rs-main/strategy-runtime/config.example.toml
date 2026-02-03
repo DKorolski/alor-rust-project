@@ -5,6 +5,11 @@ source = "strategy-runtime"
 consumer_group = "strategy-runtime"
 consumer_name = "auto"
 
+[runtime]
+trade_mode = "paper" # paper | live | backtest
+allow_live_orders = false
+guard_log_interval_ms = 5000
+
 [streams]
 bars = "md.bars.7502T0U.1m"
 orders = "broker.orders.7502T0U"
@@ -38,3 +43,12 @@ side = "sell"
 place_offset_ticks = 2
 tick_size = 0.5
 max_wait_bars_for_ack = 3
+
+[paper]
+enabled = true
+output = "stdout"
+file_path = "./paper_trades.jsonl"
+
+[backtest]
+enabled = true
+trade_log = "./backtest_trades.log"

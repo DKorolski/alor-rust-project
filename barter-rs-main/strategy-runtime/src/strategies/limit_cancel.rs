@@ -1,7 +1,8 @@
 use alor_protocol::{AckStatus, CommandAck, Side};
 
+use crate::live_guard::GatewayPhase;
 use crate::state::StrategyState;
-use crate::{BarEvent, Intent, OrderEvent, Strategy, StrategyCtx};
+use crate::{BarEvent, Intent, OrderEvent, Strategy, StrategyCtx, TradeMode};
 
 #[derive(Debug, Clone)]
 pub struct LimitCancelConfig {
@@ -48,6 +49,14 @@ impl LimitCancelStrategy {
 
 impl Strategy for LimitCancelStrategy {
     fn on_bar(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
+        if ctx.trade_mode == TradeMode::Live
+            && (bar.origin != crate::DataOrigin::Live
+                || !ctx.allow_live_orders
+                || ctx.gateway_phase != GatewayPhase::LiveReady)
+        {
+            self.last_processed_bar_ts = Some(bar.close_time_utc);
+            return Vec::new();
+        }
         if self
             .last_processed_bar_ts
             .is_some_and(|last_ts| bar.close_time_utc <= last_ts)
@@ -264,6 +273,9 @@ mod tests {
             exchange: "ex".to_string(),
             symbol: "SBER".to_string(),
             tick_size: 0.01,
+            trade_mode: TradeMode::Live,
+            allow_live_orders: true,
+            gateway_phase: GatewayPhase::LiveReady,
             last_bar_ts: None,
         }
     }

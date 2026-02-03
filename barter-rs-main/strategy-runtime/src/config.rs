@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::{ReadConfig, RuntimeConfig, StrategyConfig, StreamNames, TrimConfig};
+use crate::{
+    BacktestConfig, PaperConfig, PaperOutput, ReadConfig, RuntimeConfig, StrategyConfig,
+    StreamNames, TradeMode, TrimConfig,
+};
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
 const DEFAULT_STRATEGY_ID: &str = "limit_cancel";
@@ -22,6 +25,15 @@ const DEFAULT_MAX_WAIT_BARS_FOR_ACK: u32 = 3;
 const DEFAULT_CONSUMER_GROUP: &str = "strategy-runtime";
 const DEFAULT_CONSUMER_NAME: &str = "auto";
 const DEFAULT_HEALTH_STREAM: &str = "events.health";
+
+const DEFAULT_TRADE_MODE: TradeMode = TradeMode::Live;
+const DEFAULT_ALLOW_LIVE_ORDERS: bool = false;
+const DEFAULT_GUARD_LOG_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_PAPER_ENABLED: bool = true;
+const DEFAULT_PAPER_OUTPUT: PaperOutput = PaperOutput::Stdout;
+const DEFAULT_PAPER_FILE_PATH: &str = "./paper_trades.jsonl";
+const DEFAULT_BACKTEST_ENABLED: bool = true;
+const DEFAULT_BACKTEST_TRADE_LOG: &str = "./backtest_trades.log";
 
 const DEFAULT_BLOCK_MS: usize = 500;
 const DEFAULT_CLAIM_IDLE_MS: usize = 5_000;
@@ -66,6 +78,9 @@ pub struct ConfigSources {
     pub read: ReadSources,
     pub trim: TrimSources,
     pub strategy: StrategySources,
+    pub runtime: RuntimeSources,
+    pub paper: PaperSources,
+    pub backtest: BacktestSources,
     pub reset_state_on_start: ConfigSource,
 }
 
@@ -111,6 +126,26 @@ pub struct StrategySources {
     pub max_wait_bars_for_ack: ConfigSource,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSources {
+    pub trade_mode: ConfigSource,
+    pub allow_live_orders: ConfigSource,
+    pub guard_log_interval_ms: ConfigSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperSources {
+    pub enabled: ConfigSource,
+    pub output: ConfigSource,
+    pub file_path: ConfigSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestSources {
+    pub enabled: ConfigSource,
+    pub trade_log: ConfigSource,
+}
+
 impl Default for ConfigSources {
     fn default() -> Self {
         Self {
@@ -124,6 +159,9 @@ impl Default for ConfigSources {
             read: ReadSources::default(),
             trim: TrimSources::default(),
             strategy: StrategySources::default(),
+            runtime: RuntimeSources::default(),
+            paper: PaperSources::default(),
+            backtest: BacktestSources::default(),
             reset_state_on_start: ConfigSource::Default,
         }
     }
@@ -183,6 +221,35 @@ impl Default for StrategySources {
     }
 }
 
+impl Default for RuntimeSources {
+    fn default() -> Self {
+        Self {
+            trade_mode: ConfigSource::Default,
+            allow_live_orders: ConfigSource::Default,
+            guard_log_interval_ms: ConfigSource::Default,
+        }
+    }
+}
+
+impl Default for PaperSources {
+    fn default() -> Self {
+        Self {
+            enabled: ConfigSource::Default,
+            output: ConfigSource::Default,
+            file_path: ConfigSource::Default,
+        }
+    }
+}
+
+impl Default for BacktestSources {
+    fn default() -> Self {
+        Self {
+            enabled: ConfigSource::Default,
+            trade_log: ConfigSource::Default,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedRuntimeConfig {
     pub config: RuntimeConfig,
@@ -198,12 +265,22 @@ struct RuntimeConfigFile {
     exchange: Option<String>,
     source: Option<String>,
     streams: Option<StreamNamesFile>,
+    runtime: Option<RuntimeSettingsFile>,
     consumer_group: Option<String>,
     consumer_name: Option<String>,
     read: Option<ReadConfigFile>,
     trim: Option<TrimConfigFile>,
     strategy: Option<StrategyConfigFile>,
+    paper: Option<PaperConfigFile>,
+    backtest: Option<BacktestConfigFile>,
     reset_state_on_start: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeSettingsFile {
+    trade_mode: Option<String>,
+    allow_live_orders: Option<bool>,
+    guard_log_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -248,6 +325,19 @@ struct StrategyConfigFile {
     max_wait_bars_for_ack: Option<u32>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct PaperConfigFile {
+    enabled: Option<bool>,
+    output: Option<String>,
+    file_path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BacktestConfigFile {
+    enabled: Option<bool>,
+    trade_log: Option<String>,
+}
+
 pub fn load_runtime_config(
     config_path: PathBuf,
     allow_missing: bool,
@@ -278,6 +368,19 @@ pub fn load_runtime_config(
         claim_idle_ms: DEFAULT_CLAIM_IDLE_MS,
         claim_batch: DEFAULT_CLAIM_BATCH,
         poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
+    };
+
+    let mut trade_mode = DEFAULT_TRADE_MODE;
+    let mut allow_live_orders = DEFAULT_ALLOW_LIVE_ORDERS;
+    let mut guard_log_interval_ms = DEFAULT_GUARD_LOG_INTERVAL_MS;
+    let mut paper = PaperConfig {
+        enabled: DEFAULT_PAPER_ENABLED,
+        output: DEFAULT_PAPER_OUTPUT,
+        file_path: DEFAULT_PAPER_FILE_PATH.to_string(),
+    };
+    let mut backtest = BacktestConfig {
+        enabled: DEFAULT_BACKTEST_ENABLED,
+        trade_log: DEFAULT_BACKTEST_TRADE_LOG.to_string(),
     };
 
     let mut trim = TrimConfig {
@@ -395,6 +498,44 @@ pub fn load_runtime_config(
                 sources.strategy.max_wait_bars_for_ack = ConfigSource::File;
             }
         }
+        if let Some(runtime_file) = &file_config.runtime {
+            if let Some(value) = &runtime_file.trade_mode {
+                trade_mode = parse_trade_mode(value);
+                sources.runtime.trade_mode = ConfigSource::File;
+            }
+            if let Some(value) = runtime_file.allow_live_orders {
+                allow_live_orders = value;
+                sources.runtime.allow_live_orders = ConfigSource::File;
+            }
+            if let Some(value) = runtime_file.guard_log_interval_ms {
+                guard_log_interval_ms = value;
+                sources.runtime.guard_log_interval_ms = ConfigSource::File;
+            }
+        }
+        if let Some(paper_file) = &file_config.paper {
+            if let Some(value) = paper_file.enabled {
+                paper.enabled = value;
+                sources.paper.enabled = ConfigSource::File;
+            }
+            if let Some(value) = &paper_file.output {
+                paper.output = parse_paper_output(value);
+                sources.paper.output = ConfigSource::File;
+            }
+            if let Some(value) = &paper_file.file_path {
+                paper.file_path = value.clone();
+                sources.paper.file_path = ConfigSource::File;
+            }
+        }
+        if let Some(backtest_file) = &file_config.backtest {
+            if let Some(value) = backtest_file.enabled {
+                backtest.enabled = value;
+                sources.backtest.enabled = ConfigSource::File;
+            }
+            if let Some(value) = &backtest_file.trade_log {
+                backtest.trade_log = value.clone();
+                sources.backtest.trade_log = ConfigSource::File;
+            }
+        }
         if let Some(value) = file_config.reset_state_on_start {
             reset_state_on_start = value;
             sources.reset_state_on_start = ConfigSource::File;
@@ -497,6 +638,38 @@ pub fn load_runtime_config(
         strategy.max_wait_bars_for_ack = value;
         sources.strategy.max_wait_bars_for_ack = ConfigSource::Env;
     }
+    if let Some(value) = env::var("TRADE_MODE").ok() {
+        trade_mode = parse_trade_mode(&value);
+        sources.runtime.trade_mode = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("ALLOW_LIVE_ORDERS").ok() {
+        allow_live_orders = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.runtime.allow_live_orders = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("GUARD_LOG_INTERVAL_MS") {
+        guard_log_interval_ms = value;
+        sources.runtime.guard_log_interval_ms = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("PAPER_ENABLED").ok() {
+        paper.enabled = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.paper.enabled = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("PAPER_OUTPUT").ok() {
+        paper.output = parse_paper_output(&value);
+        sources.paper.output = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("PAPER_FILE_PATH").ok() {
+        paper.file_path = value;
+        sources.paper.file_path = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("BACKTEST_ENABLED").ok() {
+        backtest.enabled = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.backtest.enabled = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("BACKTEST_TRADE_LOG").ok() {
+        backtest.trade_log = value;
+        sources.backtest.trade_log = ConfigSource::Env;
+    }
     if let Some(value) = env::var("RESET_STATE_ON_START").ok() {
         reset_state_on_start = value == "1" || value.eq_ignore_ascii_case("true");
         sources.reset_state_on_start = ConfigSource::Env;
@@ -579,9 +752,14 @@ pub fn load_runtime_config(
         streams,
         consumer_group,
         consumer_name,
+        trade_mode,
+        allow_live_orders,
+        guard_log_interval_ms,
         read,
         trim,
         strategy,
+        paper,
+        backtest,
         reset_state_on_start,
     };
 
@@ -635,6 +813,21 @@ fn parse_side(value: &str) -> alor_protocol::Side {
     match value.to_lowercase().as_str() {
         "sell" => alor_protocol::Side::Sell,
         _ => alor_protocol::Side::Buy,
+    }
+}
+
+fn parse_trade_mode(value: &str) -> TradeMode {
+    match value.to_lowercase().as_str() {
+        "paper" => TradeMode::Paper,
+        "backtest" => TradeMode::Backtest,
+        _ => TradeMode::Live,
+    }
+}
+
+fn parse_paper_output(value: &str) -> PaperOutput {
+    match value.to_lowercase().as_str() {
+        "file" => PaperOutput::File,
+        _ => PaperOutput::Stdout,
     }
 }
 

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod live_guard;
 pub mod redis_transport;
 pub mod runtime;
 pub mod state;
@@ -45,6 +46,9 @@ pub struct StrategyCtx {
     pub exchange: String,
     pub symbol: String,
     pub tick_size: f64,
+    pub trade_mode: TradeMode,
+    pub allow_live_orders: bool,
+    pub gateway_phase: crate::live_guard::GatewayPhase,
     last_bar_ts: Option<i64>,
 }
 
@@ -101,9 +105,14 @@ pub struct RuntimeConfig {
     pub streams: StreamNames,
     pub consumer_group: String,
     pub consumer_name: String,
+    pub trade_mode: TradeMode,
+    pub allow_live_orders: bool,
+    pub guard_log_interval_ms: u64,
     pub read: ReadConfig,
     pub trim: TrimConfig,
     pub strategy: StrategyConfig,
+    pub paper: PaperConfig,
+    pub backtest: BacktestConfig,
     pub reset_state_on_start: bool,
 }
 
@@ -147,6 +156,34 @@ pub struct StrategyConfig {
     pub place_offset_ticks: i64,
     pub tick_size: f64,
     pub max_wait_bars_for_ack: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeMode {
+    Live,
+    Paper,
+    Backtest,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperOutput {
+    Stdout,
+    File,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PaperConfig {
+    pub enabled: bool,
+    pub output: PaperOutput,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BacktestConfig {
+    pub enabled: bool,
+    pub trade_log: String,
 }
 
 impl StrategyConfig {
