@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -6,14 +7,21 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Instant};
 use tracing::{error, info, warn};
 
-use alor_protocol::MessageType;
+use alor_protocol::{Envelope, MessageType};
 
+use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
-use crate::{Intent, OrderEvent, PositionEvent, RuntimeConfig, Strategy, StrategyCtx};
+use crate::{
+    BacktestConfig, Intent, OrderEvent, PaperConfig, PaperOutput, PositionEvent, RuntimeConfig,
+    Strategy, StrategyCtx, TradeMode,
+};
 
 const MAX_PENDING_LOOPS: usize = 10;
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
+const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
@@ -27,20 +35,49 @@ pub struct StrategyRuntime {
     transport: RedisRuntimeTransport,
     state: RuntimeState,
     strategy: Box<dyn Strategy + Send>,
+    live_guard: LiveGuardState,
     metrics: RuntimeMetrics,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RuntimeMetrics {
     bars_read_total: u64,
     bars_decoded_ok_total: u64,
     bars_decode_failed_total: u64,
     bars_acked_total: u64,
     bars_last_seen_close_time_utc: Option<i64>,
-    redis_read_timeouts_total: u64,
+    redis_empty_polls_total: u64,
+    redis_read_errors_total: u64,
     commands_sent_total: u64,
     publish_failures_total: u64,
+    start_time: Instant,
+    waiting_for_first_bar_info_logged: bool,
+    bars_stream_xlen_last: Option<u64>,
     last_log: Option<Instant>,
+    last_guard_log: Option<Instant>,
+    last_health_poll: Option<Instant>,
+}
+
+impl Default for RuntimeMetrics {
+    fn default() -> Self {
+        Self {
+            bars_read_total: 0,
+            bars_decoded_ok_total: 0,
+            bars_decode_failed_total: 0,
+            bars_acked_total: 0,
+            bars_last_seen_close_time_utc: None,
+            redis_empty_polls_total: 0,
+            redis_read_errors_total: 0,
+            commands_sent_total: 0,
+            publish_failures_total: 0,
+            start_time: Instant::now(),
+            waiting_for_first_bar_info_logged: false,
+            bars_stream_xlen_last: None,
+            last_log: None,
+            last_guard_log: None,
+            last_health_poll: None,
+        }
+    }
 }
 
 impl StrategyRuntime {
@@ -54,6 +91,7 @@ impl StrategyRuntime {
             transport,
             state: RuntimeState::default(),
             strategy,
+            live_guard: LiveGuardState::default(),
             metrics: RuntimeMetrics::default(),
         })
     }
@@ -93,6 +131,9 @@ impl StrategyRuntime {
             .await?;
         self.recover_pending(&streams.bars, MessageType::Bar, trim_bars)
             .await?;
+
+        self.refresh_health_if_due().await?;
+        self.log_live_guard_status_if_due().await?;
 
         Ok(())
     }
@@ -214,6 +255,8 @@ impl StrategyRuntime {
         .await?;
         self.drain_stream(&streams.bars, MessageType::Bar, trim_bars, 100)
             .await?;
+        self.refresh_health_if_due().await?;
+        self.log_live_guard_status_if_due().await?;
         self.log_metrics_if_due().await?;
         Ok(())
     }
@@ -229,13 +272,15 @@ impl StrategyRuntime {
             Ok(reply) => reply,
             Err(error) => {
                 warn!(?error, stream, "xreadgroup failed");
+                self.metrics.redis_read_errors_total =
+                    self.metrics.redis_read_errors_total.saturating_add(1);
                 return Ok(());
             }
         };
         let entries = self.transport.parse_read_group_entries(stream, reply);
         if entries.is_empty() {
-            self.metrics.redis_read_timeouts_total =
-                self.metrics.redis_read_timeouts_total.saturating_add(1);
+            self.metrics.redis_empty_polls_total =
+                self.metrics.redis_empty_polls_total.saturating_add(1);
             return Ok(());
         }
         if msg_type == MessageType::Bar {
@@ -381,15 +426,6 @@ impl StrategyRuntime {
         message_id: String,
         bar: crate::BarEvent,
     ) -> Result<()> {
-        if bar.origin != crate::DataOrigin::Live {
-            self.state
-                .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
-            self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
-            self.persist_state(None).await?;
-            self.transport.xack(&stream, &message_id).await?;
-            self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
-            return Ok(());
-        }
         if self.state.is_duplicate_bar(&bar.symbol, bar.close_time_utc) {
             self.transport.xack(&stream, &message_id).await?;
             self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
@@ -454,12 +490,21 @@ impl StrategyRuntime {
     }
 
     fn strategy_ctx(&self) -> StrategyCtx {
+        let gateway_phase = self
+            .live_guard
+            .health
+            .as_ref()
+            .map(|health| health.gateway_phase)
+            .unwrap_or_default();
         StrategyCtx {
             strategy_id: self.config.strategy.strategy_id.clone(),
             portfolio: self.config.portfolio.clone(),
             exchange: self.config.exchange.clone(),
             symbol: self.config.strategy.symbol.clone(),
             tick_size: self.config.strategy.tick_size,
+            trade_mode: self.config.trade_mode,
+            allow_live_orders: self.config.allow_live_orders,
+            gateway_phase,
             last_bar_ts: self
                 .state
                 .last_processed_bar_ts
@@ -478,9 +523,43 @@ impl StrategyRuntime {
             self.persist_state(None).await?;
             return Ok(());
         }
-        for intent in intents {
-            let command = self.intent_to_command(ctx, created_ts_utc, intent);
-            self.persist_state(Some(&command)).await?;
+        match self.config.trade_mode {
+            TradeMode::Live => {
+                for intent in intents {
+                    let command = self.intent_to_command(ctx, created_ts_utc, intent);
+                    self.persist_state(Some(&command)).await?;
+                }
+            }
+            TradeMode::Paper => {
+                let config = self.config.clone();
+                let paper = self.config.paper.clone();
+                let backtest = self.config.backtest.clone();
+                log_virtual_trades(
+                    created_ts_utc,
+                    &config,
+                    &paper,
+                    &backtest,
+                    intents,
+                    TradeMode::Paper,
+                )
+                .await?;
+                self.persist_state(None).await?;
+            }
+            TradeMode::Backtest => {
+                let config = self.config.clone();
+                let paper = self.config.paper.clone();
+                let backtest = self.config.backtest.clone();
+                log_virtual_trades(
+                    created_ts_utc,
+                    &config,
+                    &paper,
+                    &backtest,
+                    intents,
+                    TradeMode::Backtest,
+                )
+                .await?;
+                self.persist_state(None).await?;
+            }
         }
         Ok(())
     }
@@ -552,7 +631,8 @@ impl StrategyRuntime {
             bars_decode_failed_total = self.metrics.bars_decode_failed_total,
             bars_acked_total = self.metrics.bars_acked_total,
             bars_last_seen_close_time_utc = self.metrics.bars_last_seen_close_time_utc,
-            redis_read_timeouts_total = self.metrics.redis_read_timeouts_total,
+            redis_empty_polls_total = self.metrics.redis_empty_polls_total,
+            redis_read_errors_total = self.metrics.redis_read_errors_total,
             commands_sent_total = self.metrics.commands_sent_total,
             publish_failures_total = self.metrics.publish_failures_total,
             "runtime bars metrics"
@@ -563,16 +643,280 @@ impl StrategyRuntime {
                 .xlen(&self.config.streams.bars)
                 .await
                 .unwrap_or(0);
-            if xlen > 0 {
-                error!(
-                    bars_stream = self.config.streams.bars,
-                    consumer_group = self.config.consumer_group,
-                    consumer_name = self.config.consumer_name,
-                    xlen,
-                    "bars stream has data but runtime reads none — check group/consumer and start id"
-                );
+            self.metrics.bars_stream_xlen_last = Some(xlen.max(0) as u64);
+            let elapsed = now.duration_since(self.metrics.start_time);
+            match bars_stream_diagnostic(elapsed, xlen) {
+                BarsStreamDiagnostic::Empty => {
+                    tracing::debug!(
+                        bars_stream = self.config.streams.bars,
+                        "bars stream is empty"
+                    );
+                }
+                BarsStreamDiagnostic::WaitingInfo => {
+                    if !self.metrics.waiting_for_first_bar_info_logged {
+                        info!(
+                            bars_stream = self.config.streams.bars,
+                            consumer_group = self.config.consumer_group,
+                            consumer_name = self.config.consumer_name,
+                            xlen,
+                            "waiting_for_next_bar_after_restart: bars stream has data; runtime reads only new entries (\">\")"
+                        );
+                        self.metrics.waiting_for_first_bar_info_logged = true;
+                    } else {
+                        tracing::debug!(
+                            bars_stream = self.config.streams.bars,
+                            "still waiting for next bar"
+                        );
+                    }
+                }
+                BarsStreamDiagnostic::WaitingDebug => {
+                    tracing::debug!(
+                        bars_stream = self.config.streams.bars,
+                        xlen,
+                        "bars stream has data but no bars read yet; grace period active"
+                    );
+                }
+                BarsStreamDiagnostic::StalledWarn => {
+                    warn!(
+                        bars_stream = self.config.streams.bars,
+                        consumer_group = self.config.consumer_group,
+                        consumer_name = self.config.consumer_name,
+                        xlen,
+                        "bars stream has data but runtime reads none; check group/consumer and start id"
+                    );
+                }
             }
         }
         Ok(())
     }
+
+    async fn refresh_health_if_due(&mut self) -> Result<()> {
+        let stream = match &self.config.streams.health {
+            Some(stream) => stream,
+            None => return Ok(()),
+        };
+        let now = Instant::now();
+        if let Some(last) = self.metrics.last_health_poll {
+            if now.duration_since(last) < HEALTH_POLL_INTERVAL {
+                return Ok(());
+            }
+        }
+        self.metrics.last_health_poll = Some(now);
+        if let Some(payload) = self.transport.xrevrange_last(stream).await? {
+            match serde_json::from_str::<Envelope<HealthEvent>>(&payload) {
+                Ok(envelope) => {
+                    self.live_guard.update_health(envelope.payload);
+                }
+                Err(error) => {
+                    warn!(?error, stream, "failed to decode health event");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn log_live_guard_status_if_due(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let interval = Duration::from_millis(self.config.guard_log_interval_ms);
+        let log_due = match self.metrics.last_guard_log {
+            Some(last) => now.duration_since(last) >= interval,
+            None => true,
+        };
+        if !log_due {
+            return Ok(());
+        }
+        self.metrics.last_guard_log = Some(now);
+        let decision = evaluate_live_guard(
+            self.config.trade_mode,
+            self.config.allow_live_orders,
+            &self.live_guard,
+            self.metrics.bars_read_total > 0,
+            self.metrics.bars_stream_xlen_last.unwrap_or(0) > 0,
+        );
+        if decision.allowed {
+            info!("live_guard=ALLOWED");
+        } else {
+            info!(reasons = ?decision.reasons, "live_guard=BLOCKED");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarsStreamDiagnostic {
+    Empty,
+    WaitingInfo,
+    WaitingDebug,
+    StalledWarn,
+}
+
+fn bars_stream_diagnostic(elapsed: Duration, xlen: i64) -> BarsStreamDiagnostic {
+    if xlen <= 0 {
+        return BarsStreamDiagnostic::Empty;
+    }
+    if elapsed < BARS_STREAM_INFO_GRACE {
+        return BarsStreamDiagnostic::WaitingInfo;
+    }
+    if elapsed < BARS_STREAM_WARN_GRACE {
+        return BarsStreamDiagnostic::WaitingDebug;
+    }
+    BarsStreamDiagnostic::StalledWarn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grace_period_diagnostics() {
+        assert_eq!(
+            bars_stream_diagnostic(Duration::from_secs(5), 10),
+            BarsStreamDiagnostic::WaitingInfo
+        );
+        assert_eq!(
+            bars_stream_diagnostic(Duration::from_secs(40), 10),
+            BarsStreamDiagnostic::WaitingDebug
+        );
+        assert_eq!(
+            bars_stream_diagnostic(Duration::from_secs(200), 10),
+            BarsStreamDiagnostic::StalledWarn
+        );
+        assert_eq!(
+            bars_stream_diagnostic(Duration::from_secs(5), 0),
+            BarsStreamDiagnostic::Empty
+        );
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct VirtualTradeLog {
+    ts_utc: i64,
+    strategy_id: String,
+    portfolio: String,
+    symbol: String,
+    action: String,
+    qty: Option<f64>,
+    price: Option<f64>,
+    side: Option<String>,
+    order_id: Option<i64>,
+    new_price: Option<f64>,
+    new_qty: Option<f64>,
+}
+
+impl VirtualTradeLog {
+    fn from_intent(created_ts_utc: i64, config: &RuntimeConfig, intent: Intent) -> Self {
+        match intent {
+            Intent::Place { price, qty, side } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "place".to_string(),
+                qty: Some(qty),
+                price: Some(price),
+                side: Some(format!("{side:?}")),
+                order_id: None,
+                new_price: None,
+                new_qty: None,
+            },
+            Intent::Cancel { order_id } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "cancel".to_string(),
+                qty: None,
+                price: None,
+                side: None,
+                order_id: Some(order_id),
+                new_price: None,
+                new_qty: None,
+            },
+            Intent::Replace {
+                order_id,
+                new_price,
+                new_qty,
+            } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "replace".to_string(),
+                qty: None,
+                price: None,
+                side: None,
+                order_id: Some(order_id),
+                new_price: Some(new_price),
+                new_qty: Some(new_qty),
+            },
+        }
+    }
+}
+
+async fn log_virtual_trades(
+    created_ts_utc: i64,
+    config: &RuntimeConfig,
+    paper: &PaperConfig,
+    backtest: &BacktestConfig,
+    intents: Vec<Intent>,
+    trade_mode: TradeMode,
+) -> Result<()> {
+    if trade_mode == TradeMode::Paper && !paper.enabled {
+        return Ok(());
+    }
+    if trade_mode == TradeMode::Backtest && !backtest.enabled {
+        return Ok(());
+    }
+    for intent in intents {
+        let entry = VirtualTradeLog::from_intent(created_ts_utc, config, intent);
+        match trade_mode {
+            TradeMode::Paper => match paper.output {
+                PaperOutput::Stdout => {
+                    info!(trade = ?entry, "paper_trade");
+                }
+                PaperOutput::File => {
+                    append_json_line(&paper.file_path, &entry).await?;
+                }
+            },
+            TradeMode::Backtest => {
+                append_log_line(&backtest.trade_log, &entry).await?;
+            }
+            TradeMode::Live => {}
+        }
+    }
+    Ok(())
+}
+
+async fn append_json_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let payload = serde_json::to_string(entry)?;
+    file.write_all(payload.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+async fn append_log_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let line = format!(
+        "{} {} {} action={} qty={:?} price={:?} side={:?} order_id={:?} new_price={:?} new_qty={:?}",
+        entry.ts_utc,
+        entry.strategy_id,
+        entry.symbol,
+        entry.action,
+        entry.qty,
+        entry.price,
+        entry.side,
+        entry.order_id,
+        entry.new_price,
+        entry.new_qty
+    );
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
 }
