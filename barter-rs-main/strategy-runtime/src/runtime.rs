@@ -104,7 +104,15 @@ struct RuntimeMetrics {
     bars_stream_xlen_last: Option<u64>,
     last_log: Option<Instant>,
     last_guard_log: Option<Instant>,
+    last_guard_snapshot: Option<GuardSnapshot>,
+    last_waiting_next_bar_active: bool,
     last_health_poll: Option<Instant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuardSnapshot {
+    allowed: bool,
+    reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +149,8 @@ impl Default for RuntimeMetrics {
             bars_stream_xlen_last: None,
             last_log: None,
             last_guard_log: None,
+            last_guard_snapshot: None,
+            last_waiting_next_bar_active: false,
             last_health_poll: None,
         }
     }
@@ -894,11 +904,24 @@ impl StrategyRuntime {
                 let decision = self.evaluate_guard_decision();
                 if !decision.allowed {
                     self.log_guard_decision_if_due(&decision)?;
+                    for intent in intents {
+                        info!(
+                            action = self.intent_action_name(&intent),
+                            reasons = ?decision.reasons,
+                            "intent_dropped_by_guard"
+                        );
+                    }
                     self.persist_state(None).await?;
                     return Ok(());
                 }
                 for intent in intents {
+                    let action = self.intent_action_name(&intent);
                     let command = self.intent_to_command(ctx, created_ts_utc, intent);
+                    info!(
+                        action,
+                        request_id = %command.request_id,
+                        "intent_emitted"
+                    );
                     self.persist_state(Some(&command)).await?;
                 }
             }
@@ -1098,6 +1121,7 @@ impl StrategyRuntime {
 
     async fn log_live_guard_status_if_due(&mut self) -> Result<()> {
         let decision = self.evaluate_guard_decision();
+        self.log_guard_transition_if_needed(&decision)?;
         self.log_guard_decision_if_due(&decision)
     }
 
@@ -1132,6 +1156,71 @@ impl StrategyRuntime {
         }
         Ok(())
     }
+
+    fn log_guard_transition_if_needed(&mut self, decision: &LiveGuardDecision) -> Result<()> {
+        let phase = self
+            .live_guard
+            .health
+            .as_ref()
+            .map(|health| health.gateway_phase)
+            .unwrap_or_default();
+        let waiting_next_bar = decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "waiting_for_next_bar_after_restart");
+        if waiting_next_bar && !self.metrics.last_waiting_next_bar_active {
+            let tf_sec = bars_tf_seconds(&self.config.streams.bars).unwrap_or(60);
+            info!(
+                tf_sec,
+                "waiting_for_next_bar_after_restart: will allow trading after next live bar (this may take up to one bar interval)"
+            );
+        }
+        self.metrics.last_waiting_next_bar_active = waiting_next_bar;
+
+        let snapshot = GuardSnapshot {
+            allowed: decision.allowed,
+            reasons: decision.reasons.clone(),
+        };
+        let prev = match &self.metrics.last_guard_snapshot {
+            Some(prev) => prev,
+            None => {
+                self.metrics.last_guard_snapshot = Some(snapshot);
+                return Ok(());
+            }
+        };
+        if prev.allowed != snapshot.allowed {
+            let from = if prev.allowed { "ALLOWED" } else { "BLOCKED" };
+            let to = if snapshot.allowed { "ALLOWED" } else { "BLOCKED" };
+            info!(
+                from,
+                to,
+                reasons_before = ?prev.reasons,
+                reasons_after = ?snapshot.reasons,
+                phase = ?phase,
+                "live_guard_transition"
+            );
+        } else if !snapshot.allowed && prev.reasons != snapshot.reasons {
+            info!(
+                from = "BLOCKED",
+                to = "BLOCKED",
+                reasons_before = ?prev.reasons,
+                reasons_after = ?snapshot.reasons,
+                phase = ?phase,
+                "live_guard_transition"
+            );
+        }
+        self.metrics.last_guard_snapshot = Some(snapshot);
+        Ok(())
+    }
+
+    fn intent_action_name(&self, intent: &Intent) -> &'static str {
+        match intent {
+            Intent::Place { .. } => "place",
+            Intent::Market { .. } => "market",
+            Intent::Cancel { .. } => "cancel",
+            Intent::Replace { .. } => "replace",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1153,6 +1242,19 @@ fn bars_stream_diagnostic(elapsed: Duration, xlen: i64) -> BarsStreamDiagnostic 
         return BarsStreamDiagnostic::WaitingDebug;
     }
     BarsStreamDiagnostic::StalledWarn
+}
+
+fn bars_tf_seconds(stream: &str) -> Option<u64> {
+    let tf = stream.split('.').last()?;
+    let (value, unit) = tf.split_at(tf.len().saturating_sub(1));
+    let amount: u64 = value.parse().ok()?;
+    match unit {
+        "s" => Some(amount),
+        "m" => Some(amount.saturating_mul(60)),
+        "h" => Some(amount.saturating_mul(60 * 60)),
+        "d" => Some(amount.saturating_mul(60 * 60 * 24)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
