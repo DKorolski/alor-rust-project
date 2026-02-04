@@ -18,7 +18,7 @@ use crate::health::HealthState;
 const CWS_TIME_IN_FORCE: &str = "BookOrCancel";
 const CWS_ALLOW_MARGIN: bool = true;
 const CWS_MARKET_TIME_IN_FORCE: &str = "oneday";
-const CWS_MARKET_ALLOW_MARGIN: bool = false;
+const CWS_MARKET_ALLOW_MARGIN: bool = true;
 
 #[derive(Debug, Clone)]
 pub struct CwsHandle {
