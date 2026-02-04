@@ -81,6 +81,7 @@ fn loads_toml_defaults() {
         "SIDE",
         "PLACE_OFFSET_TICKS",
         "TICK_SIZE",
+        "SNAPSHOTS_STREAM",
         "STREAM_HEALTH",
     ]);
     let path = write_temp_config("redis_url = \"redis://example/\"\n");
@@ -121,6 +122,7 @@ fn env_overrides_take_precedence() {
         "SIDE",
         "PLACE_OFFSET_TICKS",
         "TICK_SIZE",
+        "SNAPSHOTS_STREAM",
         "STREAM_HEALTH",
     ]);
     let _redis_guard = set_env_var("REDIS_URL", "redis://env/");
@@ -163,6 +165,7 @@ fn health_default_is_events_health() {
         "BACKTEST_TRADE_LOG",
         "BACKTEST_TRADES_CSV",
         "BACKTEST_SUMMARY_JSON",
+        "SNAPSHOTS_STREAM",
     ]);
     let path = write_temp_config("redis_url = \"redis://example/\"\n");
 
@@ -190,6 +193,7 @@ fn loads_runtime_mode_settings() {
         "BACKTEST_TRADE_LOG",
         "BACKTEST_TRADES_CSV",
         "BACKTEST_SUMMARY_JSON",
+        "SNAPSHOTS_STREAM",
     ]);
     let path = write_temp_config(
         r#"

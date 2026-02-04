@@ -213,6 +213,30 @@ impl RedisRuntimeTransport {
         Ok(self.extract_payload(&entry[1]))
     }
 
+    pub async fn xrevrange_last_n(&self, stream: &str, count: usize) -> Result<Vec<String>> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let reply: redis::Value = redis::cmd("XREVRANGE")
+            .arg(stream)
+            .arg("+")
+            .arg("-")
+            .arg("COUNT")
+            .arg(count)
+            .query_async(&mut conn)
+            .await?;
+        let entries = match reply {
+            redis::Value::Bulk(entries) => entries,
+            _ => return Ok(Vec::new()),
+        };
+        let payloads = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                redis::Value::Bulk(values) if values.len() >= 2 => self.extract_payload(&values[1]),
+                _ => None,
+            })
+            .collect();
+        Ok(payloads)
+    }
+
     pub async fn xack(&self, stream: &str, message_id: &str) -> Result<()> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let _: redis::Value = redis::cmd("XACK")

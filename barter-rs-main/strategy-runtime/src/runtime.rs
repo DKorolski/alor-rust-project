@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
@@ -9,21 +10,22 @@ use tracing::{debug, error, info, warn};
 
 use alor_protocol::{Envelope, MessageType};
 
-use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardState};
+use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
-    BacktestConfig, BarEvent, Intent, OrderEvent, PaperConfig, PaperOutput, PositionEvent,
-    RuntimeConfig, Strategy, StrategyCtx, StrategyKind, TradeMode,
+    BacktestConfig, BarEvent, DataOrigin, Intent, OrderEvent, PaperConfig, PaperOutput,
+    PositionEvent, RuntimeConfig, Strategy, StrategyCtx, StrategyKind, TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
+const SNAPSHOT_SCAN_COUNT: usize = 200;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
@@ -32,12 +34,54 @@ struct RuntimeStateSnapshot {
     pub strategy_state: StrategyState,
 }
 
+#[derive(Debug, Deserialize)]
+struct OrdersSnapshot {
+    pub orders: HashMap<i64, OrderEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PositionsSnapshot {
+    pub positions: HashMap<String, PositionEvent>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct BootstrapState {
+    orders_snapshot_loaded: bool,
+    positions_snapshot_loaded: bool,
+    seen_live_bar: bool,
+}
+
+impl BootstrapState {
+    fn ready(&self) -> bool {
+        self.orders_snapshot_loaded && self.positions_snapshot_loaded && self.seen_live_bar
+    }
+
+    fn reasons(&self) -> Vec<String> {
+        if self.ready() {
+            return Vec::new();
+        }
+        let mut reasons = Vec::new();
+        reasons.push("bootstrap:not_ready".to_string());
+        if !self.orders_snapshot_loaded {
+            reasons.push("bootstrap:missing_orders_snapshot".to_string());
+        }
+        if !self.positions_snapshot_loaded {
+            reasons.push("bootstrap:missing_positions_snapshot".to_string());
+        }
+        if !self.seen_live_bar {
+            reasons.push("bootstrap:missing_live_bar".to_string());
+        }
+        reasons
+    }
+}
+
 pub struct StrategyRuntime {
     config: RuntimeConfig,
     transport: RedisRuntimeTransport,
     state: RuntimeState,
     strategy: Box<dyn Strategy + Send + Sync>,
     live_guard: LiveGuardState,
+    bootstrap_state: BootstrapState,
     metrics: RuntimeMetrics,
     ledger: TradeLedger,
     sim_orders: Vec<SimOrder>,
@@ -119,6 +163,7 @@ impl StrategyRuntime {
             state: RuntimeState::default(),
             strategy,
             live_guard: LiveGuardState::default(),
+            bootstrap_state: BootstrapState::default(),
             metrics: RuntimeMetrics::default(),
             ledger: TradeLedger::default(),
             sim_orders: Vec::new(),
@@ -173,37 +218,92 @@ impl StrategyRuntime {
     }
 
     async fn load_snapshots(&mut self) -> Result<()> {
-        let orders_key = format!("snapshots.orders.{}", self.config.portfolio);
-        let positions_key = format!("snapshots.positions.{}", self.config.portfolio);
-        let orders = self.transport.hgetall(&orders_key).await?;
-        for (_key, value) in orders {
-            match serde_json::from_str::<OrderEvent>(&value) {
-                Ok(order) => {
-                    self.state.orders.insert(order.order_id, order);
-                }
-                Err(error) => {
-                    warn!(?error, "failed to parse order snapshot");
-                }
+        let stream = match &self.config.streams.snapshots {
+            Some(stream) => stream,
+            None => {
+                warn!("bootstrap: snapshots stream not configured");
+                return Ok(());
             }
-        }
-        let positions = self.transport.hgetall(&positions_key).await?;
-        for (_key, value) in positions {
-            match serde_json::from_str::<PositionEvent>(&value) {
-                Ok(position) => {
-                    self.state
-                        .positions
-                        .insert(position.symbol.clone(), position);
-                }
-                Err(error) => {
-                    warn!(?error, "failed to parse position snapshot");
-                }
-            }
-        }
+        };
         info!(
-            orders = self.state.orders.len(),
-            positions = self.state.positions.len(),
-            "snapshots loaded"
+            stream,
+            scan = SNAPSHOT_SCAN_COUNT,
+            "bootstrap: loading snapshots"
         );
+        let payloads = self
+            .transport
+            .xrevrange_last_n(stream, SNAPSHOT_SCAN_COUNT)
+            .await?;
+        let mut orders_snapshot: Option<OrdersSnapshot> = None;
+        let mut positions_snapshot: Option<PositionsSnapshot> = None;
+        for payload in payloads {
+            let envelope = match serde_json::from_str::<Envelope<serde_json::Value>>(&payload) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    warn!(?error, "failed to parse snapshot envelope");
+                    continue;
+                }
+            };
+            match envelope.msg_type {
+                MessageType::SnapshotOrders if orders_snapshot.is_none() => {
+                    match serde_json::from_str::<Envelope<OrdersSnapshot>>(&payload) {
+                        Ok(envelope) => {
+                            orders_snapshot = Some(envelope.payload);
+                        }
+                        Err(error) => {
+                            warn!(?error, "failed to parse orders snapshot");
+                        }
+                    }
+                }
+                MessageType::SnapshotPositions if positions_snapshot.is_none() => {
+                    match serde_json::from_str::<Envelope<PositionsSnapshot>>(&payload) {
+                        Ok(envelope) => {
+                            positions_snapshot = Some(envelope.payload);
+                        }
+                        Err(error) => {
+                            warn!(?error, "failed to parse positions snapshot");
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if orders_snapshot.is_some() && positions_snapshot.is_some() {
+                break;
+            }
+        }
+
+        if let Some(snapshot) = orders_snapshot {
+            self.state.orders = snapshot.orders;
+            self.bootstrap_state.orders_snapshot_loaded = true;
+        }
+        if let Some(snapshot) = positions_snapshot {
+            self.state.positions = snapshot.positions;
+            self.bootstrap_state.positions_snapshot_loaded = true;
+        }
+
+        if !self.bootstrap_state.orders_snapshot_loaded
+            || !self.bootstrap_state.positions_snapshot_loaded
+        {
+            if self.config.trade_mode == TradeMode::Live {
+                anyhow::bail!(
+                    "bootstrap: snapshots missing orders={} positions={}",
+                    self.bootstrap_state.orders_snapshot_loaded,
+                    self.bootstrap_state.positions_snapshot_loaded
+                );
+            }
+            warn!(
+                orders_loaded = self.bootstrap_state.orders_snapshot_loaded,
+                positions_loaded = self.bootstrap_state.positions_snapshot_loaded,
+                "bootstrap: snapshots missing"
+            );
+        } else {
+            info!(
+                orders = self.state.orders.len(),
+                positions = self.state.positions.len(),
+                "bootstrap: snapshots loaded"
+            );
+        }
+
         Ok(())
     }
 
@@ -468,6 +568,9 @@ impl StrategyRuntime {
         }
         self.state
             .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        if bar.origin == DataOrigin::Live {
+            self.bootstrap_state.seen_live_bar = true;
+        }
         let ctx = self.strategy_ctx();
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
@@ -788,6 +891,12 @@ impl StrategyRuntime {
         }
         match self.config.trade_mode {
             TradeMode::Live => {
+                let decision = self.evaluate_guard_decision();
+                if !decision.allowed {
+                    self.log_guard_decision_if_due(&decision)?;
+                    self.persist_state(None).await?;
+                    return Ok(());
+                }
                 for intent in intents {
                     let command = self.intent_to_command(ctx, created_ts_utc, intent);
                     self.persist_state(Some(&command)).await?;
@@ -988,6 +1097,24 @@ impl StrategyRuntime {
     }
 
     async fn log_live_guard_status_if_due(&mut self) -> Result<()> {
+        let decision = self.evaluate_guard_decision();
+        self.log_guard_decision_if_due(&decision)
+    }
+
+    fn evaluate_guard_decision(&self) -> LiveGuardDecision {
+        let mut decision = evaluate_live_guard(
+            self.config.trade_mode,
+            self.config.allow_live_orders,
+            &self.live_guard,
+            self.metrics.bars_read_total > 0,
+            self.metrics.bars_stream_xlen_last.unwrap_or(0) > 0,
+        );
+        decision.reasons.extend(self.bootstrap_state.reasons());
+        decision.allowed = decision.reasons.is_empty();
+        decision
+    }
+
+    fn log_guard_decision_if_due(&mut self, decision: &LiveGuardDecision) -> Result<()> {
         let now = Instant::now();
         let interval = Duration::from_millis(self.config.guard_log_interval_ms);
         let log_due = match self.metrics.last_guard_log {
@@ -998,13 +1125,6 @@ impl StrategyRuntime {
             return Ok(());
         }
         self.metrics.last_guard_log = Some(now);
-        let decision = evaluate_live_guard(
-            self.config.trade_mode,
-            self.config.allow_live_orders,
-            &self.live_guard,
-            self.metrics.bars_read_total > 0,
-            self.metrics.bars_stream_xlen_last.unwrap_or(0) > 0,
-        );
         if decision.allowed {
             info!("live_guard=ALLOWED");
         } else {
@@ -1057,6 +1177,41 @@ mod tests {
             bars_stream_diagnostic(Duration::from_secs(5), 0),
             BarsStreamDiagnostic::Empty
         );
+    }
+
+    #[test]
+    fn bootstrap_ready_requires_snapshots_and_live_bar() {
+        let state = BootstrapState::default();
+        assert!(!state.ready());
+        assert!(state
+            .reasons()
+            .iter()
+            .any(|reason| reason == "bootstrap:not_ready"));
+    }
+
+    #[test]
+    fn bootstrap_ready_without_live_bar_is_false() {
+        let state = BootstrapState {
+            orders_snapshot_loaded: true,
+            positions_snapshot_loaded: true,
+            seen_live_bar: false,
+        };
+        assert!(!state.ready());
+        assert!(state
+            .reasons()
+            .iter()
+            .any(|reason| reason == "bootstrap:missing_live_bar"));
+    }
+
+    #[test]
+    fn bootstrap_ready_with_snapshots_and_live_bar_is_true() {
+        let state = BootstrapState {
+            orders_snapshot_loaded: true,
+            positions_snapshot_loaded: true,
+            seen_live_bar: true,
+        };
+        assert!(state.ready());
+        assert!(state.reasons().is_empty());
     }
 }
 

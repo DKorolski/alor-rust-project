@@ -167,6 +167,7 @@ pub struct StreamNames {
     pub positions: String,
     pub commands: String,
     pub acks: String,
+    pub snapshots: Option<String>,
     pub health: Option<String>,
     pub dlq_prefix: String,
     pub runtime_state: String,

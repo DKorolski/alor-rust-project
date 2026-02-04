@@ -6,8 +6,8 @@ consumer_group = "strategy-runtime"
 consumer_name = "auto"
 
 [runtime]
-trade_mode = "paper" # paper | live | backtest
-allow_live_orders = false
+trade_mode = "live" # paper | live | backtest
+allow_live_orders = true
 guard_log_interval_ms = 5000
 
 [streams]
@@ -16,6 +16,7 @@ orders = "broker.orders.7502T0U"
 positions = "broker.positions.7502T0U"
 commands = "cmd.orders.7502T0U"
 acks = "cmd.acks.7502T0U"
+snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
 runtime_state = "runtime.state.limit_cancel.7502T0U"
@@ -47,14 +48,14 @@ max_wait_bars_for_ack = 3
 close_trigger = "next_bar" # next_bar | position_update
 
 [paper]
-enabled = true
+enabled = false
 output = "stdout"
 file_path = "./paper_trades.jsonl"
 trades_csv = "./trades.csv"
 summary_json = "./summary.json"
 
 [backtest]
-enabled = true
+enabled = false
 trade_log = "./backtest_trades.log"
 trades_csv = "./trades.csv"
 summary_json = "./summary.json"

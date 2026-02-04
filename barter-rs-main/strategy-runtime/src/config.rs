@@ -97,6 +97,7 @@ pub struct StreamSources {
     pub positions: ConfigSource,
     pub commands: ConfigSource,
     pub acks: ConfigSource,
+    pub snapshots: ConfigSource,
     pub health: ConfigSource,
     pub dlq_prefix: ConfigSource,
     pub runtime_state: ConfigSource,
@@ -187,6 +188,7 @@ impl Default for StreamSources {
             positions: ConfigSource::Default,
             commands: ConfigSource::Default,
             acks: ConfigSource::Default,
+            snapshots: ConfigSource::Default,
             health: ConfigSource::Default,
             dlq_prefix: ConfigSource::Default,
             runtime_state: ConfigSource::Default,
@@ -308,6 +310,7 @@ struct StreamNamesFile {
     positions: Option<String>,
     commands: Option<String>,
     acks: Option<String>,
+    snapshots: Option<String>,
     health: Option<String>,
     dlq_prefix: Option<String>,
     runtime_state: Option<String>,
@@ -775,6 +778,10 @@ pub fn load_runtime_config(
             streams.acks = value.clone();
             sources.streams.acks = ConfigSource::File;
         }
+        if let Some(value) = &streams_file.snapshots {
+            streams.snapshots = parse_optional_stream(value);
+            sources.streams.snapshots = ConfigSource::File;
+        }
         if let Some(value) = &streams_file.health {
             streams.health = parse_optional_stream(value);
             sources.streams.health = ConfigSource::File;
@@ -808,6 +815,10 @@ pub fn load_runtime_config(
     if let Some(value) = env::var("STREAM_ACKS").ok() {
         streams.acks = value;
         sources.streams.acks = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("SNAPSHOTS_STREAM").ok() {
+        streams.snapshots = parse_optional_stream(&value);
+        sources.streams.snapshots = ConfigSource::Env;
     }
     if let Some(value) = env::var("STREAM_HEALTH").ok() {
         streams.health = parse_optional_stream(&value);
@@ -874,6 +885,7 @@ fn default_streams(portfolio: &str, strategy_id: &str) -> StreamNames {
         positions: format!("broker.positions.{portfolio}"),
         commands: format!("cmd.orders.{portfolio}"),
         acks: format!("cmd.acks.{portfolio}"),
+        snapshots: Some(format!("broker.snapshots.{portfolio}")),
         health: Some(DEFAULT_HEALTH_STREAM.to_string()),
         dlq_prefix: "dlq".to_string(),
         runtime_state: format!("runtime.state.{strategy_id}.{portfolio}"),
@@ -937,6 +949,9 @@ fn validate_trade_mode(config: &RuntimeConfig) -> Result<()> {
             }
             if !config.allow_live_orders {
                 conflicts.push("allow_live_orders=false");
+            }
+            if config.streams.snapshots.is_none() {
+                conflicts.push("streams.snapshots=none");
             }
         }
         TradeMode::Paper | TradeMode::Backtest => {

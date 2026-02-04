@@ -1,9 +1,11 @@
 mod common;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
+use serde::Serialize;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
@@ -11,8 +13,9 @@ use alor_protocol::{AckStatus, CommandAck, Envelope, MessageType, OrderCommand};
 use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
-    deterministic_request_id, BacktestConfig, BarEvent, DataOrigin, PaperConfig, PaperOutput,
-    ReadConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode, TrimConfig,
+    deterministic_request_id, BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig,
+    PaperOutput, PositionEvent, ReadConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode,
+    TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -36,6 +39,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             positions: format!("{prefix}:positions"),
             commands: format!("{prefix}:commands"),
             acks: format!("{prefix}:acks"),
+            snapshots: Some(format!("{prefix}:snapshots")),
             health: Some(format!("{prefix}:health")),
             dlq_prefix: format!("{prefix}:dlq"),
             runtime_state: format!("{prefix}:runtime-state"),
@@ -88,11 +92,50 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
     }
 }
 
+#[derive(Debug, Serialize)]
+struct OrdersSnapshot {
+    orders: HashMap<i64, OrderEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct PositionsSnapshot {
+    positions: HashMap<String, PositionEvent>,
+}
+
 async fn spawn_runtime(config: RuntimeConfig) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut runtime = StrategyRuntime::new(config).await.expect("runtime init");
         let _ = runtime.run().await;
     })
+}
+
+async fn publish_snapshots(redis_url: &str, stream: &str) -> Result<()> {
+    let orders = OrdersSnapshot {
+        orders: HashMap::new(),
+    };
+    let positions = PositionsSnapshot {
+        positions: HashMap::new(),
+    };
+    let orders_envelope =
+        Envelope::new(Utc::now().timestamp(), "test", MessageType::SnapshotOrders, orders);
+    let positions_envelope = Envelope::new(
+        Utc::now().timestamp(),
+        "test",
+        MessageType::SnapshotPositions,
+        positions,
+    );
+    let orders_json = serde_json::to_string(&orders_envelope)?;
+    let positions_json = serde_json::to_string(&positions_envelope)?;
+    xadd_json(redis_url, stream, &orders_json).await?;
+    xadd_json(redis_url, stream, &positions_json).await?;
+    Ok(())
+}
+
+async fn publish_snapshots_if_configured(config: &RuntimeConfig) -> Result<()> {
+    if let Some(stream) = &config.streams.snapshots {
+        publish_snapshots(&config.redis_url, stream).await?;
+    }
+    Ok(())
 }
 
 async fn publish_bar(
@@ -264,6 +307,8 @@ async fn e2e_limit_cancel_happy_path() -> Result<()> {
         publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
     }
 
+    publish_snapshots_if_configured(&config).await?;
+
     let runtime_handle = spawn_runtime(config.clone()).await;
 
     publish_bar(
@@ -357,6 +402,8 @@ async fn e2e_restart_without_duplicate_place() -> Result<()> {
         publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
     }
 
+    publish_snapshots_if_configured(&config_a).await?;
+
     let handle_a = spawn_runtime(config_a.clone()).await;
 
     publish_bar(
@@ -382,6 +429,8 @@ async fn e2e_restart_without_duplicate_place() -> Result<()> {
     if let Some(health_stream) = &config_b.streams.health {
         publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
     }
+
+    publish_snapshots_if_configured(&config_b).await?;
 
     let handle_b = spawn_runtime(config_b.clone()).await;
     sleep(Duration::from_millis(500)).await;
@@ -461,6 +510,8 @@ async fn paper_mode_never_sends_commands() -> Result<()> {
         publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
     }
 
+    publish_snapshots_if_configured(&config).await?;
+
     let runtime_handle = spawn_runtime(config.clone()).await;
 
     publish_bar(
@@ -508,6 +559,8 @@ async fn live_guard_blocks_when_phase_not_ready() -> Result<()> {
         .await?;
     }
 
+    publish_snapshots_if_configured(&config).await?;
+
     let runtime_handle = spawn_runtime(config.clone()).await;
     publish_bar(
         &redis_url,
@@ -547,6 +600,8 @@ async fn live_guard_blocks_non_live_origin() -> Result<()> {
     if let Some(health_stream) = &config.streams.health {
         publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
     }
+
+    publish_snapshots_if_configured(&config).await?;
 
     let runtime_handle = spawn_runtime(config.clone()).await;
     publish_bar(
@@ -588,6 +643,8 @@ async fn live_guard_allows_when_ready() -> Result<()> {
         publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
     }
 
+    publish_snapshots_if_configured(&config).await?;
+
     let runtime_handle = spawn_runtime(config.clone()).await;
     publish_bar(
         &redis_url,
@@ -595,6 +652,63 @@ async fn live_guard_allows_when_ready() -> Result<()> {
         &config.strategy.symbol,
         40_000,
         100.0,
+        DataOrigin::Live,
+    )
+    .await?;
+
+    let _ = timeout(
+        Duration::from_secs(5),
+        read_next_command(&redis_url, &config.streams.commands, "0-0"),
+    )
+    .await??;
+
+    runtime_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_guard_blocks_until_live_bar_after_snapshots() -> Result<()> {
+    let redis_url = match redis_url() {
+        Some(url) => url,
+        None => {
+            eprintln!("REDIS_URL not set; skipping e2e test");
+            return Ok(());
+        }
+    };
+    redis_flushdb(&redis_url).await?;
+
+    let prefix = format!("e2e-guard-bootstrap-{}", Uuid::new_v4());
+    let mut config = build_config(redis_url.clone(), &prefix, "runtime-guard-bootstrap");
+    config.trade_mode = TradeMode::Live;
+    config.allow_live_orders = true;
+
+    if let Some(health_stream) = &config.streams.health {
+        publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
+    }
+
+    publish_snapshots_if_configured(&config).await?;
+
+    let runtime_handle = spawn_runtime(config.clone()).await;
+    publish_bar(
+        &redis_url,
+        &config.streams.bars,
+        &config.strategy.symbol,
+        60_000,
+        100.0,
+        DataOrigin::History,
+    )
+    .await?;
+
+    sleep(Duration::from_millis(500)).await;
+    let total_commands = xlen(&redis_url, &config.streams.commands).await?;
+    assert_eq!(total_commands, 0);
+
+    publish_bar(
+        &redis_url,
+        &config.streams.bars,
+        &config.strategy.symbol,
+        61_000,
+        101.0,
         DataOrigin::Live,
     )
     .await?;
@@ -623,6 +737,8 @@ async fn backtest_does_not_send_orders() -> Result<()> {
     let prefix = format!("e2e-backtest-{}", Uuid::new_v4());
     let mut config = build_config(redis_url.clone(), &prefix, "runtime-backtest");
     config.trade_mode = TradeMode::Backtest;
+
+    publish_snapshots_if_configured(&config).await?;
 
     let runtime_handle = spawn_runtime(config.clone()).await;
 
