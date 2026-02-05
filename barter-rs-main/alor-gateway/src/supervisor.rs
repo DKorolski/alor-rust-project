@@ -491,10 +491,19 @@ impl Supervisor {
                 let mut orders_rx = streams.orders_rx;
                 while let Some(order) = orders_rx.recv().await {
                     let mut order = order;
+                    let event_request_id = order.request_id;
                     if let Some(request_id) =
                         request_map_orders.read().get(&order.order_id).copied()
                     {
-                        order.request_id = Some(request_id);
+                        if event_request_id != Some(request_id) {
+                            info!(
+                                order_id = order.order_id,
+                                event_request_id = ?event_request_id,
+                                state_request_id = ?request_id,
+                                "order event request_id updated from state"
+                            );
+                            order.request_id = Some(request_id);
+                        }
                     }
                     {
                         let mut guard = health.write();

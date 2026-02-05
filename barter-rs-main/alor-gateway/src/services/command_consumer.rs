@@ -291,6 +291,10 @@ pub async fn run_command_consumer(
                     continue;
                 }
 
+                if let CommandAction::Cancel(payload) = &command.action {
+                    request_map.write().insert(payload.order_id, request_id);
+                }
+
                 match execute_command(&cws, &command, price_step, volume_step).await {
                     Ok(response) => {
                         let info = parse_cws_response(&response);
