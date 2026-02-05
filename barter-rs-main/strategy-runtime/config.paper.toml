@@ -6,8 +6,8 @@ consumer_group = "strategy-runtime"
 consumer_name = "auto"
 
 [runtime]
-trade_mode = "live" # paper | live | backtest
-allow_live_orders = true
+trade_mode = "paper" # paper | live | backtest
+allow_live_orders = false
 guard_log_interval_ms = 5000
 
 [streams]
@@ -41,14 +41,14 @@ strategy_id = "limit_cancel"
 strategy_kind = "market_buy_and_close" # limit_cancel | market_buy_and_close
 symbol = "IMOEXF"
 qty = 1.0
-side = "sell"
+side = "buy"
 place_offset_ticks = 2
 tick_size = 0.5
 max_wait_bars_for_ack = 3
-close_trigger = "next_bar" # next_bar | position_update
+close_trigger = "position_update" # next_bar | position_update
 
 [paper]
-enabled = false
+enabled = true
 output = "stdout"
 file_path = "./paper_trades.jsonl"
 trades_csv = "./trades.csv"
