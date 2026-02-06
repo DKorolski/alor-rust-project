@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, SCHEMA_VERSION};
 
-use crate::{BarEvent, OrderEvent, PositionEvent, RuntimeConfig};
+use crate::{BarEvent, OrderEvent, PositionEvent, RuntimeConfig, TradeEvent};
 
 const PAYLOAD_FIELD: &str = "payload";
 
@@ -342,6 +342,15 @@ impl RedisRuntimeTransport {
             &self.config.streams.orders,
             MessageType::Order,
             self.config.trim.orders,
+        )
+        .await
+    }
+
+    pub async fn next_trade(&self) -> Option<RuntimeMessage<TradeEvent>> {
+        self.next_message(
+            &self.config.streams.trades,
+            MessageType::Trade,
+            self.config.trim.trades,
         )
         .await
     }

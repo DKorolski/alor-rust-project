@@ -35,6 +35,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
         streams: StreamNames {
             bars: format!("{prefix}:bars"),
             orders: format!("{prefix}:orders"),
+            trades: format!("{prefix}:trades"),
             positions: format!("{prefix}:positions"),
             commands: format!("{prefix}:commands"),
             acks: format!("{prefix}:acks"),
@@ -57,6 +58,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
         trim: TrimConfig {
             bars: 1_000,
             orders: 1_000,
+            trades: 1_000,
             positions: 1_000,
             commands: 1_000,
             acks: 1_000,
@@ -80,12 +82,14 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             file_path: format!("{prefix}-paper.jsonl"),
             trades_csv: format!("{prefix}-trades.csv"),
             summary_json: format!("{prefix}-summary.json"),
+            append: false,
         },
         backtest: BacktestConfig {
             enabled: false,
             trade_log: format!("{prefix}-backtest.log"),
             trades_csv: format!("{prefix}-trades.csv"),
             summary_json: format!("{prefix}-summary.json"),
+            append: false,
         },
         reset_state_on_start: false,
     }

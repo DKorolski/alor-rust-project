@@ -285,7 +285,8 @@ async fn ack_subscriptions(
     let mut bars_guid = None;
     let mut positions_ok = false;
     let mut orders_ok = false;
-    while bars_guid.is_none() || !positions_ok || !orders_ok {
+    let mut trades_ok = false;
+    while bars_guid.is_none() || !positions_ok || !orders_ok || !trades_ok {
         let Some(event) = events.recv().await else {
             continue;
         };
@@ -310,6 +311,10 @@ async fn ack_subscriptions(
                 server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
                 orders_ok = true;
             }
+            "TradesGetAndSubscribeV2" => {
+                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                trades_ok = true;
+            }
             _ => {}
         }
     }
@@ -325,8 +330,9 @@ async fn delayed_bars_ack(
     let mut second_guid = None;
     let mut positions_ok = false;
     let mut orders_ok = false;
+    let mut trades_ok = false;
 
-    while second_guid.is_none() || !positions_ok || !orders_ok {
+    while second_guid.is_none() || !positions_ok || !orders_ok || !trades_ok {
         let Some(event) = events.recv().await else {
             continue;
         };
@@ -360,6 +366,10 @@ async fn delayed_bars_ack(
             "OrdersGetAndSubscribeV2" => {
                 server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
                 orders_ok = true;
+            }
+            "TradesGetAndSubscribeV2" => {
+                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                trades_ok = true;
             }
             _ => {}
         }

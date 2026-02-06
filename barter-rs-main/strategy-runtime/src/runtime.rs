@@ -18,7 +18,7 @@ use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, BarEvent, DataOrigin, Intent, OrderEvent, PaperConfig, PaperOutput,
-    PositionEvent, RuntimeConfig, Strategy, StrategyCtx, StrategyKind, TradeMode,
+    PositionEvent, RuntimeConfig, Strategy, StrategyCtx, StrategyKind, TradeEvent, TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -26,12 +26,19 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
+const TRADE_DEDUP_LIMIT: usize = 512;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
     pub ts_utc: i64,
     pub last_processed_bar_ts: std::collections::HashMap<String, i64>,
     pub strategy_state: StrategyState,
+    #[serde(default)]
+    pub last_trade_ts: Option<i64>,
+    #[serde(default)]
+    pub last_trade_id: Option<String>,
+    #[serde(default)]
+    pub seen_trade_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,8 +91,19 @@ pub struct StrategyRuntime {
     bootstrap_state: BootstrapState,
     metrics: RuntimeMetrics,
     ledger: TradeLedger,
+    pending_exec: HashMap<i64, PendingExecution>,
     sim_orders: Vec<SimOrder>,
     next_sim_order_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingExecution {
+    order_id: i64,
+    symbol: String,
+    side: String,
+    target_qty: f64,
+    filled_qty: f64,
+    order_price: f64,
 }
 
 #[derive(Debug)]
@@ -176,6 +194,7 @@ impl StrategyRuntime {
             bootstrap_state: BootstrapState::default(),
             metrics: RuntimeMetrics::default(),
             ledger: TradeLedger::default(),
+            pending_exec: HashMap::new(),
             sim_orders: Vec::new(),
             next_sim_order_id: 1,
         })
@@ -194,10 +213,12 @@ impl StrategyRuntime {
     }
 
     async fn bootstrap(&mut self) -> Result<()> {
+        self.prepare_artifacts()?;
         self.transport
             .ensure_groups(&[
                 &self.config.streams.bars,
                 &self.config.streams.orders,
+                &self.config.streams.trades,
                 &self.config.streams.positions,
                 &self.config.streams.acks,
             ])
@@ -209,12 +230,15 @@ impl StrategyRuntime {
         let streams = self.config.streams.clone();
         let trim_acks = self.config.trim.acks;
         let trim_orders = self.config.trim.orders;
+        let trim_trades = self.config.trim.trades;
         let trim_positions = self.config.trim.positions;
         let trim_bars = self.config.trim.bars;
 
         self.recover_pending(&streams.acks, MessageType::CommandAck, trim_acks)
             .await?;
         self.recover_pending(&streams.orders, MessageType::Order, trim_orders)
+            .await?;
+        self.recover_pending(&streams.trades, MessageType::Trade, trim_trades)
             .await?;
         self.recover_pending(&streams.positions, MessageType::Position, trim_positions)
             .await?;
@@ -224,6 +248,32 @@ impl StrategyRuntime {
         self.refresh_health_if_due().await?;
         self.log_live_guard_status_if_due().await?;
 
+        Ok(())
+    }
+
+    fn prepare_artifacts(&self) -> Result<()> {
+        match self.config.trade_mode {
+            TradeMode::Paper if self.config.paper.enabled && !self.config.paper.append => {
+                self.truncate_file(&self.config.paper.file_path)?;
+                self.truncate_file(&self.config.paper.trades_csv)?;
+                self.truncate_file(&self.config.paper.summary_json)?;
+            }
+            TradeMode::Backtest if self.config.backtest.enabled && !self.config.backtest.append => {
+                self.truncate_file(&self.config.backtest.trade_log)?;
+                self.truncate_file(&self.config.backtest.trades_csv)?;
+                self.truncate_file(&self.config.backtest.summary_json)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn truncate_file(&self, path: &str) -> Result<()> {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         Ok(())
     }
 
@@ -289,6 +339,15 @@ impl StrategyRuntime {
         if let Some(snapshot) = positions_snapshot {
             self.state.positions = snapshot.positions;
             self.bootstrap_state.positions_snapshot_loaded = true;
+            for (symbol, position) in &self.state.positions {
+                debug!(
+                    symbol = symbol,
+                    qty = position.qty,
+                    avg_price = position.avg_price,
+                    ts_utc = position.ts_utc,
+                    "bootstrap: position snapshot"
+                );
+            }
         }
 
         if !self.bootstrap_state.orders_snapshot_loaded
@@ -331,6 +390,9 @@ impl StrategyRuntime {
                 Ok(snapshot) => {
                     self.state.last_processed_bar_ts = snapshot.last_processed_bar_ts;
                     self.state.strategy_state = snapshot.strategy_state.clone();
+                    self.state.last_trade_ts = snapshot.last_trade_ts;
+                    self.state.last_trade_id = snapshot.last_trade_id;
+                    self.state.seen_trade_ids = snapshot.seen_trade_ids;
                     self.strategy.set_state(snapshot.strategy_state);
                     info!("runtime state restored");
                 }
@@ -383,12 +445,15 @@ impl StrategyRuntime {
         let streams = self.config.streams.clone();
         let trim_acks = self.config.trim.acks;
         let trim_orders = self.config.trim.orders;
+        let trim_trades = self.config.trim.trades;
         let trim_positions = self.config.trim.positions;
         let trim_bars = self.config.trim.bars;
 
         self.drain_stream(&streams.acks, MessageType::CommandAck, trim_acks, 10)
             .await?;
         self.drain_stream(&streams.orders, MessageType::Order, trim_orders, 10)
+            .await?;
+        self.drain_stream(&streams.trades, MessageType::Trade, trim_trades, 10)
             .await?;
         self.drain_stream(
             &streams.positions,
@@ -462,6 +527,11 @@ impl StrategyRuntime {
             stream if stream == self.config.streams.orders => {
                 let order = serde_json::from_value(message.payload)?;
                 self.handle_order(message.stream, message.message_id, order)
+                    .await?;
+            }
+            stream if stream == self.config.streams.trades => {
+                let trade = serde_json::from_value(message.payload)?;
+                self.handle_trade(message.stream, message.message_id, trade)
                     .await?;
             }
             stream if stream == self.config.streams.positions => {
@@ -547,6 +617,87 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    async fn handle_trade(
+        &mut self,
+        stream: String,
+        message_id: String,
+        trade: TradeEvent,
+    ) -> Result<()> {
+        if !self.should_process_trade(&trade) {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        debug!(
+            trade_id = trade.trade_id,
+            order_id = trade.order_id,
+            symbol = trade.symbol,
+            side = trade.side,
+            qty = trade.qty,
+            price = trade.price,
+            commission = trade.commission,
+            existing = trade.existing,
+            ts_utc = trade.ts_utc,
+            "trade event accepted"
+        );
+        if trade.order_id <= 0 {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        if !self.pending_exec.contains_key(&trade.order_id) {
+            if let Some(order) = self.state.orders.get(&trade.order_id) {
+                let fill_target = if order.filled > 0.0 { order.filled } else { order.qty };
+                self.pending_exec.insert(
+                    trade.order_id,
+                    PendingExecution {
+                        order_id: trade.order_id,
+                        symbol: order.symbol.clone(),
+                        side: order.side.to_lowercase(),
+                        target_qty: fill_target.max(trade.qty),
+                        filled_qty: 0.0,
+                        order_price: order.price,
+                    },
+                );
+            }
+        }
+        if let Some(pending) = self.pending_exec.get_mut(&trade.order_id) {
+            let exec_qty = trade.qty;
+            if exec_qty > 0.0 {
+                let trade_record = TradeRecord {
+                    ts_utc: trade.ts_utc,
+                    order_id: trade.order_id,
+                    symbol: trade.symbol.clone(),
+                    side: trade.side.to_lowercase(),
+                    qty: exec_qty,
+                    price: trade.price,
+                    commission: trade.commission,
+                };
+                self.ledger.record_fill(trade_record);
+                pending.filled_qty += exec_qty;
+                info!(
+                    order_id = pending.order_id,
+                    symbol = pending.symbol,
+                    side = pending.side,
+                    qty = exec_qty,
+                    order_price = pending.order_price,
+                    exec_price = trade.price,
+                    commission = trade.commission,
+                    "execution confirmed"
+                );
+                if pending.filled_qty + f64::EPSILON >= pending.target_qty {
+                    self.pending_exec.remove(&trade.order_id);
+                }
+            }
+        } else {
+            debug!(
+                order_id = trade.order_id,
+                trade_id = trade.trade_id,
+                "trade ignored: no pending execution"
+            );
+        }
+        self.transport.xack(&stream, &message_id).await?;
+        Ok(())
+    }
+
     async fn handle_position(
         &mut self,
         stream: String,
@@ -606,6 +757,9 @@ impl StrategyRuntime {
             ts_utc: Utc::now().timestamp(),
             last_processed_bar_ts: self.state.last_processed_bar_ts.clone(),
             strategy_state: self.state.strategy_state.clone(),
+            last_trade_ts: self.state.last_trade_ts,
+            last_trade_id: self.state.last_trade_id.clone(),
+            seen_trade_ids: self.state.seen_trade_ids.clone(),
         };
         let payload = serde_json::to_string(&snapshot)?;
         if let Some(command) = maybe_cmd {
@@ -648,6 +802,13 @@ impl StrategyRuntime {
             return Ok(());
         }
         let status = order.status.to_lowercase();
+        debug!(
+            order_id = order.order_id,
+            order_price = order.price,
+            status = order.status,
+            existing = order.existing,
+            "order event price observed"
+        );
         let record = OrderRecord {
             order_id: order.order_id,
             symbol: order.symbol.clone(),
@@ -659,6 +820,42 @@ impl StrategyRuntime {
             ts_utc: order.ts_utc,
         };
         self.ledger.record_order(record);
+        if self.config.trade_mode == TradeMode::Live {
+            let prev_filled = self
+                .state
+                .orders
+                .get(&order.order_id)
+                .map(|prev| prev.status.eq_ignore_ascii_case("filled"))
+                .unwrap_or(false);
+            if status == "filled" {
+                let fill_qty = if order.filled > 0.0 { order.filled } else { order.qty };
+                if fill_qty > 0.0 && !(prev_filled && order.existing) {
+                    let entry = self.pending_exec.entry(order.order_id).or_insert_with(|| {
+                        PendingExecution {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.to_lowercase(),
+                            target_qty: fill_qty,
+                            filled_qty: 0.0,
+                            order_price: order.price,
+                        }
+                    });
+                    entry.target_qty = fill_qty;
+                    entry.order_price = order.price;
+                    info!(
+                        order_id = order.order_id,
+                        symbol = order.symbol,
+                        side = order.side,
+                        qty = fill_qty,
+                        order_price = order.price,
+                        exec_price = "UNKNOWN",
+                        "order filled awaiting execution"
+                    );
+                }
+            }
+            return Ok(());
+        }
+
         if status == "filled" {
             let fill_qty = if order.filled > 0.0 { order.filled } else { order.qty };
             if fill_qty > 0.0 {
@@ -676,12 +873,53 @@ impl StrategyRuntime {
                     order_id = order.order_id,
                     symbol = order.symbol,
                     qty = fill_qty,
-                    price = order.price,
+                    exec_price = order.price,
                     "order filled"
                 );
             }
         }
         Ok(())
+    }
+
+    fn should_process_trade(&mut self, trade: &TradeEvent) -> bool {
+        let trade_key = self.trade_dedupe_key(trade);
+        if self.state.seen_trade_ids.iter().any(|id| id == &trade_key) {
+            return false;
+        }
+        if let Some(last_ts) = self.state.last_trade_ts {
+            if trade.ts_utc < last_ts {
+                return false;
+            }
+        }
+        self.remember_trade(&trade_key, trade.ts_utc);
+        true
+    }
+
+    fn trade_dedupe_key(&self, trade: &TradeEvent) -> String {
+        if trade.trade_id.trim().is_empty() {
+            format!(
+                "{}:{}:{}:{}:{}",
+                trade.order_id, trade.ts_utc, trade.side, trade.qty, trade.price
+            )
+        } else {
+            trade.trade_id.clone()
+        }
+    }
+
+    fn remember_trade(&mut self, trade_key: &str, ts_utc: i64) {
+        if self.state.seen_trade_ids.iter().any(|id| id == trade_key) {
+            return;
+        }
+        self.state.seen_trade_ids.push(trade_key.to_string());
+        if self.state.seen_trade_ids.len() > TRADE_DEDUP_LIMIT {
+            let overflow = self.state.seen_trade_ids.len() - TRADE_DEDUP_LIMIT;
+            self.state.seen_trade_ids.drain(0..overflow);
+        }
+        let last_ts = self.state.last_trade_ts.unwrap_or(i64::MIN);
+        if ts_utc >= last_ts {
+            self.state.last_trade_ts = Some(ts_utc);
+            self.state.last_trade_id = Some(trade_key.to_string());
+        }
     }
 
     async fn simulate_intents(&mut self, bar: &BarEvent, intents: Vec<Intent>) -> Result<()> {
@@ -1260,6 +1498,80 @@ fn bars_tf_seconds(stream: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CloseTrigger, ReadConfig, StrategyConfig, StreamNames, TrimConfig};
+
+    fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {
+        let config = RuntimeConfig {
+            redis_url: "redis://127.0.0.1/".to_string(),
+            source: "test".to_string(),
+            portfolio: "demo".to_string(),
+            exchange: "alor".to_string(),
+            streams: StreamNames {
+                bars: "bars".to_string(),
+                orders: "orders".to_string(),
+                trades: "trades".to_string(),
+                positions: "positions".to_string(),
+                commands: "commands".to_string(),
+                acks: "acks".to_string(),
+                snapshots: None,
+                health: None,
+                dlq_prefix: "dlq".to_string(),
+                runtime_state: "runtime-state".to_string(),
+            },
+            consumer_group: "group".to_string(),
+            consumer_name: "consumer".to_string(),
+            trade_mode,
+            allow_live_orders: true,
+            guard_log_interval_ms: 1_000,
+            read: ReadConfig {
+                block_ms: 100,
+                claim_idle_ms: 100,
+                claim_batch: 1,
+                poll_interval_ms: 10,
+            },
+            trim: TrimConfig {
+                bars: 10,
+                orders: 10,
+                trades: 10,
+                positions: 10,
+                commands: 10,
+                acks: 10,
+                health: 10,
+                runtime_state: 10,
+            },
+            strategy: StrategyConfig {
+                strategy_id: "limit_cancel".to_string(),
+                strategy_kind: StrategyKind::LimitCancel,
+                symbol: "SBER".to_string(),
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                place_offset_ticks: 1,
+                tick_size: 0.01,
+                max_wait_bars_for_ack: 1,
+                close_trigger: CloseTrigger::NextBar,
+            },
+            paper: PaperConfig {
+                enabled: false,
+                output: PaperOutput::Stdout,
+                file_path: "paper.jsonl".to_string(),
+                trades_csv: "trades.csv".to_string(),
+                summary_json: "summary.json".to_string(),
+                append: false,
+            },
+            backtest: BacktestConfig {
+                enabled: false,
+                trade_log: "backtest.log".to_string(),
+                trades_csv: "trades.csv".to_string(),
+                summary_json: "summary.json".to_string(),
+                append: false,
+            },
+            reset_state_on_start: false,
+        };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(StrategyRuntime::new(config))
+            .unwrap()
+    }
 
     #[test]
     fn grace_period_diagnostics() {
@@ -1314,6 +1626,64 @@ mod tests {
         };
         assert!(state.ready());
         assert!(state.reasons().is_empty());
+    }
+
+    #[test]
+    fn dedup_trade_cursor_blocks_duplicates() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.state.last_trade_ts = Some(100);
+        runtime.state.seen_trade_ids = vec!["trade-1".to_string()];
+
+        let trade = TradeEvent {
+            trade_id: "trade-1".to_string(),
+            order_id: 1,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            price: 100.0,
+            commission: 0.1,
+            existing: true,
+            ts_utc: 100,
+        };
+        assert!(!runtime.should_process_trade(&trade));
+
+        let trade_new = TradeEvent {
+            trade_id: "trade-2".to_string(),
+            ts_utc: 101,
+            ..trade
+        };
+        assert!(runtime.should_process_trade(&trade_new));
+    }
+
+    #[test]
+    fn order_vs_exec_price_uses_trade_record() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        let order = OrderEvent {
+            order_id: 1,
+            request_id: None,
+            symbol: "SBER".to_string(),
+            status: "filled".to_string(),
+            side: "buy".to_string(),
+            order_type: "market".to_string(),
+            qty: 1.0,
+            filled: 1.0,
+            price: 100.0,
+            existing: false,
+            ts_utc: 10,
+        };
+        runtime.update_ledger_from_order(&order).unwrap();
+        assert!(runtime.ledger.trades().is_empty());
+
+        runtime.ledger.record_fill(TradeRecord {
+            ts_utc: 11,
+            order_id: 1,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            price: 110.0,
+            commission: 0.0,
+        });
+        assert_eq!(runtime.ledger.trades()[0].price, 110.0);
     }
 }
 

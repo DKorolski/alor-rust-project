@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
-use crate::models::{BarEvent, DataOrigin, OrderEvent, PositionEvent};
+use crate::models::{BarEvent, DataOrigin, OrderEvent, PositionEvent, TradeEvent};
 
 pub struct Router;
 
@@ -26,6 +26,7 @@ pub struct RouterStreams {
     pub bars_rx: mpsc::Receiver<BarEvent>,
     pub positions_rx: mpsc::Receiver<PositionEvent>,
     pub orders_rx: mpsc::Receiver<OrderEvent>,
+    pub trades_rx: mpsc::Receiver<TradeEvent>,
     pub control_rx: mpsc::Receiver<RouterControl>,
 }
 
@@ -37,6 +38,7 @@ impl Router {
         let (bars_tx, bars_rx) = mpsc::channel(1024);
         let (positions_tx, positions_rx) = mpsc::channel(1024);
         let (orders_tx, orders_rx) = mpsc::channel(1024);
+        let (trades_tx, trades_rx) = mpsc::channel(1024);
         let (control_tx, control_rx) = mpsc::channel(32);
         let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
 
@@ -107,6 +109,11 @@ impl Router {
                             continue;
                         }
 
+                        if let Some(trade) = parse_trade(&value) {
+                            let _ = trades_tx.send(trade).await;
+                            continue;
+                        }
+
                         if let Some(position) = parse_position(&value) {
                             let _ = positions_tx.send(position).await;
                             continue;
@@ -126,6 +133,7 @@ impl Router {
                 bars_rx,
                 positions_rx,
                 orders_rx,
+                trades_rx,
                 control_rx,
             },
         )
@@ -279,6 +287,61 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
     })
 }
 
+fn parse_trade(value: &Value) -> Option<TradeEvent> {
+    let data = value.get("data")?;
+    let order_id = data
+        .get("orderno")
+        .or_else(|| data.get("orderNo"))
+        .and_then(to_i64)?;
+    let trade_id = data
+        .get("id")
+        .or_else(|| data.get("tradeId"))
+        .and_then(|value| match value {
+            Value::String(value) => Some(value.clone()),
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        })?;
+    let symbol = data
+        .get("symbol")
+        .or_else(|| data.get("code"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let side = data
+        .get("side")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_lowercase();
+    Some(TradeEvent {
+        trade_id,
+        order_id,
+        symbol,
+        side,
+        qty: data
+            .get("qty")
+            .or_else(|| data.get("qtyUnits"))
+            .or_else(|| data.get("qtyBatch"))
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        price: data
+            .get("price")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        commission: data
+            .get("commission")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        existing: data
+            .get("existing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        ts_utc: data
+            .get("date")
+            .or_else(|| data.get("timestamp"))
+            .and_then(to_i64)
+            .unwrap_or_else(|| Utc::now().timestamp()),
+    })
+}
+
 fn to_i64(value: &Value) -> Option<i64> {
     if let Some(v) = value.as_i64() {
         return Some(v);
@@ -419,5 +482,32 @@ mod tests {
         assert_eq!(order.price, 99.5);
         assert!(order.existing);
         assert_eq!(order.ts_utc, 1700000001);
+    }
+
+    #[test]
+    fn parse_trade_event() {
+        let value = json!({
+            "data": {
+                "id": "trade-1",
+                "orderno": 42,
+                "symbol": "IMOEXF",
+                "side": "buy",
+                "qty": 1.5,
+                "price": 2738.5,
+                "commission": 0.5,
+                "existing": true,
+                "date": "2024-03-01T12:00:00"
+            }
+        });
+        let trade = parse_trade(&value).expect("trade");
+        assert_eq!(trade.trade_id, "trade-1");
+        assert_eq!(trade.order_id, 42);
+        assert_eq!(trade.symbol, "IMOEXF");
+        assert_eq!(trade.side, "buy");
+        assert_eq!(trade.qty, 1.5);
+        assert_eq!(trade.price, 2738.5);
+        assert_eq!(trade.commission, 0.5);
+        assert!(trade.existing);
+        assert_eq!(trade.ts_utc, 1709294400);
     }
 }

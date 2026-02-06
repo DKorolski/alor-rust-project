@@ -175,6 +175,7 @@ async fn publish_event(sink: &Arc<dyn EventSink>, msg: EventMessage) -> anyhow::
     match msg {
         EventMessage::Bar(event) => sink.publish_bar(event).await,
         EventMessage::Order(event) => sink.publish_order(event).await,
+        EventMessage::Trade(event) => sink.publish_trade(event).await,
         EventMessage::Position(event) => sink.publish_position(event).await,
         EventMessage::Health(event) => sink.publish_health(event).await,
         EventMessage::SnapshotOrders(event) => sink.publish_snapshot_orders(event).await,
@@ -198,6 +199,9 @@ mod tests {
             self.fail_once_then_ok()
         }
         async fn publish_order(&self, _event: crate::models::OrderEvent) -> anyhow::Result<()> {
+            self.fail_once_then_ok()
+        }
+        async fn publish_trade(&self, _event: crate::models::TradeEvent) -> anyhow::Result<()> {
             self.fail_once_then_ok()
         }
         async fn publish_position(

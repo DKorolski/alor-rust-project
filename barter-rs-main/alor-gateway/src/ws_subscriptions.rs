@@ -62,6 +62,23 @@ pub fn build_orders_subscribe(
     (guid, msg.to_string())
 }
 
+pub fn build_trades_subscribe(
+    cfg: &AlorGatewayConfig,
+    access_token: &str,
+    skip_history: bool,
+) -> (String, String) {
+    let guid = new_guid();
+    let msg = json!({
+        "opcode": "TradesGetAndSubscribeV2",
+        "portfolio": cfg.portfolio,
+        "exchange": cfg.exchange,
+        "skipHistory": skip_history,
+        "guid": guid,
+        "token": access_token,
+    });
+    (guid, msg.to_string())
+}
+
 fn new_guid() -> String {
     Uuid::new_v4().to_string()
 }

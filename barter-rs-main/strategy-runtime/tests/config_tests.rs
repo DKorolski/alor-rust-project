@@ -71,10 +71,12 @@ fn loads_toml_defaults() {
         "PAPER_FILE_PATH",
         "PAPER_TRADES_CSV",
         "PAPER_SUMMARY_JSON",
+        "PAPER_APPEND",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
         "BACKTEST_TRADES_CSV",
         "BACKTEST_SUMMARY_JSON",
+        "BACKTEST_APPEND",
         "STRATEGY_ID",
         "SYMBOL",
         "QTY",
@@ -92,6 +94,7 @@ fn loads_toml_defaults() {
     assert_eq!(resolved.config.portfolio, "demo");
     assert_eq!(resolved.config.strategy.strategy_id, "limit_cancel");
     assert_eq!(resolved.config.streams.bars, "md.bars.demo.1m");
+    assert_eq!(resolved.config.streams.trades, "broker.trades.demo");
 }
 
 #[test]
@@ -112,10 +115,12 @@ fn env_overrides_take_precedence() {
         "PAPER_FILE_PATH",
         "PAPER_TRADES_CSV",
         "PAPER_SUMMARY_JSON",
+        "PAPER_APPEND",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
         "BACKTEST_TRADES_CSV",
         "BACKTEST_SUMMARY_JSON",
+        "BACKTEST_APPEND",
         "STRATEGY_ID",
         "SYMBOL",
         "QTY",
@@ -161,10 +166,12 @@ fn health_default_is_events_health() {
         "PAPER_FILE_PATH",
         "PAPER_TRADES_CSV",
         "PAPER_SUMMARY_JSON",
+        "PAPER_APPEND",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
         "BACKTEST_TRADES_CSV",
         "BACKTEST_SUMMARY_JSON",
+        "BACKTEST_APPEND",
         "SNAPSHOTS_STREAM",
     ]);
     let path = write_temp_config("redis_url = \"redis://example/\"\n");
@@ -189,10 +196,12 @@ fn loads_runtime_mode_settings() {
         "PAPER_FILE_PATH",
         "PAPER_TRADES_CSV",
         "PAPER_SUMMARY_JSON",
+        "PAPER_APPEND",
         "BACKTEST_ENABLED",
         "BACKTEST_TRADE_LOG",
         "BACKTEST_TRADES_CSV",
         "BACKTEST_SUMMARY_JSON",
+        "BACKTEST_APPEND",
         "SNAPSHOTS_STREAM",
     ]);
     let path = write_temp_config(
@@ -240,6 +249,7 @@ fn loads_paper_report_paths() {
         "PAPER_FILE_PATH",
         "PAPER_TRADES_CSV",
         "PAPER_SUMMARY_JSON",
+        "PAPER_APPEND",
     ]);
     let path = write_temp_config(
         r#"

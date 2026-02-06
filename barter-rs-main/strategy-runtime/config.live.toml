@@ -13,6 +13,7 @@ guard_log_interval_ms = 5000
 [streams]
 bars = "md.bars.7502T0U.1m"
 orders = "broker.orders.7502T0U"
+trades = "broker.trades.7502T0U"
 positions = "broker.positions.7502T0U"
 commands = "cmd.orders.7502T0U"
 acks = "cmd.acks.7502T0U"
@@ -30,6 +31,7 @@ poll_interval_ms = 100
 [trim]
 bars = 200000
 orders = 100000
+trades = 100000
 positions = 50000
 commands = 50000
 acks = 100000
@@ -53,9 +55,11 @@ output = "stdout"
 file_path = "./paper_trades.jsonl"
 trades_csv = "./trades.csv"
 summary_json = "./summary.json"
+append = false
 
 [backtest]
 enabled = false
 trade_log = "./backtest_trades.log"
 trades_csv = "./trades.csv"
 summary_json = "./summary.json"
+append = false

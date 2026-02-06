@@ -17,7 +17,7 @@ use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::ResyncMode;
 use crate::models::DataOrigin;
 use crate::ws_subscriptions::{
-    build_bars_subscribe, build_orders_subscribe, build_positions_subscribe,
+    build_bars_subscribe, build_orders_subscribe, build_positions_subscribe, build_trades_subscribe,
 };
 
 #[derive(Debug)]
@@ -613,6 +613,53 @@ async fn subscribe_all(
             &guid,
             &msg,
             "orders",
+            event_tx,
+            &bars_guid_map,
+            subscription_manager,
+            last_ws_rx_ts,
+            subscribe_ack_timeout_ms,
+            generation,
+        )
+        .await
+        .is_ok()
+        {
+            break;
+        }
+        attempt += 1;
+        if attempt >= subscribe_ack_retries {
+            return Err(anyhow::anyhow!("ws subscribe retry exceeded"));
+        }
+    }
+
+    let trades_skip_history = if from_ts.is_some() {
+        false
+    } else {
+        cfg.skip_history_orders
+    };
+    let mut attempt = 0;
+    loop {
+        let (guid, msg) = build_trades_subscribe(cfg, token, trades_skip_history);
+        subscription_manager.add_subscription(Subscription {
+            guid: guid.clone(),
+            symbol: cfg.portfolio.clone(),
+            subscription_type: "trades".to_string(),
+            is_active: false,
+            epoch: subscription_manager.subscription_epoch,
+        });
+        let _ = event_tx
+            .send(WsEvent::SubscriptionStats {
+                desired: subscription_manager.desired_count(),
+                active: subscription_manager.active_count(),
+                pending_acks: subscription_manager.pending_counts(),
+                generation,
+            })
+            .await;
+        if send_and_ack(
+            ws_sink,
+            ws_stream,
+            &guid,
+            &msg,
+            "trades",
             event_tx,
             &bars_guid_map,
             subscription_manager,

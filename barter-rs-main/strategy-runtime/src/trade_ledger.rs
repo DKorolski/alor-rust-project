@@ -37,7 +37,9 @@ pub struct ClosedTradeRecord {
     pub qty: f64,
     pub entry_price: f64,
     pub exit_price: f64,
-    pub pnl: f64,
+    pub commission_total: f64,
+    pub pnl_gross: f64,
+    pub pnl_net: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,7 +48,9 @@ pub struct LedgerSummary {
     pub symbol: String,
     pub trades_total: usize,
     pub win_rate: f64,
-    pub pnl_total: f64,
+    pub pnl_gross_total: f64,
+    pub pnl_net_total: f64,
+    pub commission_total: f64,
     pub gross_profit: f64,
     pub gross_loss: f64,
     pub avg_pnl: f64,
@@ -66,6 +70,7 @@ pub struct TradeLedger {
     entry_price: f64,
     entry_side: Option<String>,
     entry_symbol: Option<String>,
+    open_commission_total: f64,
 }
 
 impl TradeLedger {
@@ -84,20 +89,26 @@ impl TradeLedger {
         let mut gross_loss = 0.0;
         let mut max_pnl = 0.0;
         let mut min_pnl = 0.0;
+        let mut pnl_gross_total = 0.0;
+        let mut pnl_net_total = 0.0;
+        let mut commission_total = 0.0;
         for (idx, trade) in self.closed_trades.iter().enumerate() {
-            if trade.pnl >= 0.0 {
-                gross_profit += trade.pnl;
+            pnl_gross_total += trade.pnl_gross;
+            pnl_net_total += trade.pnl_net;
+            commission_total += trade.commission_total;
+            if trade.pnl_gross >= 0.0 {
+                gross_profit += trade.pnl_gross;
             } else {
-                gross_loss += trade.pnl.abs();
+                gross_loss += trade.pnl_gross.abs();
             }
-            if idx == 0 || trade.pnl > max_pnl {
-                max_pnl = trade.pnl;
+            if idx == 0 || trade.pnl_net > max_pnl {
+                max_pnl = trade.pnl_net;
             }
-            if idx == 0 || trade.pnl < min_pnl {
-                min_pnl = trade.pnl;
+            if idx == 0 || trade.pnl_net < min_pnl {
+                min_pnl = trade.pnl_net;
             }
         }
-        let pnl_total = gross_profit - gross_loss;
+        let pnl_total = pnl_net_total;
         let avg_pnl = if trades_total == 0 {
             0.0
         } else {
@@ -106,7 +117,7 @@ impl TradeLedger {
         let wins = self
             .closed_trades
             .iter()
-            .filter(|trade| trade.pnl > 0.0)
+            .filter(|trade| trade.pnl_net > 0.0)
             .count();
         let win_rate = if trades_total == 0 {
             0.0
@@ -118,7 +129,9 @@ impl TradeLedger {
             symbol: symbol.to_string(),
             trades_total,
             win_rate,
-            pnl_total,
+            pnl_gross_total,
+            pnl_net_total,
+            commission_total,
             gross_profit,
             gross_loss,
             avg_pnl,
@@ -147,12 +160,12 @@ impl TradeLedger {
         let mut file = File::create(path)?;
         writeln!(
             file,
-            "entry_ts_utc,exit_ts_utc,symbol,side,qty,entry_price,exit_price,pnl"
+            "entry_ts_utc,exit_ts_utc,symbol,side,qty,entry_price,exit_price,commission_total,pnl_gross,pnl_net"
         )?;
         for trade in &self.closed_trades {
             writeln!(
                 file,
-                "{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{}",
                 trade.entry_ts_utc,
                 trade.exit_ts_utc,
                 trade.symbol,
@@ -160,7 +173,9 @@ impl TradeLedger {
                 trade.qty,
                 trade.entry_price,
                 trade.exit_price,
-                trade.pnl
+                trade.commission_total,
+                trade.pnl_gross,
+                trade.pnl_net
             )?;
         }
         Ok(())
@@ -183,6 +198,7 @@ impl TradeLedger {
         };
         let qty = trade.qty;
         let price = trade.price;
+        let trade_commission = trade.commission;
         match trade.side.as_str() {
             "buy" => {
                 if self.position_qty < 0.0 {
@@ -223,6 +239,11 @@ impl TradeLedger {
         let is_flat = self.position_qty.abs() <= f64::EPSILON;
         let was_flat = before_qty.abs() <= f64::EPSILON;
         let flipped = !was_flat && !is_flat && before_qty.signum() != self.position_qty.signum();
+        let close_ratio = if flipped && qty > 0.0 {
+            (before_qty.abs() / qty).min(1.0)
+        } else {
+            1.0
+        };
 
         if !was_flat && (is_flat || flipped) {
             let entry_price = if self.entry_price > 0.0 {
@@ -242,11 +263,17 @@ impl TradeLedger {
                 .clone()
                 .unwrap_or_else(|| trade.symbol.clone());
             let close_qty = before_qty.abs();
-            let pnl = if entry_side == "buy" {
+            let pnl_gross = if entry_side == "buy" {
                 (price - entry_price) * close_qty
             } else {
                 (entry_price - price) * close_qty
             };
+            let commission_total = if flipped {
+                self.open_commission_total + (trade_commission * close_ratio)
+            } else {
+                self.open_commission_total + trade_commission
+            };
+            let pnl_net = pnl_gross - commission_total;
             if entry_price > 0.0 {
                 self.closed_trades.push(ClosedTradeRecord {
                     entry_ts_utc: self.entry_ts_utc.unwrap_or(trade.ts_utc),
@@ -256,13 +283,16 @@ impl TradeLedger {
                     qty: close_qty,
                     entry_price,
                     exit_price: price,
-                    pnl,
+                    commission_total,
+                    pnl_gross,
+                    pnl_net,
                 });
             }
             self.entry_ts_utc = None;
             self.entry_side = None;
             self.entry_symbol = None;
             self.entry_price = 0.0;
+            self.open_commission_total = 0.0;
 
             if flipped {
                 self.entry_ts_utc = Some(trade.ts_utc);
@@ -273,14 +303,17 @@ impl TradeLedger {
                 });
                 self.entry_symbol = Some(trade.symbol.clone());
                 self.entry_price = self.average_price().abs();
+                self.open_commission_total = trade_commission * (1.0 - close_ratio);
             }
         } else if was_flat && !is_flat {
             self.entry_ts_utc = Some(trade.ts_utc);
             self.entry_side = Some(trade.side.clone());
             self.entry_symbol = Some(trade.symbol.clone());
             self.entry_price = self.average_price().abs();
+            self.open_commission_total = trade_commission;
         } else if !is_flat {
             self.entry_price = self.average_price().abs();
+            self.open_commission_total += trade_commission;
         }
     }
 
@@ -324,6 +357,6 @@ mod tests {
             commission: 0.0,
         });
         assert_eq!(ledger.closed_trades().len(), 1);
-        assert!(ledger.closed_trades()[0].pnl > 0.0);
+        assert!(ledger.closed_trades()[0].pnl_gross > 0.0);
     }
 }

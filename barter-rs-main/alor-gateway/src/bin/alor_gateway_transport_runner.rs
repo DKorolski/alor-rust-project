@@ -177,6 +177,7 @@ fn build_transport_config(args: &[String], cfg: &AlorGatewayConfig) -> Transport
     let default_bars = format!("md.bars.{portfolio}.{tf_label}");
     let default_orders = format!("broker.orders.{portfolio}");
     let default_positions = format!("broker.positions.{portfolio}");
+    let default_trades = format!("broker.trades.{portfolio}");
     let default_snapshots = format!("broker.snapshots.{portfolio}");
     let default_commands = format!("cmd.orders.{portfolio}");
     let default_acks = format!("cmd.acks.{portfolio}");
@@ -190,6 +191,9 @@ fn build_transport_config(args: &[String], cfg: &AlorGatewayConfig) -> Transport
         orders: arg_value(args, "--stream-orders")
             .or_else(|| env::var("STREAM_ORDERS").ok())
             .unwrap_or(default_orders),
+        trades: arg_value(args, "--stream-trades")
+            .or_else(|| env::var("STREAM_TRADES").ok())
+            .unwrap_or(default_trades),
         positions: arg_value(args, "--stream-positions")
             .or_else(|| env::var("STREAM_POSITIONS").ok())
             .unwrap_or(default_positions),

@@ -20,6 +20,7 @@ fn base_config(redis_url: String, prefix: &str, consumer_name: &str) -> Transpor
         streams: StreamNames {
             bars: format!("{prefix}:bars"),
             orders: format!("{prefix}:orders"),
+            trades: format!("{prefix}:trades"),
             positions: format!("{prefix}:positions"),
             snapshots: format!("{prefix}:snapshots"),
             commands: format!("{prefix}:commands"),

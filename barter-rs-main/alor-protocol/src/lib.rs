@@ -9,6 +9,7 @@ pub const SCHEMA_VERSION: u16 = 1;
 pub enum MessageType {
     Bar,
     Order,
+    Trade,
     Position,
     Health,
     Command,

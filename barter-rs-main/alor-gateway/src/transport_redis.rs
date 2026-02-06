@@ -9,7 +9,9 @@ use uuid::Uuid;
 use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, SCHEMA_VERSION};
 
 use crate::health::HealthState;
-use crate::models::{BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot};
+use crate::models::{
+    BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot, TradeEvent,
+};
 use crate::transport::{CommandEnvelope, CommandSink, CommandSource, EventSink, TransportConfig};
 
 pub struct RedisEventSink {
@@ -54,6 +56,11 @@ impl EventSink for RedisEventSink {
 
     async fn publish_order(&self, event: OrderEvent) -> Result<()> {
         self.publish_event(&self.config.streams.orders, MessageType::Order, &event)
+            .await
+    }
+
+    async fn publish_trade(&self, event: TradeEvent) -> Result<()> {
+        self.publish_event(&self.config.streams.trades, MessageType::Trade, &event)
             .await
     }
 

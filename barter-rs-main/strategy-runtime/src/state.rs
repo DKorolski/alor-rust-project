@@ -58,6 +58,9 @@ pub struct RuntimeState {
     pub strategy_state: StrategyState,
     pub orders: HashMap<i64, OrderEvent>,
     pub positions: HashMap<String, PositionEvent>,
+    pub last_trade_ts: Option<i64>,
+    pub last_trade_id: Option<String>,
+    pub seen_trade_ids: Vec<String>,
 }
 
 impl RuntimeState {

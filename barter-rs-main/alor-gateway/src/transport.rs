@@ -6,12 +6,15 @@ use alor_protocol::CommandAck;
 use alor_protocol::OrderCommand;
 
 use crate::health::HealthState;
-use crate::models::{BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot};
+use crate::models::{
+    BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot, TradeEvent,
+};
 
 #[derive(Debug, Clone)]
 pub enum EventMessage {
     Bar(BarEvent),
     Order(OrderEvent),
+    Trade(TradeEvent),
     Position(PositionEvent),
     Health(HealthState),
     SnapshotOrders(OrdersSnapshot),
@@ -34,6 +37,7 @@ pub struct TransportConfig {
 pub struct StreamNames {
     pub bars: String,
     pub orders: String,
+    pub trades: String,
     pub positions: String,
     pub snapshots: String,
     pub commands: String,
@@ -46,6 +50,7 @@ pub struct StreamNames {
 pub trait EventSink: Send + Sync {
     async fn publish_bar(&self, event: BarEvent) -> Result<()>;
     async fn publish_order(&self, event: OrderEvent) -> Result<()>;
+    async fn publish_trade(&self, event: TradeEvent) -> Result<()>;
     async fn publish_position(&self, event: PositionEvent) -> Result<()>;
     async fn publish_health(&self, health: HealthState) -> Result<()>;
     async fn publish_snapshot_orders(&self, snapshot: OrdersSnapshot) -> Result<()>;
@@ -175,6 +180,13 @@ impl EventSink for InprocEventSink {
     async fn publish_order(&self, event: OrderEvent) -> Result<()> {
         self.tx
             .send(EventMessage::Order(event))
+            .await
+            .map_err(|_| anyhow::anyhow!("inproc event channel closed"))
+    }
+
+    async fn publish_trade(&self, event: TradeEvent) -> Result<()> {
+        self.tx
+            .send(EventMessage::Trade(event))
             .await
             .map_err(|_| anyhow::anyhow!("inproc event channel closed"))
     }

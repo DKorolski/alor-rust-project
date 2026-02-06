@@ -32,6 +32,19 @@ pub struct PositionEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeEvent {
+    pub trade_id: String,
+    pub order_id: i64,
+    pub symbol: String,
+    pub side: String,
+    pub qty: f64,
+    pub price: f64,
+    pub commission: f64,
+    pub existing: bool,
+    pub ts_utc: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderEvent {
     pub order_id: i64,
     pub request_id: Option<Uuid>,

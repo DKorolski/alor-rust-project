@@ -116,6 +116,26 @@ pub struct OrderEvent {
     pub ts_utc: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TradeEvent {
+    pub trade_id: String,
+    pub order_id: i64,
+    #[serde(default)]
+    pub symbol: String,
+    #[serde(default)]
+    pub side: String,
+    #[serde(default)]
+    pub qty: f64,
+    #[serde(default)]
+    pub price: f64,
+    #[serde(default)]
+    pub commission: f64,
+    #[serde(default)]
+    pub existing: bool,
+    #[serde(default)]
+    pub ts_utc: i64,
+}
+
 impl Default for OrderEvent {
     fn default() -> Self {
         Self {
@@ -138,6 +158,10 @@ impl Default for OrderEvent {
 pub struct PositionEvent {
     pub symbol: String,
     pub qty: f64,
+    #[serde(default)]
+    pub avg_price: f64,
+    #[serde(default)]
+    pub ts_utc: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -164,6 +188,7 @@ pub struct RuntimeConfig {
 pub struct StreamNames {
     pub bars: String,
     pub orders: String,
+    pub trades: String,
     pub positions: String,
     pub commands: String,
     pub acks: String,
@@ -185,6 +210,7 @@ pub struct ReadConfig {
 pub struct TrimConfig {
     pub bars: usize,
     pub orders: usize,
+    pub trades: usize,
     pub positions: usize,
     pub commands: usize,
     pub acks: usize,
@@ -241,6 +267,7 @@ pub struct PaperConfig {
     pub file_path: String,
     pub trades_csv: String,
     pub summary_json: String,
+    pub append: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -249,6 +276,7 @@ pub struct BacktestConfig {
     pub trade_log: String,
     pub trades_csv: String,
     pub summary_json: String,
+    pub append: bool,
 }
 
 impl StrategyConfig {

@@ -41,10 +41,12 @@ fn ledger_exports_reports() {
     let trades_contents = fs::read_to_string(&trades_csv).expect("read trades");
     let trades_lines: Vec<_> = trades_contents.lines().collect();
     assert_eq!(trades_lines.len(), 2, "header + 1 trade");
+    assert!(trades_lines[0].contains("pnl_net"));
 
     let summary_contents = fs::read_to_string(&summary_json).expect("read summary");
     let summary: serde_json::Value =
         serde_json::from_str(&summary_contents).expect("parse summary");
     assert_eq!(summary["trades_total"], 1);
-    assert_eq!(summary["pnl_total"], 10.0);
+    assert_eq!(summary["pnl_gross_total"], 10.0);
+    assert_eq!(summary["pnl_net_total"], 10.0);
 }

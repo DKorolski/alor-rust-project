@@ -36,10 +36,12 @@ const DEFAULT_PAPER_OUTPUT: PaperOutput = PaperOutput::Stdout;
 const DEFAULT_PAPER_FILE_PATH: &str = "./paper_trades.jsonl";
 const DEFAULT_PAPER_TRADES_CSV: &str = "./trades.csv";
 const DEFAULT_PAPER_SUMMARY_JSON: &str = "./summary.json";
+const DEFAULT_PAPER_APPEND: bool = false;
 const DEFAULT_BACKTEST_ENABLED: bool = true;
 const DEFAULT_BACKTEST_TRADE_LOG: &str = "./backtest_trades.log";
 const DEFAULT_BACKTEST_TRADES_CSV: &str = "./trades.csv";
 const DEFAULT_BACKTEST_SUMMARY_JSON: &str = "./summary.json";
+const DEFAULT_BACKTEST_APPEND: bool = false;
 
 const DEFAULT_BLOCK_MS: usize = 500;
 const DEFAULT_CLAIM_IDLE_MS: usize = 5_000;
@@ -48,6 +50,7 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 100;
 
 const DEFAULT_TRIM_BARS: usize = 200_000;
 const DEFAULT_TRIM_ORDERS: usize = 100_000;
+const DEFAULT_TRIM_TRADES: usize = 100_000;
 const DEFAULT_TRIM_POSITIONS: usize = 50_000;
 const DEFAULT_TRIM_COMMANDS: usize = 50_000;
 const DEFAULT_TRIM_ACKS: usize = 100_000;
@@ -94,6 +97,7 @@ pub struct ConfigSources {
 pub struct StreamSources {
     pub bars: ConfigSource,
     pub orders: ConfigSource,
+    pub trades: ConfigSource,
     pub positions: ConfigSource,
     pub commands: ConfigSource,
     pub acks: ConfigSource,
@@ -115,6 +119,7 @@ pub struct ReadSources {
 pub struct TrimSources {
     pub bars: ConfigSource,
     pub orders: ConfigSource,
+    pub trades: ConfigSource,
     pub positions: ConfigSource,
     pub commands: ConfigSource,
     pub acks: ConfigSource,
@@ -149,6 +154,7 @@ pub struct PaperSources {
     pub file_path: ConfigSource,
     pub trades_csv: ConfigSource,
     pub summary_json: ConfigSource,
+    pub append: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +163,7 @@ pub struct BacktestSources {
     pub trade_log: ConfigSource,
     pub trades_csv: ConfigSource,
     pub summary_json: ConfigSource,
+    pub append: ConfigSource,
 }
 
 impl Default for ConfigSources {
@@ -185,6 +192,7 @@ impl Default for StreamSources {
         Self {
             bars: ConfigSource::Default,
             orders: ConfigSource::Default,
+            trades: ConfigSource::Default,
             positions: ConfigSource::Default,
             commands: ConfigSource::Default,
             acks: ConfigSource::Default,
@@ -212,6 +220,7 @@ impl Default for TrimSources {
         Self {
             bars: ConfigSource::Default,
             orders: ConfigSource::Default,
+            trades: ConfigSource::Default,
             positions: ConfigSource::Default,
             commands: ConfigSource::Default,
             acks: ConfigSource::Default,
@@ -255,6 +264,7 @@ impl Default for PaperSources {
             file_path: ConfigSource::Default,
             trades_csv: ConfigSource::Default,
             summary_json: ConfigSource::Default,
+            append: ConfigSource::Default,
         }
     }
 }
@@ -266,6 +276,7 @@ impl Default for BacktestSources {
             trade_log: ConfigSource::Default,
             trades_csv: ConfigSource::Default,
             summary_json: ConfigSource::Default,
+            append: ConfigSource::Default,
         }
     }
 }
@@ -307,6 +318,7 @@ struct RuntimeSettingsFile {
 struct StreamNamesFile {
     bars: Option<String>,
     orders: Option<String>,
+    trades: Option<String>,
     positions: Option<String>,
     commands: Option<String>,
     acks: Option<String>,
@@ -328,6 +340,7 @@ struct ReadConfigFile {
 struct TrimConfigFile {
     bars: Option<usize>,
     orders: Option<usize>,
+    trades: Option<usize>,
     positions: Option<usize>,
     commands: Option<usize>,
     acks: Option<usize>,
@@ -355,6 +368,7 @@ struct PaperConfigFile {
     file_path: Option<String>,
     trades_csv: Option<String>,
     summary_json: Option<String>,
+    append: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -363,6 +377,7 @@ struct BacktestConfigFile {
     trade_log: Option<String>,
     trades_csv: Option<String>,
     summary_json: Option<String>,
+    append: Option<bool>,
 }
 
 pub fn load_runtime_config(
@@ -408,17 +423,20 @@ pub fn load_runtime_config(
         file_path: DEFAULT_PAPER_FILE_PATH.to_string(),
         trades_csv: DEFAULT_PAPER_TRADES_CSV.to_string(),
         summary_json: DEFAULT_PAPER_SUMMARY_JSON.to_string(),
+        append: DEFAULT_PAPER_APPEND,
     };
     let mut backtest = BacktestConfig {
         enabled: DEFAULT_BACKTEST_ENABLED,
         trade_log: DEFAULT_BACKTEST_TRADE_LOG.to_string(),
         trades_csv: DEFAULT_BACKTEST_TRADES_CSV.to_string(),
         summary_json: DEFAULT_BACKTEST_SUMMARY_JSON.to_string(),
+        append: DEFAULT_BACKTEST_APPEND,
     };
 
     let mut trim = TrimConfig {
         bars: DEFAULT_TRIM_BARS,
         orders: DEFAULT_TRIM_ORDERS,
+        trades: DEFAULT_TRIM_TRADES,
         positions: DEFAULT_TRIM_POSITIONS,
         commands: DEFAULT_TRIM_COMMANDS,
         acks: DEFAULT_TRIM_ACKS,
@@ -479,6 +497,10 @@ pub fn load_runtime_config(
             if let Some(value) = trim_file.orders {
                 trim.orders = value;
                 sources.trim.orders = ConfigSource::File;
+            }
+            if let Some(value) = trim_file.trades {
+                trim.trades = value;
+                sources.trim.trades = ConfigSource::File;
             }
             if let Some(value) = trim_file.positions {
                 trim.positions = value;
@@ -574,6 +596,10 @@ pub fn load_runtime_config(
                 paper.summary_json = value.clone();
                 sources.paper.summary_json = ConfigSource::File;
             }
+            if let Some(value) = paper_file.append {
+                paper.append = value;
+                sources.paper.append = ConfigSource::File;
+            }
         }
         if let Some(backtest_file) = &file_config.backtest {
             if let Some(value) = backtest_file.enabled {
@@ -591,6 +617,10 @@ pub fn load_runtime_config(
             if let Some(value) = &backtest_file.summary_json {
                 backtest.summary_json = value.clone();
                 sources.backtest.summary_json = ConfigSource::File;
+            }
+            if let Some(value) = backtest_file.append {
+                backtest.append = value;
+                sources.backtest.append = ConfigSource::File;
             }
         }
         if let Some(value) = file_config.reset_state_on_start {
@@ -646,6 +676,10 @@ pub fn load_runtime_config(
     if let Some(value) = env_parse("TRIM_MAXLEN_ORDERS") {
         trim.orders = value;
         sources.trim.orders = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("TRIM_MAXLEN_TRADES") {
+        trim.trades = value;
+        sources.trim.trades = ConfigSource::Env;
     }
     if let Some(value) = env_parse("TRIM_MAXLEN_POSITIONS") {
         trim.positions = value;
@@ -735,6 +769,10 @@ pub fn load_runtime_config(
         paper.summary_json = value;
         sources.paper.summary_json = ConfigSource::Env;
     }
+    if let Some(value) = env_parse("PAPER_APPEND") {
+        paper.append = value;
+        sources.paper.append = ConfigSource::Env;
+    }
     if let Some(value) = env::var("BACKTEST_ENABLED").ok() {
         backtest.enabled = value == "1" || value.eq_ignore_ascii_case("true");
         sources.backtest.enabled = ConfigSource::Env;
@@ -751,6 +789,10 @@ pub fn load_runtime_config(
         backtest.summary_json = value;
         sources.backtest.summary_json = ConfigSource::Env;
     }
+    if let Some(value) = env_parse("BACKTEST_APPEND") {
+        backtest.append = value;
+        sources.backtest.append = ConfigSource::Env;
+    }
     if let Some(value) = env::var("RESET_STATE_ON_START").ok() {
         reset_state_on_start = value == "1" || value.eq_ignore_ascii_case("true");
         sources.reset_state_on_start = ConfigSource::Env;
@@ -765,6 +807,10 @@ pub fn load_runtime_config(
         if let Some(value) = &streams_file.orders {
             streams.orders = value.clone();
             sources.streams.orders = ConfigSource::File;
+        }
+        if let Some(value) = &streams_file.trades {
+            streams.trades = value.clone();
+            sources.streams.trades = ConfigSource::File;
         }
         if let Some(value) = &streams_file.positions {
             streams.positions = value.clone();
@@ -803,6 +849,10 @@ pub fn load_runtime_config(
     if let Some(value) = env::var("STREAM_ORDERS").ok() {
         streams.orders = value;
         sources.streams.orders = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("STREAM_TRADES").ok() {
+        streams.trades = value;
+        sources.streams.trades = ConfigSource::Env;
     }
     if let Some(value) = env::var("STREAM_POSITIONS").ok() {
         streams.positions = value;
@@ -882,6 +932,7 @@ fn default_streams(portfolio: &str, strategy_id: &str) -> StreamNames {
     StreamNames {
         bars: format!("md.bars.{portfolio}.1m"),
         orders: format!("broker.orders.{portfolio}"),
+        trades: format!("broker.trades.{portfolio}"),
         positions: format!("broker.positions.{portfolio}"),
         commands: format!("cmd.orders.{portfolio}"),
         acks: format!("cmd.acks.{portfolio}"),

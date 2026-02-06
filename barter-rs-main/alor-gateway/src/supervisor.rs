@@ -242,6 +242,7 @@ impl Supervisor {
 
         let (positions_tx, positions_rx) = mpsc::channel(1024);
         let (orders_tx, orders_rx) = mpsc::channel(1024);
+        let (trades_tx, _trades_rx) = mpsc::channel(1024);
         let positions_manager = PositionsManager::start(
             positions_rx,
             cfg.log_positions_filter.clone(),
@@ -530,6 +531,37 @@ impl Supervisor {
                             .await;
                     }
                     let _ = orders_tx.send(order).await;
+                }
+            }
+        });
+
+        tokio::spawn({
+            let health = self.health.clone();
+            let publisher = publisher.clone();
+            async move {
+                let mut trades_rx = streams.trades_rx;
+                while let Some(trade) = trades_rx.recv().await {
+                    {
+                        let mut guard = health.write();
+                        guard.last_orders_ts = guard.last_orders_ts.max(trade.ts_utc);
+                    }
+                    info!(
+                        trade_id = trade.trade_id,
+                        order_id = trade.order_id,
+                        symbol = trade.symbol,
+                        side = trade.side,
+                        qty = trade.qty,
+                        price = trade.price,
+                        commission = trade.commission,
+                        existing = trade.existing,
+                        "trade event received"
+                    );
+                    if let Some(publisher) = publisher.as_ref() {
+                        publisher
+                            .publish_critical(EventMessage::Trade(trade.clone()))
+                            .await;
+                    }
+                    let _ = trades_tx.send(trade).await;
                 }
             }
         });
