@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::Duration;
 
@@ -27,6 +27,7 @@ const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
 const TRADE_DEDUP_LIMIT: usize = 512;
+const MAX_PENDING_TRADES_PER_ORDER: usize = 50;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
@@ -91,6 +92,9 @@ pub struct StrategyRuntime {
     bootstrap_state: BootstrapState,
     metrics: RuntimeMetrics,
     ledger: TradeLedger,
+    our_request_ids: HashSet<uuid::Uuid>,
+    our_order_ids: HashSet<i64>,
+    pending_trades_by_order_id: HashMap<i64, Vec<TradeEvent>>,
     pending_exec: HashMap<i64, PendingExecution>,
     sim_orders: Vec<SimOrder>,
     next_sim_order_id: i64,
@@ -194,6 +198,9 @@ impl StrategyRuntime {
             bootstrap_state: BootstrapState::default(),
             metrics: RuntimeMetrics::default(),
             ledger: TradeLedger::default(),
+            our_request_ids: HashSet::new(),
+            our_order_ids: HashSet::new(),
+            pending_trades_by_order_id: HashMap::new(),
             pending_exec: HashMap::new(),
             sim_orders: Vec::new(),
             next_sim_order_id: 1,
@@ -561,6 +568,16 @@ impl StrategyRuntime {
         message_id: String,
         ack: alor_protocol::CommandAck,
     ) -> Result<()> {
+        if self.our_request_ids.remove(&ack.request_id) {
+            if let Some(order_id) = ack.broker_order_id {
+                self.our_order_ids.insert(order_id);
+                if let Some(trades) = self.pending_trades_by_order_id.remove(&order_id) {
+                    for trade in trades {
+                        self.apply_trade_execution(trade);
+                    }
+                }
+            }
+        }
         match ack.status {
             alor_protocol::AckStatus::Rejected
             | alor_protocol::AckStatus::Expired
@@ -606,6 +623,10 @@ impl StrategyRuntime {
         message_id: String,
         order: OrderEvent,
     ) -> Result<()> {
+        if self.config.trade_mode != TradeMode::Live {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
         let ctx = self.strategy_ctx();
         let created_ts = ctx.last_bar_ts().unwrap_or(0);
         let intents = self.strategy.on_order(&ctx, &order);
@@ -623,7 +644,26 @@ impl StrategyRuntime {
         message_id: String,
         trade: TradeEvent,
     ) -> Result<()> {
+        if self.config.trade_mode != TradeMode::Live {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
         if !self.should_process_trade(&trade) {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        if trade.order_id <= 0 {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        if !self.our_order_ids.contains(&trade.order_id) {
+            let entry = self
+                .pending_trades_by_order_id
+                .entry(trade.order_id)
+                .or_default();
+            if entry.len() < MAX_PENDING_TRADES_PER_ORDER {
+                entry.push(trade);
+            }
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
@@ -639,10 +679,12 @@ impl StrategyRuntime {
             ts_utc = trade.ts_utc,
             "trade event accepted"
         );
-        if trade.order_id <= 0 {
-            self.transport.xack(&stream, &message_id).await?;
-            return Ok(());
-        }
+        self.apply_trade_execution(trade);
+        self.transport.xack(&stream, &message_id).await?;
+        Ok(())
+    }
+
+    fn apply_trade_execution(&mut self, trade: TradeEvent) {
         if !self.pending_exec.contains_key(&trade.order_id) {
             if let Some(order) = self.state.orders.get(&trade.order_id) {
                 let fill_target = if order.filled > 0.0 { order.filled } else { order.qty };
@@ -694,8 +736,6 @@ impl StrategyRuntime {
                 "trade ignored: no pending execution"
             );
         }
-        self.transport.xack(&stream, &message_id).await?;
-        Ok(())
     }
 
     async fn handle_position(
@@ -799,6 +839,10 @@ impl StrategyRuntime {
 
     fn update_ledger_from_order(&mut self, order: &OrderEvent) -> Result<()> {
         if order.order_id <= 0 {
+            return Ok(());
+        }
+        if self.config.trade_mode == TradeMode::Live && !self.our_order_ids.contains(&order.order_id)
+        {
             return Ok(());
         }
         let status = order.status.to_lowercase();
@@ -1161,6 +1205,7 @@ impl StrategyRuntime {
                         "intent_emitted"
                     );
                     self.persist_state(Some(&command)).await?;
+                    self.our_request_ids.insert(command.request_id);
                 }
             }
             TradeMode::Paper => {
