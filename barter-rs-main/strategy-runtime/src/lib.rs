@@ -42,6 +42,20 @@ pub trait Strategy: Send + Sync {
     fn on_ack(&mut self, ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent>;
     fn on_order(&mut self, ctx: &StrategyCtx, ord: &OrderEvent) -> Vec<Intent>;
     fn on_position(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent>;
+    fn on_bootstrap_snapshot(
+        &mut self,
+        _ctx: &StrategyCtx,
+        _snapshot: &BootstrapSnapshot,
+    ) -> Vec<Intent> {
+        Vec::new()
+    }
+    fn on_runtime_state_restored(
+        &mut self,
+        _ctx: &StrategyCtx,
+        _state: &RuntimeStateRestored,
+    ) -> Vec<Intent> {
+        Vec::new()
+    }
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
 }
@@ -182,6 +196,19 @@ pub struct RuntimeConfig {
     pub paper: PaperConfig,
     pub backtest: BacktestConfig,
     pub reset_state_on_start: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapSnapshot {
+    pub positions_strategy: HashMap<String, PositionEvent>,
+    pub working_orders_strategy: HashMap<i64, OrderEvent>,
+    pub snapshot_ts_utc: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeStateRestored {
+    pub known_order_ids: Vec<i64>,
+    pub pending_requests: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

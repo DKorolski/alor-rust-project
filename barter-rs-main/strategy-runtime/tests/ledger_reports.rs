@@ -18,6 +18,7 @@ fn ledger_exports_reports() {
         qty: 1.0,
         price: 2800.0,
         commission: 0.0,
+        owned: true,
     });
     ledger.record_fill(TradeRecord {
         ts_utc: 2,
@@ -27,6 +28,7 @@ fn ledger_exports_reports() {
         qty: 1.0,
         price: 2790.0,
         commission: 0.0,
+        owned: true,
     });
 
     ledger

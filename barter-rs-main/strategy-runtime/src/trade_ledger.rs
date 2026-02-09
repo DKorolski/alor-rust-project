@@ -14,6 +14,7 @@ pub struct TradeRecord {
     pub qty: f64,
     pub price: f64,
     pub commission: f64,
+    pub owned: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,6 +27,7 @@ pub struct OrderRecord {
     pub price: f64,
     pub status: String,
     pub ts_utc: i64,
+    pub owned: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -346,6 +348,7 @@ mod tests {
             qty: 1.0,
             price: 100.0,
             commission: 0.0,
+            owned: true,
         });
         ledger.record_fill(TradeRecord {
             ts_utc: 2,
@@ -355,6 +358,7 @@ mod tests {
             qty: 1.0,
             price: 110.0,
             commission: 0.0,
+            owned: true,
         });
         assert_eq!(ledger.closed_trades().len(), 1);
         assert!(ledger.closed_trades()[0].pnl_gross > 0.0);

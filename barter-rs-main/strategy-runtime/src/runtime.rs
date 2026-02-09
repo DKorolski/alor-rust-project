@@ -17,8 +17,9 @@ use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
-    BacktestConfig, BarEvent, DataOrigin, Intent, OrderEvent, PaperConfig, PaperOutput,
-    PositionEvent, RuntimeConfig, Strategy, StrategyCtx, StrategyKind, TradeEvent, TradeMode,
+    BacktestConfig, BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PaperConfig,
+    PaperOutput, PositionEvent, RuntimeConfig, RuntimeStateRestored, Strategy, StrategyCtx,
+    StrategyKind, TradeEvent, TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -94,6 +95,7 @@ pub struct StrategyRuntime {
     ledger: TradeLedger,
     our_request_ids: HashSet<uuid::Uuid>,
     our_order_ids: HashSet<i64>,
+    bootstrap_snapshot: Option<BootstrapSnapshot>,
     pending_trades_by_order_id: HashMap<i64, Vec<TradeEvent>>,
     pending_exec: HashMap<i64, PendingExecution>,
     sim_orders: Vec<SimOrder>,
@@ -200,6 +202,7 @@ impl StrategyRuntime {
             ledger: TradeLedger::default(),
             our_request_ids: HashSet::new(),
             our_order_ids: HashSet::new(),
+            bootstrap_snapshot: None,
             pending_trades_by_order_id: HashMap::new(),
             pending_exec: HashMap::new(),
             sim_orders: Vec::new(),
@@ -233,6 +236,8 @@ impl StrategyRuntime {
 
         self.load_snapshots().await?;
         self.load_runtime_state().await?;
+        self.notify_bootstrap_snapshot().await?;
+        self.notify_runtime_state_restored().await?;
 
         let streams = self.config.streams.clone();
         let trim_acks = self.config.trim.acks;
@@ -339,22 +344,86 @@ impl StrategyRuntime {
             }
         }
 
+        let strategy_symbol = self.config.strategy.symbol.clone();
+        let mut positions_strategy = HashMap::new();
+        let mut working_orders_strategy = HashMap::new();
+        let mut snapshot_ts_utc = None;
+        let mut positions_total_all = 0usize;
+        let mut positions_open_all = 0usize;
+        let mut positions_total_strategy = 0usize;
+        let mut positions_open_strategy = 0usize;
+        let mut orders_total_all = 0usize;
+        let mut orders_open_all = 0usize;
+        let mut orders_total_strategy = 0usize;
+        let mut orders_open_strategy = 0usize;
+
         if let Some(snapshot) = orders_snapshot {
-            self.state.orders = snapshot.orders;
+            let mut strategy_orders = HashMap::new();
+            for (order_id, order) in snapshot.orders {
+                orders_total_all += 1;
+                if self.is_working_order(&order) {
+                    orders_open_all += 1;
+                }
+                if order.symbol == strategy_symbol {
+                    if self.is_working_order(&order) {
+                        orders_open_strategy += 1;
+                        working_orders_strategy.insert(order_id, order.clone());
+                        self.our_order_ids.insert(order_id);
+                    }
+                    orders_total_strategy += 1;
+                    if order.ts_utc > 0 {
+                        snapshot_ts_utc = Some(
+                            snapshot_ts_utc.map_or(order.ts_utc, |ts: i64| ts.max(order.ts_utc)),
+                        );
+                    }
+                    strategy_orders.insert(order_id, order);
+                }
+            }
+            self.state.orders = strategy_orders;
             self.bootstrap_state.orders_snapshot_loaded = true;
         }
         if let Some(snapshot) = positions_snapshot {
-            self.state.positions = snapshot.positions;
-            self.bootstrap_state.positions_snapshot_loaded = true;
-            for (symbol, position) in &self.state.positions {
-                debug!(
-                    symbol = symbol,
-                    qty = position.qty,
-                    avg_price = position.avg_price,
-                    ts_utc = position.ts_utc,
-                    "bootstrap: position snapshot"
-                );
+            let mut strategy_positions = HashMap::new();
+            for (symbol, position) in snapshot.positions {
+                positions_total_all += 1;
+                if self.is_open_position(&position) {
+                    positions_open_all += 1;
+                }
+                if symbol == strategy_symbol {
+                    positions_total_strategy += 1;
+                    if self.is_open_position(&position) {
+                        positions_open_strategy += 1;
+                    }
+                    if position.ts_utc > 0 {
+                        snapshot_ts_utc = Some(
+                            snapshot_ts_utc
+                                .map_or(position.ts_utc, |ts: i64| ts.max(position.ts_utc)),
+                        );
+                    }
+                    positions_strategy.insert(symbol.clone(), position.clone());
+                    strategy_positions.insert(symbol, position);
+                }
             }
+            self.state.positions = strategy_positions;
+            self.bootstrap_state.positions_snapshot_loaded = true;
+        }
+        if self.bootstrap_state.orders_snapshot_loaded || self.bootstrap_state.positions_snapshot_loaded {
+            info!(
+                positions_total_all,
+                positions_open_all,
+                positions_total_strategy,
+                positions_open_strategy,
+                orders_total_all,
+                orders_open_all,
+                orders_total_strategy,
+                orders_open_strategy,
+                "bootstrap: snapshots filtered"
+            );
+            self.bootstrap_snapshot = Some(BootstrapSnapshot {
+                positions_strategy,
+                working_orders_strategy,
+                snapshot_ts_utc,
+            });
         }
 
         if !self.bootstrap_state.orders_snapshot_loaded
@@ -401,6 +470,7 @@ impl StrategyRuntime {
                     self.state.last_trade_id = snapshot.last_trade_id;
                     self.state.seen_trade_ids = snapshot.seen_trade_ids;
                     self.strategy.set_state(snapshot.strategy_state);
+                    self.restore_pending_requests();
                     info!("runtime state restored");
                 }
                 Err(error) => {
@@ -409,6 +479,33 @@ impl StrategyRuntime {
             }
         }
         Ok(())
+    }
+
+    fn restore_pending_requests(&mut self) {
+        self.our_request_ids.extend(self.pending_request_ids());
+    }
+
+    fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
+        match &self.state.strategy_state {
+            StrategyState::Placed {
+                place_request_id, ..
+            } => vec![*place_request_id],
+            StrategyState::MarketBuyPending {
+                buy_request_id, ..
+            }
+            | StrategyState::MarketBuySent {
+                buy_request_id, ..
+            } => vec![*buy_request_id],
+            StrategyState::MarketCloseSent {
+                close_request_id,
+                ..
+            } => vec![*close_request_id],
+            StrategyState::CancelSent {
+                cancel_request_id,
+                ..
+            } => vec![*cancel_request_id],
+            StrategyState::Idle | StrategyState::Done { .. } => Vec::new(),
+        }
     }
 
     async fn recover_pending(
@@ -627,6 +724,10 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
+        if order.symbol != self.config.strategy.symbol {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
         let ctx = self.strategy_ctx();
         let created_ts = ctx.last_bar_ts().unwrap_or(0);
         let intents = self.strategy.on_order(&ctx, &order);
@@ -648,6 +749,10 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
+        if trade.symbol != self.config.strategy.symbol {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
         if !self.should_process_trade(&trade) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
@@ -656,14 +761,19 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if !self.our_order_ids.contains(&trade.order_id) {
-            let entry = self
-                .pending_trades_by_order_id
-                .entry(trade.order_id)
-                .or_default();
-            if entry.len() < MAX_PENDING_TRADES_PER_ORDER {
-                entry.push(trade);
-            }
+        let owned = self.our_order_ids.contains(&trade.order_id);
+        if !owned {
+            warn!(
+                trade_id = trade.trade_id,
+                order_id = trade.order_id,
+                symbol = trade.symbol,
+                side = trade.side,
+                qty = trade.qty,
+                price = trade.price,
+                "orphan_trade"
+            );
+            self.our_order_ids.insert(trade.order_id);
+            self.record_orphan_trade(&trade);
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
@@ -712,6 +822,7 @@ impl StrategyRuntime {
                     qty: exec_qty,
                     price: trade.price,
                     commission: trade.commission,
+                    owned: true,
                 };
                 self.ledger.record_fill(trade_record);
                 pending.filled_qty += exec_qty;
@@ -744,6 +855,10 @@ impl StrategyRuntime {
         message_id: String,
         position: PositionEvent,
     ) -> Result<()> {
+        if position.symbol != self.config.strategy.symbol {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
         let ctx = self.strategy_ctx();
         let created_ts = ctx.last_bar_ts().unwrap_or(0);
         let intents = self.strategy.on_position(&ctx, &position);
@@ -841,10 +956,10 @@ impl StrategyRuntime {
         if order.order_id <= 0 {
             return Ok(());
         }
-        if self.config.trade_mode == TradeMode::Live && !self.our_order_ids.contains(&order.order_id)
-        {
+        if order.symbol != self.config.strategy.symbol {
             return Ok(());
         }
+        let owned = self.our_order_ids.contains(&order.order_id);
         let status = order.status.to_lowercase();
         debug!(
             order_id = order.order_id,
@@ -862,39 +977,42 @@ impl StrategyRuntime {
             price: order.price,
             status: status.clone(),
             ts_utc: order.ts_utc,
+            owned,
         };
         self.ledger.record_order(record);
         if self.config.trade_mode == TradeMode::Live {
-            let prev_filled = self
-                .state
-                .orders
-                .get(&order.order_id)
-                .map(|prev| prev.status.eq_ignore_ascii_case("filled"))
-                .unwrap_or(false);
-            if status == "filled" {
-                let fill_qty = if order.filled > 0.0 { order.filled } else { order.qty };
-                if fill_qty > 0.0 && !(prev_filled && order.existing) {
-                    let entry = self.pending_exec.entry(order.order_id).or_insert_with(|| {
-                        PendingExecution {
-                            order_id: order.order_id,
-                            symbol: order.symbol.clone(),
-                            side: order.side.to_lowercase(),
-                            target_qty: fill_qty,
-                            filled_qty: 0.0,
-                            order_price: order.price,
-                        }
-                    });
-                    entry.target_qty = fill_qty;
-                    entry.order_price = order.price;
-                    info!(
-                        order_id = order.order_id,
-                        symbol = order.symbol,
-                        side = order.side,
-                        qty = fill_qty,
-                        order_price = order.price,
-                        exec_price = "UNKNOWN",
-                        "order filled awaiting execution"
-                    );
+            if owned {
+                let prev_filled = self
+                    .state
+                    .orders
+                    .get(&order.order_id)
+                    .map(|prev| prev.status.eq_ignore_ascii_case("filled"))
+                    .unwrap_or(false);
+                if status == "filled" {
+                    let fill_qty = if order.filled > 0.0 { order.filled } else { order.qty };
+                    if fill_qty > 0.0 && !(prev_filled && order.existing) {
+                        let entry = self.pending_exec.entry(order.order_id).or_insert_with(|| {
+                            PendingExecution {
+                                order_id: order.order_id,
+                                symbol: order.symbol.clone(),
+                                side: order.side.to_lowercase(),
+                                target_qty: fill_qty,
+                                filled_qty: 0.0,
+                                order_price: order.price,
+                            }
+                        });
+                        entry.target_qty = fill_qty;
+                        entry.order_price = order.price;
+                        info!(
+                            order_id = order.order_id,
+                            symbol = order.symbol,
+                            side = order.side,
+                            qty = fill_qty,
+                            order_price = order.price,
+                            exec_price = "UNKNOWN",
+                            "order filled awaiting execution"
+                        );
+                    }
                 }
             }
             return Ok(());
@@ -911,6 +1029,7 @@ impl StrategyRuntime {
                     qty: fill_qty,
                     price: order.price,
                     commission: 0.0,
+                    owned: true,
                 };
                 self.ledger.record_fill(trade);
                 info!(
@@ -991,6 +1110,7 @@ impl StrategyRuntime {
                         price,
                         status: "working".to_string(),
                         ts_utc: bar.close_time_utc,
+                        owned: true,
                     });
                 }
                 Intent::Market { qty, side, .. } => {
@@ -1015,6 +1135,7 @@ impl StrategyRuntime {
                         price: 0.0,
                         status: "working".to_string(),
                         ts_utc: bar.close_time_utc,
+                        owned: true,
                     });
                 }
                 Intent::Cancel { order_id } => {
@@ -1033,6 +1154,7 @@ impl StrategyRuntime {
                             price: order.price.unwrap_or(0.0),
                             status: "canceled".to_string(),
                             ts_utc: bar.close_time_utc,
+                            owned: true,
                         });
                     }
                 }
@@ -1057,6 +1179,7 @@ impl StrategyRuntime {
                             price: new_price,
                             status: "working".to_string(),
                             ts_utc: bar.close_time_utc,
+                            owned: true,
                         });
                     }
                 }
@@ -1103,6 +1226,7 @@ impl StrategyRuntime {
                     qty: order.qty,
                     price,
                     commission: 0.0,
+                    owned: true,
                 };
                 self.ledger.record_fill(trade);
                 self.ledger.record_order(OrderRecord {
@@ -1114,6 +1238,7 @@ impl StrategyRuntime {
                     price,
                     status: "filled".to_string(),
                     ts_utc: bar.close_time_utc,
+                    owned: true,
                 });
                 self.persist_ledger_reports().await?;
             }
@@ -1169,6 +1294,61 @@ impl StrategyRuntime {
                 .get(&self.config.strategy.symbol)
                 .copied(),
         }
+    }
+
+    async fn notify_bootstrap_snapshot(&mut self) -> Result<()> {
+        let snapshot = match &self.bootstrap_snapshot {
+            Some(snapshot) => snapshot.clone(),
+            None => return Ok(()),
+        };
+        let ctx = self.strategy_ctx();
+        let created_ts = snapshot.snapshot_ts_utc.unwrap_or(0);
+        let intents = self.strategy.on_bootstrap_snapshot(&ctx, &snapshot);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.apply_intents(&ctx, created_ts, intents).await?;
+        Ok(())
+    }
+
+    async fn notify_runtime_state_restored(&mut self) -> Result<()> {
+        let ctx = self.strategy_ctx();
+        let restored = RuntimeStateRestored {
+            known_order_ids: self.our_order_ids.iter().copied().collect(),
+            pending_requests: self.our_request_ids.iter().copied().collect(),
+        };
+        let created_ts = ctx.last_bar_ts().unwrap_or(0);
+        let intents = self.strategy.on_runtime_state_restored(&ctx, &restored);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.apply_intents(&ctx, created_ts, intents).await?;
+        Ok(())
+    }
+
+    fn record_orphan_trade(&mut self, trade: &TradeEvent) {
+        let record = TradeRecord {
+            ts_utc: trade.ts_utc,
+            order_id: trade.order_id,
+            symbol: trade.symbol.clone(),
+            side: trade.side.to_lowercase(),
+            qty: trade.qty,
+            price: trade.price,
+            commission: trade.commission,
+            owned: false,
+        };
+        self.ledger.record_fill(record);
+    }
+
+    fn is_open_position(&self, position: &PositionEvent) -> bool {
+        position.qty.abs() > f64::EPSILON
+    }
+
+    fn is_working_order(&self, order: &OrderEvent) -> bool {
+        if order.order_id <= 0 {
+            return false;
+        }
+        let status = order.status.to_lowercase();
+        !matches!(
+            status.as_str(),
+            "filled" | "canceled" | "cancelled" | "expired" | "rejected"
+        )
     }
 
     async fn apply_intents(
@@ -1727,6 +1907,7 @@ mod tests {
             qty: 1.0,
             price: 110.0,
             commission: 0.0,
+            owned: true,
         });
         assert_eq!(runtime.ledger.trades()[0].price, 110.0);
     }
