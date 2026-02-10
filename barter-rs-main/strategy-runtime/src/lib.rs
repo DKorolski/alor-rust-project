@@ -127,6 +127,8 @@ pub struct OrderEvent {
     #[serde(default)]
     pub existing: bool,
     #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
     pub ts_utc: i64,
 }
 
@@ -163,6 +165,7 @@ impl Default for OrderEvent {
             filled: 0.0,
             price: 0.0,
             existing: false,
+            comment: None,
             ts_utc: 0,
         }
     }
@@ -172,6 +175,8 @@ impl Default for OrderEvent {
 pub struct PositionEvent {
     pub symbol: String,
     pub qty: f64,
+    #[serde(default)]
+    pub existing: bool,
     #[serde(default)]
     pub avg_price: f64,
     #[serde(default)]
@@ -190,6 +195,7 @@ pub struct RuntimeConfig {
     pub trade_mode: TradeMode,
     pub allow_live_orders: bool,
     pub guard_log_interval_ms: u64,
+    pub bootstrap_dump: bool,
     pub read: ReadConfig,
     pub trim: TrimConfig,
     pub strategy: StrategyConfig,

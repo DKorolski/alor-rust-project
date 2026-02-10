@@ -9,6 +9,7 @@ consumer_name = "auto"
 trade_mode = "paper" # paper | live | backtest
 allow_live_orders = false
 guard_log_interval_ms = 5000
+bootstrap_dump = false
 
 [streams]
 bars = "md.bars.7502T0U.1m"

@@ -31,6 +31,7 @@ const DEFAULT_HEALTH_STREAM: &str = "events.health";
 const DEFAULT_TRADE_MODE: TradeMode = TradeMode::Paper;
 const DEFAULT_ALLOW_LIVE_ORDERS: bool = false;
 const DEFAULT_GUARD_LOG_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_BOOTSTRAP_DUMP: bool = false;
 const DEFAULT_PAPER_ENABLED: bool = true;
 const DEFAULT_PAPER_OUTPUT: PaperOutput = PaperOutput::Stdout;
 const DEFAULT_PAPER_FILE_PATH: &str = "./paper_trades.jsonl";
@@ -145,6 +146,7 @@ pub struct RuntimeSources {
     pub trade_mode: ConfigSource,
     pub allow_live_orders: ConfigSource,
     pub guard_log_interval_ms: ConfigSource,
+    pub bootstrap_dump: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +254,7 @@ impl Default for RuntimeSources {
             trade_mode: ConfigSource::Default,
             allow_live_orders: ConfigSource::Default,
             guard_log_interval_ms: ConfigSource::Default,
+            bootstrap_dump: ConfigSource::Default,
         }
     }
 }
@@ -312,6 +315,7 @@ struct RuntimeSettingsFile {
     trade_mode: Option<String>,
     allow_live_orders: Option<bool>,
     guard_log_interval_ms: Option<u64>,
+    bootstrap_dump: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -417,6 +421,7 @@ pub fn load_runtime_config(
     let mut trade_mode = DEFAULT_TRADE_MODE;
     let mut allow_live_orders = DEFAULT_ALLOW_LIVE_ORDERS;
     let mut guard_log_interval_ms = DEFAULT_GUARD_LOG_INTERVAL_MS;
+    let mut bootstrap_dump = DEFAULT_BOOTSTRAP_DUMP;
     let mut paper = PaperConfig {
         enabled: DEFAULT_PAPER_ENABLED,
         output: DEFAULT_PAPER_OUTPUT,
@@ -573,6 +578,10 @@ pub fn load_runtime_config(
             if let Some(value) = runtime_file.guard_log_interval_ms {
                 guard_log_interval_ms = value;
                 sources.runtime.guard_log_interval_ms = ConfigSource::File;
+            }
+            if let Some(value) = runtime_file.bootstrap_dump {
+                bootstrap_dump = value;
+                sources.runtime.bootstrap_dump = ConfigSource::File;
             }
         }
         if let Some(paper_file) = &file_config.paper {
@@ -749,6 +758,10 @@ pub fn load_runtime_config(
         guard_log_interval_ms = value;
         sources.runtime.guard_log_interval_ms = ConfigSource::Env;
     }
+    if let Some(value) = env::var("BOOTSTRAP_DUMP").ok() {
+        bootstrap_dump = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.runtime.bootstrap_dump = ConfigSource::Env;
+    }
     if let Some(value) = env::var("PAPER_ENABLED").ok() {
         paper.enabled = value == "1" || value.eq_ignore_ascii_case("true");
         sources.paper.enabled = ConfigSource::Env;
@@ -894,6 +907,7 @@ pub fn load_runtime_config(
         trade_mode,
         allow_live_orders,
         guard_log_interval_ms,
+        bootstrap_dump,
         read,
         trim,
         strategy,

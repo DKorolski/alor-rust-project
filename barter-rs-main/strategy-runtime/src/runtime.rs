@@ -28,7 +28,7 @@ const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
 const TRADE_DEDUP_LIMIT: usize = 512;
-const MAX_PENDING_TRADES_PER_ORDER: usize = 50;
+const NON_WORKING_ORDER_STATUSES: [&str; 5] = ["filled", "canceled", "cancelled", "expired", "rejected"];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
@@ -51,6 +51,31 @@ struct OrdersSnapshot {
 #[derive(Debug, Deserialize)]
 struct PositionsSnapshot {
     pub positions: HashMap<String, PositionEvent>,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct PositionDump {
+    symbol: String,
+    qty: f64,
+    existing: bool,
+    avg_price: f64,
+    ts_utc: i64,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct OrderDump {
+    order_id: i64,
+    status: String,
+    side: String,
+    price: f64,
+    qty: f64,
+    filled: f64,
+    existing: bool,
+    request_id: Option<uuid::Uuid>,
+    comment: Option<String>,
+    ts_utc: i64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -419,6 +444,13 @@ impl StrategyRuntime {
                 orders_open_strategy,
                 "bootstrap: snapshots filtered"
             );
+            self.log_bootstrap_dump(
+                &positions_strategy,
+                &self.state.orders,
+                positions_open_strategy,
+                orders_open_strategy,
+                snapshot_ts_utc,
+            );
             self.bootstrap_snapshot = Some(BootstrapSnapshot {
                 positions_strategy,
                 working_orders_strategy,
@@ -472,6 +504,7 @@ impl StrategyRuntime {
                     self.strategy.set_state(snapshot.strategy_state);
                     self.restore_pending_requests();
                     info!("runtime state restored");
+                    self.log_runtime_state_dump();
                 }
                 Err(error) => {
                     warn!(?error, "failed to parse runtime state snapshot");
@@ -1345,10 +1378,110 @@ impl StrategyRuntime {
             return false;
         }
         let status = order.status.to_lowercase();
-        !matches!(
-            status.as_str(),
-            "filled" | "canceled" | "cancelled" | "expired" | "rejected"
-        )
+        !NON_WORKING_ORDER_STATUSES.contains(&status.as_str())
+    }
+
+    fn log_bootstrap_dump(
+        &self,
+        positions_strategy: &HashMap<String, PositionEvent>,
+        strategy_orders: &HashMap<i64, OrderEvent>,
+        positions_open_strategy: usize,
+        orders_open_strategy: usize,
+        snapshot_ts_utc: Option<i64>,
+    ) {
+        if !self.config.bootstrap_dump {
+            return;
+        }
+        let mut positions: Vec<PositionDump> = positions_strategy
+            .iter()
+            .map(|(symbol, position)| PositionDump {
+                symbol: symbol.clone(),
+                qty: position.qty,
+                existing: position.existing,
+                avg_price: position.avg_price,
+                ts_utc: position.ts_utc,
+            })
+            .collect();
+        positions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        let mut orders: Vec<OrderDump> = strategy_orders
+            .iter()
+            .map(|(order_id, order)| OrderDump {
+                order_id: *order_id,
+                status: order.status.clone(),
+                side: order.side.clone(),
+                price: order.price,
+                qty: order.qty,
+                filled: order.filled,
+                existing: order.existing,
+                request_id: order.request_id,
+                comment: order.comment.clone(),
+                ts_utc: order.ts_utc,
+            })
+            .collect();
+        orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+        info!(
+            source = "snapshot",
+            snapshot_ts_utc,
+            positions = ?positions,
+            orders = ?orders,
+            positions_open_strategy,
+            orders_open_strategy,
+            open_order_excluded_statuses = ?NON_WORKING_ORDER_STATUSES,
+            "bootstrap_dump"
+        );
+    }
+
+    fn log_runtime_state_dump(&self) {
+        if !self.config.bootstrap_dump {
+            return;
+        }
+        let pending_request_ids = self.pending_request_ids();
+        let strategy_state_order_ids = self.strategy_state_order_ids();
+        let mut our_request_ids: Vec<_> = self.our_request_ids.iter().copied().collect();
+        our_request_ids.sort();
+        let mut known_order_ids = self.our_order_ids.clone();
+        known_order_ids.extend(strategy_state_order_ids.iter().copied());
+        let mut active_known_orders: Vec<(i64, String)> = known_order_ids
+            .iter()
+            .map(|order_id| {
+                let status = self
+                    .state
+                    .orders
+                    .get(order_id)
+                    .map(|order| order.status.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                (*order_id, status)
+            })
+            .collect();
+        active_known_orders.sort_by(|a, b| a.0.cmp(&b.0));
+        info!(
+            source = "runtime_state",
+            active_known_orders = ?active_known_orders,
+            strategy_state_order_ids = ?strategy_state_order_ids,
+            strategy_state = ?self.state.strategy_state,
+            pending_request_ids = ?pending_request_ids,
+            pending_request_ids_len = pending_request_ids.len(),
+            our_request_ids = ?our_request_ids,
+            our_request_ids_len = our_request_ids.len(),
+            "state_dump"
+        );
+    }
+
+    fn strategy_state_order_ids(&self) -> Vec<i64> {
+        let mut order_ids = Vec::new();
+        match &self.state.strategy_state {
+            StrategyState::Placed {
+                order_id: Some(order_id),
+                ..
+            }
+            | StrategyState::CancelSent { order_id, .. } => {
+                order_ids.push(*order_id);
+            }
+            _ => {}
+        }
+        order_ids.sort();
+        order_ids.dedup();
+        order_ids
     }
 
     async fn apply_intents(
@@ -1748,6 +1881,7 @@ mod tests {
             trade_mode,
             allow_live_orders: true,
             guard_log_interval_ms: 1_000,
+            bootstrap_dump: false,
             read: ReadConfig {
                 block_ms: 100,
                 claim_idle_ms: 100,
@@ -1894,6 +2028,7 @@ mod tests {
             filled: 1.0,
             price: 100.0,
             existing: false,
+            comment: None,
             ts_utc: 10,
         };
         runtime.update_ledger_from_order(&order).unwrap();
