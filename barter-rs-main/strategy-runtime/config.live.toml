@@ -21,7 +21,7 @@ acks = "cmd.acks.7502T0U"
 snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.limit_cancel.7502T0U"
+runtime_state = "runtime.state.market_buy_and_close.7502T0U"
 
 [read]
 block_ms = 500
@@ -40,7 +40,7 @@ health = 10000
 runtime_state = 2000
 
 [strategy]
-strategy_id = "limit_cancel"
+strategy_id = "market_buy_and_close"
 strategy_kind = "market_buy_and_close" # limit_cancel | market_buy_and_close
 symbol = "IMOEXF"
 qty = 1.0

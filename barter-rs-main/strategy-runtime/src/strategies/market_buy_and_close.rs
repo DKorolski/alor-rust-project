@@ -87,6 +87,8 @@ impl Strategy for MarketBuyAndCloseStrategy {
         }
 
         let mut intent = None;
+        let close_side = self.close_side();
+        let qty = self.config.qty;
         match &mut self.state {
             StrategyState::Idle => {
                 let close_trigger = self.effective_close_trigger(ctx);
@@ -146,6 +148,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
             StrategyState::MarketBuySent {
                 close_trigger,
                 buy_bar_ts,
+                baseline_qty,
                 last_bar_ts,
                 ..
             } => {
@@ -155,8 +158,21 @@ impl Strategy for MarketBuyAndCloseStrategy {
                         TradeMode::Live => None,
                         TradeMode::Paper | TradeMode::Backtest => Some(bar.o),
                     };
-                    intent = Some(self.build_market_intent(self.close_side(), fill_price));
-                    self.state = StrategyState::Done {
+                    intent = Some(Intent::Market {
+                        qty,
+                        side: close_side,
+                        fill_price,
+                    });
+                    self.state = StrategyState::MarketCloseSent {
+                        close_request_id: crate::deterministic_request_id(
+                            &ctx.strategy_id,
+                            &ctx.portfolio,
+                            &bar.symbol,
+                            "market_close",
+                            bar.close_time_utc,
+                            1,
+                        ),
+                        baseline_qty: *baseline_qty,
                         last_bar_ts: bar.close_time_utc,
                     };
                 }
@@ -328,5 +344,16 @@ mod tests {
         assert_eq!(intents.len(), 1);
         let intents = strategy.on_bar(&ctx, &bar3);
         assert_eq!(intents.len(), 1);
+        assert!(matches!(strategy.state(), StrategyState::MarketCloseSent { .. }));
+
+        let position_closed = PositionEvent {
+            symbol: "SBER".to_string(),
+            qty: 0.0,
+            existing: false,
+            avg_price: 0.0,
+            ts_utc: 31,
+        };
+        assert!(strategy.on_position(&ctx, &position_closed).is_empty());
+        assert!(matches!(strategy.state(), StrategyState::Done { .. }));
     }
 }
