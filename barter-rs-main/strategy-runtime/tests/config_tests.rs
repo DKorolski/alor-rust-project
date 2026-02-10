@@ -66,6 +66,7 @@ fn loads_toml_defaults() {
         "TRADE_MODE",
         "ALLOW_LIVE_ORDERS",
         "GUARD_LOG_INTERVAL_MS",
+        "BOOTSTRAP_DUMP",
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
@@ -110,6 +111,7 @@ fn env_overrides_take_precedence() {
         "TRADE_MODE",
         "ALLOW_LIVE_ORDERS",
         "GUARD_LOG_INTERVAL_MS",
+        "BOOTSTRAP_DUMP",
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
@@ -161,6 +163,7 @@ fn health_default_is_events_health() {
         "TRADE_MODE",
         "ALLOW_LIVE_ORDERS",
         "GUARD_LOG_INTERVAL_MS",
+        "BOOTSTRAP_DUMP",
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
@@ -191,6 +194,7 @@ fn loads_runtime_mode_settings() {
         "TRADE_MODE",
         "ALLOW_LIVE_ORDERS",
         "GUARD_LOG_INTERVAL_MS",
+        "BOOTSTRAP_DUMP",
         "PAPER_ENABLED",
         "PAPER_OUTPUT",
         "PAPER_FILE_PATH",
@@ -210,6 +214,7 @@ fn loads_runtime_mode_settings() {
 trade_mode = "backtest"
 allow_live_orders = false
 guard_log_interval_ms = 1234
+bootstrap_dump = true
 
 [paper]
 enabled = false
@@ -230,6 +235,7 @@ trade_log = "./backtest.log"
     );
     assert!(!resolved.config.allow_live_orders);
     assert_eq!(resolved.config.guard_log_interval_ms, 1234);
+    assert!(resolved.config.bootstrap_dump);
     assert!(!resolved.config.paper.enabled);
     assert_eq!(
         resolved.config.paper.output,

@@ -48,6 +48,8 @@ async fn main() -> Result<()> {
         allow_live_orders_source = %sources.runtime.allow_live_orders,
         guard_log_interval_ms = config.guard_log_interval_ms,
         guard_log_interval_ms_source = %sources.runtime.guard_log_interval_ms,
+        bootstrap_dump = config.bootstrap_dump,
+        bootstrap_dump_source = %sources.runtime.bootstrap_dump,
         strategy = ?config.strategy,
         strategy_sources = ?sources.strategy,
         paper = ?config.paper,

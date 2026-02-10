@@ -50,6 +50,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
         trade_mode: TradeMode::Live,
         allow_live_orders: true,
         guard_log_interval_ms: 500,
+        bootstrap_dump: false,
         read: ReadConfig {
             block_ms: 100,
             claim_idle_ms: 200,
