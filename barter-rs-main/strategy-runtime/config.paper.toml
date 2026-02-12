@@ -21,7 +21,7 @@ acks = "cmd.acks.7502T0U"
 snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.limit_cancel.7502T0U"
+runtime_state = "runtime.state.toy_session_timing.7502T0U"
 
 [read]
 block_ms = 500
@@ -40,15 +40,22 @@ health = 10000
 runtime_state = 2000
 
 [strategy]
-strategy_id = "limit_cancel"
-strategy_kind = "market_buy_and_close" # limit_cancel | market_buy_and_close
+strategy_id = "toy_session_timing"
+strategy_kind = "toy_session_timing" # limit_cancel | market_buy_and_close | toy_session_timing
 symbol = "IMOEXF"
 qty = 1.0
 side = "buy"
 place_offset_ticks = 2
 tick_size = 0.5
 max_wait_bars_for_ack = 3
-close_trigger = "position_update" # next_bar | position_update
+close_trigger = "next_bar" # next_bar | position_update
+session_open_hour = 10
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 50
+entry_after_open_min = 59
+exit_before_close_min = 20
+timezone_offset_hours = 3
 
 [paper]
 enabled = true

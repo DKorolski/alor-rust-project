@@ -1,0 +1,2 @@
+entry_ts_utc,exit_ts_utc,symbol,side,qty,entry_price,exit_price,commission_total,pnl_gross,pnl_net
+1770713820,1770755460,IMOEXF,buy,1,2735.5,2716,0,-19.5,-19.5

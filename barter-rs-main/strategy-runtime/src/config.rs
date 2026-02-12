@@ -24,6 +24,13 @@ const DEFAULT_QTY: f64 = 1.0;
 const DEFAULT_TICK_SIZE: f64 = 0.01;
 const DEFAULT_MAX_WAIT_BARS_FOR_ACK: u32 = 3;
 const DEFAULT_CLOSE_TRIGGER: CloseTrigger = CloseTrigger::NextBar;
+const DEFAULT_SESSION_OPEN_HOUR: u32 = 10;
+const DEFAULT_SESSION_OPEN_MINUTE: u32 = 0;
+const DEFAULT_SESSION_CLOSE_HOUR: u32 = 23;
+const DEFAULT_SESSION_CLOSE_MINUTE: u32 = 50;
+const DEFAULT_ENTRY_AFTER_OPEN_MIN: u32 = 59;
+const DEFAULT_EXIT_BEFORE_CLOSE_MIN: u32 = 20;
+const DEFAULT_TIMEZONE_OFFSET_HOURS: i32 = 3;
 const DEFAULT_CONSUMER_GROUP: &str = "strategy-runtime";
 const DEFAULT_CONSUMER_NAME: &str = "auto";
 const DEFAULT_HEALTH_STREAM: &str = "events.health";
@@ -139,6 +146,13 @@ pub struct StrategySources {
     pub tick_size: ConfigSource,
     pub max_wait_bars_for_ack: ConfigSource,
     pub close_trigger: ConfigSource,
+    pub session_open_hour: ConfigSource,
+    pub session_open_minute: ConfigSource,
+    pub session_close_hour: ConfigSource,
+    pub session_close_minute: ConfigSource,
+    pub entry_after_open_min: ConfigSource,
+    pub exit_before_close_min: ConfigSource,
+    pub timezone_offset_hours: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +258,13 @@ impl Default for StrategySources {
             tick_size: ConfigSource::Default,
             max_wait_bars_for_ack: ConfigSource::Default,
             close_trigger: ConfigSource::Default,
+            session_open_hour: ConfigSource::Default,
+            session_open_minute: ConfigSource::Default,
+            session_close_hour: ConfigSource::Default,
+            session_close_minute: ConfigSource::Default,
+            entry_after_open_min: ConfigSource::Default,
+            exit_before_close_min: ConfigSource::Default,
+            timezone_offset_hours: ConfigSource::Default,
         }
     }
 }
@@ -363,6 +384,13 @@ struct StrategyConfigFile {
     tick_size: Option<f64>,
     max_wait_bars_for_ack: Option<u32>,
     close_trigger: Option<String>,
+    session_open_hour: Option<u32>,
+    session_open_minute: Option<u32>,
+    session_close_hour: Option<u32>,
+    session_close_minute: Option<u32>,
+    entry_after_open_min: Option<u32>,
+    exit_before_close_min: Option<u32>,
+    timezone_offset_hours: Option<i32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -409,6 +437,13 @@ pub fn load_runtime_config(
         tick_size: DEFAULT_TICK_SIZE,
         max_wait_bars_for_ack: DEFAULT_MAX_WAIT_BARS_FOR_ACK,
         close_trigger: DEFAULT_CLOSE_TRIGGER,
+        session_open_hour: DEFAULT_SESSION_OPEN_HOUR,
+        session_open_minute: DEFAULT_SESSION_OPEN_MINUTE,
+        session_close_hour: DEFAULT_SESSION_CLOSE_HOUR,
+        session_close_minute: DEFAULT_SESSION_CLOSE_MINUTE,
+        entry_after_open_min: DEFAULT_ENTRY_AFTER_OPEN_MIN,
+        exit_before_close_min: DEFAULT_EXIT_BEFORE_CLOSE_MIN,
+        timezone_offset_hours: DEFAULT_TIMEZONE_OFFSET_HOURS,
     };
 
     let mut read = ReadConfig {
@@ -564,6 +599,34 @@ pub fn load_runtime_config(
             if let Some(value) = &strategy_file.close_trigger {
                 strategy.close_trigger = parse_close_trigger(value);
                 sources.strategy.close_trigger = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.session_open_hour {
+                strategy.session_open_hour = value;
+                sources.strategy.session_open_hour = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.session_open_minute {
+                strategy.session_open_minute = value;
+                sources.strategy.session_open_minute = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.session_close_hour {
+                strategy.session_close_hour = value;
+                sources.strategy.session_close_hour = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.session_close_minute {
+                strategy.session_close_minute = value;
+                sources.strategy.session_close_minute = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.entry_after_open_min {
+                strategy.entry_after_open_min = value;
+                sources.strategy.entry_after_open_min = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.exit_before_close_min {
+                strategy.exit_before_close_min = value;
+                sources.strategy.exit_before_close_min = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.timezone_offset_hours {
+                strategy.timezone_offset_hours = value;
+                sources.strategy.timezone_offset_hours = ConfigSource::File;
             }
         }
         if let Some(runtime_file) = &file_config.runtime {
@@ -745,6 +808,34 @@ pub fn load_runtime_config(
     if let Some(value) = env::var("CLOSE_TRIGGER").ok() {
         strategy.close_trigger = parse_close_trigger(&value);
         sources.strategy.close_trigger = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("SESSION_OPEN_HOUR") {
+        strategy.session_open_hour = value;
+        sources.strategy.session_open_hour = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("SESSION_OPEN_MINUTE") {
+        strategy.session_open_minute = value;
+        sources.strategy.session_open_minute = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("SESSION_CLOSE_HOUR") {
+        strategy.session_close_hour = value;
+        sources.strategy.session_close_hour = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("SESSION_CLOSE_MINUTE") {
+        strategy.session_close_minute = value;
+        sources.strategy.session_close_minute = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("ENTRY_AFTER_OPEN_MIN") {
+        strategy.entry_after_open_min = value;
+        sources.strategy.entry_after_open_min = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("EXIT_BEFORE_CLOSE_MIN") {
+        strategy.exit_before_close_min = value;
+        sources.strategy.exit_before_close_min = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("TIMEZONE_OFFSET_HOURS") {
+        strategy.timezone_offset_hours = value;
+        sources.strategy.timezone_offset_hours = ConfigSource::Env;
     }
     if let Some(value) = env::var("TRADE_MODE").ok() {
         trade_mode = parse_trade_mode(&value);
@@ -984,6 +1075,7 @@ fn parse_trade_mode(value: &str) -> TradeMode {
 fn parse_strategy_kind(value: &str) -> StrategyKind {
     match value.to_lowercase().as_str() {
         "market_buy_and_close" | "marketbuyandclose" => StrategyKind::MarketBuyAndClose,
+        "toy_session_timing" | "toysessiontiming" => StrategyKind::ToySessionTiming,
         _ => StrategyKind::LimitCancel,
     }
 }

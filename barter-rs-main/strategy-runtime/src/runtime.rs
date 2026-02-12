@@ -15,6 +15,7 @@ use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
+use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PaperConfig,
@@ -28,7 +29,8 @@ const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
 const TRADE_DEDUP_LIMIT: usize = 512;
-const NON_WORKING_ORDER_STATUSES: [&str; 5] = ["filled", "canceled", "cancelled", "expired", "rejected"];
+const NON_WORKING_ORDER_STATUSES: [&str; 5] =
+    ["filled", "canceled", "cancelled", "expired", "rejected"];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
@@ -214,6 +216,9 @@ impl StrategyRuntime {
             )),
             StrategyKind::MarketBuyAndClose => Box::new(MarketBuyAndCloseStrategy::new(
                 config.strategy.to_market_buy_and_close_config(),
+            )),
+            StrategyKind::ToySessionTiming => Box::new(ToySessionTimingStrategy::new(
+                config.strategy.to_toy_session_timing_config(),
             )),
         };
         Ok(Self {
@@ -432,7 +437,9 @@ impl StrategyRuntime {
             self.state.positions = strategy_positions;
             self.bootstrap_state.positions_snapshot_loaded = true;
         }
-        if self.bootstrap_state.orders_snapshot_loaded || self.bootstrap_state.positions_snapshot_loaded {
+        if self.bootstrap_state.orders_snapshot_loaded
+            || self.bootstrap_state.positions_snapshot_loaded
+        {
             info!(
                 positions_total_all,
                 positions_open_all,
@@ -523,19 +530,13 @@ impl StrategyRuntime {
             StrategyState::Placed {
                 place_request_id, ..
             } => vec![*place_request_id],
-            StrategyState::MarketBuyPending {
-                buy_request_id, ..
-            }
-            | StrategyState::MarketBuySent {
-                buy_request_id, ..
-            } => vec![*buy_request_id],
+            StrategyState::MarketBuyPending { buy_request_id, .. }
+            | StrategyState::MarketBuySent { buy_request_id, .. } => vec![*buy_request_id],
             StrategyState::MarketCloseSent {
-                close_request_id,
-                ..
+                close_request_id, ..
             } => vec![*close_request_id],
             StrategyState::CancelSent {
-                cancel_request_id,
-                ..
+                cancel_request_id, ..
             } => vec![*cancel_request_id],
             StrategyState::Idle | StrategyState::Done { .. } => Vec::new(),
         }
@@ -830,7 +831,11 @@ impl StrategyRuntime {
     fn apply_trade_execution(&mut self, trade: TradeEvent) {
         if !self.pending_exec.contains_key(&trade.order_id) {
             if let Some(order) = self.state.orders.get(&trade.order_id) {
-                let fill_target = if order.filled > 0.0 { order.filled } else { order.qty };
+                let fill_target = if order.filled > 0.0 {
+                    order.filled
+                } else {
+                    order.qty
+                };
                 self.pending_exec.insert(
                     trade.order_id,
                     PendingExecution {
@@ -1022,7 +1027,11 @@ impl StrategyRuntime {
                     .map(|prev| prev.status.eq_ignore_ascii_case("filled"))
                     .unwrap_or(false);
                 if status == "filled" {
-                    let fill_qty = if order.filled > 0.0 { order.filled } else { order.qty };
+                    let fill_qty = if order.filled > 0.0 {
+                        order.filled
+                    } else {
+                        order.qty
+                    };
                     if fill_qty > 0.0 && !(prev_filled && order.existing) {
                         let entry = self.pending_exec.entry(order.order_id).or_insert_with(|| {
                             PendingExecution {
@@ -1052,7 +1061,11 @@ impl StrategyRuntime {
         }
 
         if status == "filled" {
-            let fill_qty = if order.filled > 0.0 { order.filled } else { order.qty };
+            let fill_qty = if order.filled > 0.0 {
+                order.filled
+            } else {
+                order.qty
+            };
             if fill_qty > 0.0 {
                 let trade = TradeRecord {
                     ts_utc: order.ts_utc,
@@ -1281,14 +1294,12 @@ impl StrategyRuntime {
 
     async fn persist_ledger_reports(&self) -> Result<()> {
         match self.config.trade_mode {
-            TradeMode::Paper => self
-                .ledger
-                .persist_reports(
-                    &self.config.strategy.strategy_id,
-                    &self.config.strategy.symbol,
-                    &self.config.paper.trades_csv,
-                    &self.config.paper.summary_json,
-                ),
+            TradeMode::Paper => self.ledger.persist_reports(
+                &self.config.strategy.strategy_id,
+                &self.config.strategy.symbol,
+                &self.config.paper.trades_csv,
+                &self.config.paper.summary_json,
+            ),
             TradeMode::Backtest => self.ledger.persist_reports(
                 &self.config.strategy.strategy_id,
                 &self.config.strategy.symbol,
@@ -1573,7 +1584,11 @@ impl StrategyRuntime {
                 fill_price: _,
             } => (
                 alor_protocol::CommandAction::Market(alor_protocol::MarketOrder { qty, side }),
-                if side == alor_protocol::Side::Buy { 3 } else { 4 },
+                if side == alor_protocol::Side::Buy {
+                    3
+                } else {
+                    4
+                },
                 "market",
             ),
             Intent::Cancel { order_id } => (
@@ -1786,7 +1801,11 @@ impl StrategyRuntime {
         };
         if prev.allowed != snapshot.allowed {
             let from = if prev.allowed { "ALLOWED" } else { "BLOCKED" };
-            let to = if snapshot.allowed { "ALLOWED" } else { "BLOCKED" };
+            let to = if snapshot.allowed {
+                "ALLOWED"
+            } else {
+                "BLOCKED"
+            };
             info!(
                 from,
                 to,
@@ -1908,6 +1927,13 @@ mod tests {
                 tick_size: 0.01,
                 max_wait_bars_for_ack: 1,
                 close_trigger: CloseTrigger::NextBar,
+                session_open_hour: 10,
+                session_open_minute: 0,
+                session_close_hour: 23,
+                session_close_minute: 50,
+                entry_after_open_min: 59,
+                exit_before_close_min: 20,
+                timezone_offset_hours: 3,
             },
             paper: PaperConfig {
                 enabled: false,

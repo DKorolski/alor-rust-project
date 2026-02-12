@@ -271,3 +271,45 @@ summary_json = "./custom_summary.json"
     assert_eq!(resolved.config.paper.trades_csv, "./custom_trades.csv");
     assert_eq!(resolved.config.paper.summary_json, "./custom_summary.json");
 }
+
+#[test]
+fn loads_toy_session_timing_strategy_fields() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_KIND",
+        "SESSION_OPEN_HOUR",
+        "SESSION_OPEN_MINUTE",
+        "SESSION_CLOSE_HOUR",
+        "SESSION_CLOSE_MINUTE",
+        "ENTRY_AFTER_OPEN_MIN",
+        "EXIT_BEFORE_CLOSE_MIN",
+        "TIMEZONE_OFFSET_HOURS",
+    ]);
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_kind = "toy_session_timing"
+session_open_hour = 9
+session_open_minute = 30
+session_close_hour = 18
+session_close_minute = 45
+entry_after_open_min = 59
+exit_before_close_min = 20
+timezone_offset_hours = 3
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::ToySessionTiming
+    );
+    assert_eq!(resolved.config.strategy.session_open_hour, 9);
+    assert_eq!(resolved.config.strategy.session_open_minute, 30);
+    assert_eq!(resolved.config.strategy.session_close_hour, 18);
+    assert_eq!(resolved.config.strategy.session_close_minute, 45);
+    assert_eq!(resolved.config.strategy.entry_after_open_min, 59);
+    assert_eq!(resolved.config.strategy.exit_before_close_min, 20);
+    assert_eq!(resolved.config.strategy.timezone_offset_hours, 3);
+}

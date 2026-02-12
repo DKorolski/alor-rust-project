@@ -6,8 +6,8 @@ consumer_group = "strategy-runtime"
 consumer_name = "auto"
 
 [runtime]
-trade_mode = "live" # paper | live | backtest
-allow_live_orders = true
+trade_mode = "backtest" # paper | live | backtest
+allow_live_orders = false
 guard_log_interval_ms = 5000
 bootstrap_dump = false
 
@@ -21,7 +21,7 @@ acks = "cmd.acks.7502T0U"
 snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.market_buy_and_close.7502T0U"
+runtime_state = "runtime.state.toy_session_timing.7502T0U"
 
 [read]
 block_ms = 500
@@ -40,8 +40,8 @@ health = 10000
 runtime_state = 2000
 
 [strategy]
-strategy_id = "market_buy_and_close"
-strategy_kind = "market_buy_and_close" # limit_cancel | market_buy_and_close | toy_session_timing
+strategy_id = "toy_session_timing"
+strategy_kind = "toy_session_timing" # limit_cancel | market_buy_and_close | toy_session_timing
 symbol = "IMOEXF"
 qty = 1.0
 side = "buy"
@@ -66,7 +66,7 @@ summary_json = "./summary.json"
 append = false
 
 [backtest]
-enabled = false
+enabled = true
 trade_log = "./backtest_trades.log"
 trades_csv = "./trades.csv"
 summary_json = "./summary.json"

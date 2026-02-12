@@ -9,7 +9,7 @@ consumer_name = "auto"
 trade_mode = "live" # paper | live | backtest
 allow_live_orders = true
 guard_log_interval_ms = 5000
-bootstrap_dump = true
+bootstrap_dump = false
 
 [streams]
 bars = "md.bars.7502T0U.1m"
@@ -41,7 +41,7 @@ runtime_state = 2000
 
 [strategy]
 strategy_id = "limit_cancel"
-strategy_kind = "limit_cancel" # limit_cancel | market_buy_and_close
+strategy_kind = "limit_cancel" # limit_cancel | market_buy_and_close | toy_session_timing
 symbol = "IMOEXF"
 qty = 1.0
 side = "sell"
@@ -49,6 +49,13 @@ place_offset_ticks = 4
 tick_size = 0.5
 max_wait_bars_for_ack = 3
 close_trigger = "next_bar" # next_bar | position_update
+session_open_hour = 10
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 50
+entry_after_open_min = 59
+exit_before_close_min = 20
+timezone_offset_hours = 3
 
 [paper]
 enabled = false

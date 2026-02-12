@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::strategies::limit_cancel::LimitCancelConfig;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseConfig;
+use crate::strategies::toy_session_timing::ToySessionTimingConfig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Intent {
@@ -262,6 +263,13 @@ pub struct StrategyConfig {
     pub tick_size: f64,
     pub max_wait_bars_for_ack: u32,
     pub close_trigger: CloseTrigger,
+    pub session_open_hour: u32,
+    pub session_open_minute: u32,
+    pub session_close_hour: u32,
+    pub session_close_minute: u32,
+    pub entry_after_open_min: u32,
+    pub exit_before_close_min: u32,
+    pub timezone_offset_hours: i32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,6 +285,7 @@ pub enum TradeMode {
 pub enum StrategyKind {
     LimitCancel,
     MarketBuyAndClose,
+    ToySessionTiming,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -330,6 +339,21 @@ impl StrategyConfig {
             qty: self.qty,
             side: self.side,
             close_trigger: self.close_trigger,
+        }
+    }
+
+    pub fn to_toy_session_timing_config(&self) -> ToySessionTimingConfig {
+        ToySessionTimingConfig {
+            symbol: self.symbol.clone(),
+            qty: self.qty,
+            entry_side: self.side,
+            session_open_hour: self.session_open_hour,
+            session_open_minute: self.session_open_minute,
+            session_close_hour: self.session_close_hour,
+            session_close_minute: self.session_close_minute,
+            entry_after_open_min: self.entry_after_open_min,
+            exit_before_close_min: self.exit_before_close_min,
+            timezone_offset_hours: self.timezone_offset_hours,
         }
     }
 }

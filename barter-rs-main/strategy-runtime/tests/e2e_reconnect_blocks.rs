@@ -76,6 +76,13 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             tick_size: 0.01,
             max_wait_bars_for_ack: 3,
             close_trigger: strategy_runtime::CloseTrigger::NextBar,
+            session_open_hour: 10,
+            session_open_minute: 0,
+            session_close_hour: 23,
+            session_close_minute: 50,
+            entry_after_open_min: 59,
+            exit_before_close_min: 20,
+            timezone_offset_hours: 3,
         },
         paper: PaperConfig {
             enabled: false,
@@ -120,8 +127,12 @@ async fn publish_snapshots(redis_url: &str, stream: &str) -> Result<()> {
     let positions = PositionsSnapshot {
         positions: HashMap::new(),
     };
-    let orders_envelope =
-        Envelope::new(Utc::now().timestamp(), "test", MessageType::SnapshotOrders, orders);
+    let orders_envelope = Envelope::new(
+        Utc::now().timestamp(),
+        "test",
+        MessageType::SnapshotOrders,
+        orders,
+    );
     let positions_envelope = Envelope::new(
         Utc::now().timestamp(),
         "test",
