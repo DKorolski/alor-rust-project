@@ -104,9 +104,7 @@ impl Strategy for ToySessionTimingStrategy {
                     fill_price: self.fill_price_for_mode(bar, ctx.trade_mode),
                 });
                 self.position_open = false;
-                self.state = StrategyState::Done {
-                    last_bar_ts: bar.close_time_utc,
-                };
+                self.state = StrategyState::Idle;
             }
         } else if self.traded_day_key.is_none()
             && minute_of_day >= entry_min

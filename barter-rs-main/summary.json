@@ -1,14 +1,14 @@
 {
   "strategy_id": "toy_session_timing",
   "symbol": "IMOEXF",
-  "trades_total": 1,
-  "win_rate": 0.0,
-  "pnl_gross_total": -19.5,
-  "pnl_net_total": -19.5,
+  "trades_total": 2,
+  "win_rate": 0.5,
+  "pnl_gross_total": 4.0,
+  "pnl_net_total": 4.0,
   "commission_total": 0.0,
-  "gross_profit": 0.0,
-  "gross_loss": 19.5,
-  "avg_pnl": -19.5,
-  "max_pnl": -19.5,
-  "min_pnl": -19.5
+  "gross_profit": 22.5,
+  "gross_loss": 18.5,
+  "avg_pnl": 2.0,
+  "max_pnl": 22.5,
+  "min_pnl": -18.5
 }
