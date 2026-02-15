@@ -313,3 +313,89 @@ timezone_offset_hours = 3
     assert_eq!(resolved.config.strategy.exit_before_close_min, 20);
     assert_eq!(resolved.config.strategy.timezone_offset_hours, 3);
 }
+
+#[test]
+fn loads_replay_settings_from_file() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "REPLAY_ENABLED",
+        "REPLAY_BARS_CSV_PATH",
+        "REPLAY_REFERENCE_TRADES_CSV_PATH",
+        "REPLAY_OUTPUT_DIR",
+        "REPLAY_PRICE_TOLERANCE",
+        "REPLAY_STRICT_DEDUP",
+    ]);
+
+    let path = write_temp_config(
+        r#"
+[replay]
+enabled = true
+bars_csv_path = "./paper_bars_2.csv"
+reference_trades_csv_path = "./paper_trades_2.csv"
+output_dir = "./artifacts"
+price_tolerance = 0.0001
+strict_dedup = false
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert!(resolved.config.replay.enabled);
+    assert_eq!(
+        resolved.config.replay.bars_csv_path.as_deref(),
+        Some("./paper_bars_2.csv")
+    );
+    assert_eq!(
+        resolved.config.replay.reference_trades_csv_path.as_deref(),
+        Some("./paper_trades_2.csv")
+    );
+    assert_eq!(resolved.config.replay.output_dir, "./artifacts");
+    assert_eq!(resolved.config.replay.price_tolerance, 0.0001);
+    assert!(!resolved.config.replay.strict_dedup);
+}
+
+#[test]
+fn replay_env_overrides_take_precedence() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "REPLAY_ENABLED",
+        "REPLAY_BARS_CSV_PATH",
+        "REPLAY_REFERENCE_TRADES_CSV_PATH",
+        "REPLAY_OUTPUT_DIR",
+        "REPLAY_PRICE_TOLERANCE",
+        "REPLAY_STRICT_DEDUP",
+    ]);
+    let _enabled = set_env_var("REPLAY_ENABLED", "true");
+    let _bars = set_env_var("REPLAY_BARS_CSV_PATH", "./env_bars.csv");
+    let _reference = set_env_var("REPLAY_REFERENCE_TRADES_CSV_PATH", "./env_trades.csv");
+    let _out = set_env_var("REPLAY_OUTPUT_DIR", "./env_out");
+    let _tol = set_env_var("REPLAY_PRICE_TOLERANCE", "0.25");
+    let _dedup = set_env_var("REPLAY_STRICT_DEDUP", "false");
+
+    let path = write_temp_config(
+        r#"
+[replay]
+enabled = false
+bars_csv_path = "./file_bars.csv"
+reference_trades_csv_path = "./file_trades.csv"
+output_dir = "./file_out"
+price_tolerance = 0.00000001
+strict_dedup = true
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert!(resolved.config.replay.enabled);
+    assert_eq!(
+        resolved.config.replay.bars_csv_path.as_deref(),
+        Some("./env_bars.csv")
+    );
+    assert_eq!(
+        resolved.config.replay.reference_trades_csv_path.as_deref(),
+        Some("./env_trades.csv")
+    );
+    assert_eq!(resolved.config.replay.output_dir, "./env_out");
+    assert_eq!(resolved.config.replay.price_tolerance, 0.25);
+    assert!(!resolved.config.replay.strict_dedup);
+}

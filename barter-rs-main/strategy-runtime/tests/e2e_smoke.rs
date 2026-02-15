@@ -14,8 +14,8 @@ use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
     deterministic_request_id, BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig,
-    PaperOutput, PositionEvent, ReadConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode,
-    TrimConfig,
+    PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
+    StreamNames, TradeMode, TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -99,6 +99,14 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             trades_csv: format!("{prefix}-trades.csv"),
             summary_json: format!("{prefix}-summary.json"),
             append: false,
+        },
+        replay: ReplayConfig {
+            enabled: false,
+            bars_csv_path: None,
+            reference_trades_csv_path: None,
+            output_dir: "replay_out".to_string(),
+            price_tolerance: 1e-8,
+            strict_dedup: true,
         },
         reset_state_on_start: false,
     }

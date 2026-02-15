@@ -15,6 +15,7 @@ use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
+use crate::strategies::session_gap_standalone::SessionGapStandaloneStrategy;
 use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
@@ -219,6 +220,9 @@ impl StrategyRuntime {
             )),
             StrategyKind::ToySessionTiming => Box::new(ToySessionTimingStrategy::new(
                 config.strategy.to_toy_session_timing_config(),
+            )),
+            StrategyKind::SessionGapStandalone => Box::new(SessionGapStandaloneStrategy::new(
+                config.strategy.to_session_gap_standalone_config(),
             )),
         };
         Ok(Self {
@@ -1875,7 +1879,7 @@ fn bars_tf_seconds(stream: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CloseTrigger, ReadConfig, StrategyConfig, StreamNames, TrimConfig};
+    use crate::{CloseTrigger, ReadConfig, ReplayConfig, StrategyConfig, StreamNames, TrimConfig};
 
     fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {
         let config = RuntimeConfig {
@@ -1949,6 +1953,14 @@ mod tests {
                 trades_csv: "trades.csv".to_string(),
                 summary_json: "summary.json".to_string(),
                 append: false,
+            },
+            replay: ReplayConfig {
+                enabled: false,
+                bars_csv_path: None,
+                reference_trades_csv_path: None,
+                output_dir: "replay_out".to_string(),
+                price_tolerance: 1e-8,
+                strict_dedup: true,
             },
             reset_state_on_start: false,
         };

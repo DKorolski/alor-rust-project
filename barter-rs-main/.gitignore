@@ -19,3 +19,10 @@ Cargo.lock
 *.swo
 *.swn
 *.bak
+
+# Replay artifacts
+bars_normalized.csv
+intents_log.csv
+trades_runtime.csv
+parity_report.json
+replay_out/

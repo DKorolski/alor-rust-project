@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::strategies::limit_cancel::LimitCancelConfig;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseConfig;
+use crate::strategies::session_gap_standalone::SessionGapStandaloneConfig;
 use crate::strategies::toy_session_timing::ToySessionTimingConfig;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +203,7 @@ pub struct RuntimeConfig {
     pub strategy: StrategyConfig,
     pub paper: PaperConfig,
     pub backtest: BacktestConfig,
+    pub replay: ReplayConfig,
     pub reset_state_on_start: bool,
 }
 
@@ -286,6 +288,7 @@ pub enum StrategyKind {
     LimitCancel,
     MarketBuyAndClose,
     ToySessionTiming,
+    SessionGapStandalone,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -310,6 +313,16 @@ pub struct PaperConfig {
     pub trades_csv: String,
     pub summary_json: String,
     pub append: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplayConfig {
+    pub enabled: bool,
+    pub bars_csv_path: Option<String>,
+    pub reference_trades_csv_path: Option<String>,
+    pub output_dir: String,
+    pub price_tolerance: f64,
+    pub strict_dedup: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -354,6 +367,16 @@ impl StrategyConfig {
             entry_after_open_min: self.entry_after_open_min,
             exit_before_close_min: self.exit_before_close_min,
             timezone_offset_hours: self.timezone_offset_hours,
+        }
+    }
+
+    pub fn to_session_gap_standalone_config(&self) -> SessionGapStandaloneConfig {
+        SessionGapStandaloneConfig {
+            symbol: self.symbol.clone(),
+            timezone_offset_hours: self.timezone_offset_hours,
+            close_hour: self.session_close_hour,
+            close_minute: self.session_close_minute,
+            ..SessionGapStandaloneConfig::default()
         }
     }
 }

@@ -41,7 +41,7 @@ runtime_state = 2000
 
 [strategy]
 strategy_id = "toy_session_timing"
-strategy_kind = "toy_session_timing" # limit_cancel | market_buy_and_close | toy_session_timing
+strategy_kind = "toy_session_timing" # limit_cancel | market_buy_and_close | toy_session_timing | session_gap_standalone
 symbol = "IMOEXF"
 qty = 1.0
 side = "buy"

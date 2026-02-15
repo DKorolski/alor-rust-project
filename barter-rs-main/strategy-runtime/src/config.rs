@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::{
-    BacktestConfig, CloseTrigger, PaperConfig, PaperOutput, ReadConfig, RuntimeConfig,
-    StrategyConfig, StrategyKind, StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, CloseTrigger, PaperConfig, PaperOutput, ReadConfig, ReplayConfig,
+    RuntimeConfig, StrategyConfig, StrategyKind, StreamNames, TradeMode, TrimConfig,
 };
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
@@ -50,6 +50,12 @@ const DEFAULT_BACKTEST_TRADE_LOG: &str = "./backtest_trades.log";
 const DEFAULT_BACKTEST_TRADES_CSV: &str = "./trades.csv";
 const DEFAULT_BACKTEST_SUMMARY_JSON: &str = "./summary.json";
 const DEFAULT_BACKTEST_APPEND: bool = false;
+const DEFAULT_REPLAY_ENABLED: bool = false;
+const DEFAULT_REPLAY_BARS_CSV_PATH: Option<&str> = None;
+const DEFAULT_REPLAY_REFERENCE_TRADES_CSV_PATH: Option<&str> = None;
+const DEFAULT_REPLAY_OUTPUT_DIR: &str = "replay_out";
+const DEFAULT_REPLAY_PRICE_TOLERANCE: f64 = 1e-8;
+const DEFAULT_REPLAY_STRICT_DEDUP: bool = true;
 
 const DEFAULT_BLOCK_MS: usize = 500;
 const DEFAULT_CLAIM_IDLE_MS: usize = 5_000;
@@ -98,6 +104,7 @@ pub struct ConfigSources {
     pub runtime: RuntimeSources,
     pub paper: PaperSources,
     pub backtest: BacktestSources,
+    pub replay: ReplaySources,
     pub reset_state_on_start: ConfigSource,
 }
 
@@ -182,6 +189,16 @@ pub struct BacktestSources {
     pub append: ConfigSource,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaySources {
+    pub enabled: ConfigSource,
+    pub bars_csv_path: ConfigSource,
+    pub reference_trades_csv_path: ConfigSource,
+    pub output_dir: ConfigSource,
+    pub price_tolerance: ConfigSource,
+    pub strict_dedup: ConfigSource,
+}
+
 impl Default for ConfigSources {
     fn default() -> Self {
         Self {
@@ -198,6 +215,7 @@ impl Default for ConfigSources {
             runtime: RuntimeSources::default(),
             paper: PaperSources::default(),
             backtest: BacktestSources::default(),
+            replay: ReplaySources::default(),
             reset_state_on_start: ConfigSource::Default,
         }
     }
@@ -305,6 +323,19 @@ impl Default for BacktestSources {
     }
 }
 
+impl Default for ReplaySources {
+    fn default() -> Self {
+        Self {
+            enabled: ConfigSource::Default,
+            bars_csv_path: ConfigSource::Default,
+            reference_trades_csv_path: ConfigSource::Default,
+            output_dir: ConfigSource::Default,
+            price_tolerance: ConfigSource::Default,
+            strict_dedup: ConfigSource::Default,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedRuntimeConfig {
     pub config: RuntimeConfig,
@@ -328,6 +359,7 @@ struct RuntimeConfigFile {
     strategy: Option<StrategyConfigFile>,
     paper: Option<PaperConfigFile>,
     backtest: Option<BacktestConfigFile>,
+    replay: Option<ReplayConfigFile>,
     reset_state_on_start: Option<bool>,
 }
 
@@ -412,6 +444,16 @@ struct BacktestConfigFile {
     append: Option<bool>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ReplayConfigFile {
+    enabled: Option<bool>,
+    bars_csv_path: Option<String>,
+    reference_trades_csv_path: Option<String>,
+    output_dir: Option<String>,
+    price_tolerance: Option<f64>,
+    strict_dedup: Option<bool>,
+}
+
 pub fn load_runtime_config(
     config_path: PathBuf,
     allow_missing: bool,
@@ -471,6 +513,15 @@ pub fn load_runtime_config(
         trades_csv: DEFAULT_BACKTEST_TRADES_CSV.to_string(),
         summary_json: DEFAULT_BACKTEST_SUMMARY_JSON.to_string(),
         append: DEFAULT_BACKTEST_APPEND,
+    };
+    let mut replay = ReplayConfig {
+        enabled: DEFAULT_REPLAY_ENABLED,
+        bars_csv_path: DEFAULT_REPLAY_BARS_CSV_PATH.map(ToString::to_string),
+        reference_trades_csv_path: DEFAULT_REPLAY_REFERENCE_TRADES_CSV_PATH
+            .map(ToString::to_string),
+        output_dir: DEFAULT_REPLAY_OUTPUT_DIR.to_string(),
+        price_tolerance: DEFAULT_REPLAY_PRICE_TOLERANCE,
+        strict_dedup: DEFAULT_REPLAY_STRICT_DEDUP,
     };
 
     let mut trim = TrimConfig {
@@ -695,6 +746,32 @@ pub fn load_runtime_config(
                 sources.backtest.append = ConfigSource::File;
             }
         }
+        if let Some(replay_file) = &file_config.replay {
+            if let Some(value) = replay_file.enabled {
+                replay.enabled = value;
+                sources.replay.enabled = ConfigSource::File;
+            }
+            if let Some(value) = &replay_file.bars_csv_path {
+                replay.bars_csv_path = Some(value.clone());
+                sources.replay.bars_csv_path = ConfigSource::File;
+            }
+            if let Some(value) = &replay_file.reference_trades_csv_path {
+                replay.reference_trades_csv_path = Some(value.clone());
+                sources.replay.reference_trades_csv_path = ConfigSource::File;
+            }
+            if let Some(value) = &replay_file.output_dir {
+                replay.output_dir = value.clone();
+                sources.replay.output_dir = ConfigSource::File;
+            }
+            if let Some(value) = replay_file.price_tolerance {
+                replay.price_tolerance = value;
+                sources.replay.price_tolerance = ConfigSource::File;
+            }
+            if let Some(value) = replay_file.strict_dedup {
+                replay.strict_dedup = value;
+                sources.replay.strict_dedup = ConfigSource::File;
+            }
+        }
         if let Some(value) = file_config.reset_state_on_start {
             reset_state_on_start = value;
             sources.reset_state_on_start = ConfigSource::File;
@@ -897,6 +974,30 @@ pub fn load_runtime_config(
         backtest.append = value;
         sources.backtest.append = ConfigSource::Env;
     }
+    if let Some(value) = env::var("REPLAY_ENABLED").ok() {
+        replay.enabled = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.replay.enabled = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("REPLAY_BARS_CSV_PATH").ok() {
+        replay.bars_csv_path = Some(value);
+        sources.replay.bars_csv_path = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("REPLAY_REFERENCE_TRADES_CSV_PATH").ok() {
+        replay.reference_trades_csv_path = Some(value);
+        sources.replay.reference_trades_csv_path = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("REPLAY_OUTPUT_DIR").ok() {
+        replay.output_dir = value;
+        sources.replay.output_dir = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse::<f64>("REPLAY_PRICE_TOLERANCE") {
+        replay.price_tolerance = value;
+        sources.replay.price_tolerance = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("REPLAY_STRICT_DEDUP") {
+        replay.strict_dedup = value;
+        sources.replay.strict_dedup = ConfigSource::Env;
+    }
     if let Some(value) = env::var("RESET_STATE_ON_START").ok() {
         reset_state_on_start = value == "1" || value.eq_ignore_ascii_case("true");
         sources.reset_state_on_start = ConfigSource::Env;
@@ -1004,6 +1105,7 @@ pub fn load_runtime_config(
         strategy,
         paper,
         backtest,
+        replay,
         reset_state_on_start,
     };
 
@@ -1076,6 +1178,7 @@ fn parse_strategy_kind(value: &str) -> StrategyKind {
     match value.to_lowercase().as_str() {
         "market_buy_and_close" | "marketbuyandclose" => StrategyKind::MarketBuyAndClose,
         "toy_session_timing" | "toysessiontiming" => StrategyKind::ToySessionTiming,
+        "session_gap_standalone" | "sessiongapstandalone" => StrategyKind::SessionGapStandalone,
         _ => StrategyKind::LimitCancel,
     }
 }

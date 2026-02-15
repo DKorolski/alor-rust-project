@@ -41,7 +41,7 @@ runtime_state = 2000
 
 [strategy]
 strategy_id = "limit_cancel"
-strategy_kind = "limit_cancel" # limit_cancel | market_buy_and_close | toy_session_timing
+strategy_kind = "limit_cancel" # limit_cancel | market_buy_and_close | toy_session_timing | session_gap_standalone
 symbol = "IMOEXF"
 qty = 1.0
 side = "sell"
@@ -71,3 +71,11 @@ trade_log = "./backtest_trades.log"
 trades_csv = "./trades.csv"
 summary_json = "./summary.json"
 append = false
+
+[replay]
+enabled = false
+bars_csv_path = "./paper_bars_2.csv"
+reference_trades_csv_path = "./paper_trades_2.csv"
+output_dir = "./replay_out"
+price_tolerance = 1e-8
+strict_dedup = true
