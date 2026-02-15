@@ -1,0 +1,14 @@
+{
+  "strategy_id": "session_gap_standalone",
+  "symbol": "IMOEXF",
+  "trades_total": 25,
+  "win_rate": 0.72,
+  "pnl_gross_total": 443.8800000000037,
+  "pnl_net_total": 443.8800000000037,
+  "commission_total": 0.0,
+  "gross_profit": 1296.420000000009,
+  "gross_loss": 852.5400000000053,
+  "avg_pnl": 17.755200000000148,
+  "max_pnl": 144.3200000000038,
+  "min_pnl": -278.4600000000004
+}

@@ -2,15 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tokio::time::{sleep, Instant};
+use serde_json::json;
+use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 
 use alor_protocol::{Envelope, MessageType};
 
-use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
+use crate::live_guard::{HealthEvent, LiveGuardDecision, LiveGuardState, evaluate_live_guard};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
@@ -54,6 +55,37 @@ struct OrdersSnapshot {
 #[derive(Debug, Deserialize)]
 struct PositionsSnapshot {
     pub positions: HashMap<String, PositionEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayCsvBarRow {
+    time: String,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayReferenceTradeRow {
+    entry_time: String,
+    exit_time: String,
+    direction: String,
+    size: i64,
+    entry_price: f64,
+    exit_price: f64,
+    reason: String,
+    pnl: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplayParityReport {
+    status: String,
+    tolerance: f64,
+    runtime_trades: usize,
+    reference_trades: usize,
+    matched_trades: usize,
+    first_divergence: Option<String>,
 }
 
 #[derive(Debug)]
@@ -245,6 +277,10 @@ impl StrategyRuntime {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        if self.config.replay.enabled {
+            return self.run_replay().await;
+        }
+
         self.bootstrap().await?;
         loop {
             self.poll_once().await?;
@@ -254,6 +290,107 @@ impl StrategyRuntime {
 
     pub async fn flush_reports(&self) -> Result<()> {
         self.persist_ledger_reports().await
+    }
+
+    async fn run_replay(&mut self) -> Result<()> {
+        self.prepare_artifacts()?;
+        let bars_csv_path = self
+            .config
+            .replay
+            .bars_csv_path
+            .as_deref()
+            .context("replay.enabled=true requires replay.bars_csv_path")?;
+
+        let bars = Self::load_replay_bars(
+            bars_csv_path,
+            &self.config.strategy.symbol,
+            self.config.replay.strict_dedup,
+        )?;
+
+        for bar in bars {
+            self.handle_replay_bar(bar).await?;
+        }
+
+        self.persist_ledger_reports().await?;
+        self.persist_replay_parity_report()?;
+        Ok(())
+    }
+
+    fn load_replay_bars(path: &str, symbol: &str, strict_dedup: bool) -> Result<Vec<BarEvent>> {
+        let mut rdr = csv::Reader::from_path(path)
+            .with_context(|| format!("failed to open replay bars csv at {path}"))?;
+        let mut bars = Vec::new();
+        let mut previous_ts: Option<i64> = None;
+
+        for (idx, row) in rdr.deserialize::<ReplayCsvBarRow>().enumerate() {
+            let row_number = idx + 2;
+            let raw = row.with_context(|| format!("invalid replay csv row #{row_number}"))?;
+            let ts_utc = chrono::DateTime::parse_from_rfc3339(&raw.time)
+                .with_context(|| {
+                    format!(
+                        "invalid replay RFC3339 time at row #{row_number}: {}",
+                        raw.time
+                    )
+                })?
+                .timestamp();
+
+            if let Some(prev) = previous_ts {
+                if ts_utc < prev {
+                    anyhow::bail!(
+                        "replay bars are not ascending at row #{row_number}: {ts_utc} < {prev}"
+                    );
+                }
+                if ts_utc == prev {
+                    if strict_dedup {
+                        anyhow::bail!(
+                            "replay bars contain duplicate timestamp at row #{row_number}: {ts_utc}"
+                        );
+                    }
+                    continue;
+                }
+            }
+            previous_ts = Some(ts_utc);
+
+            bars.push(BarEvent {
+                symbol: symbol.to_string(),
+                close_time_utc: ts_utc,
+                close: raw.close,
+                o: raw.open,
+                h: raw.high,
+                l: raw.low,
+                v: 0.0,
+                origin: DataOrigin::Replay,
+            });
+        }
+
+        Ok(bars)
+    }
+
+    async fn handle_replay_bar(&mut self, bar: BarEvent) -> Result<()> {
+        if self.state.is_duplicate_bar(&bar.symbol, bar.close_time_utc) {
+            return Ok(());
+        }
+
+        self.state
+            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        let ctx = self.strategy_ctx();
+        let intents = self.strategy.on_bar(&ctx, &bar);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
+
+        if self.config.trade_mode != TradeMode::Live {
+            self.simulate_fills(&bar).await?;
+            self.simulate_intents(&bar, intents).await?;
+        } else {
+            self.apply_intents(&ctx, bar.close_time_utc, intents)
+                .await?;
+        }
+
+        self.metrics.bars_read_total = self.metrics.bars_read_total.saturating_add(1);
+        self.metrics.bars_decoded_ok_total = self.metrics.bars_decoded_ok_total.saturating_add(1);
+        self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
+
+        Ok(())
     }
 
     async fn bootstrap(&mut self) -> Result<()> {
@@ -1314,6 +1451,159 @@ impl StrategyRuntime {
         }
     }
 
+    fn persist_replay_parity_report(&self) -> Result<()> {
+        if !self.config.replay.enabled {
+            return Ok(());
+        }
+
+        let Some(reference_path) = self.config.replay.reference_trades_csv_path.as_deref() else {
+            return Ok(());
+        };
+
+        let reference = Self::load_reference_trades(reference_path)?;
+        let report = Self::build_replay_parity_report(
+            self.ledger.closed_trades(),
+            &reference,
+            self.config.replay.price_tolerance,
+        );
+
+        let output_path = format!("{}/parity_report.json", self.config.replay.output_dir);
+        if let Some(parent) = std::path::Path::new(&output_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create replay output directory {}",
+                        parent.display()
+                    )
+                })?;
+            }
+        }
+
+        let file = std::fs::File::create(&output_path)
+            .with_context(|| format!("failed to create replay parity report at {output_path}"))?;
+        serde_json::to_writer_pretty(file, &report)?;
+
+        info!(
+            output_path = %output_path,
+            status = %report.status,
+            runtime_trades = report.runtime_trades,
+            reference_trades = report.reference_trades,
+            matched_trades = report.matched_trades,
+            "replay parity report written"
+        );
+
+        Ok(())
+    }
+
+    fn load_reference_trades(path: &str) -> Result<Vec<ReplayReferenceTradeRow>> {
+        if !std::path::Path::new(path).exists() {
+            return Ok(Vec::new());
+        }
+        let mut rdr = csv::Reader::from_path(path)
+            .with_context(|| format!("failed to open reference trades csv at {path}"))?;
+        let mut rows = Vec::new();
+        for row in rdr.deserialize::<ReplayReferenceTradeRow>() {
+            rows.push(
+                row.with_context(|| {
+                    format!("failed to decode reference trades csv row in {path}")
+                })?,
+            );
+        }
+        Ok(rows)
+    }
+
+    fn normalize_reference_side(direction: &str) -> Option<&'static str> {
+        if direction.eq_ignore_ascii_case("long") || direction.eq_ignore_ascii_case("buy") {
+            Some("buy")
+        } else if direction.eq_ignore_ascii_case("short") || direction.eq_ignore_ascii_case("sell")
+        {
+            Some("sell")
+        } else {
+            None
+        }
+    }
+
+    fn build_replay_parity_report(
+        runtime: &[crate::trade_ledger::ClosedTradeRecord],
+        reference: &[ReplayReferenceTradeRow],
+        tolerance: f64,
+    ) -> ReplayParityReport {
+        let mut first_divergence = None;
+        let mut matched = 0usize;
+        let common = runtime.len().min(reference.len());
+
+        for index in 0..common {
+            let rt = &runtime[index];
+            let rf = &reference[index];
+
+            let entry_match = chrono::DateTime::parse_from_rfc3339(&rf.entry_time)
+                .ok()
+                .map(|d| d.timestamp())
+                == Some(rt.entry_ts_utc);
+            let exit_match = chrono::DateTime::parse_from_rfc3339(&rf.exit_time)
+                .ok()
+                .map(|d| d.timestamp())
+                == Some(rt.exit_ts_utc);
+            let normalized_ref_side = Self::normalize_reference_side(&rf.direction);
+            let side_match = normalized_ref_side
+                .map(|side| side.eq_ignore_ascii_case(&rt.side))
+                .unwrap_or_else(|| rf.direction.eq_ignore_ascii_case(&rt.side));
+            let qty_match = (rf.size as f64 - rt.qty).abs() <= tolerance;
+            let entry_price_match = (rf.entry_price - rt.entry_price).abs() <= tolerance;
+            let exit_price_match = (rf.exit_price - rt.exit_price).abs() <= tolerance;
+            let pnl_match = (rf.pnl - rt.pnl_net).abs() <= tolerance;
+
+            if entry_match
+                && exit_match
+                && side_match
+                && qty_match
+                && entry_price_match
+                && exit_price_match
+                && pnl_match
+            {
+                matched += 1;
+                continue;
+            }
+
+            first_divergence = Some(format!(
+                "index={index} entry_match={entry_match} exit_match={exit_match} side_match={side_match} qty_match={qty_match} entry_price_match={entry_price_match} exit_price_match={exit_price_match} pnl_match={pnl_match} reason_ref={} expected_side={} runtime={} ",
+                rf.reason,
+                normalized_ref_side.unwrap_or(rf.direction.as_str()),
+                json!({
+                    "entry_ts_utc": rt.entry_ts_utc,
+                    "exit_ts_utc": rt.exit_ts_utc,
+                    "side": rt.side,
+                    "qty": rt.qty,
+                    "entry_price": rt.entry_price,
+                    "exit_price": rt.exit_price,
+                    "pnl_net": rt.pnl_net,
+                })
+            ));
+            break;
+        }
+
+        if first_divergence.is_none() && runtime.len() != reference.len() {
+            first_divergence = Some(format!(
+                "trade count mismatch runtime={} reference={}",
+                runtime.len(),
+                reference.len()
+            ));
+        }
+
+        ReplayParityReport {
+            status: if first_divergence.is_none() {
+                "pass".to_string()
+            } else {
+                "fail".to_string()
+            },
+            tolerance,
+            runtime_trades: runtime.len(),
+            reference_trades: reference.len(),
+            matched_trades: matched,
+            first_divergence,
+        }
+    }
+
     fn strategy_ctx(&self) -> StrategyCtx {
         let gateway_phase = self
             .live_guard
@@ -1994,10 +2284,12 @@ mod tests {
     fn bootstrap_ready_requires_snapshots_and_live_bar() {
         let state = BootstrapState::default();
         assert!(!state.ready());
-        assert!(state
-            .reasons()
-            .iter()
-            .any(|reason| reason == "bootstrap:not_ready"));
+        assert!(
+            state
+                .reasons()
+                .iter()
+                .any(|reason| reason == "bootstrap:not_ready")
+        );
     }
 
     #[test]
@@ -2008,10 +2300,12 @@ mod tests {
             seen_live_bar: false,
         };
         assert!(!state.ready());
-        assert!(state
-            .reasons()
-            .iter()
-            .any(|reason| reason == "bootstrap:missing_live_bar"));
+        assert!(
+            state
+                .reasons()
+                .iter()
+                .any(|reason| reason == "bootstrap:missing_live_bar")
+        );
     }
 
     #[test]
@@ -2083,6 +2377,90 @@ mod tests {
             owned: true,
         });
         assert_eq!(runtime.ledger.trades()[0].price, 110.0);
+    }
+
+    #[test]
+    fn parity_side_mapping_accepts_long_short_vs_buy_sell() {
+        let runtime = test_runtime(TradeMode::Paper);
+        let runtime_rows = vec![crate::trade_ledger::ClosedTradeRecord {
+            entry_ts_utc: 100,
+            exit_ts_utc: 160,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            entry_price: 10.0,
+            exit_price: 11.0,
+            commission_total: 0.0,
+            pnl_gross: 1.0,
+            pnl_net: 1.0,
+        }];
+        let reference_rows = vec![ReplayReferenceTradeRow {
+            entry_time: chrono::DateTime::from_timestamp(100, 0)
+                .unwrap()
+                .to_rfc3339(),
+            exit_time: chrono::DateTime::from_timestamp(160, 0)
+                .unwrap()
+                .to_rfc3339(),
+            direction: "Long".to_string(),
+            size: 1,
+            entry_price: 10.0,
+            exit_price: 11.0,
+            reason: "tp".to_string(),
+            pnl: 1.0,
+        }];
+
+        let report =
+            StrategyRuntime::build_replay_parity_report(&runtime_rows, &reference_rows, 1e-8);
+        assert_eq!(report.status, "pass");
+        assert_eq!(report.matched_trades, 1);
+        drop(runtime);
+    }
+
+    #[test]
+    fn simulated_market_fills_on_next_bar_open() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let bar1 = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.5,
+            o: 10.0,
+            h: 10.6,
+            l: 9.9,
+            v: 0.0,
+            origin: DataOrigin::Replay,
+        };
+        let bar2 = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 160,
+            close: 11.2,
+            o: 11.0,
+            h: 11.3,
+            l: 10.8,
+            v: 0.0,
+            origin: DataOrigin::Replay,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar1,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Buy,
+                        fill_price: Some(999.0),
+                    }],
+                )
+                .await
+                .unwrap();
+            runtime.simulate_fills(&bar1).await.unwrap();
+            assert!(runtime.ledger.trades().is_empty());
+
+            runtime.simulate_fills(&bar2).await.unwrap();
+            assert_eq!(runtime.ledger.trades().len(), 1);
+            assert_eq!(runtime.ledger.trades()[0].ts_utc, 160);
+            assert_eq!(runtime.ledger.trades()[0].price, 11.0);
+        });
     }
 }
 

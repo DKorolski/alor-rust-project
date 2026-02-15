@@ -158,6 +158,10 @@ impl TradeLedger {
         &self.trades
     }
 
+    pub fn closed_trades(&self) -> &[ClosedTradeRecord] {
+        &self.closed_trades
+    }
+
     fn write_trades_csv(&self, path: &str) -> Result<()> {
         let mut file = File::create(path)?;
         writeln!(
@@ -186,7 +190,11 @@ impl TradeLedger {
     fn write_summary_json(&self, strategy_id: &str, symbol: &str, path: &str) -> Result<()> {
         let summary = self.summary(strategy_id, symbol);
         let payload = serde_json::to_string_pretty(&summary)?;
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         file.write_all(payload.as_bytes())?;
         Ok(())
     }
@@ -325,11 +333,6 @@ impl TradeLedger {
         } else {
             self.position_cost / self.position_qty
         }
-    }
-
-    #[cfg(test)]
-    fn closed_trades(&self) -> &[ClosedTradeRecord] {
-        &self.closed_trades
     }
 }
 

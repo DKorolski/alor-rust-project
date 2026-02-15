@@ -529,13 +529,23 @@ fn main() -> Result<()> {
 
     let bars_path =
         env::var("REPLAY_BARS_CSV_PATH").unwrap_or_else(|_| DEFAULT_BARS_CSV.to_string());
-    let reference_trades_path =
-        env::var("REPLAY_REFERENCE_TRADES_PATH").unwrap_or_else(|_| DEFAULT_TRADES_CSV.to_string());
+    let reference_trades_path = env::var("REPLAY_REFERENCE_TRADES_CSV_PATH")
+        .or_else(|_| env::var("REPLAY_REFERENCE_TRADES_PATH"))
+        .unwrap_or_else(|_| DEFAULT_TRADES_CSV.to_string());
     let symbol = env::var("REPLAY_SYMBOL").unwrap_or_else(|_| DEFAULT_SYMBOL.to_string());
     let tolerance = env::var("REPLAY_PRICE_TOLERANCE")
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(1e-8);
+    let strict_dedup = env::var("REPLAY_STRICT_DEDUP")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true);
 
     let output_dir =
         env::var("REPLAY_OUTPUT_DIR").unwrap_or_else(|_| DEFAULT_OUTPUT_DIR.to_string());
@@ -560,7 +570,7 @@ fn main() -> Result<()> {
         DEFAULT_PARITY_REPORT_JSON,
     );
 
-    let bars = load_bars(&bars_path)?;
+    let bars = load_bars(&bars_path, strict_dedup)?;
     write_normalized_bars(&bars, &bars_out)?;
 
     let mut state = ReplayState::new(StrategyConfig::default());
@@ -603,7 +613,7 @@ fn ensure_parent_dir(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn load_bars(path: &str) -> Result<Vec<Bar>> {
+fn load_bars(path: &str, strict_dedup: bool) -> Result<Vec<Bar>> {
     let mut rdr = csv::Reader::from_path(path)
         .with_context(|| format!("failed to open bars csv at {path}"))?;
     let mut bars = Vec::new();
@@ -617,10 +627,14 @@ fn load_bars(path: &str) -> Result<Vec<Bar>> {
         let ts_utc = time.timestamp();
 
         if let Some(prev) = previous_ts {
-            if ts_utc <= prev {
-                bail!(
-                    "bars csv is not strictly ascending or contains duplicate timestamp at row #{row_number}: {ts_utc} <= {prev}"
-                );
+            if ts_utc < prev {
+                bail!("bars csv is not ascending at row #{row_number}: {ts_utc} < {prev}");
+            }
+            if ts_utc == prev {
+                if strict_dedup {
+                    bail!("bars csv contains duplicate timestamp at row #{row_number}: {ts_utc}");
+                }
+                continue;
             }
         }
         previous_ts = Some(ts_utc);
