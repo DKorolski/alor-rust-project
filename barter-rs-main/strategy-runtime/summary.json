@@ -1,14 +1,14 @@
 {
-  "strategy_id": "limit_cancel",
-  "symbol": "SBER",
-  "trades_total": 0,
-  "win_rate": 0.0,
-  "pnl_gross_total": 0.0,
-  "pnl_net_total": 0.0,
+  "strategy_id": "session_gap_standalone",
+  "symbol": "USDRUBF",
+  "trades_total": 25,
+  "win_rate": 0.72,
+  "pnl_gross_total": 443.9000000000088,
+  "pnl_net_total": 443.9000000000088,
   "commission_total": 0.0,
-  "gross_profit": 0.0,
-  "gross_loss": 0.0,
-  "avg_pnl": 0.0,
-  "max_pnl": 0.0,
-  "min_pnl": 0.0
+  "gross_profit": 1296.420000000009,
+  "gross_loss": 852.5200000000002,
+  "avg_pnl": 17.756000000000352,
+  "max_pnl": 144.3200000000038,
+  "min_pnl": -278.4600000000004
 }

@@ -1,6 +1,6 @@
 {
   "strategy_id": "session_gap_standalone",
-  "symbol": "IMOEXF",
+  "symbol": "USDRUBF",
   "trades_total": 25,
   "win_rate": 0.72,
   "pnl_gross_total": 443.8800000000037,

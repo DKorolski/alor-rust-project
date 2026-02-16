@@ -6,8 +6,8 @@ consumer_group = "strategy-runtime"
 consumer_name = "auto"
 
 [runtime]
-trade_mode = "paper" # paper | live | backtest
-allow_live_orders = false
+trade_mode = "live"
+allow_live_orders = true
 guard_log_interval_ms = 5000
 bootstrap_dump = false
 
@@ -21,7 +21,7 @@ acks = "cmd.acks.7502T0U"
 snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.session_gap_standalone.7502T0U"
+runtime_state = "runtime.state.session_gap_standalone.live.7502T0U"
 
 [read]
 block_ms = 500
@@ -41,37 +41,41 @@ runtime_state = 2000
 
 [strategy]
 strategy_id = "session_gap_standalone"
-strategy_kind = "session_gap_standalone" # limit_cancel | market_buy_and_close | toy_session_timing | session_gap_standalone
+strategy_kind = "session_gap_standalone"
 symbol = "USDRUBF"
 qty = 1.0
+side = "buy"
+place_offset_ticks = 0
 tick_size = 0.01
-max_wait_bars_for_ack = 3
-close_trigger = "next_bar" # next_bar | position_update
-session_open_hour = 9
-session_open_minute = 0
+max_wait_bars_for_ack = 1 # required by shared schema, unused by session_gap_standalone
+close_trigger = "next_bar" # required by shared schema, unused by session_gap_standalone
+session_open_hour = 0 # required by shared schema, unused by session_gap_standalone
+session_open_minute = 0 # required by shared schema, unused by session_gap_standalone
 session_close_hour = 23
-session_close_minute = 50
+session_close_minute = 49
+entry_after_open_min = 0 # required by shared schema, unused by session_gap_standalone
+exit_before_close_min = 0 # required by shared schema, unused by session_gap_standalone
 timezone_offset_hours = 3
 
 [paper]
 enabled = false
 output = "stdout"
-file_path = "./paper_trades.jsonl"
-trades_csv = "./trades.csv"
-summary_json = "./summary.json"
+file_path = "./strategy-runtime/paper_trades.jsonl"
+trades_csv = "./strategy-runtime/trades.csv"
+summary_json = "./strategy-runtime/summary.json"
 append = false
 
 [backtest]
 enabled = false
-trade_log = "./backtest_trades.log"
-trades_csv = "./trades.csv"
-summary_json = "./summary.json"
+trade_log = "./strategy-runtime/backtest_trades.log"
+trades_csv = "./strategy-runtime/backtest_trades.csv"
+summary_json = "./strategy-runtime/backtest_summary.json"
 append = false
 
 [replay]
-enabled = true
+enabled = false
 bars_csv_path = "./paper_bars_2.csv"
 reference_trades_csv_path = "./paper_trades_2.csv"
-output_dir = "./replay_out"
+output_dir = "./strategy-runtime/replay_out"
 price_tolerance = 1e-8
 strict_dedup = true

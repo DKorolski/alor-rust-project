@@ -2,7 +2,7 @@ use std::env;
 use std::fs::File;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Timelike};
 use serde::Deserialize;
 use serde::Serialize;
@@ -75,6 +75,11 @@ enum Direction {
 struct PendingEntry {
     direction: Direction,
     size: i64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingExit {
+    reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +176,7 @@ struct ReplayState {
     first_hour_price: Option<f64>,
     traded_session: bool,
     pending_entry: Option<PendingEntry>,
+    pending_exit: Option<PendingExit>,
     position: Option<Position>,
 }
 
@@ -193,6 +199,7 @@ impl ReplayState {
             first_hour_price: None,
             traded_session: false,
             pending_entry: None,
+            pending_exit: None,
             position: None,
         }
     }
@@ -210,7 +217,8 @@ impl ReplayState {
 
         self.update_session(bar);
         self.execute_pending_entry(symbol, bar, intents);
-        self.handle_exit_conditions(symbol, bar, intents, trades);
+        self.execute_pending_exit(symbol, bar, intents, trades);
+        self.handle_exit_conditions(bar);
         self.maybe_generate_signal(symbol, bar, intents);
     }
 
@@ -276,6 +284,7 @@ impl ReplayState {
         self.first_hour_price = None;
         self.traded_session = false;
         self.pending_entry = None;
+        self.pending_exit = None;
     }
 
     fn execute_pending_entry(&mut self, symbol: &str, bar: &Bar, intents: &mut Vec<IntentLogRow>) {
@@ -332,14 +341,37 @@ impl ReplayState {
         self.position = Some(position);
     }
 
-    fn handle_exit_conditions(
+    fn execute_pending_exit(
         &mut self,
         symbol: &str,
         bar: &Bar,
         intents: &mut Vec<IntentLogRow>,
         trades: &mut Vec<TradeRuntimeRow>,
     ) {
+        let pending = match self.pending_exit.take() {
+            Some(pending) => pending,
+            None => return,
+        };
         let position = match self.position.clone() {
+            Some(position) => position,
+            None => return,
+        };
+        self.exit_position(
+            symbol,
+            bar,
+            bar.open,
+            &pending.reason,
+            &position,
+            intents,
+            trades,
+        );
+    }
+
+    fn handle_exit_conditions(&mut self, bar: &Bar) {
+        if self.pending_exit.is_some() {
+            return;
+        }
+        let position = match self.position.as_ref() {
             Some(pos) => pos,
             None => return,
         };
@@ -347,15 +379,9 @@ impl ReplayState {
         if let Some(session_end_dt) = self.session_end_dt {
             let exit_threshold = session_end_dt - Duration::minutes(self.cfg.exit_offset_min);
             if bar.time >= exit_threshold {
-                self.exit_position(
-                    symbol,
-                    bar,
-                    bar.close,
-                    "session_end",
-                    &position,
-                    intents,
-                    trades,
-                );
+                self.pending_exit = Some(PendingExit {
+                    reason: "session_end".to_string(),
+                });
                 return;
             }
         }
@@ -363,16 +389,24 @@ impl ReplayState {
         match position.direction {
             Direction::Long => {
                 if bar.high >= position.tp {
-                    self.exit_position(symbol, bar, position.tp, "tp", &position, intents, trades);
+                    self.pending_exit = Some(PendingExit {
+                        reason: "tp".to_string(),
+                    });
                 } else if bar.low <= position.sl {
-                    self.exit_position(symbol, bar, position.sl, "sl", &position, intents, trades);
+                    self.pending_exit = Some(PendingExit {
+                        reason: "sl".to_string(),
+                    });
                 }
             }
             Direction::Short => {
                 if bar.low <= position.tp {
-                    self.exit_position(symbol, bar, position.tp, "tp", &position, intents, trades);
+                    self.pending_exit = Some(PendingExit {
+                        reason: "tp".to_string(),
+                    });
                 } else if bar.high >= position.sl {
-                    self.exit_position(symbol, bar, position.sl, "sl", &position, intents, trades);
+                    self.pending_exit = Some(PendingExit {
+                        reason: "sl".to_string(),
+                    });
                 }
             }
         }
@@ -423,6 +457,7 @@ impl ReplayState {
         });
 
         self.position = None;
+        self.pending_exit = None;
     }
 
     fn maybe_generate_signal(&mut self, symbol: &str, bar: &Bar, intents: &mut Vec<IntentLogRow>) {
