@@ -42,7 +42,7 @@ runtime_state = 2000
 [strategy]
 strategy_id = "limit_cancel"
 strategy_kind = "limit_cancel" # limit_cancel | market_buy_and_close | toy_session_timing | session_gap_standalone
-symbol = "IMOEXF"
+symbol = "USDRUBF"
 qty = 1.0
 side = "sell"
 place_offset_ticks = 4
