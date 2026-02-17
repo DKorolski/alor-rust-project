@@ -678,6 +678,15 @@ impl StrategyRuntime {
             } => vec![*close_request_id],
             StrategyState::MarketLivePendingEntry { request_guid, .. }
             | StrategyState::MarketLivePendingExit { request_guid, .. } => vec![*request_guid],
+            StrategyState::SessionGapStandalone { phase, .. } => match phase {
+                crate::state::SessionGapLivePhase::PendingEntry { request_id, .. }
+                | crate::state::SessionGapLivePhase::PendingExit { request_id, .. } => {
+                    vec![*request_id]
+                }
+                crate::state::SessionGapLivePhase::Flat
+                | crate::state::SessionGapLivePhase::InPosition { .. }
+                | crate::state::SessionGapLivePhase::Blocked { .. } => Vec::new(),
+            },
             StrategyState::CancelSent {
                 cancel_request_id, ..
             } => vec![*cancel_request_id],

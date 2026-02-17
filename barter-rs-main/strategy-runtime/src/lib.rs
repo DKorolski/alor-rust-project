@@ -384,6 +384,10 @@ impl StrategyConfig {
             timezone_offset_hours: self.timezone_offset_hours,
             close_hour: self.session_close_hour,
             close_minute: self.session_close_minute,
+            entry_ack_timeout_ms: self.entry_ack_timeout_ms,
+            entry_fill_timeout_ms: self.entry_fill_timeout_ms,
+            exit_ack_timeout_ms: self.exit_ack_timeout_ms,
+            exit_fill_timeout_ms: self.exit_fill_timeout_ms,
             ..SessionGapStandaloneConfig::default()
         }
     }

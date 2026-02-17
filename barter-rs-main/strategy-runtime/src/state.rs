@@ -1,9 +1,47 @@
 use std::collections::HashMap;
 
+use alor_protocol::Side;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{OrderEvent, PositionEvent};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionGapLivePhase {
+    Flat,
+    PendingEntry {
+        request_id: Uuid,
+        side: Side,
+        qty: f64,
+        baseline_qty: f64,
+        tp: Option<f64>,
+        sl: Option<f64>,
+        sent_ts: i64,
+        acked: bool,
+    },
+    InPosition {
+        side: Side,
+        qty: f64,
+        avg_price: f64,
+        baseline_qty: f64,
+        tp: Option<f64>,
+        sl: Option<f64>,
+        opened_ts: i64,
+    },
+    PendingExit {
+        request_id: Uuid,
+        side: Side,
+        qty: f64,
+        baseline_qty: f64,
+        reason: String,
+        sent_ts: i64,
+        acked: bool,
+    },
+    Blocked {
+        reason: String,
+        ts_utc: i64,
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StrategyState {
@@ -69,6 +107,14 @@ pub enum StrategyState {
     Blocked {
         reason: String,
         last_bar_ts: i64,
+    },
+    SessionGapStandalone {
+        session_date: Option<String>,
+        traded_session: bool,
+        prev_close: Option<f64>,
+        yesterday_range: Option<f64>,
+        phase: SessionGapLivePhase,
+        last_bar_ts: Option<i64>,
     },
     CancelSent {
         cancel_request_id: Uuid,
