@@ -158,6 +158,34 @@ async fn publish_snapshots(redis_url: &str, stream: &str) -> Result<()> {
     Ok(())
 }
 
+async fn publish_snapshots_with_positions(
+    redis_url: &str,
+    stream: &str,
+    positions: HashMap<String, PositionEvent>,
+) -> Result<()> {
+    let orders = OrdersSnapshot {
+        orders: HashMap::new(),
+    };
+    let positions = PositionsSnapshot { positions };
+    let orders_envelope = Envelope::new(
+        Utc::now().timestamp(),
+        "test",
+        MessageType::SnapshotOrders,
+        orders,
+    );
+    let positions_envelope = Envelope::new(
+        Utc::now().timestamp(),
+        "test",
+        MessageType::SnapshotPositions,
+        positions,
+    );
+    let orders_json = serde_json::to_string(&orders_envelope)?;
+    let positions_json = serde_json::to_string(&positions_envelope)?;
+    xadd_json(redis_url, stream, &orders_json).await?;
+    xadd_json(redis_url, stream, &positions_json).await?;
+    Ok(())
+}
+
 async fn publish_bar(
     redis_url: &str,
     stream: &str,
@@ -370,4 +398,142 @@ async fn buy_and_close_smoke() -> Result<()> {
 
     runtime_handle.abort();
     Ok(())
+}
+
+async fn run_restart_mid_cycle_case(with_updated_snapshot: bool) -> Result<()> {
+    let redis_url = match redis_url() {
+        Some(url) => url,
+        None => {
+            eprintln!("REDIS_URL not set; skipping e2e test");
+            return Ok(());
+        }
+    };
+    redis_flushdb(&redis_url).await?;
+
+    let prefix = format!("e2e-buy-close-restart-{}", Uuid::new_v4());
+    let config_a = build_config(redis_url.clone(), &prefix, "runtime-buy-close-a");
+    let config_b = build_config(redis_url.clone(), &prefix, "runtime-buy-close-b");
+
+    if let Some(stream) = &config_a.streams.snapshots {
+        publish_snapshots(&redis_url, stream).await?;
+    }
+    if let Some(health_stream) = &config_a.streams.health {
+        publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
+    }
+
+    let handle_a = spawn_runtime(config_a.clone()).await;
+
+    publish_bar(
+        &redis_url,
+        &config_a.streams.bars,
+        &config_a.strategy.symbol,
+        30_000,
+        100.0,
+        DataOrigin::Live,
+    )
+    .await?;
+
+    let (buy_id, buy_cmd) = timeout(
+        Duration::from_secs(5),
+        read_next_command(&redis_url, &config_a.streams.commands, "0-0"),
+    )
+    .await??;
+
+    publish_ack(
+        &redis_url,
+        &config_a.streams.acks,
+        CommandAck::accepted(buy_cmd.request_id),
+    )
+    .await?;
+    publish_position(
+        &redis_url,
+        &config_a.streams.positions,
+        &config_a.strategy.symbol,
+        1.0,
+        30_001,
+    )
+    .await?;
+
+    handle_a.abort();
+
+    if let Some(stream) = &config_b.streams.snapshots {
+        if with_updated_snapshot {
+            publish_snapshots_with_positions(
+                &redis_url,
+                stream,
+                HashMap::from([(
+                    config_b.strategy.symbol.clone(),
+                    PositionEvent {
+                        symbol: config_b.strategy.symbol.clone(),
+                        qty: 1.0,
+                        existing: true,
+                        avg_price: 100.0,
+                        ts_utc: 30_010,
+                    },
+                )]),
+            )
+            .await?;
+        } else {
+            publish_snapshots(&redis_url, stream).await?;
+        }
+    }
+    if let Some(health_stream) = &config_b.streams.health {
+        publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
+    }
+
+    let handle_b = spawn_runtime(config_b.clone()).await;
+
+    publish_bar(
+        &redis_url,
+        &config_b.streams.bars,
+        &config_b.strategy.symbol,
+        31_000,
+        101.0,
+        DataOrigin::Live,
+    )
+    .await?;
+
+    let (_close_id, close_cmd) = timeout(
+        Duration::from_secs(5),
+        read_next_command(&redis_url, &config_b.streams.commands, &buy_id),
+    )
+    .await??;
+    match close_cmd.action {
+        alor_protocol::CommandAction::Market(market) => {
+            assert_eq!(market.side, alor_protocol::Side::Sell);
+            assert_eq!(market.qty, 1.0);
+        }
+        other => panic!("expected market close after restart, got {other:?}"),
+    }
+
+    publish_ack(
+        &redis_url,
+        &config_b.streams.acks,
+        CommandAck::accepted(close_cmd.request_id),
+    )
+    .await?;
+    publish_position(
+        &redis_url,
+        &config_b.streams.positions,
+        &config_b.strategy.symbol,
+        0.0,
+        31_001,
+    )
+    .await?;
+
+    let total_commands = xlen(&redis_url, &config_b.streams.commands).await?;
+    assert_eq!(total_commands, 2, "must not send duplicate entry after restart");
+
+    handle_b.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_mid_cycle_uses_runtime_state_without_snapshot_update() -> Result<()> {
+    run_restart_mid_cycle_case(false).await
+}
+
+#[tokio::test]
+async fn restart_mid_cycle_works_with_updated_snapshot() -> Result<()> {
+    run_restart_mid_cycle_case(true).await
 }
