@@ -1,6 +1,6 @@
 {
-  "strategy_id": "limit_cancel",
-  "symbol": "SBER",
+  "strategy_id": "session_gap_standalone",
+  "symbol": "USDRUBF",
   "trades_total": 0,
   "win_rate": 0.0,
   "pnl_gross_total": 0.0,
