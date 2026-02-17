@@ -6,7 +6,7 @@ portfolio = "7502T0U"
 exchange = "MOEX"
 instrument_group = "RFUD"
 # used for market order routing in CWS (create:market)
-symbols = ["USDRUBF"]
+symbols = ["IMOEXF"]
 refresh_token = ""
 
 tf_sec = 60
@@ -17,7 +17,7 @@ cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
 
 
-log_positions_filter = ["USDRUBF"]
+log_positions_filter = ["IMOEXF"]
 log_cash_positions = false
 cash_symbols = ["RUB", "SUR"]
 log_existing_snapshot_orders = false

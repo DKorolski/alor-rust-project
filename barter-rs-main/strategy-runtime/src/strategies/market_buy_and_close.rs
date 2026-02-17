@@ -1,4 +1,5 @@
-use alor_protocol::{CommandAck, Side};
+use alor_protocol::{AckStatus, CommandAck, Side};
+use tracing::{info, warn};
 
 use crate::live_guard::GatewayPhase;
 use crate::state::StrategyState;
@@ -10,6 +11,10 @@ pub struct MarketBuyAndCloseConfig {
     pub qty: f64,
     pub side: Side,
     pub close_trigger: CloseTrigger,
+    pub entry_ack_timeout_ms: u64,
+    pub entry_fill_timeout_ms: u64,
+    pub exit_ack_timeout_ms: u64,
+    pub exit_fill_timeout_ms: u64,
 }
 
 #[derive(Debug)]
@@ -28,21 +33,6 @@ impl MarketBuyAndCloseStrategy {
         }
     }
 
-    fn effective_close_trigger(&self, ctx: &StrategyCtx) -> CloseTrigger {
-        match ctx.trade_mode {
-            TradeMode::Live => self.config.close_trigger,
-            TradeMode::Paper | TradeMode::Backtest => CloseTrigger::NextBar,
-        }
-    }
-
-    fn build_market_intent(&self, side: Side, fill_price: Option<f64>) -> Intent {
-        Intent::Market {
-            qty: self.config.qty,
-            side,
-            fill_price,
-        }
-    }
-
     fn close_side(&self) -> Side {
         match self.config.side {
             Side::Buy => Side::Sell,
@@ -57,11 +47,171 @@ impl MarketBuyAndCloseStrategy {
                 || ctx.gateway_phase != GatewayPhase::LiveReady)
     }
 
-    fn update_baseline_pre_buy(state: &mut StrategyState, qty: f64) {
-        match state {
-            StrategyState::MarketBuyPending { baseline_qty, .. } => {
-                if baseline_qty.is_none() {
-                    *baseline_qty = Some(qty);
+    fn ts_to_ms(ts: i64) -> i64 {
+        ts.saturating_mul(1_000)
+    }
+
+    fn blocked(&mut self, reason: impl Into<String>, ts: i64) {
+        self.state = StrategyState::Blocked {
+            reason: reason.into(),
+            last_bar_ts: ts,
+        };
+    }
+
+    fn maybe_open_for_paper_backtest(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
+        let mut intent = None;
+        let close_side = self.close_side();
+        let qty = self.config.qty;
+        match &mut self.state {
+            StrategyState::Idle => {
+                self.state = StrategyState::MarketBuyPending {
+                    buy_request_id: crate::deterministic_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &bar.symbol,
+                        "market_buy",
+                        bar.close_time_utc,
+                        0,
+                    ),
+                    baseline_qty: ctx.position_qty,
+                    close_trigger: CloseTrigger::NextBar,
+                    pending_bar_ts: bar.close_time_utc,
+                    last_bar_ts: bar.close_time_utc,
+                };
+            }
+            StrategyState::MarketBuyPending {
+                buy_request_id,
+                close_trigger,
+                pending_bar_ts,
+                last_bar_ts,
+                baseline_qty,
+            } => {
+                *last_bar_ts = bar.close_time_utc;
+                if bar.close_time_utc > *pending_bar_ts {
+                    self.state = StrategyState::MarketBuySent {
+                        buy_request_id: *buy_request_id,
+                        baseline_qty: *baseline_qty,
+                        close_trigger: *close_trigger,
+                        buy_bar_ts: bar.close_time_utc,
+                        last_bar_ts: bar.close_time_utc,
+                    };
+                    intent = Some(Intent::Market {
+                        qty: self.config.qty,
+                        side: self.config.side,
+                        fill_price: Some(bar.o),
+                    });
+                }
+            }
+            StrategyState::MarketBuySent {
+                buy_bar_ts,
+                last_bar_ts,
+                baseline_qty,
+                ..
+            } => {
+                *last_bar_ts = bar.close_time_utc;
+                if bar.close_time_utc > *buy_bar_ts {
+                    intent = Some(Intent::Market {
+                        qty,
+                        side: close_side,
+                        fill_price: Some(bar.o),
+                    });
+                    self.state = StrategyState::MarketCloseSent {
+                        close_request_id: crate::deterministic_request_id(
+                            &ctx.strategy_id,
+                            &ctx.portfolio,
+                            &bar.symbol,
+                            "market_close",
+                            bar.close_time_utc,
+                            1,
+                        ),
+                        baseline_qty: *baseline_qty,
+                        last_bar_ts: bar.close_time_utc,
+                    };
+                }
+            }
+            StrategyState::MarketCloseSent { last_bar_ts, .. }
+            | StrategyState::Done { last_bar_ts }
+            | StrategyState::Blocked { last_bar_ts, .. } => *last_bar_ts = bar.close_time_utc,
+            _ => {}
+        }
+        intent.into_iter().collect()
+    }
+
+    fn maybe_send_live_entry(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
+        let baseline_qty = ctx.position_qty.unwrap_or(0.0);
+        let request_guid = crate::deterministic_market_request_id(
+            &ctx.strategy_id,
+            &ctx.portfolio,
+            &bar.symbol,
+            bar.close_time_utc,
+            self.config.side,
+        );
+        self.state = StrategyState::MarketLivePendingEntry {
+            request_guid,
+            side: self.config.side,
+            qty: self.config.qty,
+            baseline_qty,
+            close_trigger: self.config.close_trigger,
+            sent_ts: bar.close_time_utc,
+            acked: false,
+            entry_confirmed_ts: None,
+            last_bar_ts: bar.close_time_utc,
+        };
+        vec![Intent::Market {
+            qty: self.config.qty,
+            side: self.config.side,
+            fill_price: None,
+        }]
+    }
+
+    fn check_live_timeouts(&mut self, bar_ts: i64) {
+        let now_ms = Self::ts_to_ms(bar_ts);
+        match &self.state {
+            StrategyState::MarketLivePendingEntry {
+                sent_ts,
+                acked,
+                entry_confirmed_ts,
+                ..
+            } => {
+                let elapsed = now_ms.saturating_sub(Self::ts_to_ms(*sent_ts)) as u64;
+                if !acked && elapsed > self.config.entry_ack_timeout_ms {
+                    self.blocked(
+                        format!(
+                            "entry_ack_timeout_ms exceeded: {}",
+                            self.config.entry_ack_timeout_ms
+                        ),
+                        bar_ts,
+                    );
+                } else if entry_confirmed_ts.is_none()
+                    && elapsed > self.config.entry_fill_timeout_ms
+                {
+                    self.blocked(
+                        format!(
+                            "entry_fill_timeout_ms exceeded: {}",
+                            self.config.entry_fill_timeout_ms
+                        ),
+                        bar_ts,
+                    );
+                }
+            }
+            StrategyState::MarketLivePendingExit { sent_ts, acked, .. } => {
+                let elapsed = now_ms.saturating_sub(Self::ts_to_ms(*sent_ts)) as u64;
+                if !acked && elapsed > self.config.exit_ack_timeout_ms {
+                    self.blocked(
+                        format!(
+                            "exit_ack_timeout_ms exceeded: {}",
+                            self.config.exit_ack_timeout_ms
+                        ),
+                        bar_ts,
+                    );
+                } else if elapsed > self.config.exit_fill_timeout_ms {
+                    self.blocked(
+                        format!(
+                            "exit_fill_timeout_ms exceeded: {}",
+                            self.config.exit_fill_timeout_ms
+                        ),
+                        bar_ts,
+                    );
                 }
             }
             _ => {}
@@ -86,112 +236,114 @@ impl Strategy for MarketBuyAndCloseStrategy {
             return Vec::new();
         }
 
-        let mut intent = None;
-        let close_side = self.close_side();
-        let qty = self.config.qty;
-        match &mut self.state {
-            StrategyState::Idle => {
-                let close_trigger = self.effective_close_trigger(ctx);
-                let baseline_qty = ctx.position_qty;
-                if ctx.trade_mode == TradeMode::Live {
-                    self.state = StrategyState::MarketBuySent {
-                        buy_request_id: crate::deterministic_request_id(
-                            &ctx.strategy_id,
-                            &ctx.portfolio,
-                            &bar.symbol,
-                            "market_buy",
-                            bar.close_time_utc,
-                            0,
-                        ),
-                        baseline_qty,
+        let intents = match ctx.trade_mode {
+            TradeMode::Paper | TradeMode::Backtest => self.maybe_open_for_paper_backtest(ctx, bar),
+            TradeMode::Live => {
+                self.check_live_timeouts(bar.close_time_utc);
+                let close_side = self.close_side();
+                match &mut self.state {
+                    StrategyState::Idle => self.maybe_send_live_entry(ctx, bar),
+                    StrategyState::MarketLiveInPosition {
                         close_trigger,
-                        buy_bar_ts: bar.close_time_utc,
-                        last_bar_ts: bar.close_time_utc,
-                    };
-                    intent = Some(self.build_market_intent(self.config.side, None));
-                } else {
-                    self.state = StrategyState::MarketBuyPending {
-                        buy_request_id: crate::deterministic_request_id(
-                            &ctx.strategy_id,
-                            &ctx.portfolio,
-                            &bar.symbol,
-                            "market_buy",
-                            bar.close_time_utc,
-                            0,
-                        ),
+                        opened_ts,
                         baseline_qty,
-                        close_trigger,
-                        pending_bar_ts: bar.close_time_utc,
-                        last_bar_ts: bar.close_time_utc,
-                    };
+                        ..
+                    } => {
+                        if *close_trigger == CloseTrigger::NextBar
+                            && bar.close_time_utc > *opened_ts
+                        {
+                            let baseline = *baseline_qty;
+                            info!(
+                                from = "market_live_in_position",
+                                to = "market_live_pending_exit",
+                                reason = "next_bar",
+                                baseline_qty = baseline,
+                                ts_utc = bar.close_time_utc,
+                                "strategy_state_transition"
+                            );
+                            self.state = StrategyState::MarketLivePendingExit {
+                                request_guid: crate::deterministic_market_request_id(
+                                    &ctx.strategy_id,
+                                    &ctx.portfolio,
+                                    &bar.symbol,
+                                    bar.close_time_utc,
+                                    close_side,
+                                ),
+                                reason: "next_bar".to_string(),
+                                side: close_side,
+                                qty: self.config.qty,
+                                baseline_qty: baseline,
+                                sent_ts: bar.close_time_utc,
+                                acked: false,
+                                last_bar_ts: bar.close_time_utc,
+                            };
+                            vec![Intent::Market {
+                                qty: self.config.qty,
+                                side: close_side,
+                                fill_price: None,
+                            }]
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    StrategyState::MarketLivePendingEntry { last_bar_ts, .. }
+                    | StrategyState::MarketLivePendingExit { last_bar_ts, .. }
+                    | StrategyState::Blocked { last_bar_ts, .. }
+                    | StrategyState::Done { last_bar_ts } => {
+                        *last_bar_ts = bar.close_time_utc;
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
                 }
             }
-            StrategyState::MarketBuyPending {
-                buy_request_id,
-                close_trigger,
-                pending_bar_ts,
-                last_bar_ts,
-                baseline_qty,
-            } => {
-                *last_bar_ts = bar.close_time_utc;
-                if bar.close_time_utc > *pending_bar_ts {
-                    self.state = StrategyState::MarketBuySent {
-                        buy_request_id: *buy_request_id,
-                        baseline_qty: *baseline_qty,
-                        close_trigger: *close_trigger,
-                        buy_bar_ts: bar.close_time_utc,
-                        last_bar_ts: bar.close_time_utc,
-                    };
-                    intent = Some(self.build_market_intent(self.config.side, Some(bar.o)));
-                }
-            }
-            StrategyState::MarketBuySent {
-                close_trigger,
-                buy_bar_ts,
-                baseline_qty,
-                last_bar_ts,
-                ..
-            } => {
-                *last_bar_ts = bar.close_time_utc;
-                if *close_trigger == CloseTrigger::NextBar && bar.close_time_utc > *buy_bar_ts {
-                    let fill_price = match ctx.trade_mode {
-                        TradeMode::Live => None,
-                        TradeMode::Paper | TradeMode::Backtest => Some(bar.o),
-                    };
-                    intent = Some(Intent::Market {
-                        qty,
-                        side: close_side,
-                        fill_price,
-                    });
-                    self.state = StrategyState::MarketCloseSent {
-                        close_request_id: crate::deterministic_request_id(
-                            &ctx.strategy_id,
-                            &ctx.portfolio,
-                            &bar.symbol,
-                            "market_close",
-                            bar.close_time_utc,
-                            1,
-                        ),
-                        baseline_qty: *baseline_qty,
-                        last_bar_ts: bar.close_time_utc,
-                    };
-                }
-            }
-            StrategyState::MarketCloseSent { last_bar_ts, .. } => {
-                *last_bar_ts = bar.close_time_utc;
-            }
-            StrategyState::Placed { last_bar_ts, .. }
-            | StrategyState::CancelSent { last_bar_ts, .. }
-            | StrategyState::Done { last_bar_ts } => {
-                *last_bar_ts = bar.close_time_utc;
-            }
-        }
+        };
 
         self.last_processed_bar_ts = Some(bar.close_time_utc);
-        intent.into_iter().collect()
+        intents
     }
 
-    fn on_ack(&mut self, _ctx: &StrategyCtx, _ack: &CommandAck) -> Vec<Intent> {
+    fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
+        match &mut self.state {
+            StrategyState::MarketLivePendingEntry {
+                request_guid,
+                acked,
+                ..
+            } => {
+                if ack.request_id == *request_guid {
+                    match ack.status {
+                        AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
+                            *acked = true;
+                        }
+                        AckStatus::Rejected | AckStatus::Expired | AckStatus::Error => {
+                            self.blocked(
+                                format!("entry_rejected status={:?}", ack.status),
+                                ack.processed_ts_utc,
+                            );
+                        }
+                    }
+                }
+            }
+            StrategyState::MarketLivePendingExit {
+                request_guid,
+                acked,
+                ..
+            } => {
+                if ack.request_id == *request_guid {
+                    match ack.status {
+                        AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
+                            *acked = true;
+                        }
+                        AckStatus::Rejected | AckStatus::Expired | AckStatus::Error => {
+                            self.blocked(
+                                format!("exit_rejected status={:?}", ack.status),
+                                ack.processed_ts_utc,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         Vec::new()
     }
 
@@ -203,66 +355,124 @@ impl Strategy for MarketBuyAndCloseStrategy {
         if pos.symbol != self.config.symbol {
             return Vec::new();
         }
-        let close_side = self.close_side();
-        let qty = self.config.qty;
-        Self::update_baseline_pre_buy(&mut self.state, pos.qty);
 
-        let mut intent = None;
+        let now_ts = ctx.last_bar_ts().unwrap_or(pos.ts_utc);
+        let close_side = self.close_side();
         match &mut self.state {
-            StrategyState::MarketBuySent {
-                close_trigger,
-                buy_bar_ts,
+            StrategyState::MarketLivePendingEntry {
                 baseline_qty,
+                close_trigger,
+                entry_confirmed_ts,
                 last_bar_ts,
                 ..
             } => {
-                *last_bar_ts = ctx.last_bar_ts().unwrap_or(*buy_bar_ts);
-                if *close_trigger == CloseTrigger::PositionUpdate {
-                    if baseline_qty.is_none() {
-                        *baseline_qty = Some(pos.qty);
-                        return Vec::new();
-                    }
-                    if let Some(baseline) = baseline_qty {
-                        if (pos.qty - *baseline).abs() > f64::EPSILON {
-                            intent = Some(Intent::Market {
-                                qty,
-                                side: close_side,
-                                fill_price: None,
-                            });
-                            self.state = StrategyState::MarketCloseSent {
-                                close_request_id: crate::deterministic_request_id(
-                                    &ctx.strategy_id,
-                                    &ctx.portfolio,
-                                    &pos.symbol,
-                                    "market_close",
-                                    ctx.last_bar_ts().unwrap_or(*buy_bar_ts),
-                                    1,
-                                ),
-                                baseline_qty: Some(*baseline),
-                                last_bar_ts: ctx.last_bar_ts().unwrap_or(*buy_bar_ts),
-                            };
-                        }
-                    }
+                *last_bar_ts = now_ts;
+                if (pos.qty - *baseline_qty).abs() > f64::EPSILON {
+                    *entry_confirmed_ts = Some(now_ts);
+                    info!(
+                        from = "market_live_pending_entry",
+                        to = "market_live_in_position",
+                        baseline_qty = *baseline_qty,
+                        broker_qty = pos.qty,
+                        avg_price = pos.avg_price,
+                        ts_utc = now_ts,
+                        "strategy_state_transition"
+                    );
+                    self.state = StrategyState::MarketLiveInPosition {
+                        side: self.config.side,
+                        qty: self.config.qty,
+                        avg_price: pos.avg_price,
+                        baseline_qty: *baseline_qty,
+                        close_trigger: *close_trigger,
+                        opened_ts: now_ts,
+                        last_bar_ts: now_ts,
+                    };
                 }
             }
-            StrategyState::MarketCloseSent {
+            StrategyState::MarketLiveInPosition {
+                baseline_qty,
+                close_trigger,
+                ..
+            } => {
+                if (pos.qty - *baseline_qty).abs() <= f64::EPSILON {
+                    warn!(
+                        qty = pos.qty,
+                        baseline = *baseline_qty,
+                        "state corrected by broker"
+                    );
+                    self.state = StrategyState::Idle;
+                    return Vec::new();
+                }
+                if *close_trigger == CloseTrigger::PositionUpdate {
+                    info!(
+                        from = "market_live_in_position",
+                        to = "market_live_pending_exit",
+                        reason = "position_update",
+                        baseline_qty = *baseline_qty,
+                        broker_qty = pos.qty,
+                        ts_utc = now_ts,
+                        "strategy_state_transition"
+                    );
+                    self.state = StrategyState::MarketLivePendingExit {
+                        request_guid: crate::deterministic_market_request_id(
+                            &ctx.strategy_id,
+                            &ctx.portfolio,
+                            &pos.symbol,
+                            now_ts,
+                            close_side,
+                        ),
+                        reason: "position_update".to_string(),
+                        side: close_side,
+                        qty: self.config.qty,
+                        baseline_qty: *baseline_qty,
+                        sent_ts: now_ts,
+                        acked: false,
+                        last_bar_ts: now_ts,
+                    };
+                    return vec![Intent::Market {
+                        qty: self.config.qty,
+                        side: close_side,
+                        fill_price: None,
+                    }];
+                }
+            }
+            StrategyState::MarketLivePendingExit {
                 baseline_qty,
                 last_bar_ts,
                 ..
             } => {
-                *last_bar_ts = ctx.last_bar_ts().unwrap_or(*last_bar_ts);
-                if let Some(baseline) = baseline_qty {
-                    if (pos.qty - *baseline).abs() <= f64::EPSILON {
-                        self.state = StrategyState::Done {
-                            last_bar_ts: ctx.last_bar_ts().unwrap_or(*last_bar_ts),
-                        };
-                    }
+                *last_bar_ts = now_ts;
+                if (pos.qty - *baseline_qty).abs() <= f64::EPSILON {
+                    info!(
+                        from = "market_live_pending_exit",
+                        to = "done",
+                        baseline_qty = *baseline_qty,
+                        broker_qty = pos.qty,
+                        ts_utc = now_ts,
+                        "strategy_state_transition"
+                    );
+                    self.state = StrategyState::Done {
+                        last_bar_ts: now_ts,
+                    };
+                }
+            }
+            StrategyState::Idle => {
+                if pos.qty.abs() > f64::EPSILON {
+                    warn!(qty = pos.qty, "state corrected by broker");
+                    self.state = StrategyState::MarketLiveInPosition {
+                        side: self.config.side,
+                        qty: pos.qty.abs(),
+                        avg_price: pos.avg_price,
+                        baseline_qty: 0.0,
+                        close_trigger: self.config.close_trigger,
+                        opened_ts: now_ts,
+                        last_bar_ts: now_ts,
+                    };
                 }
             }
             _ => {}
         }
-
-        intent.into_iter().collect()
+        Vec::new()
     }
 
     fn state(&self) -> &StrategyState {
@@ -285,6 +495,10 @@ mod tests {
             qty: 1.0,
             side: Side::Buy,
             close_trigger: CloseTrigger::NextBar,
+            entry_ack_timeout_ms: 15_000,
+            entry_fill_timeout_ms: 60_000,
+            exit_ack_timeout_ms: 15_000,
+            exit_fill_timeout_ms: 60_000,
         }
     }
 
@@ -323,9 +537,9 @@ mod tests {
     }
 
     #[test]
-    fn paper_market_buy_then_close_next_bar() {
+    fn live_needs_position_confirmation_before_close() {
         let mut strategy = MarketBuyAndCloseStrategy::new(config());
-        let ctx = ctx(TradeMode::Paper);
+        let mut ctx = ctx(TradeMode::Live);
         let bar1 = BarEvent {
             symbol: "SBER".to_string(),
             close_time_utc: 10,
@@ -334,26 +548,208 @@ mod tests {
             h: 10.0,
             l: 9.5,
             v: 1.0,
-            origin: DataOrigin::History,
+            origin: DataOrigin::Live,
         };
-        let bar2 = BarEvent { close_time_utc: 20, o: 10.5, close: 11.0, ..bar1.clone() };
-        let bar3 = BarEvent { close_time_utc: 30, o: 11.5, close: 12.0, ..bar1.clone() };
+        let bar2 = BarEvent {
+            close_time_utc: 20,
+            o: 10.5,
+            close: 11.0,
+            ..bar1.clone()
+        };
 
-        assert!(strategy.on_bar(&ctx, &bar1).is_empty());
-        let intents = strategy.on_bar(&ctx, &bar2);
-        assert_eq!(intents.len(), 1);
-        let intents = strategy.on_bar(&ctx, &bar3);
-        assert_eq!(intents.len(), 1);
-        assert!(matches!(strategy.state(), StrategyState::MarketCloseSent { .. }));
+        assert_eq!(strategy.on_bar(&ctx, &bar1).len(), 1);
+        assert!(strategy.on_bar(&ctx, &bar2).is_empty());
 
-        let position_closed = PositionEvent {
+        ctx.last_bar_ts = Some(20);
+        let pos = PositionEvent {
             symbol: "SBER".to_string(),
-            qty: 0.0,
+            qty: 1.0,
             existing: false,
-            avg_price: 0.0,
-            ts_utc: 31,
+            avg_price: 10.2,
+            ts_utc: 20,
         };
-        assert!(strategy.on_position(&ctx, &position_closed).is_empty());
-        assert!(matches!(strategy.state(), StrategyState::Done { .. }));
+        assert!(strategy.on_position(&ctx, &pos).is_empty());
+
+        let bar3 = BarEvent {
+            close_time_utc: 30,
+            o: 11.0,
+            close: 11.2,
+            ..bar1
+        };
+        assert_eq!(strategy.on_bar(&ctx, &bar3).len(), 1);
+    }
+    #[test]
+    fn live_blocks_on_entry_ack_timeout() {
+        let mut cfg = config();
+        cfg.entry_ack_timeout_ms = 1_000;
+        let mut strategy = MarketBuyAndCloseStrategy::new(cfg);
+        let ctx = ctx(TradeMode::Live);
+        let bar1 = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 10,
+            close: 10.0,
+            o: 9.5,
+            h: 10.0,
+            l: 9.5,
+            v: 1.0,
+            origin: DataOrigin::Live,
+        };
+        let bar2 = BarEvent {
+            close_time_utc: 12,
+            ..bar1.clone()
+        };
+        assert_eq!(strategy.on_bar(&ctx, &bar1).len(), 1);
+        assert!(strategy.on_bar(&ctx, &bar2).is_empty());
+        assert!(matches!(strategy.state(), StrategyState::Blocked { .. }));
+    }
+
+    #[test]
+    fn live_position_update_trigger_transitions_to_pending_exit() {
+        let mut cfg = config();
+        cfg.close_trigger = CloseTrigger::PositionUpdate;
+        let mut strategy = MarketBuyAndCloseStrategy::new(cfg);
+        let mut ctx = ctx(TradeMode::Live);
+
+        strategy.state = StrategyState::MarketLiveInPosition {
+            side: Side::Buy,
+            qty: 1.0,
+            avg_price: 100.0,
+            baseline_qty: 0.0,
+            close_trigger: CloseTrigger::PositionUpdate,
+            opened_ts: 100,
+            last_bar_ts: 100,
+        };
+
+        ctx.last_bar_ts = Some(120);
+        let pos = PositionEvent {
+            symbol: "SBER".to_string(),
+            qty: 1.0,
+            existing: false,
+            avg_price: 101.0,
+            ts_utc: 120,
+        };
+
+        let intents = strategy.on_position(&ctx, &pos);
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::MarketLivePendingExit {
+                reason,
+                baseline_qty,
+                ..
+            } if reason == "position_update" && (*baseline_qty - 0.0).abs() <= f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn live_next_bar_trigger_transitions_to_pending_exit() {
+        let mut strategy = MarketBuyAndCloseStrategy::new(config());
+        let ctx = ctx(TradeMode::Live);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 120,
+            close: 101.0,
+            o: 100.5,
+            h: 101.5,
+            l: 100.0,
+            v: 1.0,
+            origin: DataOrigin::Live,
+        };
+
+        strategy.state = StrategyState::MarketLiveInPosition {
+            side: Side::Buy,
+            qty: 1.0,
+            avg_price: 100.0,
+            baseline_qty: 0.0,
+            close_trigger: CloseTrigger::NextBar,
+            opened_ts: 100,
+            last_bar_ts: 100,
+        };
+
+        let intents = strategy.on_bar(&ctx, &bar);
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::MarketLivePendingExit {
+                reason,
+                baseline_qty,
+                sent_ts,
+                ..
+            } if reason == "next_bar" && (*baseline_qty - 0.0).abs() <= f64::EPSILON && *sent_ts == 120
+        ));
+    }
+
+    #[test]
+    fn ack_matches_pending_sets_acked_true() {
+        let mut strategy = MarketBuyAndCloseStrategy::new(config());
+        let ctx = ctx(TradeMode::Live);
+        let request_id = crate::deterministic_market_request_id(
+            &ctx.strategy_id,
+            &ctx.portfolio,
+            &ctx.symbol,
+            1_000,
+            Side::Buy,
+        );
+        strategy.state = StrategyState::MarketLivePendingEntry {
+            request_guid: request_id,
+            side: Side::Buy,
+            qty: 1.0,
+            baseline_qty: 0.0,
+            close_trigger: CloseTrigger::NextBar,
+            sent_ts: 1_000,
+            acked: false,
+            entry_confirmed_ts: None,
+            last_bar_ts: 1_000,
+        };
+
+        let ack = CommandAck::accepted(request_id);
+        let _ = strategy.on_ack(&ctx, &ack);
+
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::MarketLivePendingEntry { acked: true, .. }
+        ));
+    }
+
+    #[test]
+    fn reject_blocks_strategy_with_reason() {
+        let mut strategy = MarketBuyAndCloseStrategy::new(config());
+        let ctx = ctx(TradeMode::Live);
+        let request_id = crate::deterministic_market_request_id(
+            &ctx.strategy_id,
+            &ctx.portfolio,
+            &ctx.symbol,
+            2_000,
+            Side::Buy,
+        );
+        strategy.state = StrategyState::MarketLivePendingEntry {
+            request_guid: request_id,
+            side: Side::Buy,
+            qty: 1.0,
+            baseline_qty: 0.0,
+            close_trigger: CloseTrigger::NextBar,
+            sent_ts: 2_000,
+            acked: false,
+            entry_confirmed_ts: None,
+            last_bar_ts: 2_000,
+        };
+
+        let ack = CommandAck {
+            request_id,
+            status: AckStatus::Rejected,
+            cws_message: None,
+            error_code: Some("rejected".to_string()),
+            error_msg: Some("broker rejected".to_string()),
+            cws_http_code: None,
+            cws_request_guid: None,
+            broker_order_id: None,
+            processed_ts_utc: 2_001,
+        };
+        let _ = strategy.on_ack(&ctx, &ack);
+
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::Blocked { reason, .. } if reason.contains("entry_rejected")
+        ));
     }
 }

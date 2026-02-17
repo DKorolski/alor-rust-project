@@ -265,6 +265,10 @@ pub struct StrategyConfig {
     pub tick_size: f64,
     pub max_wait_bars_for_ack: u32,
     pub close_trigger: CloseTrigger,
+    pub entry_ack_timeout_ms: u64,
+    pub entry_fill_timeout_ms: u64,
+    pub exit_ack_timeout_ms: u64,
+    pub exit_fill_timeout_ms: u64,
     pub session_open_hour: u32,
     pub session_open_minute: u32,
     pub session_close_hour: u32,
@@ -352,6 +356,10 @@ impl StrategyConfig {
             qty: self.qty,
             side: self.side,
             close_trigger: self.close_trigger,
+            entry_ack_timeout_ms: self.entry_ack_timeout_ms,
+            entry_fill_timeout_ms: self.entry_fill_timeout_ms,
+            exit_ack_timeout_ms: self.exit_ack_timeout_ms,
+            exit_fill_timeout_ms: self.exit_fill_timeout_ms,
         }
     }
 
@@ -391,6 +399,31 @@ pub fn deterministic_request_id(
 ) -> Uuid {
     let name = format!("{strategy_id}|{portfolio}|{symbol}|{action}|{bar_ts}|{seq}");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
+}
+
+pub fn market_request_seq(side: Side) -> u8 {
+    if side == Side::Buy {
+        3
+    } else {
+        4
+    }
+}
+
+pub fn deterministic_market_request_id(
+    strategy_id: &str,
+    portfolio: &str,
+    symbol: &str,
+    created_ts_utc: i64,
+    side: Side,
+) -> Uuid {
+    deterministic_request_id(
+        strategy_id,
+        portfolio,
+        symbol,
+        "market",
+        created_ts_utc,
+        market_request_seq(side),
+    )
 }
 
 pub fn build_place_command(

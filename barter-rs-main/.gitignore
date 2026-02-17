@@ -26,3 +26,12 @@ intents_log.csv
 trades_runtime.csv
 parity_report.json
 replay_out/
+
+# Strategy runtime / e2e artifacts
+e2e-*-*.csv
+e2e-*-*.json
+e2e-*-*.jsonl
+e2e-*-*.log
+summary.json
+trades.csv
+paper_trades.jsonl

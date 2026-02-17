@@ -76,6 +76,10 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             tick_size: 0.01,
             max_wait_bars_for_ack: 3,
             close_trigger: strategy_runtime::CloseTrigger::NextBar,
+            entry_ack_timeout_ms: 15_000,
+            entry_fill_timeout_ms: 60_000,
+            exit_ack_timeout_ms: 15_000,
+            exit_fill_timeout_ms: 60_000,
             session_open_hour: 10,
             session_open_minute: 0,
             session_close_hour: 23,
@@ -247,6 +251,31 @@ async fn read_next_command(
     Ok((message_id, envelope.payload))
 }
 
+async fn publish_position(
+    redis_url: &str,
+    stream: &str,
+    symbol: &str,
+    qty: f64,
+    ts_utc: i64,
+) -> Result<()> {
+    let position = PositionEvent {
+        symbol: symbol.to_string(),
+        qty,
+        existing: false,
+        avg_price: 100.0,
+        ts_utc,
+    };
+    let envelope = Envelope::new(
+        Utc::now().timestamp(),
+        "test",
+        MessageType::Position,
+        position,
+    );
+    let json = serde_json::to_string(&envelope)?;
+    xadd_json(redis_url, stream, &json).await?;
+    Ok(())
+}
+
 async fn publish_ack(redis_url: &str, stream: &str, ack: CommandAck) -> Result<()> {
     let envelope = Envelope::new(Utc::now().timestamp(), "test", MessageType::CommandAck, ack);
     let json = serde_json::to_string(&envelope)?;
@@ -297,6 +326,14 @@ async fn buy_and_close_smoke() -> Result<()> {
         CommandAck::accepted(buy_cmd.request_id),
     )
     .await?;
+    publish_position(
+        &redis_url,
+        &config.streams.positions,
+        &config.strategy.symbol,
+        1.0,
+        20_001,
+    )
+    .await?;
 
     publish_bar(
         &redis_url,
@@ -317,6 +354,14 @@ async fn buy_and_close_smoke() -> Result<()> {
         &redis_url,
         &config.streams.acks,
         CommandAck::accepted(close_cmd.request_id),
+    )
+    .await?;
+    publish_position(
+        &redis_url,
+        &config.streams.positions,
+        &config.strategy.symbol,
+        0.0,
+        21_001,
     )
     .await?;
 
