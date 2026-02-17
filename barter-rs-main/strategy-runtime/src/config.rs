@@ -24,6 +24,10 @@ const DEFAULT_QTY: f64 = 1.0;
 const DEFAULT_TICK_SIZE: f64 = 0.01;
 const DEFAULT_MAX_WAIT_BARS_FOR_ACK: u32 = 3;
 const DEFAULT_CLOSE_TRIGGER: CloseTrigger = CloseTrigger::NextBar;
+const DEFAULT_ENTRY_ACK_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_ENTRY_FILL_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_EXIT_ACK_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_EXIT_FILL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_SESSION_OPEN_HOUR: u32 = 10;
 const DEFAULT_SESSION_OPEN_MINUTE: u32 = 0;
 const DEFAULT_SESSION_CLOSE_HOUR: u32 = 23;
@@ -153,6 +157,10 @@ pub struct StrategySources {
     pub tick_size: ConfigSource,
     pub max_wait_bars_for_ack: ConfigSource,
     pub close_trigger: ConfigSource,
+    pub entry_ack_timeout_ms: ConfigSource,
+    pub entry_fill_timeout_ms: ConfigSource,
+    pub exit_ack_timeout_ms: ConfigSource,
+    pub exit_fill_timeout_ms: ConfigSource,
     pub session_open_hour: ConfigSource,
     pub session_open_minute: ConfigSource,
     pub session_close_hour: ConfigSource,
@@ -276,6 +284,10 @@ impl Default for StrategySources {
             tick_size: ConfigSource::Default,
             max_wait_bars_for_ack: ConfigSource::Default,
             close_trigger: ConfigSource::Default,
+            entry_ack_timeout_ms: ConfigSource::Default,
+            entry_fill_timeout_ms: ConfigSource::Default,
+            exit_ack_timeout_ms: ConfigSource::Default,
+            exit_fill_timeout_ms: ConfigSource::Default,
             session_open_hour: ConfigSource::Default,
             session_open_minute: ConfigSource::Default,
             session_close_hour: ConfigSource::Default,
@@ -416,6 +428,10 @@ struct StrategyConfigFile {
     tick_size: Option<f64>,
     max_wait_bars_for_ack: Option<u32>,
     close_trigger: Option<String>,
+    entry_ack_timeout_ms: Option<u64>,
+    entry_fill_timeout_ms: Option<u64>,
+    exit_ack_timeout_ms: Option<u64>,
+    exit_fill_timeout_ms: Option<u64>,
     session_open_hour: Option<u32>,
     session_open_minute: Option<u32>,
     session_close_hour: Option<u32>,
@@ -479,6 +495,10 @@ pub fn load_runtime_config(
         tick_size: DEFAULT_TICK_SIZE,
         max_wait_bars_for_ack: DEFAULT_MAX_WAIT_BARS_FOR_ACK,
         close_trigger: DEFAULT_CLOSE_TRIGGER,
+        entry_ack_timeout_ms: DEFAULT_ENTRY_ACK_TIMEOUT_MS,
+        entry_fill_timeout_ms: DEFAULT_ENTRY_FILL_TIMEOUT_MS,
+        exit_ack_timeout_ms: DEFAULT_EXIT_ACK_TIMEOUT_MS,
+        exit_fill_timeout_ms: DEFAULT_EXIT_FILL_TIMEOUT_MS,
         session_open_hour: DEFAULT_SESSION_OPEN_HOUR,
         session_open_minute: DEFAULT_SESSION_OPEN_MINUTE,
         session_close_hour: DEFAULT_SESSION_CLOSE_HOUR,
@@ -650,6 +670,22 @@ pub fn load_runtime_config(
             if let Some(value) = &strategy_file.close_trigger {
                 strategy.close_trigger = parse_close_trigger(value);
                 sources.strategy.close_trigger = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.entry_ack_timeout_ms {
+                strategy.entry_ack_timeout_ms = value;
+                sources.strategy.entry_ack_timeout_ms = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.entry_fill_timeout_ms {
+                strategy.entry_fill_timeout_ms = value;
+                sources.strategy.entry_fill_timeout_ms = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.exit_ack_timeout_ms {
+                strategy.exit_ack_timeout_ms = value;
+                sources.strategy.exit_ack_timeout_ms = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.exit_fill_timeout_ms {
+                strategy.exit_fill_timeout_ms = value;
+                sources.strategy.exit_fill_timeout_ms = ConfigSource::File;
             }
             if let Some(value) = strategy_file.session_open_hour {
                 strategy.session_open_hour = value;
@@ -885,6 +921,22 @@ pub fn load_runtime_config(
     if let Some(value) = env::var("CLOSE_TRIGGER").ok() {
         strategy.close_trigger = parse_close_trigger(&value);
         sources.strategy.close_trigger = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("ENTRY_ACK_TIMEOUT_MS") {
+        strategy.entry_ack_timeout_ms = value;
+        sources.strategy.entry_ack_timeout_ms = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("ENTRY_FILL_TIMEOUT_MS") {
+        strategy.entry_fill_timeout_ms = value;
+        sources.strategy.entry_fill_timeout_ms = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("EXIT_ACK_TIMEOUT_MS") {
+        strategy.exit_ack_timeout_ms = value;
+        sources.strategy.exit_ack_timeout_ms = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("EXIT_FILL_TIMEOUT_MS") {
+        strategy.exit_fill_timeout_ms = value;
+        sources.strategy.exit_fill_timeout_ms = ConfigSource::Env;
     }
     if let Some(value) = env_parse("SESSION_OPEN_HOUR") {
         strategy.session_open_hour = value;

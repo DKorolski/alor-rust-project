@@ -6,12 +6,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use tracing::{debug, error, info, warn};
 
 use alor_protocol::{Envelope, MessageType};
 
-use crate::live_guard::{HealthEvent, LiveGuardDecision, LiveGuardState, evaluate_live_guard};
+use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
@@ -676,10 +676,24 @@ impl StrategyRuntime {
             StrategyState::MarketCloseSent {
                 close_request_id, ..
             } => vec![*close_request_id],
+            StrategyState::MarketLivePendingEntry { request_guid, .. }
+            | StrategyState::MarketLivePendingExit { request_guid, .. } => vec![*request_guid],
+            StrategyState::SessionGapStandalone { phase, .. } => match phase {
+                crate::state::SessionGapLivePhase::PendingEntry { request_id, .. }
+                | crate::state::SessionGapLivePhase::PendingExit { request_id, .. } => {
+                    vec![*request_id]
+                }
+                crate::state::SessionGapLivePhase::Flat
+                | crate::state::SessionGapLivePhase::InPosition { .. }
+                | crate::state::SessionGapLivePhase::Blocked { .. } => Vec::new(),
+            },
             StrategyState::CancelSent {
                 cancel_request_id, ..
             } => vec![*cancel_request_id],
-            StrategyState::Idle | StrategyState::Done { .. } => Vec::new(),
+            StrategyState::Idle
+            | StrategyState::Done { .. }
+            | StrategyState::MarketLiveInPosition { .. }
+            | StrategyState::Blocked { .. } => Vec::new(),
         }
     }
 
@@ -1904,14 +1918,28 @@ impl StrategyRuntime {
                 "replace",
             ),
         };
-        let request_id = crate::deterministic_request_id(
-            &ctx.strategy_id,
-            &ctx.portfolio,
-            &ctx.symbol,
-            action_name,
-            created_ts_utc,
-            seq,
-        );
+        let request_id = if action_name == "market" {
+            let side = match &action {
+                alor_protocol::CommandAction::Market(market) => market.side,
+                _ => unreachable!("market action_name must map to market command action"),
+            };
+            crate::deterministic_market_request_id(
+                &ctx.strategy_id,
+                &ctx.portfolio,
+                &ctx.symbol,
+                created_ts_utc,
+                side,
+            )
+        } else {
+            crate::deterministic_request_id(
+                &ctx.strategy_id,
+                &ctx.portfolio,
+                &ctx.symbol,
+                action_name,
+                created_ts_utc,
+                seq,
+            )
+        };
         alor_protocol::OrderCommand {
             request_id,
             created_ts_utc,
@@ -2221,6 +2249,10 @@ mod tests {
                 tick_size: 0.01,
                 max_wait_bars_for_ack: 1,
                 close_trigger: CloseTrigger::NextBar,
+                entry_ack_timeout_ms: 15_000,
+                entry_fill_timeout_ms: 60_000,
+                exit_ack_timeout_ms: 15_000,
+                exit_fill_timeout_ms: 60_000,
                 session_open_hour: 10,
                 session_open_minute: 0,
                 session_close_hour: 23,
@@ -2284,12 +2316,10 @@ mod tests {
     fn bootstrap_ready_requires_snapshots_and_live_bar() {
         let state = BootstrapState::default();
         assert!(!state.ready());
-        assert!(
-            state
-                .reasons()
-                .iter()
-                .any(|reason| reason == "bootstrap:not_ready")
-        );
+        assert!(state
+            .reasons()
+            .iter()
+            .any(|reason| reason == "bootstrap:not_ready"));
     }
 
     #[test]
@@ -2300,12 +2330,10 @@ mod tests {
             seen_live_bar: false,
         };
         assert!(!state.ready());
-        assert!(
-            state
-                .reasons()
-                .iter()
-                .any(|reason| reason == "bootstrap:missing_live_bar")
-        );
+        assert!(state
+            .reasons()
+            .iter()
+            .any(|reason| reason == "bootstrap:missing_live_bar"));
     }
 
     #[test]

@@ -128,8 +128,16 @@ impl Strategy for LimitCancelStrategy {
             }
             StrategyState::MarketBuyPending { last_bar_ts, .. }
             | StrategyState::MarketBuySent { last_bar_ts, .. }
-            | StrategyState::MarketCloseSent { last_bar_ts, .. } => {
+            | StrategyState::MarketCloseSent { last_bar_ts, .. }
+            | StrategyState::MarketLivePendingEntry { last_bar_ts, .. }
+            | StrategyState::MarketLiveInPosition { last_bar_ts, .. }
+            | StrategyState::MarketLivePendingExit { last_bar_ts, .. }
+            | StrategyState::Blocked { last_bar_ts, .. } => {
                 *last_bar_ts = bar.close_time_utc;
+                None
+            }
+            StrategyState::SessionGapStandalone { last_bar_ts, .. } => {
+                *last_bar_ts = Some(bar.close_time_utc);
                 None
             }
             StrategyState::Done { last_bar_ts } => {
