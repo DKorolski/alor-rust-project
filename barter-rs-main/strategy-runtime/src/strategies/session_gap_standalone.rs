@@ -955,4 +955,155 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn restart_runtime_state_keeps_cycle_and_closes_position() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id: uuid::Uuid::new_v4(),
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(120.0),
+                sl: Some(80.0),
+                sent_ts: 1_000,
+                acked: true,
+            },
+            last_bar_ts: Some(1_000),
+        };
+
+        let opened = PositionEvent {
+            symbol: "USDRUBF".into(),
+            qty: 1.0,
+            existing: false,
+            avg_price: 101.0,
+            ts_utc: 1_001,
+        };
+        let _ = strategy.on_position(&ctx, &opened);
+
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::InPosition { qty: 1.0, .. },
+                ..
+            }
+        ));
+
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        let ts_exit = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 30, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let mut exit_bar = bar(ts_exit, 101.0, 102.0, 100.0, 101.5);
+        exit_bar.origin = DataOrigin::Live;
+        let intents = strategy.on_bar(&ctx, &exit_bar);
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            intents[0],
+            Intent::Market {
+                side: Side::Sell,
+                qty: 1.0,
+                ..
+            }
+        ));
+
+        let closed = PositionEvent {
+            symbol: "USDRUBF".into(),
+            qty: 0.0,
+            existing: false,
+            avg_price: 0.0,
+            ts_utc: ts_exit + 1,
+        };
+        let _ = strategy.on_position(&ctx, &closed);
+
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::Flat,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn restart_snapshot_reconciles_to_in_position_then_closes() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        let ts_snapshot = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 20, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id: uuid::Uuid::new_v4(),
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(120.0),
+                sl: Some(80.0),
+                sent_ts: ts_snapshot - 10,
+                acked: true,
+            },
+            last_bar_ts: Some(ts_snapshot - 10),
+        };
+
+        let snapshot = crate::BootstrapSnapshot {
+            positions_strategy: std::collections::HashMap::from([(
+                "USDRUBF".to_string(),
+                PositionEvent {
+                    symbol: "USDRUBF".into(),
+                    qty: 1.0,
+                    existing: true,
+                    avg_price: 101.0,
+                    ts_utc: ts_snapshot,
+                },
+            )]),
+            working_orders_strategy: std::collections::HashMap::new(),
+            snapshot_ts_utc: Some(ts_snapshot),
+        };
+        let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);
+
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::InPosition { qty: 1.0, .. },
+                ..
+            }
+        ));
+
+        let ts_exit = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 30, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let mut exit_bar = bar(ts_exit, 101.0, 102.0, 100.0, 101.5);
+        exit_bar.origin = DataOrigin::Live;
+        let intents = strategy.on_bar(&ctx, &exit_bar);
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            intents[0],
+            Intent::Market {
+                side: Side::Sell,
+                qty: 1.0,
+                ..
+            }
+        ));
+    }
 }
