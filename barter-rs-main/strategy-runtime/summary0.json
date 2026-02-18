@@ -1,14 +1,14 @@
 {
   "strategy_id": "session_gap_standalone",
   "symbol": "USDRUBF",
-  "trades_total": 0,
-  "win_rate": 0.0,
-  "pnl_gross_total": 0.0,
-  "pnl_net_total": 0.0,
+  "trades_total": 1,
+  "win_rate": 1.0,
+  "pnl_gross_total": 102.0800000000022,
+  "pnl_net_total": 102.0800000000022,
   "commission_total": 0.0,
-  "gross_profit": 0.0,
+  "gross_profit": 102.0800000000022,
   "gross_loss": 0.0,
-  "avg_pnl": 0.0,
-  "max_pnl": 0.0,
-  "min_pnl": 0.0
+  "avg_pnl": 102.0800000000022,
+  "max_pnl": 102.0800000000022,
+  "min_pnl": 102.0800000000022
 }

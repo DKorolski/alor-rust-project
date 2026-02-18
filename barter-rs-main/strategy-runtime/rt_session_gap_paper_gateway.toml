@@ -63,7 +63,7 @@ output = "stdout"
 file_path = "./strategy-runtime/paper_trades.jsonl"
 trades_csv = "./strategy-runtime/trades0.csv"
 summary_json = "./strategy-runtime/summary0.json"
-append = false
+append = true
 
 [backtest]
 enabled = false
