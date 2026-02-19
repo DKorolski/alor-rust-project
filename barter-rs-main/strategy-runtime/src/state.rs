@@ -119,8 +119,12 @@ pub enum StrategyState {
         first_hour_price: Option<f64>,
         session_start_ts_utc: Option<i64>,
         session_end_ts_utc: Option<i64>,
+        session_high: Option<f64>,
+        session_low: Option<f64>,
+        session_close: Option<f64>,
         last_dt_ts_utc: Option<i64>,
         phase: SessionGapLivePhase,
+        phase_last_change_ts_utc: Option<i64>,
         last_bar_ts: Option<i64>,
     },
     CancelSent {
