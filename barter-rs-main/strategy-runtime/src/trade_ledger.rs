@@ -154,6 +154,14 @@ impl TradeLedger {
         Ok(())
     }
 
+    pub fn order(&self, order_id: i64) -> Option<&OrderRecord> {
+        self.orders.get(&order_id)
+    }
+
+    pub fn orders_total(&self) -> usize {
+        self.orders.len()
+    }
+
     pub fn trades(&self) -> &[TradeRecord] {
         &self.trades
     }

@@ -3,12 +3,12 @@
   "symbol": "USDRUBF",
   "trades_total": 25,
   "win_rate": 0.72,
-  "pnl_gross_total": 443.8800000000037,
-  "pnl_net_total": 443.8800000000037,
+  "pnl_gross_total": 582.7515999999878,
+  "pnl_net_total": 582.7515999999878,
   "commission_total": 0.0,
-  "gross_profit": 1296.420000000009,
-  "gross_loss": 852.5400000000053,
-  "avg_pnl": 17.755200000000148,
-  "max_pnl": 144.3200000000038,
-  "min_pnl": -278.4600000000004
+  "gross_profit": 1420.4787999999926,
+  "gross_loss": 837.7272000000047,
+  "avg_pnl": 23.31006399999951,
+  "max_pnl": 167.55199999999968,
+  "min_pnl": -274.3187999999999
 }

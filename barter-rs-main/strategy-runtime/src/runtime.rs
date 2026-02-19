@@ -1314,30 +1314,60 @@ impl StrategyRuntime {
                         owned: true,
                     });
                 }
-                Intent::Market { qty, side, .. } => {
+                Intent::Market {
+                    qty,
+                    side,
+                    fill_price,
+                } => {
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
                     let side = format!("{side:?}").to_lowercase();
-                    self.sim_orders.push(SimOrder {
-                        order_id,
-                        symbol: bar.symbol.clone(),
-                        side: side.clone(),
-                        order_type: SimOrderType::Market,
-                        qty,
-                        price: None,
-                        created_bar_ts: bar.close_time_utc,
-                    });
-                    self.ledger.record_order(OrderRecord {
-                        order_id,
-                        symbol: bar.symbol.clone(),
-                        side,
-                        qty,
-                        filled: 0.0,
-                        price: 0.0,
-                        status: "working".to_string(),
-                        ts_utc: bar.close_time_utc,
-                        owned: true,
-                    });
+
+                    if let Some(price) = fill_price {
+                        self.ledger.record_fill(TradeRecord {
+                            ts_utc: bar.close_time_utc,
+                            order_id,
+                            symbol: bar.symbol.clone(),
+                            side: side.clone(),
+                            qty,
+                            price,
+                            commission: 0.0,
+                            owned: true,
+                        });
+                        self.ledger.record_order(OrderRecord {
+                            order_id,
+                            symbol: bar.symbol.clone(),
+                            side,
+                            qty,
+                            filled: qty,
+                            price,
+                            status: "filled".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
+                        self.persist_ledger_reports().await?;
+                    } else {
+                        self.sim_orders.push(SimOrder {
+                            order_id,
+                            symbol: bar.symbol.clone(),
+                            side: side.clone(),
+                            order_type: SimOrderType::Market,
+                            qty,
+                            price: None,
+                            created_bar_ts: bar.close_time_utc,
+                        });
+                        self.ledger.record_order(OrderRecord {
+                            order_id,
+                            symbol: bar.symbol.clone(),
+                            side,
+                            qty,
+                            filled: 0.0,
+                            price: 0.0,
+                            status: "working".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
+                    }
                 }
                 Intent::Cancel { order_id } => {
                     if let Some(pos) = self
@@ -2445,7 +2475,45 @@ mod tests {
     }
 
     #[test]
-    fn simulated_market_fills_on_next_bar_open() {
+    fn simulated_market_with_fill_price_fills_immediately_on_current_bar() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.5,
+            o: 10.0,
+            h: 10.6,
+            l: 9.9,
+            v: 0.0,
+            origin: DataOrigin::Replay,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Buy,
+                        fill_price: Some(123.45),
+                    }],
+                )
+                .await
+                .unwrap();
+
+            assert!(runtime.sim_orders.is_empty());
+            assert_eq!(runtime.ledger.trades().len(), 1);
+            assert_eq!(runtime.ledger.trades()[0].ts_utc, 100);
+            assert_eq!(runtime.ledger.trades()[0].price, 123.45);
+            assert_eq!(runtime.ledger.orders_total(), 1);
+            assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
+            assert_eq!(runtime.ledger.order(1).unwrap().price, 123.45);
+        });
+    }
+
+    #[test]
+    fn simulated_market_without_fill_price_fills_on_next_bar_open() {
         let mut runtime = test_runtime(TradeMode::Paper);
         let bar1 = BarEvent {
             symbol: "SBER".to_string(),
@@ -2476,11 +2544,17 @@ mod tests {
                     vec![Intent::Market {
                         qty: 1.0,
                         side: alor_protocol::Side::Buy,
-                        fill_price: Some(999.0),
+                        fill_price: None,
                     }],
                 )
                 .await
                 .unwrap();
+
+            assert_eq!(runtime.sim_orders.len(), 1);
+            assert_eq!(runtime.ledger.orders_total(), 1);
+            assert_eq!(runtime.ledger.order(1).unwrap().status, "working");
+            assert_eq!(runtime.ledger.order(1).unwrap().price, 0.0);
+
             runtime.simulate_fills(&bar1).await.unwrap();
             assert!(runtime.ledger.trades().is_empty());
 
@@ -2488,6 +2562,8 @@ mod tests {
             assert_eq!(runtime.ledger.trades().len(), 1);
             assert_eq!(runtime.ledger.trades()[0].ts_utc, 160);
             assert_eq!(runtime.ledger.trades()[0].price, 11.0);
+            assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
+            assert_eq!(runtime.ledger.order(1).unwrap().price, 11.0);
         });
     }
 }
