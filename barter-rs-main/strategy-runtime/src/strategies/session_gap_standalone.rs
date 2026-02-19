@@ -511,6 +511,42 @@ impl SessionGapStandaloneStrategy {
             "live phase transition"
         );
     }
+
+    fn persisted_phase_or_flat(&self) -> SessionGapLivePhase {
+        match &self.state {
+            StrategyState::SessionGapStandalone { phase, .. } => phase.clone(),
+            _ => SessionGapLivePhase::Flat,
+        }
+    }
+
+    fn persist_state_snapshot(
+        &mut self,
+        session_date: String,
+        phase: SessionGapLivePhase,
+        last_bar_ts: i64,
+    ) {
+        self.state = StrategyState::SessionGapStandalone {
+            session_date: Some(session_date),
+            traded_session: self.traded_session,
+            prev_close: self.yesterday_close,
+            yesterday_range: self.yesterday_range,
+            pre_prev_close: self.pre_prev_close,
+            first_min_high: self.first_min_high,
+            first_min_low: self.first_min_low,
+            first_hour_price: self.first_hour_price,
+            session_start_ts_utc: self
+                .session_start_dt
+                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+            session_end_ts_utc: self
+                .session_end_dt
+                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+            last_dt_ts_utc: self
+                .last_dt
+                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+            phase,
+            last_bar_ts: Some(last_bar_ts),
+        };
+    }
 }
 
 impl Strategy for SessionGapStandaloneStrategy {
@@ -530,12 +566,15 @@ impl Strategy for SessionGapStandaloneStrategy {
         let current_session_date = self.session_date(bar_dt);
         if !self.config.work_weekends && bar_dt.weekday().number_from_monday() >= 6 {
             self.last_processed_bar_ts = Some(bar.close_time_utc);
+            let phase = self.persisted_phase_or_flat();
+            self.persist_state_snapshot(current_session_date, phase, bar.close_time_utc);
             return Vec::new();
         }
 
         self.update_session(bar_dt, bar);
 
         if ctx.trade_mode != TradeMode::Live {
+            let phase = self.persisted_phase_or_flat();
             let mut intents = Vec::new();
             if let Some(entry) = self.maybe_open_position(bar) {
                 intents.push(entry);
@@ -545,51 +584,18 @@ impl Strategy for SessionGapStandaloneStrategy {
             }
             self.maybe_generate_signal(bar_dt, bar);
             self.last_processed_bar_ts = Some(bar.close_time_utc);
+            self.persist_state_snapshot(current_session_date, phase, bar.close_time_utc);
             return intents;
         }
 
         if self.should_block_live(ctx, bar) {
             self.last_processed_bar_ts = Some(bar.close_time_utc);
+            let phase = self.persisted_phase_or_flat();
+            self.persist_state_snapshot(current_session_date, phase, bar.close_time_utc);
             return Vec::new();
         }
 
-        let mut traded_session = self.traded_session;
-        let mut phase = SessionGapLivePhase::Flat;
-        if let StrategyState::SessionGapStandalone {
-            session_date,
-            traded_session: persisted_traded,
-            prev_close,
-            yesterday_range,
-            pre_prev_close,
-            first_min_high,
-            first_min_low,
-            first_hour_price,
-            session_start_ts_utc,
-            session_end_ts_utc,
-            last_dt_ts_utc,
-            phase: persisted_phase,
-            ..
-        } = &self.state
-        {
-            traded_session = if session_date.as_deref() == Some(current_session_date.as_str()) {
-                *persisted_traded
-            } else {
-                false
-            };
-            self.yesterday_close = *prev_close;
-            self.yesterday_range = *yesterday_range;
-            self.pre_prev_close = *pre_prev_close;
-            self.first_min_high = *first_min_high;
-            self.first_min_low = *first_min_low;
-            self.first_hour_price = *first_hour_price;
-            let offset = chrono::FixedOffset::east_opt(self.config.timezone_offset_hours * 3600).expect("valid fixed offset");
-            self.session_start_dt = session_start_ts_utc.and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single().map(|dt| dt.with_timezone(&offset)));
-            self.session_end_dt = session_end_ts_utc.and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single().map(|dt| dt.with_timezone(&offset)));
-            self.last_dt = last_dt_ts_utc.and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single().map(|dt| dt.with_timezone(&offset)));
-            phase = persisted_phase.clone();
-        }
-
-        self.traded_session = traded_session;
+        let phase = self.persisted_phase_or_flat();
         self.maybe_generate_signal(bar_dt, bar);
 
         let mut intents = Vec::new();
@@ -625,11 +631,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                     SessionGapLivePhase::Flat
                 }
             }
-            SessionGapLivePhase::PendingEntry {
-                sent_ts,
-                acked,
-                ..
-            } => {
+            SessionGapLivePhase::PendingEntry { sent_ts, acked, .. } => {
                 let elapsed = (bar.close_time_utc - sent_ts).saturating_mul(1000) as u64;
                 if !acked && elapsed > self.config.entry_ack_timeout_ms {
                     SessionGapLivePhase::Blocked {
@@ -657,7 +659,8 @@ impl Strategy for SessionGapStandaloneStrategy {
                 let mut should_exit = false;
                 let mut reason = "";
                 if let Some(session_end_dt) = self.session_end_dt {
-                    let exit_threshold = session_end_dt - Duration::minutes(self.config.exit_offset_min);
+                    let exit_threshold =
+                        session_end_dt - Duration::minutes(self.config.exit_offset_min);
                     if bar_dt >= exit_threshold {
                         should_exit = true;
                         reason = "session_exit";
@@ -714,11 +717,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                     phase
                 }
             }
-            SessionGapLivePhase::PendingExit {
-                sent_ts,
-                acked,
-                ..
-            } => {
+            SessionGapLivePhase::PendingExit { sent_ts, acked, .. } => {
                 let elapsed = (bar.close_time_utc - sent_ts).saturating_mul(1000) as u64;
                 if !acked && elapsed > self.config.exit_ack_timeout_ms {
                     SessionGapLivePhase::Blocked {
@@ -738,21 +737,7 @@ impl Strategy for SessionGapStandaloneStrategy {
         };
 
         Self::log_phase_transition(&previous_phase, &next_phase, bar.close_time_utc);
-        self.state = StrategyState::SessionGapStandalone {
-            session_date: Some(current_session_date),
-            traded_session: self.traded_session,
-            prev_close: self.yesterday_close,
-            yesterday_range: self.yesterday_range,
-            pre_prev_close: self.pre_prev_close,
-            first_min_high: self.first_min_high,
-            first_min_low: self.first_min_low,
-            first_hour_price: self.first_hour_price,
-            session_start_ts_utc: self.session_start_dt.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
-            session_end_ts_utc: self.session_end_dt.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
-            last_dt_ts_utc: self.last_dt.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
-            phase: next_phase,
-            last_bar_ts: Some(bar.close_time_utc),
-        };
+        self.persist_state_snapshot(current_session_date, next_phase, bar.close_time_utc);
 
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         intents
@@ -835,7 +820,11 @@ impl Strategy for SessionGapStandaloneStrategy {
                             "state corrected by broker"
                         );
                         *phase = SessionGapLivePhase::InPosition {
-                            side: if pos.qty >= 0.0 { Side::Buy } else { Side::Sell },
+                            side: if pos.qty >= 0.0 {
+                                Side::Buy
+                            } else {
+                                Side::Sell
+                            },
                             qty: pos.qty.abs(),
                             avg_price: pos.avg_price,
                             baseline_qty: 0.0,
@@ -911,10 +900,26 @@ impl Strategy for SessionGapStandaloneStrategy {
             self.first_min_high = *first_min_high;
             self.first_min_low = *first_min_low;
             self.first_hour_price = *first_hour_price;
-            let offset = chrono::FixedOffset::east_opt(self.config.timezone_offset_hours * 3600).expect("valid fixed offset");
-            self.session_start_dt = session_start_ts_utc.and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single().map(|dt| dt.with_timezone(&offset)));
-            self.session_end_dt = session_end_ts_utc.and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single().map(|dt| dt.with_timezone(&offset)));
-            self.last_dt = last_dt_ts_utc.and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single().map(|dt| dt.with_timezone(&offset)));
+            let offset = chrono::FixedOffset::east_opt(self.config.timezone_offset_hours * 3600)
+                .expect("valid fixed offset");
+            self.session_start_dt = session_start_ts_utc.and_then(|ts| {
+                chrono::Utc
+                    .timestamp_opt(ts, 0)
+                    .single()
+                    .map(|dt| dt.with_timezone(&offset))
+            });
+            self.session_end_dt = session_end_ts_utc.and_then(|ts| {
+                chrono::Utc
+                    .timestamp_opt(ts, 0)
+                    .single()
+                    .map(|dt| dt.with_timezone(&offset))
+            });
+            self.last_dt = last_dt_ts_utc.and_then(|ts| {
+                chrono::Utc
+                    .timestamp_opt(ts, 0)
+                    .single()
+                    .map(|dt| dt.with_timezone(&offset))
+            });
             info!(
                 strategy = "session_gap_standalone",
                 traded_session,
@@ -948,7 +953,10 @@ mod tests {
     use super::*;
     use crate::{BarEvent, DataOrigin};
 
-    fn ctx_live(allow_live_orders: bool, gateway_phase: crate::live_guard::GatewayPhase) -> StrategyCtx {
+    fn ctx_live(
+        allow_live_orders: bool,
+        gateway_phase: crate::live_guard::GatewayPhase,
+    ) -> StrategyCtx {
         StrategyCtx {
             strategy_id: "s".into(),
             portfolio: "p".into(),
@@ -1065,7 +1073,10 @@ mod tests {
 
         let mut b = bar(1_733_386_740, 101.0, 101.0, 100.0, 101.0);
         b.origin = DataOrigin::Replay;
-        let intents = strategy.on_bar(&ctx_live(true, crate::live_guard::GatewayPhase::LiveReady), &b);
+        let intents = strategy.on_bar(
+            &ctx_live(true, crate::live_guard::GatewayPhase::LiveReady),
+            &b,
+        );
 
         assert!(intents.is_empty());
         assert!(matches!(
@@ -1110,7 +1121,10 @@ mod tests {
         let mut b = bar(12, 101.0, 102.0, 100.0, 101.0);
         b.origin = DataOrigin::Live;
 
-        let _ = strategy.on_bar(&ctx_live(true, crate::live_guard::GatewayPhase::LiveReady), &b);
+        let _ = strategy.on_bar(
+            &ctx_live(true, crate::live_guard::GatewayPhase::LiveReady),
+            &b,
+        );
         assert!(matches!(
             strategy.state,
             StrategyState::SessionGapStandalone {
@@ -1316,6 +1330,177 @@ mod tests {
     }
 
     #[test]
+    fn live_rollover_does_not_get_overwritten_by_persisted_state() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+
+        let last_dt = offset
+            .with_ymd_and_hms(2025, 12, 5, 10, 0, 0)
+            .single()
+            .unwrap();
+        strategy.last_dt = Some(last_dt);
+        strategy.session_start_dt = Some(last_dt);
+        strategy.session_end_dt = Some(
+            offset
+                .with_ymd_and_hms(2025, 12, 5, 23, 49, 0)
+                .single()
+                .unwrap(),
+        );
+        strategy.session_high = Some(120.0);
+        strategy.session_low = Some(80.0);
+        strategy.session_close = Some(110.0);
+        strategy.yesterday_close = Some(105.0);
+        strategy.yesterday_range = Some(8.0);
+        strategy.pre_prev_close = Some(98.0);
+        strategy.first_hour_price = Some(101.0);
+        strategy.first_min_high = Some(102.0);
+        strategy.first_min_low = Some(99.0);
+
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(999.0),
+            yesterday_range: Some(777.0),
+            pre_prev_close: Some(555.0),
+            first_min_high: Some(444.0),
+            first_min_low: Some(333.0),
+            first_hour_price: Some(222.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::Flat,
+            last_bar_ts: Some(last_dt.timestamp()),
+        };
+
+        let rollover_ts = (last_dt + Duration::minutes(120))
+            .with_timezone(&Utc)
+            .timestamp();
+        let mut rollover_bar = bar(rollover_ts, 130.0, 131.0, 129.0, 130.5);
+        rollover_bar.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &rollover_bar);
+        assert!(intents.is_empty());
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                prev_close,
+                yesterday_range,
+                pre_prev_close,
+                first_hour_price,
+                first_min_high,
+                first_min_low,
+                ..
+            } => {
+                assert_eq!(*prev_close, Some(110.0));
+                assert_eq!(*yesterday_range, Some(40.0));
+                assert_eq!(*pre_prev_close, Some(105.0));
+                assert_ne!(*prev_close, Some(999.0));
+                assert_ne!(*yesterday_range, Some(777.0));
+                assert_ne!(*pre_prev_close, Some(555.0));
+                assert_eq!(*first_hour_price, None);
+                assert_eq!(*first_min_high, Some(131.0));
+                assert_eq!(*first_min_low, Some(129.0));
+            }
+            other => panic!("unexpected state after rollover: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blocked_bar_still_updates_session_and_persists_state() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(false, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+
+        let last_dt = offset
+            .with_ymd_and_hms(2025, 12, 5, 10, 0, 0)
+            .single()
+            .unwrap();
+        strategy.last_dt = Some(last_dt);
+        strategy.session_start_dt = Some(last_dt);
+        strategy.session_end_dt = Some(
+            offset
+                .with_ymd_and_hms(2025, 12, 5, 23, 49, 0)
+                .single()
+                .unwrap(),
+        );
+        strategy.session_high = Some(100.0);
+        strategy.session_low = Some(95.0);
+        strategy.session_close = Some(98.0);
+        strategy.yesterday_close = Some(94.0);
+        strategy.yesterday_range = Some(10.0);
+        strategy.pre_prev_close = Some(90.0);
+
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: false,
+            prev_close: strategy.yesterday_close,
+            yesterday_range: strategy.yesterday_range,
+            pre_prev_close: strategy.pre_prev_close,
+            first_min_high: strategy.first_min_high,
+            first_min_low: strategy.first_min_low,
+            first_hour_price: strategy.first_hour_price,
+            session_start_ts_utc: strategy
+                .session_start_dt
+                .map(|dt| dt.with_timezone(&Utc).timestamp()),
+            session_end_ts_utc: strategy
+                .session_end_dt
+                .map(|dt| dt.with_timezone(&Utc).timestamp()),
+            last_dt_ts_utc: strategy
+                .last_dt
+                .map(|dt| dt.with_timezone(&Utc).timestamp()),
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id,
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: None,
+                sl: None,
+                sent_ts: last_dt.with_timezone(&Utc).timestamp(),
+                acked: false,
+            },
+            last_bar_ts: Some(last_dt.with_timezone(&Utc).timestamp()),
+        };
+
+        let next_ts = (last_dt + Duration::minutes(1))
+            .with_timezone(&Utc)
+            .timestamp();
+        let mut blocked_bar = bar(next_ts, 99.0, 103.0, 94.0, 101.0);
+        blocked_bar.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &blocked_bar);
+        assert!(intents.is_empty());
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase,
+                last_bar_ts,
+                last_dt_ts_utc,
+                session_date,
+                ..
+            } => {
+                assert!(matches!(
+                    phase,
+                    SessionGapLivePhase::PendingEntry {
+                        request_id: phase_request,
+                        ..
+                    } if *phase_request == request_id
+                ));
+                assert_eq!(*last_bar_ts, Some(next_ts));
+                assert_eq!(*last_dt_ts_utc, Some(next_ts));
+                assert_eq!(session_date.as_deref(), Some("2025-12-05"));
+            }
+            other => panic!("unexpected state on blocked bar: {other:?}"),
+        }
+
+        assert_eq!(strategy.session_high, Some(103.0));
+        assert_eq!(strategy.session_low, Some(94.0));
+        assert_eq!(strategy.session_close, Some(101.0));
+        assert_eq!(strategy.last_processed_bar_ts, Some(next_ts));
+    }
+
+    #[test]
     fn runtime_state_restored_applies_first_hour_price_indicator() {
         let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
         let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
@@ -1410,7 +1595,9 @@ mod tests {
             Some(session_end_ts_utc)
         );
         assert_eq!(
-            strategy.last_dt.map(|dt| dt.with_timezone(&Utc).timestamp()),
+            strategy
+                .last_dt
+                .map(|dt| dt.with_timezone(&Utc).timestamp()),
             Some(last_dt_ts_utc)
         );
     }
