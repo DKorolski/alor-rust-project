@@ -4,6 +4,7 @@ exchange = "MOEX"
 source = "strategy-runtime"
 consumer_group = "strategy-runtime"
 consumer_name = "auto"
+reset_state_on_start = false
 
 [runtime]
 trade_mode = "paper"

@@ -423,18 +423,24 @@ impl SessionGapStandaloneStrategy {
             persisted_session_start_ts_utc,
             persisted_session_end_ts_utc,
             persisted_last_dt_ts_utc,
+            persisted_last_bar_ts,
+            persisted_phase_last_change_ts_utc,
         ) = match &self.state {
             StrategyState::SessionGapStandalone {
                 phase,
                 session_start_ts_utc,
                 session_end_ts_utc,
                 last_dt_ts_utc,
+                last_bar_ts,
+                phase_last_change_ts_utc,
                 ..
             } => (
                 phase.clone(),
                 *session_start_ts_utc,
                 *session_end_ts_utc,
                 *last_dt_ts_utc,
+                *last_bar_ts,
+                *phase_last_change_ts_utc,
             ),
             _ => return,
         };
@@ -503,8 +509,10 @@ impl SessionGapStandaloneStrategy {
                     .map(|dt| dt.with_timezone(&chrono::Utc).timestamp())
                     .or(persisted_last_dt_ts_utc),
                 phase,
-                phase_last_change_ts_utc: self.phase_last_change_ts_utc,
-                last_bar_ts: Some(ts_utc),
+                phase_last_change_ts_utc: self
+                    .phase_last_change_ts_utc
+                    .or(persisted_phase_last_change_ts_utc),
+                last_bar_ts: persisted_last_bar_ts,
             };
             let _ = ctx;
         }
@@ -1358,6 +1366,76 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_reconcile_preserves_persisted_last_bar_ts() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        let ts_snapshot = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 20, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let persisted_last_bar_ts = ts_snapshot - 25;
+
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: Some(ts_snapshot),
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id: uuid::Uuid::new_v4(),
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(120.0),
+                sl: Some(80.0),
+                sent_ts: ts_snapshot - 10,
+                acked: true,
+            },
+            phase_last_change_ts_utc: Some(ts_snapshot - 30),
+            last_bar_ts: Some(persisted_last_bar_ts),
+        };
+
+        let snapshot = crate::BootstrapSnapshot {
+            positions_strategy: std::collections::HashMap::from([(
+                "USDRUBF".to_string(),
+                PositionEvent {
+                    symbol: "USDRUBF".into(),
+                    qty: 1.0,
+                    existing: true,
+                    avg_price: 101.0,
+                    ts_utc: ts_snapshot,
+                },
+            )]),
+            working_orders_strategy: std::collections::HashMap::new(),
+            snapshot_ts_utc: Some(ts_snapshot),
+        };
+
+        let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::InPosition { .. },
+                last_bar_ts,
+                ..
+            } => {
+                assert_eq!(*last_bar_ts, Some(persisted_last_bar_ts));
+            }
+            other => panic!("unexpected state after reconcile: {other:?}"),
+        }
+    }
+
+    #[test]
     fn restart_snapshot_reconciles_to_in_position_then_closes() {
         let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
         let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
@@ -1832,7 +1910,13 @@ mod tests {
             .with_ymd_and_hms(2025, 12, 5, 11, 0, 0)
             .single()
             .unwrap();
-        let first_hour_bar = bar(first_hour_dt.with_timezone(&Utc).timestamp(), 100.0, 101.0, 99.5, 101.5);
+        let first_hour_bar = bar(
+            first_hour_dt.with_timezone(&Utc).timestamp(),
+            100.0,
+            101.0,
+            99.5,
+            101.5,
+        );
         strategy.update_session(first_hour_dt, &first_hour_bar);
         assert_eq!(strategy.first_hour_price, Some(101.5));
 
@@ -1840,7 +1924,13 @@ mod tests {
             .with_ymd_and_hms(2025, 12, 5, 12, 30, 0)
             .single()
             .unwrap();
-        let later_bar = bar(later_dt.with_timezone(&Utc).timestamp(), 100.5, 103.0, 100.0, 103.2);
+        let later_bar = bar(
+            later_dt.with_timezone(&Utc).timestamp(),
+            100.5,
+            103.0,
+            100.0,
+            103.2,
+        );
         strategy.update_session(later_dt, &later_bar);
 
         assert_eq!(strategy.first_hour_price, Some(101.5));

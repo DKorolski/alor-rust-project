@@ -43,6 +43,10 @@ pub enum SessionGapLivePhase {
     },
 }
 
+fn default_session_gap_live_phase() -> SessionGapLivePhase {
+    SessionGapLivePhase::Flat
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StrategyState {
     Idle,
@@ -109,22 +113,39 @@ pub enum StrategyState {
         last_bar_ts: i64,
     },
     SessionGapStandalone {
+        #[serde(default)]
         session_date: Option<String>,
+        #[serde(default)]
         traded_session: bool,
+        #[serde(default)]
         prev_close: Option<f64>,
+        #[serde(default)]
         yesterday_range: Option<f64>,
+        #[serde(default)]
         pre_prev_close: Option<f64>,
+        #[serde(default)]
         first_min_high: Option<f64>,
+        #[serde(default)]
         first_min_low: Option<f64>,
+        #[serde(default)]
         first_hour_price: Option<f64>,
+        #[serde(default)]
         session_start_ts_utc: Option<i64>,
+        #[serde(default)]
         session_end_ts_utc: Option<i64>,
+        #[serde(default)]
         session_high: Option<f64>,
+        #[serde(default)]
         session_low: Option<f64>,
+        #[serde(default)]
         session_close: Option<f64>,
+        #[serde(default)]
         last_dt_ts_utc: Option<i64>,
+        #[serde(default = "default_session_gap_live_phase")]
         phase: SessionGapLivePhase,
+        #[serde(default)]
         phase_last_change_ts_utc: Option<i64>,
+        #[serde(default)]
         last_bar_ts: Option<i64>,
     },
     CancelSent {
@@ -164,5 +185,51 @@ impl RuntimeState {
     pub fn update_last_bar_ts(&mut self, symbol: &str, bar_ts: i64) {
         self.last_processed_bar_ts
             .insert(symbol.to_string(), bar_ts);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionGapLivePhase, StrategyState};
+
+    #[test]
+    fn session_gap_standalone_deserializes_with_missing_new_fields() {
+        let legacy_json = r#"{
+            "SessionGapStandalone": {
+                "session_date": "2025-12-05",
+                "traded_session": true,
+                "prev_close": 100.0,
+                "yesterday_range": 2.0,
+                "pre_prev_close": 99.0,
+                "first_min_high": 101.0,
+                "first_min_low": 98.0,
+                "first_hour_price": 100.5,
+                "session_start_ts_utc": 1,
+                "session_end_ts_utc": 2,
+                "last_dt_ts_utc": 3,
+                "phase": "Flat"
+            }
+        }"#;
+        let state: StrategyState = serde_json::from_str(legacy_json).unwrap();
+
+        match state {
+            StrategyState::SessionGapStandalone {
+                phase,
+                session_high,
+                session_low,
+                session_close,
+                phase_last_change_ts_utc,
+                last_bar_ts,
+                ..
+            } => {
+                assert!(matches!(phase, SessionGapLivePhase::Flat));
+                assert_eq!(session_high, None);
+                assert_eq!(session_low, None);
+                assert_eq!(session_close, None);
+                assert_eq!(phase_last_change_ts_utc, None);
+                assert_eq!(last_bar_ts, None);
+            }
+            other => panic!("unexpected state: {other:?}"),
+        }
     }
 }
