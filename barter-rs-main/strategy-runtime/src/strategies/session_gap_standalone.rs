@@ -149,6 +149,9 @@ impl SessionGapStandaloneStrategy {
             Some(last_dt) => {
                 let diff_min = (bar_dt - last_dt).num_seconds() as f64 / 60.0;
                 if diff_min > self.config.session_gap_min {
+                    let old_session_close = self.session_close;
+                    let old_session_high = self.session_high;
+                    let old_session_low = self.session_low;
                     self.pre_prev_close = self.yesterday_close;
                     self.yesterday_close = self.session_close;
                     self.yesterday_range = match (self.session_high, self.session_low) {
@@ -156,6 +159,25 @@ impl SessionGapStandaloneStrategy {
                         _ => None,
                     };
                     self.reset_session(bar_dt, bar);
+                    info!(
+                        strategy = "session_gap_standalone",
+                        rollover_reason = "gap",
+                        gap_minutes = diff_min,
+                        old_session_close,
+                        old_session_high,
+                        old_session_low,
+                        prev_close = self.yesterday_close,
+                        pre_prev_close = self.pre_prev_close,
+                        yesterday_range = self.yesterday_range,
+                        new_session_date = self.session_date(bar_dt),
+                        session_start_ts_utc = self
+                            .session_start_dt
+                            .map(|dt| dt.with_timezone(&Utc).timestamp()),
+                        session_end_ts_utc = self
+                            .session_end_dt
+                            .map(|dt| dt.with_timezone(&Utc).timestamp()),
+                        "session rollover summary"
+                    );
                 } else {
                     self.session_high = Some(self.session_high.unwrap_or(bar.h).max(bar.h));
                     self.session_low = Some(self.session_low.unwrap_or(bar.l).min(bar.l));
@@ -910,6 +932,13 @@ impl Strategy for SessionGapStandaloneStrategy {
         ctx: &StrategyCtx,
         snapshot: &crate::BootstrapSnapshot,
     ) -> Vec<Intent> {
+        info!(
+            strategy = "session_gap_standalone",
+            snapshot_ts_utc = snapshot.snapshot_ts_utc,
+            positions = snapshot.positions_strategy.len(),
+            working_orders = snapshot.working_orders_strategy.len(),
+            "bootstrap snapshot received"
+        );
         for (symbol, position) in &snapshot.positions_strategy {
             info!(
                 strategy = "session_gap_standalone",
@@ -1770,6 +1799,119 @@ mod tests {
                 assert_eq!(*last_bar_ts, Some(1_000));
             }
             other => panic!("unexpected state after ack: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_hour_price_is_sticky_within_session() {
+        let mut cfg = SessionGapStandaloneConfig::default();
+        cfg.session_gap_min = 10_000.0;
+        let mut strategy = SessionGapStandaloneStrategy::new(cfg);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+
+        let session_start = offset
+            .with_ymd_and_hms(2025, 12, 5, 10, 0, 0)
+            .single()
+            .unwrap();
+        strategy.last_dt = Some(session_start);
+        strategy.session_start_dt = Some(session_start);
+        strategy.session_end_dt = Some(
+            offset
+                .with_ymd_and_hms(2025, 12, 5, 23, 49, 0)
+                .single()
+                .unwrap(),
+        );
+        strategy.session_high = Some(101.0);
+        strategy.session_low = Some(99.0);
+        strategy.session_close = Some(100.0);
+        strategy.yesterday_close = Some(98.0);
+        strategy.yesterday_range = Some(2.0);
+        strategy.pre_prev_close = Some(97.0);
+
+        let first_hour_dt = offset
+            .with_ymd_and_hms(2025, 12, 5, 11, 0, 0)
+            .single()
+            .unwrap();
+        let first_hour_bar = bar(first_hour_dt.with_timezone(&Utc).timestamp(), 100.0, 101.0, 99.5, 101.5);
+        strategy.update_session(first_hour_dt, &first_hour_bar);
+        assert_eq!(strategy.first_hour_price, Some(101.5));
+
+        let later_dt = offset
+            .with_ymd_and_hms(2025, 12, 5, 12, 30, 0)
+            .single()
+            .unwrap();
+        let later_bar = bar(later_dt.with_timezone(&Utc).timestamp(), 100.5, 103.0, 100.0, 103.2);
+        strategy.update_session(later_dt, &later_bar);
+
+        assert_eq!(strategy.first_hour_price, Some(101.5));
+    }
+
+    #[test]
+    fn runtime_state_restored_applies_once_and_on_bar_does_not_override_rollover() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+
+        let session_start = offset
+            .with_ymd_and_hms(2025, 12, 5, 10, 0, 0)
+            .single()
+            .unwrap();
+        let session_end = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 49, 0)
+            .single()
+            .unwrap();
+        let last_dt = offset
+            .with_ymd_and_hms(2025, 12, 5, 10, 1, 0)
+            .single()
+            .unwrap();
+
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: false,
+            prev_close: Some(105.0),
+            yesterday_range: Some(8.0),
+            pre_prev_close: Some(98.0),
+            first_min_high: Some(102.0),
+            first_min_low: Some(99.0),
+            first_hour_price: Some(101.0),
+            session_start_ts_utc: Some(session_start.with_timezone(&Utc).timestamp()),
+            session_end_ts_utc: Some(session_end.with_timezone(&Utc).timestamp()),
+            session_high: Some(120.0),
+            session_low: Some(80.0),
+            session_close: Some(110.0),
+            last_dt_ts_utc: Some(last_dt.with_timezone(&Utc).timestamp()),
+            phase: SessionGapLivePhase::Flat,
+            phase_last_change_ts_utc: Some(last_dt.with_timezone(&Utc).timestamp()),
+            last_bar_ts: Some(last_dt.with_timezone(&Utc).timestamp()),
+        };
+
+        let restored = crate::RuntimeStateRestored {
+            known_order_ids: Vec::new(),
+            pending_requests: Vec::new(),
+        };
+        let _ = strategy.on_runtime_state_restored(&ctx, &restored);
+
+        let rollover_bar_ts = (last_dt + Duration::minutes(120))
+            .with_timezone(&Utc)
+            .timestamp();
+        let mut rollover_bar = bar(rollover_bar_ts, 130.0, 131.0, 129.0, 130.5);
+        rollover_bar.origin = DataOrigin::Live;
+        let _ = strategy.on_bar(&ctx, &rollover_bar);
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                prev_close,
+                yesterday_range,
+                pre_prev_close,
+                first_hour_price,
+                ..
+            } => {
+                assert_eq!(*prev_close, Some(110.0));
+                assert_eq!(*yesterday_range, Some(40.0));
+                assert_eq!(*pre_prev_close, Some(105.0));
+                assert_eq!(*first_hour_price, None);
+            }
+            other => panic!("unexpected state after restore+rollover: {other:?}"),
         }
     }
 }
