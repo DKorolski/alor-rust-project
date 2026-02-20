@@ -19,10 +19,21 @@
 - `health_listen_addr`.
 
 Пример запуска:
+
+основной с транспортом для redis с информацией для отладки
+```bash
+RUST_LOG=info,alor_gateway::services::command_consumer=debug,alor_gateway::transport_redis=debug \
+cargo run -p alor-gateway --bin alor_gateway_transport_runner -- --config ./config.live.toml --redis-url redis://127.0.0.1/
+```
+основной с транспортом для redis
+```bash
+RUST_LOG=info \
+cargo run -p alor-gateway --bin alor_gateway_transport_runner -- --config ./config.live.toml --redis-url redis://127.0.0.1/
+```
+
 ```bash
 cargo run -p alor-gateway --bin alor_gateway_runner -- --config config.live.toml
 ```
-
 ---
 
 ## 3) Health endpoints
@@ -40,6 +51,9 @@ Gateway поднимает HTTP health server:
 - `active_subscriptions_count` vs `desired_subscriptions_count`,
 - `ws_reconnects_total`, `backpressure_lagged`.
 
+```bash
+curl -sf http://127.0.0.1:8081/readiness
+```
 ---
 
 ## 4) Типовые сбои и что делать
