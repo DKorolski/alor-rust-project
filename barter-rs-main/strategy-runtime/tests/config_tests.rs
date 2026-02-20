@@ -399,3 +399,62 @@ strict_dedup = true
     assert_eq!(resolved.config.replay.price_tolerance, 0.25);
     assert!(!resolved.config.replay.strict_dedup);
 }
+
+#[test]
+fn loads_session_gap_settings_from_nested_strategy_section() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_ID",
+        "SYMBOL",
+        "QTY",
+        "SIDE",
+        "PLACE_OFFSET_TICKS",
+        "TICK_SIZE",
+    ]);
+
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_kind = "session_gap_standalone"
+
+[strategy.session_gap]
+k_long = 0.77
+k_short = 0.55
+wait_hours = 4
+k_tp_long = 0.33
+k_sl_long = 0.88
+k_tp_short = 0.21
+k_sl_short = 0.74
+long_ex_pct = 3.2
+short_ex_pct = 1.8
+start_cash = 12345
+cash_factor = 0.42
+max_entry_hour = 17
+close_hour = 22
+close_minute = 40
+session_gap_min = 45.0
+exit_offset_min = 12
+work_weekends = true
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(resolved.config.strategy.session_gap_k_long, 0.77);
+    assert_eq!(resolved.config.strategy.session_gap_k_short, 0.55);
+    assert_eq!(resolved.config.strategy.session_gap_wait_hours, 4);
+    assert_eq!(resolved.config.strategy.session_gap_k_tp_long, 0.33);
+    assert_eq!(resolved.config.strategy.session_gap_k_sl_long, 0.88);
+    assert_eq!(resolved.config.strategy.session_gap_k_tp_short, 0.21);
+    assert_eq!(resolved.config.strategy.session_gap_k_sl_short, 0.74);
+    assert_eq!(resolved.config.strategy.session_gap_long_ex_pct, 3.2);
+    assert_eq!(resolved.config.strategy.session_gap_short_ex_pct, 1.8);
+    assert_eq!(resolved.config.strategy.session_gap_start_cash, 12345.0);
+    assert_eq!(resolved.config.strategy.session_gap_cash_factor, 0.42);
+    assert_eq!(resolved.config.strategy.session_gap_max_entry_hour, 17);
+    assert_eq!(resolved.config.strategy.session_gap_close_hour, 22);
+    assert_eq!(resolved.config.strategy.session_gap_close_minute, 40);
+    assert_eq!(resolved.config.strategy.session_gap_min, 45.0);
+    assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 12);
+    assert!(resolved.config.strategy.session_gap_work_weekends);
+}

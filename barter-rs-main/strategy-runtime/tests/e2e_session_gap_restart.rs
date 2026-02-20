@@ -91,6 +91,23 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             entry_after_open_min: 59,
             exit_before_close_min: 20,
             timezone_offset_hours: 3,
+            session_gap_k_long: 0.5,
+            session_gap_k_short: 0.46,
+            session_gap_wait_hours: 2,
+            session_gap_k_tp_short: 0.28,
+            session_gap_k_sl_short: 0.65,
+            session_gap_long_ex_pct: 2.2,
+            session_gap_short_ex_pct: 2.2,
+            session_gap_close_hour: 23,
+            session_gap_close_minute: 49,
+            session_gap_min: 60.0,
+            session_gap_exit_offset_min: 20,
+            session_gap_work_weekends: false,
+            session_gap_k_tp_long: 0.28,
+            session_gap_k_sl_long: 0.68,
+            session_gap_start_cash: 30_000.0,
+            session_gap_cash_factor: 0.9,
+            session_gap_max_entry_hour: 19,
         },
         paper: PaperConfig {
             enabled: false,
@@ -150,8 +167,12 @@ async fn publish_snapshots_with_positions(
     };
     let positions = PositionsSnapshot { positions };
 
-    let orders_envelope =
-        Envelope::new(Utc::now().timestamp(), "test", MessageType::SnapshotOrders, orders);
+    let orders_envelope = Envelope::new(
+        Utc::now().timestamp(),
+        "test",
+        MessageType::SnapshotOrders,
+        orders,
+    );
     let positions_envelope = Envelope::new(
         Utc::now().timestamp(),
         "test",
@@ -300,7 +321,12 @@ async fn publish_position(
         avg_price: 100.0,
         ts_utc,
     };
-    let envelope = Envelope::new(Utc::now().timestamp(), "test", MessageType::Position, position);
+    let envelope = Envelope::new(
+        Utc::now().timestamp(),
+        "test",
+        MessageType::Position,
+        position,
+    );
     let json = serde_json::to_string(&envelope)?;
     xadd_json(redis_url, stream, &json).await?;
     Ok(())
@@ -379,7 +405,6 @@ async fn publish_entry_bars(redis_url: &str, config: &RuntimeConfig) -> Result<(
     let stream = &config.streams.bars;
     let symbol = &config.strategy.symbol;
 
-
     publish_bar_ohlc(
         redis_url,
         stream,
@@ -411,22 +436,33 @@ async fn publish_entry_bars(redis_url: &str, config: &RuntimeConfig) -> Result<(
         stream,
         symbol,
         ts_utc_from_msk(2025, 1, 10, 18, 0),
-        130.0, 131.0, 129.0, 130.0,
+        130.0,
+        131.0,
+        129.0,
+        130.0,
         DataOrigin::Live,
-    ).await?;
+    )
+    .await?;
 
     publish_bar_ohlc(
         redis_url,
         stream,
         symbol,
         ts_utc_from_msk(2025, 1, 10, 18, 59),
-        135.0, 136.0, 134.0, 135.0,
+        135.0,
+        136.0,
+        134.0,
+        135.0,
         DataOrigin::Live,
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
-async fn run_restart_mid_cycle_case(with_updated_snapshot: bool, snapshot_only: bool) -> Result<()> {
+async fn run_restart_mid_cycle_case(
+    with_updated_snapshot: bool,
+    snapshot_only: bool,
+) -> Result<()> {
     let redis_url = match redis_url() {
         Some(url) => url,
         None => {
@@ -462,9 +498,13 @@ async fn run_restart_mid_cycle_case(with_updated_snapshot: bool, snapshot_only: 
 
     publish_entry_bars(&redis_url, &config_a).await?;
 
-    let (buy_id, buy_cmd) =
-        read_next_command_deadline(&redis_url, &config_a.streams.commands, "0-0", COMMAND_DEADLINE)
-            .await?;
+    let (buy_id, buy_cmd) = read_next_command_deadline(
+        &redis_url,
+        &config_a.streams.commands,
+        "0-0",
+        COMMAND_DEADLINE,
+    )
+    .await?;
 
     let buy_qty = match buy_cmd.action {
         alor_protocol::CommandAction::Market(market) => {
@@ -585,7 +625,10 @@ async fn run_restart_mid_cycle_case(with_updated_snapshot: bool, snapshot_only: 
     .await?;
 
     let total_commands = xlen(&redis_url, &config_b.streams.commands).await?;
-    assert_eq!(total_commands, 2, "must not send duplicate entry after restart");
+    assert_eq!(
+        total_commands, 2,
+        "must not send duplicate entry after restart"
+    );
 
     handle_b.abort();
     Ok(())

@@ -58,6 +58,25 @@ entry_after_open_min = 0 # required by shared schema, unused by session_gap_stan
 exit_before_close_min = 0 # required by shared schema, unused by session_gap_standalone
 timezone_offset_hours = 3
 
+[strategy.session_gap]
+k_long = 0.5
+k_short = 0.46
+wait_hours = 2
+k_tp_short = 0.28
+k_sl_short = 0.65
+long_ex_pct = 2.2
+short_ex_pct = 2.2
+k_tp_long = 0.28
+k_sl_long = 0.68
+start_cash = 30000
+cash_factor = 0.9
+max_entry_hour = 19
+close_hour = 23
+close_minute = 49
+session_gap_min = 60.0
+exit_offset_min = 20
+work_weekends = false
+
 [paper]
 enabled = false
 output = "stdout"

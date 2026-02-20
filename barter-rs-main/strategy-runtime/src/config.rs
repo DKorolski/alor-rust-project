@@ -35,6 +35,23 @@ const DEFAULT_SESSION_CLOSE_MINUTE: u32 = 50;
 const DEFAULT_ENTRY_AFTER_OPEN_MIN: u32 = 59;
 const DEFAULT_EXIT_BEFORE_CLOSE_MIN: u32 = 20;
 const DEFAULT_TIMEZONE_OFFSET_HOURS: i32 = 3;
+const DEFAULT_SESSION_GAP_K_LONG: f64 = 0.5;
+const DEFAULT_SESSION_GAP_K_SHORT: f64 = 0.46;
+const DEFAULT_SESSION_GAP_WAIT_HOURS: i64 = 2;
+const DEFAULT_SESSION_GAP_K_TP_LONG: f64 = 0.28;
+const DEFAULT_SESSION_GAP_K_SL_LONG: f64 = 0.68;
+const DEFAULT_SESSION_GAP_K_TP_SHORT: f64 = 0.28;
+const DEFAULT_SESSION_GAP_K_SL_SHORT: f64 = 0.65;
+const DEFAULT_SESSION_GAP_LONG_EX_PCT: f64 = 2.2;
+const DEFAULT_SESSION_GAP_SHORT_EX_PCT: f64 = 2.2;
+const DEFAULT_SESSION_GAP_START_CASH: f64 = 30_000.0;
+const DEFAULT_SESSION_GAP_CASH_FACTOR: f64 = 0.9;
+const DEFAULT_SESSION_GAP_MAX_ENTRY_HOUR: u32 = 19;
+const DEFAULT_SESSION_GAP_CLOSE_HOUR: u32 = 23;
+const DEFAULT_SESSION_GAP_CLOSE_MINUTE: u32 = 49;
+const DEFAULT_SESSION_GAP_MIN: f64 = 60.0;
+const DEFAULT_SESSION_GAP_EXIT_OFFSET_MIN: i64 = 20;
+const DEFAULT_SESSION_GAP_WORK_WEEKENDS: bool = false;
 const DEFAULT_CONSUMER_GROUP: &str = "strategy-runtime";
 const DEFAULT_CONSUMER_NAME: &str = "auto";
 const DEFAULT_HEALTH_STREAM: &str = "events.health";
@@ -168,6 +185,23 @@ pub struct StrategySources {
     pub entry_after_open_min: ConfigSource,
     pub exit_before_close_min: ConfigSource,
     pub timezone_offset_hours: ConfigSource,
+    pub session_gap_k_long: ConfigSource,
+    pub session_gap_k_short: ConfigSource,
+    pub session_gap_wait_hours: ConfigSource,
+    pub session_gap_k_tp_long: ConfigSource,
+    pub session_gap_k_sl_long: ConfigSource,
+    pub session_gap_k_tp_short: ConfigSource,
+    pub session_gap_k_sl_short: ConfigSource,
+    pub session_gap_long_ex_pct: ConfigSource,
+    pub session_gap_short_ex_pct: ConfigSource,
+    pub session_gap_start_cash: ConfigSource,
+    pub session_gap_cash_factor: ConfigSource,
+    pub session_gap_max_entry_hour: ConfigSource,
+    pub session_gap_close_hour: ConfigSource,
+    pub session_gap_close_minute: ConfigSource,
+    pub session_gap_min: ConfigSource,
+    pub session_gap_exit_offset_min: ConfigSource,
+    pub session_gap_work_weekends: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +329,23 @@ impl Default for StrategySources {
             entry_after_open_min: ConfigSource::Default,
             exit_before_close_min: ConfigSource::Default,
             timezone_offset_hours: ConfigSource::Default,
+            session_gap_k_long: ConfigSource::Default,
+            session_gap_k_short: ConfigSource::Default,
+            session_gap_wait_hours: ConfigSource::Default,
+            session_gap_k_tp_long: ConfigSource::Default,
+            session_gap_k_sl_long: ConfigSource::Default,
+            session_gap_k_tp_short: ConfigSource::Default,
+            session_gap_k_sl_short: ConfigSource::Default,
+            session_gap_long_ex_pct: ConfigSource::Default,
+            session_gap_short_ex_pct: ConfigSource::Default,
+            session_gap_start_cash: ConfigSource::Default,
+            session_gap_cash_factor: ConfigSource::Default,
+            session_gap_max_entry_hour: ConfigSource::Default,
+            session_gap_close_hour: ConfigSource::Default,
+            session_gap_close_minute: ConfigSource::Default,
+            session_gap_min: ConfigSource::Default,
+            session_gap_exit_offset_min: ConfigSource::Default,
+            session_gap_work_weekends: ConfigSource::Default,
         }
     }
 }
@@ -439,6 +490,28 @@ struct StrategyConfigFile {
     entry_after_open_min: Option<u32>,
     exit_before_close_min: Option<u32>,
     timezone_offset_hours: Option<i32>,
+    session_gap: Option<SessionGapConfigFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionGapConfigFile {
+    k_long: Option<f64>,
+    k_short: Option<f64>,
+    wait_hours: Option<i64>,
+    k_tp_long: Option<f64>,
+    k_sl_long: Option<f64>,
+    k_tp_short: Option<f64>,
+    k_sl_short: Option<f64>,
+    long_ex_pct: Option<f64>,
+    short_ex_pct: Option<f64>,
+    start_cash: Option<f64>,
+    cash_factor: Option<f64>,
+    max_entry_hour: Option<u32>,
+    close_hour: Option<u32>,
+    close_minute: Option<u32>,
+    session_gap_min: Option<f64>,
+    exit_offset_min: Option<i64>,
+    work_weekends: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -506,6 +579,23 @@ pub fn load_runtime_config(
         entry_after_open_min: DEFAULT_ENTRY_AFTER_OPEN_MIN,
         exit_before_close_min: DEFAULT_EXIT_BEFORE_CLOSE_MIN,
         timezone_offset_hours: DEFAULT_TIMEZONE_OFFSET_HOURS,
+        session_gap_k_long: DEFAULT_SESSION_GAP_K_LONG,
+        session_gap_k_short: DEFAULT_SESSION_GAP_K_SHORT,
+        session_gap_wait_hours: DEFAULT_SESSION_GAP_WAIT_HOURS,
+        session_gap_k_tp_long: DEFAULT_SESSION_GAP_K_TP_LONG,
+        session_gap_k_sl_long: DEFAULT_SESSION_GAP_K_SL_LONG,
+        session_gap_k_tp_short: DEFAULT_SESSION_GAP_K_TP_SHORT,
+        session_gap_k_sl_short: DEFAULT_SESSION_GAP_K_SL_SHORT,
+        session_gap_long_ex_pct: DEFAULT_SESSION_GAP_LONG_EX_PCT,
+        session_gap_short_ex_pct: DEFAULT_SESSION_GAP_SHORT_EX_PCT,
+        session_gap_start_cash: DEFAULT_SESSION_GAP_START_CASH,
+        session_gap_cash_factor: DEFAULT_SESSION_GAP_CASH_FACTOR,
+        session_gap_max_entry_hour: DEFAULT_SESSION_GAP_MAX_ENTRY_HOUR,
+        session_gap_close_hour: DEFAULT_SESSION_GAP_CLOSE_HOUR,
+        session_gap_close_minute: DEFAULT_SESSION_GAP_CLOSE_MINUTE,
+        session_gap_min: DEFAULT_SESSION_GAP_MIN,
+        session_gap_exit_offset_min: DEFAULT_SESSION_GAP_EXIT_OFFSET_MIN,
+        session_gap_work_weekends: DEFAULT_SESSION_GAP_WORK_WEEKENDS,
     };
 
     let mut read = ReadConfig {
@@ -714,6 +804,76 @@ pub fn load_runtime_config(
             if let Some(value) = strategy_file.timezone_offset_hours {
                 strategy.timezone_offset_hours = value;
                 sources.strategy.timezone_offset_hours = ConfigSource::File;
+            }
+            if let Some(session_gap_file) = &strategy_file.session_gap {
+                if let Some(value) = session_gap_file.k_long {
+                    strategy.session_gap_k_long = value;
+                    sources.strategy.session_gap_k_long = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.k_short {
+                    strategy.session_gap_k_short = value;
+                    sources.strategy.session_gap_k_short = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.wait_hours {
+                    strategy.session_gap_wait_hours = value;
+                    sources.strategy.session_gap_wait_hours = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.k_tp_long {
+                    strategy.session_gap_k_tp_long = value;
+                    sources.strategy.session_gap_k_tp_long = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.k_sl_long {
+                    strategy.session_gap_k_sl_long = value;
+                    sources.strategy.session_gap_k_sl_long = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.k_tp_short {
+                    strategy.session_gap_k_tp_short = value;
+                    sources.strategy.session_gap_k_tp_short = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.k_sl_short {
+                    strategy.session_gap_k_sl_short = value;
+                    sources.strategy.session_gap_k_sl_short = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.long_ex_pct {
+                    strategy.session_gap_long_ex_pct = value;
+                    sources.strategy.session_gap_long_ex_pct = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.short_ex_pct {
+                    strategy.session_gap_short_ex_pct = value;
+                    sources.strategy.session_gap_short_ex_pct = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.start_cash {
+                    strategy.session_gap_start_cash = value;
+                    sources.strategy.session_gap_start_cash = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.cash_factor {
+                    strategy.session_gap_cash_factor = value;
+                    sources.strategy.session_gap_cash_factor = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.max_entry_hour {
+                    strategy.session_gap_max_entry_hour = value;
+                    sources.strategy.session_gap_max_entry_hour = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.close_hour {
+                    strategy.session_gap_close_hour = value;
+                    sources.strategy.session_gap_close_hour = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.close_minute {
+                    strategy.session_gap_close_minute = value;
+                    sources.strategy.session_gap_close_minute = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.session_gap_min {
+                    strategy.session_gap_min = value;
+                    sources.strategy.session_gap_min = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.exit_offset_min {
+                    strategy.session_gap_exit_offset_min = value;
+                    sources.strategy.session_gap_exit_offset_min = ConfigSource::File;
+                }
+                if let Some(value) = session_gap_file.work_weekends {
+                    strategy.session_gap_work_weekends = value;
+                    sources.strategy.session_gap_work_weekends = ConfigSource::File;
+                }
             }
         }
         if let Some(runtime_file) = &file_config.runtime {

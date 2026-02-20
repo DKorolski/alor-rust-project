@@ -1,0 +1,57 @@
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502T0U"
+exchange = "MOEX"
+source = "strategy-runtime"
+consumer_group = "strategy-runtime"
+consumer_name = "auto"
+
+[runtime]
+trade_mode = "paper"
+allow_live_orders = false
+guard_log_interval_ms = 5000
+bootstrap_dump = false
+
+[strategy]
+strategy_id = "session_gap_standalone"
+strategy_kind = "session_gap_standalone"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+place_offset_ticks = 0
+tick_size = 0.01
+max_wait_bars_for_ack = 1
+close_trigger = "next_bar"
+session_open_hour = 0
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 49
+entry_after_open_min = 0
+exit_before_close_min = 0
+timezone_offset_hours = 3
+
+[strategy.session_gap]
+k_long = 0.5
+k_short = 0.46
+wait_hours = 2
+k_tp_short = 0.28
+k_sl_short = 0.65
+long_ex_pct = 2.2
+short_ex_pct = 2.2
+k_tp_long = 0.28
+k_sl_long = 0.68
+start_cash = 30000
+cash_factor = 0.9
+max_entry_hour = 19
+close_hour = 23
+close_minute = 49
+session_gap_min = 60.0
+exit_offset_min = 20
+work_weekends = false
+
+[paper]
+enabled = true
+output = "stdout"
+file_path = "./strategy-runtime/paper_trades.jsonl"
+trades_csv = "./strategy-runtime/trades.csv"
+summary_json = "./strategy-runtime/summary.json"
+append = true
