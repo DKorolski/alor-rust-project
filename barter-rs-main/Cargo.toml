@@ -8,6 +8,7 @@ members = [
     "barter-macro", 
     "barter-instrument",
     "alor-scalping",
+    "alor-types",
     "alor-protocol",
     "alor-gateway",
     "strategy-runtime"

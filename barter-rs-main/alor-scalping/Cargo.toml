@@ -22,3 +22,4 @@ csv = "1"
 tokio-tungstenite = { workspace = true }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 rand = { workspace = true }
+alor-types = { path = "../alor-types" }

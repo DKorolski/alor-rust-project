@@ -5,7 +5,7 @@ use std::time::Duration;
 use alor_gateway::config::AlorGatewayConfig;
 use alor_gateway::models::BarEvent;
 use alor_gateway::supervisor::{GatewayHandle, Supervisor};
-use alor_scalping::strategy::{Action, StrategyBar, StrategyContext, StrategyCore};
+use alor_types::{Action, StrategyBar, StrategyContext, StrategyCore};
 use serde_json::Value;
 use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
@@ -54,7 +54,10 @@ async fn reconnect_resubscribe_no_duplicates() {
         }
 
         let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
-        ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
+        ws_server
+            .set_respond_to_ping(first_conn, false)
+            .await
+            .unwrap();
         handle.request_reconnect().await.unwrap();
         wait_for_ws_reconnect(&handle, reconnect_target).await;
 
@@ -137,7 +140,10 @@ async fn ping_timeout_triggers_reconnect() {
         let _ = ack_subscriptions(&ws_server, &mut ws_events, first_conn).await;
 
         let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
-        ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
+        ws_server
+            .set_respond_to_ping(first_conn, false)
+            .await
+            .unwrap();
         wait_for_ws_reconnect(&handle, reconnect_target).await;
 
         let second_conn = wait_for_connection(&mut ws_events).await;
@@ -181,7 +187,10 @@ async fn stale_guid_after_reconnect_ignored() {
         let _ = collect_close_times(&mut emitted, 1, Duration::from_secs(2)).await;
 
         let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
-        ws_server.set_respond_to_ping(first_conn, false).await.unwrap();
+        ws_server
+            .set_respond_to_ping(first_conn, false)
+            .await
+            .unwrap();
         handle.request_reconnect().await.unwrap();
         wait_for_ws_reconnect(&handle, reconnect_target).await;
 
@@ -209,9 +218,9 @@ async fn stale_guid_after_reconnect_ignored() {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let ignored = ignored_entries.iter().find(|entry| {
-            entry.get("reason").and_then(Value::as_str) == Some("UnknownGuid")
-        });
+        let ignored = ignored_entries
+            .iter()
+            .find(|entry| entry.get("reason").and_then(Value::as_str) == Some("UnknownGuid"));
         assert!(ignored.is_some());
     })
     .await;
@@ -237,8 +246,7 @@ async fn delayed_ack_retry_ignores_old_guid() {
         let mut emitted = handle.subscribe_emitted_bars();
 
         let conn = wait_for_connection(&mut ws_events).await;
-        let (first_guid, second_guid) =
-            delayed_bars_ack(&ws_server, &mut ws_events, conn).await;
+        let (first_guid, second_guid) = delayed_bars_ack(&ws_server, &mut ws_events, conn).await;
 
         for ts in [60, 120] {
             ws_server
@@ -300,19 +308,31 @@ async fn ack_subscriptions(
         let guid = parse_guid(&text).unwrap_or_default();
         match opcode.as_str() {
             "BarsGetAndSubscribe" => {
-                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                server
+                    .send_text(conn_id, ack_for_guid(&guid))
+                    .await
+                    .unwrap();
                 bars_guid = Some(guid);
             }
             "PositionsGetAndSubscribeV2" => {
-                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                server
+                    .send_text(conn_id, ack_for_guid(&guid))
+                    .await
+                    .unwrap();
                 positions_ok = true;
             }
             "OrdersGetAndSubscribeV2" => {
-                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                server
+                    .send_text(conn_id, ack_for_guid(&guid))
+                    .await
+                    .unwrap();
                 orders_ok = true;
             }
             "TradesGetAndSubscribeV2" => {
-                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                server
+                    .send_text(conn_id, ack_for_guid(&guid))
+                    .await
+                    .unwrap();
                 trades_ok = true;
             }
             _ => {}
@@ -345,30 +365,43 @@ async fn delayed_bars_ack(
         let opcode = parse_opcode(&text).unwrap_or_default();
         let guid = parse_guid(&text).unwrap_or_default();
         match opcode.as_str() {
-            "BarsGetAndSubscribe" => {
-                match first_guid.as_ref() {
-                    None => {
-                        first_guid = Some(guid);
-                        sleep(Duration::from_millis(350)).await;
-                    }
-                    Some(_) => {
-                        second_guid = Some(guid.clone());
-                        let first = first_guid.clone().unwrap();
-                        server.send_text(conn_id, ack_for_guid(&first)).await.unwrap();
-                        server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
-                    }
+            "BarsGetAndSubscribe" => match first_guid.as_ref() {
+                None => {
+                    first_guid = Some(guid);
+                    sleep(Duration::from_millis(350)).await;
                 }
-            }
+                Some(_) => {
+                    second_guid = Some(guid.clone());
+                    let first = first_guid.clone().unwrap();
+                    server
+                        .send_text(conn_id, ack_for_guid(&first))
+                        .await
+                        .unwrap();
+                    server
+                        .send_text(conn_id, ack_for_guid(&guid))
+                        .await
+                        .unwrap();
+                }
+            },
             "PositionsGetAndSubscribeV2" => {
-                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                server
+                    .send_text(conn_id, ack_for_guid(&guid))
+                    .await
+                    .unwrap();
                 positions_ok = true;
             }
             "OrdersGetAndSubscribeV2" => {
-                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                server
+                    .send_text(conn_id, ack_for_guid(&guid))
+                    .await
+                    .unwrap();
                 orders_ok = true;
             }
             "TradesGetAndSubscribeV2" => {
-                server.send_text(conn_id, ack_for_guid(&guid)).await.unwrap();
+                server
+                    .send_text(conn_id, ack_for_guid(&guid))
+                    .await
+                    .unwrap();
                 trades_ok = true;
             }
             _ => {}

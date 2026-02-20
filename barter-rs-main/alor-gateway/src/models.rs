@@ -23,13 +23,7 @@ pub struct BarEvent {
     pub origin: DataOrigin,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PositionEvent {
-    pub symbol: String,
-    pub qty: f64,
-    pub avg_price: f64,
-    pub ts_utc: i64,
-}
+pub type PositionEvent = alor_types::PositionSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeEvent {
@@ -59,10 +53,7 @@ pub struct OrderEvent {
     pub ts_utc: i64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PositionsSnapshot {
-    pub positions: HashMap<String, PositionEvent>,
-}
+pub type PositionsSnapshot = alor_types::PositionsSnapshot;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrdersSnapshot {

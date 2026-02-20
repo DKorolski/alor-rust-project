@@ -1,8 +1,11 @@
-use std::collections::HashMap;
-
 use anyhow::Context;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use tracing::{debug, warn};
+
+pub use alor_types::{
+    Action, OrderSnapshot, OrdersSnapshot, PositionSnapshot, PositionsSnapshot, Side, StrategyBar,
+    StrategyContext, StrategyCore,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Bar {
@@ -11,17 +14,6 @@ pub struct Bar {
     pub high: f64,
     pub low: f64,
     pub close: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct StrategyBar {
-    pub symbol: String,
-    pub time: DateTime<FixedOffset>,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -433,67 +425,6 @@ impl StrategyState {
             debug!("first min low breached");
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct PositionSnapshot {
-    pub symbol: String,
-    pub qty: f64,
-    pub avg_price: f64,
-    pub ts_utc: i64,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct PositionsSnapshot {
-    pub positions: HashMap<String, PositionSnapshot>,
-}
-
-#[derive(Debug, Clone)]
-pub struct OrderSnapshot {
-    pub order_id: i64,
-    pub symbol: String,
-    pub status: String,
-    pub filled: f64,
-    pub price: f64,
-    pub ts_utc: i64,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct OrdersSnapshot {
-    pub orders: HashMap<i64, OrderSnapshot>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StrategyContext {
-    pub positions: PositionsSnapshot,
-    pub orders: OrdersSnapshot,
-}
-
-#[derive(Debug, Clone)]
-pub enum Side {
-    Buy,
-    Sell,
-}
-
-#[derive(Debug, Clone)]
-pub enum Action {
-    PlaceLimit {
-        symbol: String,
-        price: f64,
-        qty: f64,
-        side: Side,
-    },
-    Cancel { order_id: i64 },
-    Replace {
-        order_id: i64,
-        new_price: f64,
-        new_qty: f64,
-    },
-    Noop,
-}
-
-pub trait StrategyCore {
-    fn on_bar(&mut self, bar: StrategyBar, ctx: StrategyContext) -> Vec<Action>;
 }
 
 impl StrategyCore for StrategyState {

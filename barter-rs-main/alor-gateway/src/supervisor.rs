@@ -31,7 +31,7 @@ use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
 use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
-use alor_scalping::strategy::{Action, StrategyBar, StrategyContext, StrategyCore};
+use alor_types::{Action, StrategyBar, StrategyContext, StrategyCore};
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -111,7 +111,7 @@ impl Supervisor {
 
     pub fn start_with_handle<S>(&self, strategy: S) -> GatewayHandle
     where
-        S: alor_scalping::strategy::StrategyCore + Send + 'static,
+        S: alor_types::StrategyCore + Send + 'static,
     {
         let (stop_tx, stop_rx) = oneshot::channel();
         let (emitted_tx, _) = broadcast::channel(1024);
@@ -148,7 +148,7 @@ impl Supervisor {
 
     pub async fn run<S>(&self, strategy: S) -> anyhow::Result<()>
     where
-        S: alor_scalping::strategy::StrategyCore + Send + 'static,
+        S: alor_types::StrategyCore + Send + 'static,
     {
         self.run_with_hooks(Some(strategy), None, None, None, None, None)
             .await
@@ -161,7 +161,7 @@ impl Supervisor {
         command_transport: Option<CommandTransport>,
     ) -> anyhow::Result<()>
     where
-        S: alor_scalping::strategy::StrategyCore + Send + 'static,
+        S: alor_types::StrategyCore + Send + 'static,
     {
         self.run_with_hooks(
             Some(strategy),
@@ -193,7 +193,7 @@ impl Supervisor {
         hub_handle_slot: Option<Arc<TokioMutex<Option<WsHubHandle>>>>,
     ) -> anyhow::Result<()>
     where
-        S: alor_scalping::strategy::StrategyCore + Send + 'static,
+        S: alor_types::StrategyCore + Send + 'static,
     {
         let mut cfg = self.cfg.clone();
         let derived = derive_config(&cfg);

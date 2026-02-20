@@ -1,11 +1,9 @@
 use std::env;
 
-use alor_gateway::config::{
-    AlorGatewayConfig, detect_config_path, log_resolved_config,
-};
+use alor_gateway::config::{AlorGatewayConfig, detect_config_path, log_resolved_config};
 use alor_gateway::supervisor::Supervisor;
-use alor_scalping::strategy::{
-    Action, OrderSnapshot, OrdersSnapshot, StrategyBar, StrategyContext, StrategyCore,
+use alor_types::{
+    Action, OrderSnapshot, OrdersSnapshot, Side, StrategyBar, StrategyContext, StrategyCore,
 };
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -13,7 +11,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 #[derive(Debug, Clone)]
 enum OrderFlow {
     Idle,
-    Submitted { submit_bar_ts: i64 },
+    Submitted {
+        submit_bar_ts: i64,
+    },
     Acked {
         order_id: i64,
         status: String,
@@ -117,7 +117,7 @@ impl StrategyCore for LimitCancelStrategy {
                         symbol: self.symbol.clone(),
                         price,
                         qty,
-                        side: alor_scalping::strategy::Side::Buy,
+                        side: Side::Buy,
                     });
                     OrderFlow::Submitted {
                         submit_bar_ts: bar_ts,
@@ -262,10 +262,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = env::args().collect();
     let config_path = detect_config_path(&args);
-    let data_report_path = detect_data_report_path(&args)
-        .or_else(|| env::var("DATA_REPORT_PATH").ok());
-    let bar_dump_path = detect_bar_dump_path(&args)
-        .or_else(|| env::var("BAR_DUMP_PATH").ok());
+    let data_report_path =
+        detect_data_report_path(&args).or_else(|| env::var("DATA_REPORT_PATH").ok());
+    let bar_dump_path = detect_bar_dump_path(&args).or_else(|| env::var("BAR_DUMP_PATH").ok());
     let resolved = if let Some(path) = config_path.clone() {
         AlorGatewayConfig::from_file_with_sources(path)?
     } else {

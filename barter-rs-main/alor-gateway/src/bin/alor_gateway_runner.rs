@@ -1,13 +1,19 @@
 use std::env;
 
-use alor_gateway::config::{
-    AlorGatewayConfig, detect_config_path, log_resolved_config,
-};
+use alor_gateway::config::{AlorGatewayConfig, detect_config_path, log_resolved_config};
 use alor_gateway::health_server;
 use alor_gateway::supervisor::Supervisor;
-use alor_scalping::strategy::{StrategyConfig, StrategyState};
+use alor_types::{Action, StrategyBar, StrategyContext, StrategyCore};
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
+
+struct NoopStrategy;
+
+impl StrategyCore for NoopStrategy {
+    fn on_bar(&mut self, _bar: StrategyBar, _ctx: StrategyContext) -> Vec<Action> {
+        Vec::new()
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,10 +21,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = env::args().collect();
     let config_path = detect_config_path(&args);
-    let data_report_path = detect_data_report_path(&args)
-        .or_else(|| env::var("DATA_REPORT_PATH").ok());
-    let bar_dump_path = detect_bar_dump_path(&args)
-        .or_else(|| env::var("BAR_DUMP_PATH").ok());
+    let data_report_path =
+        detect_data_report_path(&args).or_else(|| env::var("DATA_REPORT_PATH").ok());
+    let bar_dump_path = detect_bar_dump_path(&args).or_else(|| env::var("BAR_DUMP_PATH").ok());
     let resolved = if let Some(path) = config_path.clone() {
         AlorGatewayConfig::from_file_with_sources(path)?
     } else {
@@ -38,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
             warn!(?error, "health server stopped");
         }
     });
-    let strategy = StrategyState::new(StrategyConfig::default(), 30_000.0);
+    let strategy = NoopStrategy;
 
     info!("starting alor gateway runner");
     if let Err(error) = supervisor.run(strategy).await {

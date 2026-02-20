@@ -1,6 +1,4 @@
-use alor_scalping::strategy::{
-    Action, OrderSnapshot, PositionSnapshot, StrategyBar, StrategyContext, StrategyCore,
-};
+use alor_types::{Action, OrderSnapshot, StrategyBar, StrategyContext, StrategyCore};
 use std::collections::VecDeque;
 
 use chrono::{Datelike, FixedOffset, TimeZone, Utc};
@@ -96,7 +94,8 @@ where
                     history_buffer.push_back(bar.clone());
                 }
 
-                let should_trade = phase == GatewayPhase::LiveReady && bar.origin == DataOrigin::Live;
+                let should_trade =
+                    phase == GatewayPhase::LiveReady && bar.origin == DataOrigin::Live;
                 if !should_trade {
                     continue;
                 }
@@ -144,26 +143,11 @@ fn map_bar(bar: BarEvent) -> StrategyBar {
     }
 }
 
-fn map_positions(snapshot: PositionsSnapshot) -> alor_scalping::strategy::PositionsSnapshot {
-    let positions = snapshot
-        .positions
-        .into_iter()
-        .map(|(symbol, event)| {
-            (
-                symbol,
-                PositionSnapshot {
-                    symbol: event.symbol,
-                    qty: event.qty,
-                    avg_price: event.avg_price,
-                    ts_utc: event.ts_utc,
-                },
-            )
-        })
-        .collect();
-    alor_scalping::strategy::PositionsSnapshot { positions }
+fn map_positions(snapshot: PositionsSnapshot) -> alor_types::PositionsSnapshot {
+    snapshot
 }
 
-fn map_orders(snapshot: OrdersSnapshot) -> alor_scalping::strategy::OrdersSnapshot {
+fn map_orders(snapshot: OrdersSnapshot) -> alor_types::OrdersSnapshot {
     let orders = snapshot
         .orders
         .into_iter()
@@ -181,7 +165,7 @@ fn map_orders(snapshot: OrdersSnapshot) -> alor_scalping::strategy::OrdersSnapsh
             )
         })
         .collect();
-    alor_scalping::strategy::OrdersSnapshot { orders }
+    alor_types::OrdersSnapshot { orders }
 }
 
 async fn execute_action(
@@ -219,7 +203,9 @@ async fn execute_action(
             let new_price = normalize_step(new_price, price_step);
             let new_qty = normalize_step(new_qty, volume_step);
             let _ = cws
-                .replace(portfolio, exchange, None, None, order_id, new_price, new_qty)
+                .replace(
+                    portfolio, exchange, None, None, order_id, new_price, new_qty,
+                )
                 .await?;
         }
         Action::Noop => {}
@@ -232,11 +218,11 @@ trait SideAsStr {
     fn as_str(&self) -> &'static str;
 }
 
-impl SideAsStr for alor_scalping::strategy::Side {
+impl SideAsStr for alor_types::Side {
     fn as_str(&self) -> &'static str {
         match self {
-            alor_scalping::strategy::Side::Buy => "buy",
-            alor_scalping::strategy::Side::Sell => "sell",
+            alor_types::Side::Buy => "buy",
+            alor_types::Side::Sell => "sell",
         }
     }
 }
