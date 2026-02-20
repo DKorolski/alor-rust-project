@@ -2004,4 +2004,217 @@ mod tests {
             other => panic!("unexpected state after restore+rollover: {other:?}"),
         }
     }
+
+    #[test]
+    fn duplicate_bar_is_ignored_using_last_processed_bar_ts() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let t = 1_733_863_740;
+        strategy.last_processed_bar_ts = Some(t);
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: false,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::Flat,
+            phase_last_change_ts_utc: Some(t - 60),
+            last_bar_ts: Some(t),
+        };
+        let before_state = strategy.state.clone();
+
+        let intents_same = strategy.on_bar(&ctx_backtest(), &bar(t, 101.0, 102.0, 100.0, 101.5));
+        let intents_older =
+            strategy.on_bar(&ctx_backtest(), &bar(t - 60, 101.0, 102.0, 100.0, 101.5));
+
+        assert!(intents_same.is_empty());
+        assert!(intents_older.is_empty());
+        assert_eq!(strategy.last_processed_bar_ts, Some(t));
+        assert_eq!(
+            format!("{:?}", strategy.state),
+            format!("{:?}", before_state)
+        );
+    }
+
+    #[test]
+    fn restored_last_bar_ts_prevents_reprocessing_last_bar() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let t = 1_733_863_740;
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::Flat,
+            phase_last_change_ts_utc: Some(t - 60),
+            last_bar_ts: Some(t),
+        };
+        let restored = crate::RuntimeStateRestored {
+            known_order_ids: Vec::new(),
+            pending_requests: Vec::new(),
+        };
+        let _ = strategy.on_runtime_state_restored(&ctx_backtest(), &restored);
+        let before_state = strategy.state.clone();
+
+        let intents = strategy.on_bar(&ctx_backtest(), &bar(t, 101.0, 102.0, 100.0, 101.5));
+
+        assert!(intents.is_empty());
+        assert_eq!(strategy.last_processed_bar_ts, Some(t));
+        assert_eq!(
+            format!("{:?}", strategy.state),
+            format!("{:?}", before_state)
+        );
+    }
+
+    #[test]
+    fn tp_and_session_end_same_bar_priority_is_deterministic() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        let session_end = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 49, 0)
+            .single()
+            .unwrap();
+        let bar_dt = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 30, 0)
+            .single()
+            .unwrap();
+
+        strategy.session_end_dt = Some(session_end);
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: Some(session_end.with_timezone(&Utc).timestamp()),
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::InPosition {
+                side: Side::Buy,
+                qty: 1.0,
+                avg_price: 100.0,
+                baseline_qty: 0.0,
+                tp: Some(102.0),
+                sl: Some(95.0),
+                opened_ts: bar_dt.with_timezone(&Utc).timestamp() - 60,
+            },
+            phase_last_change_ts_utc: None,
+            last_bar_ts: Some(bar_dt.with_timezone(&Utc).timestamp() - 60),
+        };
+        let mut conflict_bar = bar(
+            bar_dt.with_timezone(&Utc).timestamp(),
+            101.0,
+            103.0,
+            100.0,
+            102.5,
+        );
+        conflict_bar.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &conflict_bar);
+
+        assert_eq!(intents.len(), 1);
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::PendingExit { reason, .. },
+                ..
+            } => assert_eq!(reason, "session_exit"),
+            other => panic!("unexpected phase after conflict bar: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_end_forces_exit_once_and_sets_reason() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        let session_end = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 49, 0)
+            .single()
+            .unwrap();
+        let bar_dt = offset
+            .with_ymd_and_hms(2025, 12, 5, 23, 30, 0)
+            .single()
+            .unwrap();
+
+        strategy.session_end_dt = Some(session_end);
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: Some(session_end.with_timezone(&Utc).timestamp()),
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::InPosition {
+                side: Side::Buy,
+                qty: 1.0,
+                avg_price: 100.0,
+                baseline_qty: 0.0,
+                tp: None,
+                sl: None,
+                opened_ts: bar_dt.with_timezone(&Utc).timestamp() - 60,
+            },
+            phase_last_change_ts_utc: None,
+            last_bar_ts: Some(bar_dt.with_timezone(&Utc).timestamp() - 60),
+        };
+        let mut exit_bar = bar(
+            bar_dt.with_timezone(&Utc).timestamp(),
+            101.0,
+            101.5,
+            100.5,
+            101.2,
+        );
+        exit_bar.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &exit_bar);
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            intents[0],
+            Intent::Market {
+                side: Side::Sell,
+                qty: 1.0,
+                ..
+            }
+        ));
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::PendingExit { reason, .. },
+                ..
+            } => assert_eq!(reason, "session_exit"),
+            other => panic!("unexpected phase after forced session exit: {other:?}"),
+        }
+    }
 }

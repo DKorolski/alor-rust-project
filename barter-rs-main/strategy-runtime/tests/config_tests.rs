@@ -458,3 +458,92 @@ work_weekends = true
     assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 12);
     assert!(resolved.config.strategy.session_gap_work_weekends);
 }
+
+#[test]
+fn session_gap_defaults_apply_when_section_missing() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_KIND",
+        "SESSION_GAP_K_LONG",
+        "SESSION_GAP_K_SHORT",
+        "SESSION_GAP_WAIT_HOURS",
+        "SESSION_GAP_K_TP_LONG",
+        "SESSION_GAP_K_SL_LONG",
+        "SESSION_GAP_K_TP_SHORT",
+        "SESSION_GAP_K_SL_SHORT",
+        "SESSION_GAP_LONG_EX_PCT",
+        "SESSION_GAP_SHORT_EX_PCT",
+        "SESSION_GAP_START_CASH",
+        "SESSION_GAP_CASH_FACTOR",
+        "SESSION_GAP_MAX_ENTRY_HOUR",
+        "SESSION_GAP_CLOSE_HOUR",
+        "SESSION_GAP_CLOSE_MINUTE",
+        "SESSION_GAP_MIN",
+        "SESSION_GAP_EXIT_OFFSET_MIN",
+        "SESSION_GAP_WORK_WEEKENDS",
+    ]);
+
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_kind = "session_gap_standalone"
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(resolved.config.strategy.session_gap_k_long, 0.5);
+    assert_eq!(resolved.config.strategy.session_gap_wait_hours, 2);
+    assert_eq!(resolved.config.strategy.session_gap_k_tp_long, 0.28);
+    assert_eq!(resolved.config.strategy.session_gap_min, 60.0);
+    assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 20);
+    assert!(!resolved.config.strategy.session_gap_work_weekends);
+}
+
+#[test]
+fn session_gap_partial_section_uses_defaults_for_missing_fields() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_KIND",
+        "SESSION_GAP_K_LONG",
+        "SESSION_GAP_K_SHORT",
+        "SESSION_GAP_WAIT_HOURS",
+        "SESSION_GAP_K_TP_LONG",
+        "SESSION_GAP_K_SL_LONG",
+        "SESSION_GAP_K_TP_SHORT",
+        "SESSION_GAP_K_SL_SHORT",
+        "SESSION_GAP_LONG_EX_PCT",
+        "SESSION_GAP_SHORT_EX_PCT",
+        "SESSION_GAP_START_CASH",
+        "SESSION_GAP_CASH_FACTOR",
+        "SESSION_GAP_MAX_ENTRY_HOUR",
+        "SESSION_GAP_CLOSE_HOUR",
+        "SESSION_GAP_CLOSE_MINUTE",
+        "SESSION_GAP_MIN",
+        "SESSION_GAP_EXIT_OFFSET_MIN",
+        "SESSION_GAP_WORK_WEEKENDS",
+    ]);
+
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_kind = "session_gap_standalone"
+
+[strategy.session_gap]
+k_long = 0.77
+close_hour = 22
+work_weekends = true
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(resolved.config.strategy.session_gap_k_long, 0.77);
+    assert_eq!(resolved.config.strategy.session_gap_close_hour, 22);
+    assert!(resolved.config.strategy.session_gap_work_weekends);
+
+    assert_eq!(resolved.config.strategy.session_gap_wait_hours, 2);
+    assert_eq!(resolved.config.strategy.session_gap_k_tp_long, 0.28);
+    assert_eq!(resolved.config.strategy.session_gap_min, 60.0);
+    assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 20);
+}

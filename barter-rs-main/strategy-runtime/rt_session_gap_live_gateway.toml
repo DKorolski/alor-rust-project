@@ -61,7 +61,7 @@ timezone_offset_hours = 3
 [strategy.session_gap]
 k_long = 0.5
 k_short = 0.46
-wait_hours = 2
+wait_hours = 3
 k_tp_short = 0.28
 k_sl_short = 0.65
 long_ex_pct = 2.2

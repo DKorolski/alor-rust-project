@@ -67,6 +67,24 @@ cargo test -p alor-gateway --tests ws_integration
 RUST_LOG=debug cargo test -p alor-gateway --tests ws_integration -- --nocapture
 ```
 
+## Runbooks
+- [Strategy Runtime Runbook](docs/strategy-runtime-runbook.md)
+- [Alor Gateway Runbook](docs/alor-gateway-runbook.md)
+- [Replay / Backtest Guide](docs/replay-backtest-guide.md)
+- [State and Restarts](docs/state-and-restarts.md)
+
+### Quick start
+```bash
+# 1) Gateway (live market feed + command routing)
+cargo run -p alor-gateway --bin alor_gateway_runner -- --config config.live.toml
+
+# 2) Runtime paper mode
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_session_gap_paper_gateway.toml
+
+# 3) Runtime replay mode
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_replay.toml
+```
+
 ## Alor Trading Gateway + Strategy Runtime Runbook
 The `alor-gateway` streams bars/orders/positions and forwards order commands. The `strategy-runtime`
 consumes the event streams and executes the configured strategy. The MVP strategy is
