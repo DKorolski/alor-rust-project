@@ -85,6 +85,28 @@ cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy
 cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_replay.toml
 ```
 
+
+### Trading scheduler (sessions & breaks)
+`strategy-runtime` and `alor-gateway` support a shared scheduler config for trading sessions, breaks, and bar-silence control.
+
+Example below shows two daytime breaks: `14:00-14:05` and `18:50-19:05`.
+
+```toml
+[strategy]
+max_silence_bars_sec = 900
+
+[strategy.trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:05:00"
+break_start_2 = "18:50:00"
+break_end_2 = "19:05:00"
+weekends_off = true
+```
+
+For gateway-level silence control the same window can be configured in `config.live.toml` under `[trading_periods]`.
+
 ## Getting Help
 Firstly, see if the answer to your question can be found in the [API Documentation]. If the answer is not there, I'd be
 happy to help via [Chat] and try answer your question via Discord.

@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,7 +31,7 @@ use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
 use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
-use alor_types::{Action, StrategyBar, StrategyContext, StrategyCore};
+use alor_types::{Action, Scheduler, StrategyBar, StrategyContext, StrategyCore};
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -918,6 +918,13 @@ impl Supervisor {
             }
 
             if last_bar_instant.read().elapsed() > silence_threshold {
+                if let Some(periods) = &cfg.trading_periods {
+                    let scheduler = Scheduler::new(periods.clone());
+                    let now = Utc::now().naive_utc();
+                    if !scheduler.is_market_open(now.time(), now.weekday()) {
+                        continue;
+                    }
+                }
                 if last_bar_silence_resync.elapsed() < silence_rate_limit {
                     continue;
                 }

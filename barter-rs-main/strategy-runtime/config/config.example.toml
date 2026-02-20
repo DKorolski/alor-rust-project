@@ -56,6 +56,16 @@ session_close_minute = 50
 entry_after_open_min = 59
 exit_before_close_min = 20
 timezone_offset_hours = 3
+max_silence_bars_sec = 900
+
+[strategy.trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:05:00"
+break_start_2 = "18:50:00"
+break_end_2 = "19:05:00"
+weekends_off = true
 
 [strategy.session_gap]
 k_long = 0.5

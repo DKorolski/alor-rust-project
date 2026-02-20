@@ -468,6 +468,7 @@ fn test_config(
         backoff_max_ms: 50,
         backoff_multiplier: 2,
         max_silence_bars_sec: 600,
+        trading_periods: None,
         history_sessions: 1,
         history_days_back: 1,
         session_rollover_hour_utc: 0,

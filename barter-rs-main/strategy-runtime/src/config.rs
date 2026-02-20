@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use alor_types::TradingPeriods;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -35,6 +36,7 @@ const DEFAULT_SESSION_CLOSE_MINUTE: u32 = 50;
 const DEFAULT_ENTRY_AFTER_OPEN_MIN: u32 = 59;
 const DEFAULT_EXIT_BEFORE_CLOSE_MIN: u32 = 20;
 const DEFAULT_TIMEZONE_OFFSET_HOURS: i32 = 3;
+const DEFAULT_MAX_SILENCE_BARS_SEC: u64 = 0;
 const DEFAULT_SESSION_GAP_K_LONG: f64 = 0.5;
 const DEFAULT_SESSION_GAP_K_SHORT: f64 = 0.46;
 const DEFAULT_SESSION_GAP_WAIT_HOURS: i64 = 2;
@@ -185,6 +187,8 @@ pub struct StrategySources {
     pub entry_after_open_min: ConfigSource,
     pub exit_before_close_min: ConfigSource,
     pub timezone_offset_hours: ConfigSource,
+    pub trading_periods: ConfigSource,
+    pub max_silence_bars_sec: ConfigSource,
     pub session_gap_k_long: ConfigSource,
     pub session_gap_k_short: ConfigSource,
     pub session_gap_wait_hours: ConfigSource,
@@ -329,6 +333,8 @@ impl Default for StrategySources {
             entry_after_open_min: ConfigSource::Default,
             exit_before_close_min: ConfigSource::Default,
             timezone_offset_hours: ConfigSource::Default,
+            trading_periods: ConfigSource::Default,
+            max_silence_bars_sec: ConfigSource::Default,
             session_gap_k_long: ConfigSource::Default,
             session_gap_k_short: ConfigSource::Default,
             session_gap_wait_hours: ConfigSource::Default,
@@ -490,6 +496,8 @@ struct StrategyConfigFile {
     entry_after_open_min: Option<u32>,
     exit_before_close_min: Option<u32>,
     timezone_offset_hours: Option<i32>,
+    trading_periods: Option<TradingPeriods>,
+    max_silence_bars_sec: Option<u64>,
     session_gap: Option<SessionGapConfigFile>,
 }
 
@@ -579,6 +587,8 @@ pub fn load_runtime_config(
         entry_after_open_min: DEFAULT_ENTRY_AFTER_OPEN_MIN,
         exit_before_close_min: DEFAULT_EXIT_BEFORE_CLOSE_MIN,
         timezone_offset_hours: DEFAULT_TIMEZONE_OFFSET_HOURS,
+        trading_periods: None,
+        max_silence_bars_sec: DEFAULT_MAX_SILENCE_BARS_SEC,
         session_gap_k_long: DEFAULT_SESSION_GAP_K_LONG,
         session_gap_k_short: DEFAULT_SESSION_GAP_K_SHORT,
         session_gap_wait_hours: DEFAULT_SESSION_GAP_WAIT_HOURS,
@@ -804,6 +814,14 @@ pub fn load_runtime_config(
             if let Some(value) = strategy_file.timezone_offset_hours {
                 strategy.timezone_offset_hours = value;
                 sources.strategy.timezone_offset_hours = ConfigSource::File;
+            }
+            if let Some(value) = &strategy_file.trading_periods {
+                strategy.trading_periods = Some(value.clone());
+                sources.strategy.trading_periods = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.max_silence_bars_sec {
+                strategy.max_silence_bars_sec = value;
+                sources.strategy.max_silence_bars_sec = ConfigSource::File;
             }
             if let Some(session_gap_file) = &strategy_file.session_gap {
                 if let Some(value) = session_gap_file.k_long {

@@ -1117,7 +1117,9 @@ mod tests {
 
     #[test]
     fn emits_market_entry_after_pending_signal() {
-        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let mut cfg = SessionGapStandaloneConfig::default();
+        cfg.wait_hours = 2;
+        let mut strategy = SessionGapStandaloneStrategy::new(cfg);
         let offset = FixedOffset::east_opt(3 * 3600).unwrap();
         let session_start = offset
             .with_ymd_and_hms(2025, 12, 5, 10, 0, 0)

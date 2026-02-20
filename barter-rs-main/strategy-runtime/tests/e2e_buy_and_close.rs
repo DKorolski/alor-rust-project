@@ -87,6 +87,8 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             entry_after_open_min: 59,
             exit_before_close_min: 20,
             timezone_offset_hours: 3,
+            trading_periods: None,
+            max_silence_bars_sec: 0,
             session_gap_k_long: 0.5,
             session_gap_k_short: 0.46,
             session_gap_wait_hours: 2,

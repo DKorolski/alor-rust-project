@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use thiserror::Error;
 
+use alor_types::TradingPeriods;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlorGatewayConfig {
     pub portfolio: String,
@@ -28,6 +30,7 @@ pub struct AlorGatewayConfig {
     pub backoff_max_ms: u64,
     pub backoff_multiplier: u8,
     pub max_silence_bars_sec: u64,
+    pub trading_periods: Option<TradingPeriods>,
     pub history_sessions: u8,
     pub history_days_back: u8,
     pub session_rollover_hour_utc: u8,
@@ -96,8 +99,7 @@ impl AlorGatewayConfig {
             tf_sec: parse_i64("ALOR_TF_SEC", 60)?,
             from_ts: parse_i64("ALOR_FROM_TS", 0)?,
             ws_url: env::var("ALOR_WS_URL").unwrap_or_else(|_| "wss://api.alor.ru/ws".into()),
-            cws_url: env::var("ALOR_CWS_URL")
-                .unwrap_or_else(|_| "wss://api.alor.ru/cws".into()),
+            cws_url: env::var("ALOR_CWS_URL").unwrap_or_else(|_| "wss://api.alor.ru/cws".into()),
             oauth_url: env::var("ALOR_OAUTH_URL")
                 .unwrap_or_else(|_| "https://oauth.alor.ru/refresh".into()),
             refresh_token: get_required("ALOR_REFRESH_TOKEN")?,
@@ -111,6 +113,7 @@ impl AlorGatewayConfig {
             backoff_max_ms: parse_u64("ALOR_BACKOFF_MAX_MS", 30_000)?,
             backoff_multiplier: parse_u8("ALOR_BACKOFF_MULTIPLIER", 2)?,
             max_silence_bars_sec: parse_u64("ALOR_MAX_SILENCE_BARS_SEC", 180)?,
+            trading_periods: None,
             history_sessions: parse_u8("ALOR_HISTORY_SESSIONS", 2)?,
             history_days_back: parse_u8("ALOR_HISTORY_DAYS_BACK", 5)?,
             session_rollover_hour_utc: parse_u8("ALOR_SESSION_ROLLOVER_HOUR_UTC", 7)?,
@@ -121,9 +124,7 @@ impl AlorGatewayConfig {
             log_positions_filter: {
                 let raw = env::var("ALOR_LOG_POSITIONS_FILTER").unwrap_or_default();
                 if raw.trim().is_empty() {
-                    parse_list(
-                        &env::var("ALOR_SYMBOLS").unwrap_or_else(|_| "USDRUBF".to_string()),
-                    )
+                    parse_list(&env::var("ALOR_SYMBOLS").unwrap_or_else(|_| "USDRUBF".to_string()))
                 } else {
                     parse_list(&raw)
                 }
@@ -133,10 +134,7 @@ impl AlorGatewayConfig {
                 let raw = env::var("ALOR_CASH_SYMBOLS").unwrap_or_else(|_| "RUB,SUR".to_string());
                 parse_list(&raw)
             },
-            log_existing_snapshot_orders: parse_bool(
-                "ALOR_LOG_EXISTING_SNAPSHOT_ORDERS",
-                false,
-            ),
+            log_existing_snapshot_orders: parse_bool("ALOR_LOG_EXISTING_SNAPSHOT_ORDERS", false),
             ws_idle_timeout_sec: parse_u64("ALOR_WS_IDLE_TIMEOUT_SEC", 70)?,
             ws_ping_interval_sec: parse_u64("ALOR_WS_PING_INTERVAL_SEC", 30)?,
             ws_ping_timeout_sec: parse_u64("ALOR_WS_PING_TIMEOUT_SEC", 15)?,
@@ -146,10 +144,7 @@ impl AlorGatewayConfig {
             warm_reconnect_max_gap_sec: parse_u64("ALOR_WARM_RECONNECT_MAX_GAP_SEC", 21_600)?,
             gap_backfill_padding_bars: parse_u8("ALOR_GAP_BACKFILL_PADDING_BARS", 2)?,
             cold_start_history_days_back: parse_u8("ALOR_COLD_START_HISTORY_DAYS_BACK", 4)?,
-            bar_silence_resync_min_sec: parse_u64(
-                "ALOR_BAR_SILENCE_RESYNC_MIN_SEC",
-                300,
-            )?,
+            bar_silence_resync_min_sec: parse_u64("ALOR_BAR_SILENCE_RESYNC_MIN_SEC", 300)?,
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         })
@@ -161,11 +156,8 @@ impl AlorGatewayConfig {
         }
 
         let mut sources = BTreeMap::new();
-        let subscribe_ack_timeout_ms = parse_u64_with_source(
-            "ALOR_SUBSCRIBE_ACK_TIMEOUT_MS",
-            5_000,
-            &mut sources,
-        )?;
+        let subscribe_ack_timeout_ms =
+            parse_u64_with_source("ALOR_SUBSCRIBE_ACK_TIMEOUT_MS", 5_000, &mut sources)?;
         let subscribe_ack_timeout_positions_ms = parse_u64_with_source(
             "ALOR_SUBSCRIBE_ACK_TIMEOUT_POSITIONS_MS",
             subscribe_ack_timeout_ms,
@@ -176,9 +168,7 @@ impl AlorGatewayConfig {
             portfolio: get_required_with_source("ALOR_PORTFOLIO", &mut sources)?,
             exchange: env_with_source("ALOR_EXCHANGE", "MOEX", &mut sources),
             instrument_group: env_with_source("ALOR_INSTRUMENT_GROUP", "RFUD", &mut sources),
-            symbols: parse_list(
-                &env_with_source("ALOR_SYMBOLS", "USDRUBF", &mut sources),
-            ),
+            symbols: parse_list(&env_with_source("ALOR_SYMBOLS", "USDRUBF", &mut sources)),
             tf_sec: parse_i64_with_source("ALOR_TF_SEC", 60, &mut sources)?,
             from_ts: parse_i64_with_source("ALOR_FROM_TS", 0, &mut sources)?,
             ws_url: env_with_source("ALOR_WS_URL", "wss://api.alor.ru/ws", &mut sources),
@@ -212,21 +202,14 @@ impl AlorGatewayConfig {
                 1_000,
                 &mut sources,
             )?,
-            backoff_max_ms: parse_u64_with_source(
-                "ALOR_BACKOFF_MAX_MS",
-                30_000,
-                &mut sources,
-            )?,
-            backoff_multiplier: parse_u8_with_source(
-                "ALOR_BACKOFF_MULTIPLIER",
-                2,
-                &mut sources,
-            )?,
+            backoff_max_ms: parse_u64_with_source("ALOR_BACKOFF_MAX_MS", 30_000, &mut sources)?,
+            backoff_multiplier: parse_u8_with_source("ALOR_BACKOFF_MULTIPLIER", 2, &mut sources)?,
             max_silence_bars_sec: parse_u64_with_source(
                 "ALOR_MAX_SILENCE_BARS_SEC",
                 180,
                 &mut sources,
             )?,
+            trading_periods: None,
             history_sessions: parse_u8_with_source("ALOR_HISTORY_SESSIONS", 2, &mut sources)?,
             history_days_back: parse_u8_with_source("ALOR_HISTORY_DAYS_BACK", 5, &mut sources)?,
             session_rollover_hour_utc: parse_u8_with_source(
@@ -334,8 +317,11 @@ impl AlorGatewayConfig {
             path: path.clone(),
             source: err,
         })?;
-        let file_cfg: FileConfig = toml::from_str(&contents)
-            .map_err(|err| ConfigError::ParseToml { path: path.clone(), source: err })?;
+        let file_cfg: FileConfig =
+            toml::from_str(&contents).map_err(|err| ConfigError::ParseToml {
+                path: path.clone(),
+                source: err,
+            })?;
 
         let symbols = file_cfg
             .symbols
@@ -388,6 +374,7 @@ impl AlorGatewayConfig {
             backoff_max_ms: file_cfg.backoff_max_ms.unwrap_or(30_000),
             backoff_multiplier: file_cfg.backoff_multiplier.unwrap_or(2),
             max_silence_bars_sec: file_cfg.max_silence_bars_sec.unwrap_or(180),
+            trading_periods: file_cfg.trading_periods.clone(),
             history_sessions: file_cfg.history_sessions.unwrap_or(2),
             history_days_back: file_cfg.history_days_back.unwrap_or(5),
             session_rollover_hour_utc: file_cfg.session_rollover_hour_utc.unwrap_or(7),
@@ -464,8 +451,11 @@ impl AlorGatewayConfig {
             path: path.clone(),
             source: err,
         })?;
-        let file_cfg: FileConfig = toml::from_str(&contents)
-            .map_err(|err| ConfigError::ParseToml { path: path.clone(), source: err })?;
+        let file_cfg: FileConfig =
+            toml::from_str(&contents).map_err(|err| ConfigError::ParseToml {
+                path: path.clone(),
+                source: err,
+            })?;
 
         let mut sources = BTreeMap::new();
         let source_label = |field: &'static str| format!("file:{}", field);
@@ -487,7 +477,10 @@ impl AlorGatewayConfig {
         if file_cfg.log_positions_filter.is_some() {
             sources.insert("log_positions_filter", source_label("log_positions_filter"));
         } else {
-            sources.insert("log_positions_filter", default_label("log_positions_filter"));
+            sources.insert(
+                "log_positions_filter",
+                default_label("log_positions_filter"),
+            );
         }
         let subscribe_ack_timeout_ms = file_cfg
             .ws
@@ -531,7 +524,10 @@ impl AlorGatewayConfig {
                 .portfolio
                 .clone()
                 .ok_or(ConfigError::MissingField("portfolio"))?,
-            exchange: file_cfg.exchange.clone().unwrap_or_else(|| "MOEX".to_string()),
+            exchange: file_cfg
+                .exchange
+                .clone()
+                .unwrap_or_else(|| "MOEX".to_string()),
             instrument_group: file_cfg
                 .instrument_group
                 .clone()
@@ -559,12 +555,16 @@ impl AlorGatewayConfig {
             skip_history_positions: file_cfg.skip_history_positions.unwrap_or(false),
             skip_history_orders: file_cfg.skip_history_orders.unwrap_or(false),
             split_adjust: file_cfg.split_adjust.unwrap_or(true),
-            format: file_cfg.format.clone().unwrap_or_else(|| "Simple".to_string()),
+            format: file_cfg
+                .format
+                .clone()
+                .unwrap_or_else(|| "Simple".to_string()),
             frequency_ms: file_cfg.frequency_ms.unwrap_or(250),
             backoff_initial_ms: file_cfg.backoff_initial_ms.unwrap_or(1_000),
             backoff_max_ms: file_cfg.backoff_max_ms.unwrap_or(30_000),
             backoff_multiplier: file_cfg.backoff_multiplier.unwrap_or(2),
             max_silence_bars_sec: file_cfg.max_silence_bars_sec.unwrap_or(180),
+            trading_periods: file_cfg.trading_periods.clone(),
             history_sessions: file_cfg.history_sessions.unwrap_or(2),
             history_days_back: file_cfg.history_days_back.unwrap_or(5),
             session_rollover_hour_utc: file_cfg.session_rollover_hour_utc.unwrap_or(7),
@@ -659,9 +659,17 @@ pub enum ConfigError {
     #[error("invalid float env var {0}: {1}")]
     InvalidFloat(&'static str, #[source] std::num::ParseFloatError),
     #[error("failed to read config file {path}: {source}")]
-    ReadFile { path: String, #[source] source: std::io::Error },
+    ReadFile {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to parse toml config {path}: {source}")]
-    ParseToml { path: String, #[source] source: toml::de::Error },
+    ParseToml {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -687,6 +695,7 @@ struct FileConfig {
     backoff_max_ms: Option<u64>,
     backoff_multiplier: Option<u8>,
     max_silence_bars_sec: Option<u64>,
+    trading_periods: Option<TradingPeriods>,
     history_sessions: Option<u8>,
     history_days_back: Option<u8>,
     session_rollover_hour_utc: Option<u8>,
@@ -739,21 +748,27 @@ fn parse_list(raw: &str) -> Vec<String> {
 
 fn parse_i64(key: &'static str, default: i64) -> Result<i64, ConfigError> {
     match env::var(key) {
-        Ok(value) => value.parse::<i64>().map_err(|err| ConfigError::InvalidInt(key, err)),
+        Ok(value) => value
+            .parse::<i64>()
+            .map_err(|err| ConfigError::InvalidInt(key, err)),
         Err(_) => Ok(default),
     }
 }
 
 fn parse_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
     match env::var(key) {
-        Ok(value) => value.parse::<u64>().map_err(|err| ConfigError::InvalidInt(key, err)),
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|err| ConfigError::InvalidInt(key, err)),
         Err(_) => Ok(default),
     }
 }
 
 fn parse_u8(key: &'static str, default: u8) -> Result<u8, ConfigError> {
     match env::var(key) {
-        Ok(value) => value.parse::<u8>().map_err(|err| ConfigError::InvalidInt(key, err)),
+        Ok(value) => value
+            .parse::<u8>()
+            .map_err(|err| ConfigError::InvalidInt(key, err)),
         Err(_) => Ok(default),
     }
 }
@@ -805,7 +820,11 @@ pub fn derive_config(cfg: &AlorGatewayConfig) -> DerivedConfig {
     }
 }
 
-fn env_with_source(key: &'static str, default: &str, sources: &mut BTreeMap<&'static str, String>) -> String {
+fn env_with_source(
+    key: &'static str,
+    default: &str,
+    sources: &mut BTreeMap<&'static str, String>,
+) -> String {
     match env::var(key) {
         Ok(value) => {
             sources.insert(key, "env".to_string());
@@ -838,7 +857,9 @@ fn parse_i64_with_source(
     match env::var(key) {
         Ok(value) => {
             sources.insert(key, "env".to_string());
-            value.parse::<i64>().map_err(|err| ConfigError::InvalidInt(key, err))
+            value
+                .parse::<i64>()
+                .map_err(|err| ConfigError::InvalidInt(key, err))
         }
         Err(_) => {
             sources.insert(key, "default".to_string());
@@ -855,7 +876,9 @@ fn parse_u64_with_source(
     match env::var(key) {
         Ok(value) => {
             sources.insert(key, "env".to_string());
-            value.parse::<u64>().map_err(|err| ConfigError::InvalidInt(key, err))
+            value
+                .parse::<u64>()
+                .map_err(|err| ConfigError::InvalidInt(key, err))
         }
         Err(_) => {
             sources.insert(key, "default".to_string());
@@ -872,7 +895,9 @@ fn parse_u8_with_source(
     match env::var(key) {
         Ok(value) => {
             sources.insert(key, "env".to_string());
-            value.parse::<u8>().map_err(|err| ConfigError::InvalidInt(key, err))
+            value
+                .parse::<u8>()
+                .map_err(|err| ConfigError::InvalidInt(key, err))
         }
         Err(_) => {
             sources.insert(key, "default".to_string());
@@ -889,7 +914,9 @@ fn parse_f64_with_source(
     match env::var(key) {
         Ok(value) => {
             sources.insert(key, "env".to_string());
-            value.parse::<f64>().map_err(|err| ConfigError::InvalidFloat(key, err))
+            value
+                .parse::<f64>()
+                .map_err(|err| ConfigError::InvalidFloat(key, err))
         }
         Err(_) => {
             sources.insert(key, "default".to_string());
@@ -916,39 +943,91 @@ fn parse_bool_with_source(
 }
 
 fn track_file_sources(file_cfg: &FileConfig, sources: &mut BTreeMap<&'static str, String>) {
-    let set_source = |sources: &mut BTreeMap<&'static str, String>, key: &'static str, present: bool| {
-        sources.insert(key, if present { "file".to_string() } else { "default".to_string() });
-    };
+    let set_source =
+        |sources: &mut BTreeMap<&'static str, String>, key: &'static str, present: bool| {
+            sources.insert(
+                key,
+                if present {
+                    "file".to_string()
+                } else {
+                    "default".to_string()
+                },
+            );
+        };
     set_source(sources, "portfolio", file_cfg.portfolio.is_some());
     set_source(sources, "exchange", file_cfg.exchange.is_some());
-    set_source(sources, "instrument_group", file_cfg.instrument_group.is_some());
+    set_source(
+        sources,
+        "instrument_group",
+        file_cfg.instrument_group.is_some(),
+    );
     set_source(sources, "tf_sec", file_cfg.tf_sec.is_some());
     set_source(sources, "from_ts", file_cfg.from_ts.is_some());
     set_source(sources, "ws_url", file_cfg.ws_url.is_some());
     set_source(sources, "cws_url", file_cfg.cws_url.is_some());
     set_source(sources, "oauth_url", file_cfg.oauth_url.is_some());
     set_source(sources, "refresh_token", file_cfg.refresh_token.is_some());
-    set_source(sources, "skip_history_bars", file_cfg.skip_history_bars.is_some());
-    set_source(sources, "skip_history_positions", file_cfg.skip_history_positions.is_some());
-    set_source(sources, "skip_history_orders", file_cfg.skip_history_orders.is_some());
+    set_source(
+        sources,
+        "skip_history_bars",
+        file_cfg.skip_history_bars.is_some(),
+    );
+    set_source(
+        sources,
+        "skip_history_positions",
+        file_cfg.skip_history_positions.is_some(),
+    );
+    set_source(
+        sources,
+        "skip_history_orders",
+        file_cfg.skip_history_orders.is_some(),
+    );
     set_source(sources, "split_adjust", file_cfg.split_adjust.is_some());
     set_source(sources, "format", file_cfg.format.is_some());
     set_source(sources, "frequency_ms", file_cfg.frequency_ms.is_some());
-    set_source(sources, "backoff_initial_ms", file_cfg.backoff_initial_ms.is_some());
+    set_source(
+        sources,
+        "backoff_initial_ms",
+        file_cfg.backoff_initial_ms.is_some(),
+    );
     set_source(sources, "backoff_max_ms", file_cfg.backoff_max_ms.is_some());
-    set_source(sources, "backoff_multiplier", file_cfg.backoff_multiplier.is_some());
-    set_source(sources, "max_silence_bars_sec", file_cfg.max_silence_bars_sec.is_some());
-    set_source(sources, "history_sessions", file_cfg.history_sessions.is_some());
-    set_source(sources, "history_days_back", file_cfg.history_days_back.is_some());
+    set_source(
+        sources,
+        "backoff_multiplier",
+        file_cfg.backoff_multiplier.is_some(),
+    );
+    set_source(
+        sources,
+        "max_silence_bars_sec",
+        file_cfg.max_silence_bars_sec.is_some(),
+    );
+    set_source(
+        sources,
+        "history_sessions",
+        file_cfg.history_sessions.is_some(),
+    );
+    set_source(
+        sources,
+        "history_days_back",
+        file_cfg.history_days_back.is_some(),
+    );
     set_source(
         sources,
         "session_rollover_hour_utc",
         file_cfg.session_rollover_hour_utc.is_some(),
     );
-    set_source(sources, "health_listen_addr", file_cfg.health_listen_addr.is_some());
+    set_source(
+        sources,
+        "health_listen_addr",
+        file_cfg.health_listen_addr.is_some(),
+    );
     set_source(sources, "price_step", file_cfg.price_step.is_some());
     set_source(sources, "volume_step", file_cfg.volume_step.is_some());
-    set_source(sources, "log_cash_positions", file_cfg.log_cash_positions.is_some());
+    set_source(
+        sources,
+        "log_cash_positions",
+        file_cfg.log_cash_positions.is_some(),
+    );
     set_source(sources, "cash_symbols", file_cfg.cash_symbols.is_some());
     set_source(
         sources,

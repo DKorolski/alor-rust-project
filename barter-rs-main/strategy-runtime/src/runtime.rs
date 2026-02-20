@@ -3,13 +3,14 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::{sleep, Instant};
 use tracing::{debug, error, info, warn};
 
 use alor_protocol::{Envelope, MessageType};
+use alor_types::Scheduler;
 
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
@@ -1833,6 +1834,54 @@ impl StrategyRuntime {
         order_ids
     }
 
+    fn trading_window_allows_order(&self, ctx: &StrategyCtx) -> bool {
+        let Some(periods) = &self.config.strategy.trading_periods else {
+            return true;
+        };
+
+        let scheduler = Scheduler::new(periods.clone());
+        let bar_dt = ctx
+            .last_bar_ts()
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|dt| dt.naive_utc())
+            .unwrap_or_else(|| Utc::now().naive_utc());
+
+        if !scheduler.is_market_open(bar_dt.time(), bar_dt.weekday()) {
+            info!(
+                bar_ts_utc = ctx.last_bar_ts(),
+                "intent_dropped_market_closed"
+            );
+            return false;
+        }
+
+        let max_silence = self.config.strategy.max_silence_bars_sec as i64;
+        if max_silence == 0 {
+            return true;
+        }
+
+        let Some(last_bar_ts) = ctx.last_bar_ts() else {
+            info!("intent_dropped_waiting_for_first_bar");
+            return false;
+        };
+
+        let Some(last_bar_dt) =
+            chrono::DateTime::from_timestamp(last_bar_ts, 0).map(|dt| dt.naive_utc())
+        else {
+            return true;
+        };
+
+        if !scheduler.check_silence_period_at(Utc::now().naive_utc(), last_bar_dt, max_silence) {
+            warn!(
+                last_bar_ts_utc = last_bar_ts,
+                max_silence_bars_sec = max_silence,
+                "intent_dropped_bar_silence"
+            );
+            return false;
+        }
+
+        true
+    }
+
     async fn apply_intents(
         &mut self,
         ctx: &StrategyCtx,
@@ -1845,6 +1894,10 @@ impl StrategyRuntime {
         }
         match self.config.trade_mode {
             TradeMode::Live => {
+                if !self.trading_window_allows_order(ctx) {
+                    self.persist_state(None).await?;
+                    return Ok(());
+                }
                 let decision = self.evaluate_guard_decision();
                 if !decision.allowed {
                     self.log_guard_decision_if_due(&decision)?;
@@ -2290,6 +2343,8 @@ mod tests {
                 entry_after_open_min: 59,
                 exit_before_close_min: 20,
                 timezone_offset_hours: 3,
+                trading_periods: None,
+                max_silence_bars_sec: 0,
                 session_gap_k_long: 0.5,
                 session_gap_k_short: 0.46,
                 session_gap_wait_hours: 2,

@@ -9,6 +9,7 @@ pub mod trade_ledger;
 use std::collections::HashMap;
 
 use alor_protocol::{CommandAction, OrderCommand, PlaceOrder, Side};
+use alor_types::TradingPeriods;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -276,6 +277,10 @@ pub struct StrategyConfig {
     pub entry_after_open_min: u32,
     pub exit_before_close_min: u32,
     pub timezone_offset_hours: i32,
+    #[serde(default)]
+    pub trading_periods: Option<TradingPeriods>,
+    #[serde(default)]
+    pub max_silence_bars_sec: u64,
     pub session_gap_k_long: f64,
     pub session_gap_k_short: f64,
     pub session_gap_wait_hours: i64,
