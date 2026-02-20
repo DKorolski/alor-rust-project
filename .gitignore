@@ -12,3 +12,17 @@ target/
 # IDE
 .vscode/
 .idea/
+
+# Runtime/replay artifacts
+**/replay_out/
+**/*_out/
+**/*trades*.csv
+**/summary.json
+**/parity_report.json
+**/*.log
+
+# OS / editor metadata
+**/.DS_Store
+**/Thumbs.db
+**/.idea/
+**/.vscode/

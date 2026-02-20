@@ -35,3 +35,15 @@ e2e-*-*.log
 summary.json
 trades.csv
 paper_trades.jsonl
+
+# Workspace-wide generated artifacts
+**/replay_out/
+**/*_out/
+**/*trades*.csv
+**/summary.json
+**/parity_report.json
+**/*.log
+**/.DS_Store
+**/Thumbs.db
+**/.idea/
+**/.vscode/
