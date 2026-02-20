@@ -44,7 +44,7 @@ impl Default for StrategyConfig {
         Self {
             k_long: 0.5,
             k_short: 0.46,
-            wait_hours: 2,
+            wait_hours: 3,
             k_tp_long: 0.28,
             k_sl_long: 0.68,
             k_tp_short: 0.28,

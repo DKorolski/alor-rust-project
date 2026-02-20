@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 async-trait = { workspace = true }
 anyhow = "1.0"
-barter-data = { workspace = true }
+
 chrono = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }

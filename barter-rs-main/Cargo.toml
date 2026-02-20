@@ -1,13 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "barter",
-    "barter-data",
-    "barter-execution",
-    "barter-integration",
-    "barter-macro", 
-    "barter-instrument",
-    "alor-scalping",
+    "alor-types",
+    "alor-protocol",
+    "alor-gateway",
+    "strategy-runtime"
+]
+default-members = [
     "alor-types",
     "alor-protocol",
     "alor-gateway",
@@ -15,12 +14,6 @@ members = [
 ]
 
 [workspace.dependencies]
-# Barter Ecosystem
-barter-integration = { path = "./barter-integration", version = "0.9.2" }
-barter-instrument = { path = "./barter-instrument", version = "0.3.1" }
-barter-data = { path = "./barter-data", version = "0.10.2" }
-barter-execution = { path = "./barter-execution", version = "0.6.0" }
-barter-macro = { path = "./barter-macro", version = "0.2.0" }
 
 # Logging
 tracing = { version = "0.1.41" }
