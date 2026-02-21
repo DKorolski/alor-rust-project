@@ -1,18 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use tracing::{debug, error, info, warn};
 
 use alor_protocol::{Envelope, MessageType};
 use alor_types::{MarketState, Scheduler};
 
-use crate::live_guard::{HealthEvent, LiveGuardDecision, LiveGuardState, evaluate_live_guard};
+use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
+use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
@@ -22,8 +24,8 @@ use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PaperConfig,
-    PaperOutput, PositionEvent, RuntimeConfig, RuntimeStateRestored, Strategy, StrategyCtx,
-    StrategyKind, TradeEvent, TradeMode,
+    PaperOutput, PositionEvent, RuntimeConfig, RuntimeHealthSnapshot, RuntimeStateRestored,
+    Strategy, StrategyCtx, StrategyKind, TradeEvent, TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -161,6 +163,8 @@ pub struct StrategyRuntime {
     pending_exec: HashMap<i64, PendingExecution>,
     sim_orders: Vec<SimOrder>,
     next_sim_order_id: i64,
+    health_snapshot: RuntimeSharedState,
+    health_server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +262,32 @@ impl StrategyRuntime {
                 config.strategy.to_session_gap_standalone_config(),
             )),
         };
+        let now = chrono::Utc::now().timestamp();
+        let health_snapshot = Arc::new(parking_lot::RwLock::new(RuntimeHealthSnapshot {
+            uptime_start: std::time::Instant::now(),
+            runtime_phase: "SyncingHistory".to_string(),
+            live_guard_status: "BLOCKED".to_string(),
+            live_guard_reasons: vec!["bootstrap:not_ready".to_string()],
+            live_guard_last_change_ts_utc: now,
+            gateway_health_last_ts_utc: None,
+            gateway_health_age_sec: None,
+            gateway_ready: None,
+            ws_connected: None,
+            cws_authorized: None,
+            gateway_scheduler_state: None,
+            scheduler_state: "Unknown".to_string(),
+            now_local: "unknown".to_string(),
+            timezone_offset_hours: config.strategy.timezone_offset_hours,
+            last_bar_ts_utc: None,
+            last_ack_ts_utc: None,
+            last_intent_ts_utc: None,
+            orders_mode: runtime_orders_mode(&config).to_string(),
+            allow_live_orders: config.allow_live_orders,
+            allow_paper_orders: config.allow_paper_orders,
+            require_gateway_ready: config.require_gateway_ready,
+            readiness: false,
+        }));
+
         Ok(Self {
             config,
             transport,
@@ -274,6 +304,8 @@ impl StrategyRuntime {
             pending_exec: HashMap::new(),
             sim_orders: Vec::new(),
             next_sim_order_id: 1,
+            health_snapshot,
+            health_server_handle: None,
         })
     }
 
@@ -283,10 +315,82 @@ impl StrategyRuntime {
         }
 
         self.bootstrap().await?;
+        self.start_health_server();
         loop {
             self.poll_once().await?;
+            self.refresh_health_snapshot();
             sleep(Duration::from_millis(self.config.read.poll_interval_ms)).await;
         }
+    }
+
+    fn start_health_server(&mut self) {
+        let cfg = HealthCfg {
+            enabled: self.config.health.enabled,
+            listen_addr: self.config.health.listen_addr.clone(),
+            expose_metrics: self.config.health.expose_metrics,
+        };
+        if !cfg.enabled {
+            tracing::info!("health server disabled");
+            return;
+        }
+        let shared = Arc::clone(&self.health_snapshot);
+        self.health_server_handle = Some(tokio::spawn(async move {
+            if let Err(error) = spawn_health_server(shared, cfg).await {
+                tracing::error!(?error, "health server terminated with error");
+            }
+        }));
+    }
+
+    fn refresh_health_snapshot(&self) {
+        let decision = self.evaluate_guard_decision();
+        let now_ts = chrono::Utc::now().timestamp();
+        let runtime_phase = self
+            .live_guard
+            .health
+            .as_ref()
+            .map(|h| format!("{:?}", h.gateway_phase))
+            .unwrap_or_else(|| "SyncingHistory".to_string());
+        let mut scheduler_state = "Unknown".to_string();
+        let mut now_local = "unknown".to_string();
+        if let Some(periods) = &self.config.strategy.trading_periods {
+            let scheduler = Scheduler::new_with_fallback_offset_hours(
+                periods.clone(),
+                self.config.strategy.timezone_offset_hours,
+            );
+            if let Some(local) = scheduler.local_datetime_utc(now_ts) {
+                now_local = local.to_rfc3339();
+            }
+            scheduler_state = format!("{:?}", scheduler.market_state_utc(now_ts));
+        }
+
+        let gateway_health_last_ts_utc = self.live_guard.health.as_ref().map(|h| h.last_event_ts);
+        let gateway_health_age_sec = gateway_health_last_ts_utc.map(|ts| now_ts.saturating_sub(ts));
+
+        let mut guard = self.health_snapshot.write();
+        guard.runtime_phase = runtime_phase;
+        guard.live_guard_status = if decision.allowed {
+            "ALLOWED"
+        } else {
+            "BLOCKED"
+        }
+        .to_string();
+        guard.live_guard_reasons = decision.reasons;
+        guard.readiness = decision.allowed;
+        guard.live_guard_last_change_ts_utc = now_ts;
+        guard.gateway_health_last_ts_utc = gateway_health_last_ts_utc;
+        guard.gateway_health_age_sec = gateway_health_age_sec;
+        guard.gateway_ready = self.live_guard.health.as_ref().map(|h| h.readiness);
+        guard.ws_connected = self.live_guard.health.as_ref().map(|h| h.ws_connected);
+        guard.cws_authorized = self.live_guard.health.as_ref().map(|h| h.cws_authorized);
+        guard.gateway_scheduler_state = self
+            .live_guard
+            .health
+            .as_ref()
+            .and_then(|h| h.scheduler_state.clone());
+        guard.scheduler_state = scheduler_state;
+        guard.now_local = now_local;
+        guard.timezone_offset_hours = self.config.strategy.timezone_offset_hours;
+        guard.last_bar_ts_utc = self.metrics.bars_last_seen_close_time_utc;
     }
 
     pub async fn flush_reports(&self) -> Result<()> {
@@ -901,6 +1005,7 @@ impl StrategyRuntime {
         self.apply_intents(&ctx, ack.processed_ts_utc, intents)
             .await?;
         self.transport.xack(&stream, &message_id).await?;
+        self.health_snapshot.write().last_ack_ts_utc = Some(ack.processed_ts_utc);
         Ok(())
     }
 
@@ -1903,6 +2008,7 @@ impl StrategyRuntime {
             self.persist_state(None).await?;
             return Ok(());
         }
+        self.health_snapshot.write().last_intent_ts_utc = Some(created_ts_utc);
         match self.config.trade_mode {
             TradeMode::Live => {
                 if !self.trading_window_allows_order(ctx, created_ts_utc) {
@@ -2137,6 +2243,7 @@ impl StrategyRuntime {
             match serde_json::from_str::<Envelope<HealthEvent>>(&payload) {
                 Ok(envelope) => {
                     self.live_guard.update_health(envelope.payload);
+                    self.refresh_health_snapshot();
                 }
                 Err(error) => {
                     warn!(?error, stream, "failed to decode health event");
@@ -2320,11 +2427,17 @@ mod tests {
             consumer_name: "consumer".to_string(),
             trade_mode,
             allow_live_orders: true,
+            allow_paper_orders: true,
             guard_log_interval_ms: 1_000,
             still_blocked_log_period_sec: 60,
             gateway_health_stale_sec: 20,
             require_gateway_ready: true,
             bootstrap_dump: false,
+            health: crate::HealthServerConfig {
+                enabled: false,
+                listen_addr: "127.0.0.1:0".to_string(),
+                expose_metrics: false,
+            },
             read: ReadConfig {
                 block_ms: 100,
                 claim_idle_ms: 100,
@@ -2476,12 +2589,10 @@ mod tests {
     fn bootstrap_ready_requires_snapshots_and_live_bar() {
         let state = BootstrapState::default();
         assert!(!state.ready());
-        assert!(
-            state
-                .reasons()
-                .iter()
-                .any(|reason| reason == "bootstrap:not_ready")
-        );
+        assert!(state
+            .reasons()
+            .iter()
+            .any(|reason| reason == "bootstrap:not_ready"));
     }
 
     #[test]
@@ -2492,12 +2603,10 @@ mod tests {
             seen_live_bar: false,
         };
         assert!(!state.ready());
-        assert!(
-            state
-                .reasons()
-                .iter()
-                .any(|reason| reason == "bootstrap:missing_live_bar")
-        );
+        assert!(state
+            .reasons()
+            .iter()
+            .any(|reason| reason == "bootstrap:missing_live_bar"));
     }
 
     #[test]
@@ -2850,4 +2959,16 @@ async fn append_log_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+fn runtime_orders_mode(config: &RuntimeConfig) -> &'static str {
+    if config.replay.enabled {
+        "replay"
+    } else {
+        match config.trade_mode {
+            TradeMode::Live => "live",
+            TradeMode::Paper => "paper",
+            TradeMode::Backtest => "replay",
+        }
+    }
 }

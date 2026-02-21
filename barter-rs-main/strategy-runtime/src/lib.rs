@@ -1,4 +1,5 @@
 pub mod config;
+pub mod health_server;
 pub mod live_guard;
 pub mod redis_transport;
 pub mod runtime;
@@ -7,6 +8,7 @@ pub mod strategies;
 pub mod trade_ledger;
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use alor_protocol::{CommandAction, OrderCommand, PlaceOrder, Side};
 use alor_types::TradingPeriods;
@@ -197,11 +199,13 @@ pub struct RuntimeConfig {
     pub consumer_name: String,
     pub trade_mode: TradeMode,
     pub allow_live_orders: bool,
+    pub allow_paper_orders: bool,
     pub guard_log_interval_ms: u64,
     pub still_blocked_log_period_sec: u64,
     pub gateway_health_stale_sec: u64,
     pub require_gateway_ready: bool,
     pub bootstrap_dump: bool,
+    pub health: HealthServerConfig,
     pub read: ReadConfig,
     pub trim: TrimConfig,
     pub strategy: StrategyConfig,
@@ -209,6 +213,39 @@ pub struct RuntimeConfig {
     pub backtest: BacktestConfig,
     pub replay: ReplayConfig,
     pub reset_state_on_start: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthServerConfig {
+    pub enabled: bool,
+    pub listen_addr: String,
+    pub expose_metrics: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeHealthSnapshot {
+    pub uptime_start: Instant,
+    pub runtime_phase: String,
+    pub live_guard_status: String,
+    pub live_guard_reasons: Vec<String>,
+    pub live_guard_last_change_ts_utc: i64,
+    pub gateway_health_last_ts_utc: Option<i64>,
+    pub gateway_health_age_sec: Option<i64>,
+    pub gateway_ready: Option<bool>,
+    pub ws_connected: Option<bool>,
+    pub cws_authorized: Option<bool>,
+    pub gateway_scheduler_state: Option<String>,
+    pub scheduler_state: String,
+    pub now_local: String,
+    pub timezone_offset_hours: i32,
+    pub last_bar_ts_utc: Option<i64>,
+    pub last_ack_ts_utc: Option<i64>,
+    pub last_intent_ts_utc: Option<i64>,
+    pub orders_mode: String,
+    pub allow_live_orders: bool,
+    pub allow_paper_orders: bool,
+    pub require_gateway_ready: bool,
+    pub readiness: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -446,7 +483,11 @@ pub fn deterministic_request_id(
 }
 
 pub fn market_request_seq(side: Side) -> u8 {
-    if side == Side::Buy { 3 } else { 4 }
+    if side == Side::Buy {
+        3
+    } else {
+        4
+    }
 }
 
 pub fn deterministic_market_request_id(

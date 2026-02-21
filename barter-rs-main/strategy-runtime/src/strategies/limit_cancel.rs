@@ -267,7 +267,7 @@ impl Strategy for LimitCancelStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic_request_id, DataOrigin};
+    use crate::{DataOrigin, deterministic_request_id};
 
     fn config() -> LimitCancelConfig {
         LimitCancelConfig {

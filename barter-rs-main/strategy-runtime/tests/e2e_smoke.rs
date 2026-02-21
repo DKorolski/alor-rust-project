@@ -13,9 +13,9 @@ use alor_protocol::{AckStatus, CommandAck, Envelope, MessageType, OrderCommand};
 use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
-    deterministic_request_id, BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig,
-    PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
-    StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperOutput, PositionEvent,
+    ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode, TrimConfig,
+    deterministic_request_id,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -49,11 +49,17 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
         consumer_name: consumer_name.to_string(),
         trade_mode: TradeMode::Live,
         allow_live_orders: true,
+        allow_paper_orders: true,
         guard_log_interval_ms: 500,
         still_blocked_log_period_sec: 60,
         gateway_health_stale_sec: 20,
         require_gateway_ready: true,
         bootstrap_dump: false,
+        health: strategy_runtime::HealthServerConfig {
+            enabled: false,
+            listen_addr: "127.0.0.1:0".to_string(),
+            expose_metrics: false,
+        },
         read: ReadConfig {
             block_ms: 100,
             claim_idle_ms: 200,
@@ -221,7 +227,9 @@ async fn publish_health(
     let health = HealthEvent {
         gateway_phase: phase,
         readiness,
+        ws_connected: true,
         cws_authorized: true,
+        scheduler_state: Some("Open".to_string()),
         last_event_ts: Utc::now().timestamp(),
     };
     let envelope = Envelope::new(Utc::now().timestamp(), "test", MessageType::Health, health);

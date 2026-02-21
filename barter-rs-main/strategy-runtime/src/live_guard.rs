@@ -28,7 +28,11 @@ pub struct HealthEvent {
     #[serde(default)]
     pub readiness: bool,
     #[serde(default)]
+    pub ws_connected: bool,
+    #[serde(default)]
     pub cws_authorized: bool,
+    #[serde(default)]
+    pub scheduler_state: Option<String>,
     #[serde(default, alias = "last_event_publish_ts", alias = "last_event_ts")]
     pub last_event_ts: i64,
 }
@@ -74,27 +78,47 @@ pub fn evaluate_live_guard(
             reasons.push("waiting_for_first_bar".to_string());
         }
     }
-    if require_gateway_ready {
-        let phase = state
-            .health
-            .as_ref()
-            .map(|health| health.gateway_phase)
-            .unwrap_or(GatewayPhase::SyncingHistory);
-        if phase != GatewayPhase::LiveReady {
-            reasons.push(format!("phase={phase:?}"));
-        }
+    let phase = state
+        .health
+        .as_ref()
+        .map(|health| health.gateway_phase)
+        .unwrap_or(GatewayPhase::SyncingHistory);
+    if phase != GatewayPhase::LiveReady {
+        reasons.push(format!("phase={phase:?}"));
+    }
 
-        let stale_sec = i64::try_from(gateway_health_stale_sec).unwrap_or(i64::MAX);
-        let is_stale = state
+    let stale_sec = i64::try_from(gateway_health_stale_sec).unwrap_or(i64::MAX);
+    let is_stale = state
+        .health
+        .as_ref()
+        .map(|health| {
+            health.last_event_ts <= 0 || now_ts_utc.saturating_sub(health.last_event_ts) > stale_sec
+        })
+        .unwrap_or(true);
+    if is_stale {
+        reasons.push("gateway_health_stale".to_string());
+    }
+
+    if require_gateway_ready {
+        let gateway_ready = state.health.as_ref().map(|h| h.readiness).unwrap_or(false);
+        let ws_connected = state
             .health
             .as_ref()
-            .map(|health| {
-                health.last_event_ts <= 0
-                    || now_ts_utc.saturating_sub(health.last_event_ts) > stale_sec
-            })
-            .unwrap_or(true);
-        if is_stale {
-            reasons.push("gateway_health_stale".to_string());
+            .map(|h| h.ws_connected)
+            .unwrap_or(false);
+        let cws_authorized = state
+            .health
+            .as_ref()
+            .map(|h| h.cws_authorized)
+            .unwrap_or(false);
+        if !gateway_ready {
+            reasons.push("gateway_ready=false".to_string());
+        }
+        if !ws_connected {
+            reasons.push("ws_connected=false".to_string());
+        }
+        if !cws_authorized {
+            reasons.push("cws_authorized=false".to_string());
         }
     }
     let allowed = reasons.is_empty();
@@ -111,7 +135,9 @@ mod tests {
             health: Some(HealthEvent {
                 gateway_phase: GatewayPhase::LiveReady,
                 readiness: true,
+                ws_connected: true,
                 cws_authorized: true,
+                scheduler_state: Some("Open".to_string()),
                 last_event_ts: 100,
             }),
         };
@@ -129,7 +155,9 @@ mod tests {
             health: Some(HealthEvent {
                 gateway_phase: GatewayPhase::LiveReady,
                 readiness: true,
+                ws_connected: true,
                 cws_authorized: true,
+                scheduler_state: Some("Open".to_string()),
                 last_event_ts: 115,
             }),
         };

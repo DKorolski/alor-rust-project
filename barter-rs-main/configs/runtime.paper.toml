@@ -15,6 +15,11 @@ still_blocked_log_period_sec = 60
 gateway_health_stale_sec = 20
 require_gateway_ready = true
 
+[runtime.health]
+enabled = true
+listen_addr = "127.0.0.1:8091"
+expose_metrics = false
+
 [streams]
 bars = "md.bars.7502T0U.1m"
 orders = "broker.orders.7502T0U"

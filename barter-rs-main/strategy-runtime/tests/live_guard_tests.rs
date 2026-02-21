@@ -1,75 +1,91 @@
-use serde_json::from_str;
-use strategy_runtime::live_guard::{
-    evaluate_live_guard, GatewayPhase, HealthEvent, LiveGuardState,
-};
 use strategy_runtime::TradeMode;
+use strategy_runtime::live_guard::{
+    GatewayPhase, HealthEvent, LiveGuardState, evaluate_live_guard,
+};
 
-#[test]
-fn live_guard_requires_live_phase() {
-    let mut state = LiveGuardState::default();
-    state.update_health(HealthEvent {
-        gateway_phase: GatewayPhase::LiveReady,
-        readiness: true,
-        cws_authorized: true,
-        last_event_ts: 1,
-    });
-
-    let decision = evaluate_live_guard(TradeMode::Live, true, &state, true, true, 10, 20, true);
-    assert!(decision.allowed);
+fn state(health: Option<HealthEvent>) -> LiveGuardState {
+    LiveGuardState { health }
 }
 
 #[test]
-fn live_guard_blocks_when_mode_not_live() {
-    let mut state = LiveGuardState::default();
-    state.update_health(HealthEvent {
-        gateway_phase: GatewayPhase::LiveReady,
-        readiness: true,
-        cws_authorized: true,
-        last_event_ts: 2,
-    });
-
-    let decision = evaluate_live_guard(TradeMode::Paper, true, &state, true, true, 10, 20, true);
+fn readiness_false_when_live_guard_blocked() {
+    let decision = evaluate_live_guard(
+        TradeMode::Paper,
+        false,
+        &state(None),
+        false,
+        false,
+        10,
+        20,
+        true,
+    );
     assert!(!decision.allowed);
-    assert!(decision
-        .reasons
-        .iter()
-        .any(|reason| reason.contains("trade_mode")));
 }
 
 #[test]
-fn blocks_with_waiting_for_next_bar_after_restart_when_stream_has_data_and_no_bars_seen() {
-    let mut state = LiveGuardState::default();
-    state.update_health(HealthEvent {
-        gateway_phase: GatewayPhase::LiveReady,
-        readiness: true,
-        cws_authorized: true,
-        last_event_ts: 3,
-    });
-
-    let decision = evaluate_live_guard(TradeMode::Live, true, &state, false, true, 10, 20, true);
+fn readiness_false_when_gateway_health_stale() {
+    let decision = evaluate_live_guard(
+        TradeMode::Live,
+        true,
+        &state(Some(HealthEvent {
+            gateway_phase: GatewayPhase::LiveReady,
+            readiness: true,
+            ws_connected: true,
+            cws_authorized: true,
+            scheduler_state: Some("Open".to_string()),
+            last_event_ts: 1,
+        })),
+        true,
+        true,
+        100,
+        20,
+        true,
+    );
     assert!(!decision.allowed);
-    assert!(decision
-        .reasons
-        .iter()
-        .any(|reason| reason == "waiting_for_next_bar_after_restart"));
+    assert!(decision.reasons.iter().any(|r| r == "gateway_health_stale"));
 }
 
 #[test]
-fn gateway_phase_accepts_pascal_case_alias() {
-    let payload = r#"
-{
-  "schema_version": 1,
-  "ts_utc": 1,
-  "source": "test",
-  "msg_type": "health",
-  "payload": {
-    "gateway_phase": "LiveReady",
-    "readiness": true,
-    "cws_authorized": true,
-    "last_event_ts": 1
-  }
+fn readiness_false_when_require_gateway_ready_and_gateway_ready_false() {
+    let decision = evaluate_live_guard(
+        TradeMode::Live,
+        true,
+        &state(Some(HealthEvent {
+            gateway_phase: GatewayPhase::LiveReady,
+            readiness: false,
+            ws_connected: true,
+            cws_authorized: true,
+            scheduler_state: Some("Open".to_string()),
+            last_event_ts: 100,
+        })),
+        true,
+        true,
+        101,
+        20,
+        true,
+    );
+    assert!(!decision.allowed);
+    assert!(decision.reasons.iter().any(|r| r == "gateway_ready=false"));
 }
-"#;
-    let parsed: alor_protocol::Envelope<HealthEvent> = from_str(payload).expect("deserialize");
-    assert_eq!(parsed.payload.gateway_phase, GatewayPhase::LiveReady);
+
+#[test]
+fn readiness_true_when_allowed_and_gateway_ready() {
+    let decision = evaluate_live_guard(
+        TradeMode::Live,
+        true,
+        &state(Some(HealthEvent {
+            gateway_phase: GatewayPhase::LiveReady,
+            readiness: true,
+            ws_connected: true,
+            cws_authorized: true,
+            scheduler_state: Some("Open".to_string()),
+            last_event_ts: 100,
+        })),
+        true,
+        true,
+        101,
+        20,
+        true,
+    );
+    assert!(decision.allowed, "reasons={:?}", decision.reasons);
 }

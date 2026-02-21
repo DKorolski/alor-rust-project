@@ -176,3 +176,41 @@ cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy
 - [ ] Режим (`trade_mode`) соответствует ожиданию.
 - [ ] Для live: `allow_live_orders=true` только после проверки readiness gateway.
 - [ ] Настроен `RUST_LOG` и путь для отчётов/артефактов.
+
+---
+
+## 8) Health endpoints
+
+В runtime добавлен встроенный health-server (`[runtime.health]`):
+
+```toml
+[runtime.health]
+enabled = true
+listen_addr = "127.0.0.1:8091"
+expose_metrics = false
+```
+
+Также поддержаны env overrides:
+- `RUNTIME_HEALTH_ENABLED`
+- `RUNTIME_HEALTH_LISTEN_ADDR`
+
+### 8.1 Проверка liveness
+```bash
+curl -sS http://127.0.0.1:8091/liveness | jq
+```
+
+### 8.2 Проверка readiness
+```bash
+curl -i -sS http://127.0.0.1:8091/readiness | jq
+```
+
+`/readiness` возвращает:
+- `200 OK`, если `live_guard=ALLOWED`.
+- `503 Service Unavailable`, если `live_guard=BLOCKED`.
+
+Ключевые поля:
+- `gateway.health_age_sec` — «возраст» последнего health payload gateway.
+- `live_guard_reasons` — причины блокировки (`gateway_health_stale`, `phase=...`, и т.д.).
+- `scheduler.state` — состояние торговой сессии (`Open`, `Weekend`, `OutsideSession`, `Break1`, `Break2`).
+
+Для совместимости можно использовать `GET /healthz` (алиас `/readiness`).

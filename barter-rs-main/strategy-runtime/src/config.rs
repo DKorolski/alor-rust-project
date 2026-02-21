@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::{
-    BacktestConfig, CloseTrigger, PaperConfig, PaperOutput, ReadConfig, ReplayConfig,
-    RuntimeConfig, StrategyConfig, StrategyKind, StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperOutput, ReadConfig,
+    ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind, StreamNames, TradeMode, TrimConfig,
 };
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
@@ -60,11 +60,15 @@ const DEFAULT_HEALTH_STREAM: &str = "events.health";
 
 const DEFAULT_TRADE_MODE: TradeMode = TradeMode::Paper;
 const DEFAULT_ALLOW_LIVE_ORDERS: bool = false;
+const DEFAULT_ALLOW_PAPER_ORDERS: bool = true;
 const DEFAULT_GUARD_LOG_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_STILL_BLOCKED_LOG_PERIOD_SEC: u64 = 60;
 const DEFAULT_GATEWAY_HEALTH_STALE_SEC: u64 = 20;
 const DEFAULT_REQUIRE_GATEWAY_READY: bool = true;
 const DEFAULT_BOOTSTRAP_DUMP: bool = false;
+const DEFAULT_RUNTIME_HEALTH_ENABLED: bool = true;
+const DEFAULT_RUNTIME_HEALTH_LISTEN_ADDR: &str = "127.0.0.1:8091";
+const DEFAULT_RUNTIME_HEALTH_EXPOSE_METRICS: bool = false;
 const DEFAULT_PAPER_ENABLED: bool = true;
 const DEFAULT_PAPER_OUTPUT: PaperOutput = PaperOutput::Stdout;
 const DEFAULT_PAPER_FILE_PATH: &str = "./paper_trades.jsonl";
@@ -215,11 +219,15 @@ pub struct StrategySources {
 pub struct RuntimeSources {
     pub trade_mode: ConfigSource,
     pub allow_live_orders: ConfigSource,
+    pub allow_paper_orders: ConfigSource,
     pub guard_log_interval_ms: ConfigSource,
     pub still_blocked_log_period_sec: ConfigSource,
     pub gateway_health_stale_sec: ConfigSource,
     pub require_gateway_ready: ConfigSource,
     pub bootstrap_dump: ConfigSource,
+    pub health_enabled: ConfigSource,
+    pub health_listen_addr: ConfigSource,
+    pub health_expose_metrics: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,11 +375,15 @@ impl Default for RuntimeSources {
         Self {
             trade_mode: ConfigSource::Default,
             allow_live_orders: ConfigSource::Default,
+            allow_paper_orders: ConfigSource::Default,
             guard_log_interval_ms: ConfigSource::Default,
             still_blocked_log_period_sec: ConfigSource::Default,
             gateway_health_stale_sec: ConfigSource::Default,
             require_gateway_ready: ConfigSource::Default,
             bootstrap_dump: ConfigSource::Default,
+            health_enabled: ConfigSource::Default,
+            health_listen_addr: ConfigSource::Default,
+            health_expose_metrics: ConfigSource::Default,
         }
     }
 }
@@ -445,11 +457,20 @@ struct RuntimeConfigFile {
 struct RuntimeSettingsFile {
     trade_mode: Option<String>,
     allow_live_orders: Option<bool>,
+    allow_paper_orders: Option<bool>,
     guard_log_interval_ms: Option<u64>,
     still_blocked_log_period_sec: Option<u64>,
     gateway_health_stale_sec: Option<u64>,
     require_gateway_ready: Option<bool>,
     bootstrap_dump: Option<bool>,
+    health: Option<HealthServerSettingsFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct HealthServerSettingsFile {
+    enabled: Option<bool>,
+    listen_addr: Option<String>,
+    expose_metrics: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -629,11 +650,17 @@ pub fn load_runtime_config(
 
     let mut trade_mode = DEFAULT_TRADE_MODE;
     let mut allow_live_orders = DEFAULT_ALLOW_LIVE_ORDERS;
+    let mut allow_paper_orders = DEFAULT_ALLOW_PAPER_ORDERS;
     let mut guard_log_interval_ms = DEFAULT_GUARD_LOG_INTERVAL_MS;
     let mut still_blocked_log_period_sec = DEFAULT_STILL_BLOCKED_LOG_PERIOD_SEC;
     let mut gateway_health_stale_sec = DEFAULT_GATEWAY_HEALTH_STALE_SEC;
     let mut require_gateway_ready = DEFAULT_REQUIRE_GATEWAY_READY;
     let mut bootstrap_dump = DEFAULT_BOOTSTRAP_DUMP;
+    let mut health = HealthServerConfig {
+        enabled: DEFAULT_RUNTIME_HEALTH_ENABLED,
+        listen_addr: DEFAULT_RUNTIME_HEALTH_LISTEN_ADDR.to_string(),
+        expose_metrics: DEFAULT_RUNTIME_HEALTH_EXPOSE_METRICS,
+    };
     let mut paper = PaperConfig {
         enabled: DEFAULT_PAPER_ENABLED,
         output: DEFAULT_PAPER_OUTPUT,
@@ -918,6 +945,10 @@ pub fn load_runtime_config(
                 allow_live_orders = value;
                 sources.runtime.allow_live_orders = ConfigSource::File;
             }
+            if let Some(value) = runtime_file.allow_paper_orders {
+                allow_paper_orders = value;
+                sources.runtime.allow_paper_orders = ConfigSource::File;
+            }
             if let Some(value) = runtime_file.guard_log_interval_ms {
                 guard_log_interval_ms = value;
                 sources.runtime.guard_log_interval_ms = ConfigSource::File;
@@ -937,6 +968,20 @@ pub fn load_runtime_config(
             if let Some(value) = runtime_file.bootstrap_dump {
                 bootstrap_dump = value;
                 sources.runtime.bootstrap_dump = ConfigSource::File;
+            }
+            if let Some(health_file) = &runtime_file.health {
+                if let Some(value) = health_file.enabled {
+                    health.enabled = value;
+                    sources.runtime.health_enabled = ConfigSource::File;
+                }
+                if let Some(value) = &health_file.listen_addr {
+                    health.listen_addr = value.clone();
+                    sources.runtime.health_listen_addr = ConfigSource::File;
+                }
+                if let Some(value) = health_file.expose_metrics {
+                    health.expose_metrics = value;
+                    sources.runtime.health_expose_metrics = ConfigSource::File;
+                }
             }
         }
         if let Some(paper_file) = &file_config.paper {
@@ -1179,6 +1224,10 @@ pub fn load_runtime_config(
         allow_live_orders = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.allow_live_orders = ConfigSource::Env;
     }
+    if let Some(value) = env::var("ALLOW_PAPER_ORDERS").ok() {
+        allow_paper_orders = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.runtime.allow_paper_orders = ConfigSource::Env;
+    }
     if let Some(value) = env_parse("GUARD_LOG_INTERVAL_MS") {
         guard_log_interval_ms = value;
         sources.runtime.guard_log_interval_ms = ConfigSource::Env;
@@ -1198,6 +1247,18 @@ pub fn load_runtime_config(
     if let Some(value) = env::var("BOOTSTRAP_DUMP").ok() {
         bootstrap_dump = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.bootstrap_dump = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("RUNTIME_HEALTH_ENABLED").ok() {
+        health.enabled = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.runtime.health_enabled = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("RUNTIME_HEALTH_LISTEN_ADDR").ok() {
+        health.listen_addr = value;
+        sources.runtime.health_listen_addr = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("RUNTIME_HEALTH_EXPOSE_METRICS").ok() {
+        health.expose_metrics = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.runtime.health_expose_metrics = ConfigSource::Env;
     }
     if let Some(value) = env::var("PAPER_ENABLED").ok() {
         paper.enabled = value == "1" || value.eq_ignore_ascii_case("true");
@@ -1367,11 +1428,13 @@ pub fn load_runtime_config(
         consumer_name,
         trade_mode,
         allow_live_orders,
+        allow_paper_orders,
         guard_log_interval_ms,
         still_blocked_log_period_sec,
         gateway_health_stale_sec,
         require_gateway_ready,
         bootstrap_dump,
+        health,
         read,
         trim,
         strategy,
