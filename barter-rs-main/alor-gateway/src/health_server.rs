@@ -3,8 +3,11 @@ use std::sync::Arc;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use parking_lot::RwLock;
 use serde::Serialize;
+use tracing::info;
+
 
 use crate::health::{GatewayPhase, HealthState, ResyncMode};
+use alor_types::MarketState;
 
 #[derive(Debug, Serialize)]
 struct ReadinessResponse {
@@ -20,6 +23,7 @@ struct ReadinessResponse {
     backpressure_lagged: bool,
     active_subscriptions_count: u32,
     desired_subscriptions_count: u32,
+    scheduler_state: Option<MarketState>,
     last_gap_backfill_sec: u64,
     last_gap_backfill_bars: u64,
     ws_reconnects_total: u64,
@@ -32,6 +36,8 @@ pub async fn serve(health: Arc<RwLock<HealthState>>, addr: String) -> anyhow::Re
         .with_state(health);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let local_addr = listener.local_addr()?;
+    info!(%local_addr, "health server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -55,6 +61,7 @@ async fn readiness(State(health): State<Arc<RwLock<HealthState>>>) -> Json<Readi
         backpressure_lagged: guard.backpressure_lagged,
         active_subscriptions_count: guard.active_subscriptions_count,
         desired_subscriptions_count: guard.desired_subscriptions_count,
+        scheduler_state: guard.scheduler_state,
         last_gap_backfill_sec: guard.last_gap_backfill_sec,
         last_gap_backfill_bars: guard.last_gap_backfill_bars,
         ws_reconnects_total: guard.ws_reconnects_total,

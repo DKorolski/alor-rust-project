@@ -505,9 +505,9 @@ impl SessionGapStandaloneStrategy {
                 session_low: self.session_low,
                 session_close: self.session_close,
                 last_dt_ts_utc: self
-                    .last_dt
-                    .map(|dt| dt.with_timezone(&chrono::Utc).timestamp())
-                    .or(persisted_last_dt_ts_utc),
+                    .synced_last_dt_ts_utc(persisted_last_bar_ts.unwrap_or(ts_utc))
+                    .or(persisted_last_dt_ts_utc)
+                    .or(persisted_last_bar_ts),
                 phase,
                 phase_last_change_ts_utc: self
                     .phase_last_change_ts_utc
@@ -555,6 +555,13 @@ impl SessionGapStandaloneStrategy {
         }
     }
 
+    fn synced_last_dt_ts_utc(&self, last_bar_ts: i64) -> Option<i64> {
+        let last_dt_ts = self
+            .last_dt
+            .map(|dt| dt.with_timezone(&chrono::Utc).timestamp());
+        Some(last_dt_ts.unwrap_or(last_bar_ts).max(last_bar_ts))
+    }
+
     fn persist_state_snapshot(
         &mut self,
         session_date: String,
@@ -579,9 +586,7 @@ impl SessionGapStandaloneStrategy {
             session_high: self.session_high,
             session_low: self.session_low,
             session_close: self.session_close,
-            last_dt_ts_utc: self
-                .last_dt
-                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+            last_dt_ts_utc: self.synced_last_dt_ts_utc(last_bar_ts),
             phase,
             phase_last_change_ts_utc: self.phase_last_change_ts_utc,
             last_bar_ts: Some(last_bar_ts),
@@ -614,8 +619,8 @@ impl SessionGapStandaloneStrategy {
                 session_low: self.session_low,
                 session_close: self.session_close,
                 last_dt_ts_utc: self
-                    .last_dt
-                    .map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+                    .synced_last_dt_ts_utc(last_bar_ts.unwrap_or(0))
+                    .or(*last_bar_ts),
                 phase,
                 phase_last_change_ts_utc: self.phase_last_change_ts_utc,
                 last_bar_ts: *last_bar_ts,

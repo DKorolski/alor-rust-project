@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,7 +31,9 @@ use crate::state::positions_manager::PositionsManager;
 use crate::strategy_adapter::StrategyRunner;
 use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
-use alor_types::{Action, Scheduler, StrategyBar, StrategyContext, StrategyCore};
+use alor_types::{
+    Action, MarketState, Scheduler, StrategyBar, StrategyContext, StrategyCore, TradingPeriods,
+};
 
 pub struct Supervisor {
     cfg: AlorGatewayConfig,
@@ -52,6 +54,16 @@ pub struct CommandTransport {
     pub sink: Arc<dyn CommandSink>,
     pub idempotency: Arc<dyn crate::services::command_consumer::IdempotencyStore>,
     pub info: CommandConsumerInfo,
+}
+
+fn market_state_for_silence_gate(
+    periods: Option<&TradingPeriods>,
+    now_utc_ts: i64,
+) -> Option<MarketState> {
+    periods.map(|periods| {
+        let scheduler = Scheduler::new_with_fallback_offset_hours(periods.clone(), 3);
+        scheduler.market_state_utc(now_utc_ts)
+    })
 }
 
 impl GatewayHandle {
@@ -836,6 +848,9 @@ impl Supervisor {
         let mut last_bar_silence_resync = Instant::now()
             .checked_sub(silence_rate_limit)
             .unwrap_or_else(Instant::now);
+        let mut last_bar_silence_ignored_log = Instant::now()
+            .checked_sub(silence_rate_limit)
+            .unwrap_or_else(Instant::now);
 
         #[cfg(unix)]
         let mut term_signal =
@@ -915,32 +930,65 @@ impl Supervisor {
                     && guard.ws_last_rx_age_sec <= cfg.ws_idle_timeout_sec
                     && guard.active_subscriptions_count >= guard.desired_subscriptions_count
                     && guard.cws_authorized;
+                guard.scheduler_state =
+                    market_state_for_silence_gate(cfg.trading_periods.as_ref(), now);
             }
 
-            if last_bar_instant.read().elapsed() > silence_threshold {
-                if let Some(periods) = &cfg.trading_periods {
-                    let scheduler = Scheduler::new(periods.clone());
-                    let now = Utc::now().naive_utc();
-                    if !scheduler.is_market_open(now.time(), now.weekday()) {
+            let phase = *phase_tx.borrow();
+            if cfg.max_silence_bars_sec > 0
+                && phase == GatewayPhase::LiveReady
+                && last_bar_instant.read().elapsed() > silence_threshold
+            {
+                let now_utc_ts = Utc::now().timestamp();
+                if let Some(periods) = cfg.trading_periods.as_ref() {
+                    let scheduler = Scheduler::new_with_fallback_offset_hours(periods.clone(), 3);
+                    let state = scheduler.market_state_utc(now_utc_ts);
+                    let last_bar_ts_utc = self.health.read().last_bar_ts;
+                    let elapsed_sec = now_utc_ts.saturating_sub(last_bar_ts_utc);
+                    let max_silence_bars_sec =
+                        i64::try_from(cfg.max_silence_bars_sec).unwrap_or(i64::MAX);
+                    let silence_ok = Utc
+                        .timestamp_opt(now_utc_ts, 0)
+                        .single()
+                        .zip(Utc.timestamp_opt(last_bar_ts_utc, 0).single())
+                        .map(|(now_dt, last_bar_dt)| {
+                            scheduler.check_silence_period_at(
+                                now_dt.naive_utc(),
+                                last_bar_dt.naive_utc(),
+                                max_silence_bars_sec,
+                            )
+                        })
+                        .unwrap_or(true);
+                    if silence_ok {
+                        if state != MarketState::Open
+                            && last_bar_silence_ignored_log.elapsed() >= silence_rate_limit
+                        {
+                            let now_local = scheduler
+                                .local_datetime_utc(now_utc_ts)
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            info!(
+                                state = ?state,
+                                now_local,
+                                last_bar_ts_utc,
+                                elapsed_sec,
+                                max_silence_bars_sec = cfg.max_silence_bars_sec,
+                                decision = "market_closed",
+                                "bar_silence_ignored"
+                            );
+                            last_bar_silence_ignored_log = Instant::now();
+                        }
                         continue;
                     }
                 }
                 if last_bar_silence_resync.elapsed() < silence_rate_limit {
                     continue;
                 }
-                let phase = *phase_tx.borrow();
                 let ws_connected = self.health.read().ws_connected;
-                if phase != GatewayPhase::LiveReady
-                    || !ws_connected
-                    || resync_in_progress.load(Ordering::SeqCst)
-                {
+                if !ws_connected || resync_in_progress.load(Ordering::SeqCst) {
                     continue;
                 }
                 warn!("bar silence detected; resubscribing");
-                log_event(GatewayEvent::ResyncStarted {
-                    mode: ResyncMode::Warm,
-                    reason: "bar_silence",
-                });
                 let (plan, mode) = compute_backfill_plan(
                     &cfg.symbols,
                     cfg.tf_sec,
@@ -973,12 +1021,6 @@ impl Supervisor {
                 }
                 *last_bar_instant.write() = Instant::now();
                 last_bar_silence_resync = Instant::now();
-                let plan = hub_handle.backfill_plan();
-                log_event(GatewayEvent::ResyncDone {
-                    mode: plan.mode,
-                    gap_sec: plan.gap_sec,
-                    bars_backfilled: self.health.read().last_gap_backfill_bars,
-                });
             }
         }
 
@@ -1270,4 +1312,41 @@ fn transition_phase(
         }
     }
     let _ = phase_tx.send(next);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDate, NaiveTime};
+
+    fn t(v: &str) -> NaiveTime {
+        NaiveTime::parse_from_str(v, "%H:%M").unwrap()
+    }
+
+    #[test]
+    fn market_state_for_silence_gate_uses_timezone_and_breaks() {
+        let periods = TradingPeriods {
+            session_start: t("09:00"),
+            session_end: t("23:49"),
+            break_start_1: t("14:00"),
+            break_end_1: t("14:05"),
+            break_start_2: t("18:50"),
+            break_end_2: t("19:05"),
+            weekends_off: true,
+            timezone_offset_hours: 3,
+        };
+
+        // 15:55 UTC == 18:55 local (+3) -> Break2
+        let ts_utc = NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(15, 55, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+
+        assert_eq!(
+            market_state_for_silence_gate(Some(&periods), ts_utc),
+            Some(MarketState::Break2)
+        );
+    }
 }

@@ -103,6 +103,7 @@ break_end_1 = "14:05:00"
 break_start_2 = "18:50:00"
 break_end_2 = "19:05:00"
 weekends_off = true
+timezone_offset_hours = 3
 ```
 
 For gateway-level silence control the same window can be configured in `config.live.toml` under `[trading_periods]`.

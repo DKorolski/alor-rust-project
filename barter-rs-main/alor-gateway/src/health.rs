@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
+use alor_types::MarketState;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum GatewayPhase {
     SyncingHistory,
@@ -74,4 +76,5 @@ pub struct HealthState {
     pub last_gap_backfill_bars: u64,
     pub active_subscriptions_count: u32,
     pub desired_subscriptions_count: u32,
+    pub scheduler_state: Option<MarketState>,
 }

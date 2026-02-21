@@ -3,16 +3,16 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 
 use alor_protocol::{Envelope, MessageType};
-use alor_types::Scheduler;
+use alor_types::{MarketState, Scheduler};
 
-use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
+use crate::live_guard::{HealthEvent, LiveGuardDecision, LiveGuardState, evaluate_live_guard};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
@@ -1834,21 +1834,29 @@ impl StrategyRuntime {
         order_ids
     }
 
-    fn trading_window_allows_order(&self, ctx: &StrategyCtx) -> bool {
+    fn trading_window_allows_order(&self, ctx: &StrategyCtx, created_ts_utc: i64) -> bool {
         let Some(periods) = &self.config.strategy.trading_periods else {
             return true;
         };
 
-        let scheduler = Scheduler::new(periods.clone());
-        let bar_dt = ctx
-            .last_bar_ts()
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-            .map(|dt| dt.naive_utc())
-            .unwrap_or_else(|| Utc::now().naive_utc());
+        let scheduler = Scheduler::new_with_fallback_offset_hours(
+            periods.clone(),
+            self.config.strategy.timezone_offset_hours,
+        );
+        let Some(now_utc) = chrono::DateTime::from_timestamp(created_ts_utc, 0) else {
+            return true;
+        };
+        let now_local = scheduler
+            .local_datetime_utc(created_ts_utc)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "unknown".to_string());
+        let market_state = scheduler.market_state_utc(created_ts_utc);
 
-        if !scheduler.is_market_open(bar_dt.time(), bar_dt.weekday()) {
+        if market_state != MarketState::Open {
             info!(
-                bar_ts_utc = ctx.last_bar_ts(),
+                state = ?market_state,
+                created_ts_utc,
+                now_local,
                 "intent_dropped_market_closed"
             );
             return false;
@@ -1870,10 +1878,13 @@ impl StrategyRuntime {
             return true;
         };
 
-        if !scheduler.check_silence_period_at(Utc::now().naive_utc(), last_bar_dt, max_silence) {
+        if !scheduler.check_silence_period_at(now_utc.naive_utc(), last_bar_dt, max_silence) {
             warn!(
                 last_bar_ts_utc = last_bar_ts,
                 max_silence_bars_sec = max_silence,
+                state = ?market_state,
+                created_ts_utc,
+                now_local,
                 "intent_dropped_bar_silence"
             );
             return false;
@@ -1894,7 +1905,7 @@ impl StrategyRuntime {
         }
         match self.config.trade_mode {
             TradeMode::Live => {
-                if !self.trading_window_allows_order(ctx) {
+                if !self.trading_window_allows_order(ctx, created_ts_utc) {
                     self.persist_state(None).await?;
                     return Ok(());
                 }
@@ -2281,6 +2292,7 @@ fn bars_tf_seconds(stream: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::{CloseTrigger, ReadConfig, ReplayConfig, StrategyConfig, StreamNames, TrimConfig};
+    use alor_types::TradingPeriods;
 
     fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {
         let config = RuntimeConfig {
@@ -2395,6 +2407,45 @@ mod tests {
     }
 
     #[test]
+    fn intent_gating_uses_created_ts_not_last_bar_ts() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy.max_silence_bars_sec = 0;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+
+        // Last bar in open local window: 13:00 local == 10:00 UTC.
+        let last_bar_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        runtime
+            .state
+            .last_processed_bar_ts
+            .insert(runtime.config.strategy.symbol.clone(), last_bar_ts);
+
+        // Created ts in Break2 local window: 18:55 local == 15:55 UTC.
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(15, 55, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+
+        let ctx = runtime.strategy_ctx();
+        assert!(!runtime.trading_window_allows_order(&ctx, created_ts_utc));
+    }
+    #[test]
     fn grace_period_diagnostics() {
         assert_eq!(
             bars_stream_diagnostic(Duration::from_secs(5), 10),
@@ -2418,10 +2469,12 @@ mod tests {
     fn bootstrap_ready_requires_snapshots_and_live_bar() {
         let state = BootstrapState::default();
         assert!(!state.ready());
-        assert!(state
-            .reasons()
-            .iter()
-            .any(|reason| reason == "bootstrap:not_ready"));
+        assert!(
+            state
+                .reasons()
+                .iter()
+                .any(|reason| reason == "bootstrap:not_ready")
+        );
     }
 
     #[test]
@@ -2432,10 +2485,12 @@ mod tests {
             seen_live_bar: false,
         };
         assert!(!state.ready());
-        assert!(state
-            .reasons()
-            .iter()
-            .any(|reason| reason == "bootstrap:missing_live_bar"));
+        assert!(
+            state
+                .reasons()
+                .iter()
+                .any(|reason| reason == "bootstrap:missing_live_bar")
+        );
     }
 
     #[test]
