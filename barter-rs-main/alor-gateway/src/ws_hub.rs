@@ -1,13 +1,16 @@
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicI64, AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, AtomicU64, Ordering},
+};
 use std::time::Duration;
 
+use chrono::{DateTime, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
 use parking_lot::RwLock;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use chrono::{DateTime, TimeZone, Utc};
 use tracing::{debug, info, warn};
 
 use crate::auth::TokenProvider;
@@ -22,8 +25,14 @@ use crate::ws_subscriptions::{
 
 #[derive(Debug)]
 pub enum WsEvent {
-    Raw { value: Value, generation: u64 },
-    Conn { event: ConnEvent, generation: u64 },
+    Raw {
+        value: Value,
+        generation: u64,
+    },
+    Conn {
+        event: ConnEvent,
+        generation: u64,
+    },
     Subscribed {
         wallclock_ts: i64,
         history_origin: DataOrigin,
@@ -31,10 +40,25 @@ pub enum WsEvent {
         skip_history: bool,
         generation: u64,
     },
-    SubscriptionAck { subscription_type: String, generation: u64 },
-    SubscriptionStats { desired: u32, active: u32, pending_acks: PendingAcks, generation: u64 },
-    WsRx { ts: i64, generation: u64 },
-    Ignored { symbol: Option<String>, reason: IgnoredReason, generation: u64 },
+    SubscriptionAck {
+        subscription_type: String,
+        generation: u64,
+    },
+    SubscriptionStats {
+        desired: u32,
+        active: u32,
+        pending_acks: PendingAcks,
+        generation: u64,
+    },
+    WsRx {
+        ts: i64,
+        generation: u64,
+    },
+    Ignored {
+        symbol: Option<String>,
+        reason: IgnoredReason,
+        generation: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -63,14 +87,12 @@ struct Subscription {
     symbol: String,
     subscription_type: String,
     is_active: bool,
-    epoch: u64,
 }
 
 #[derive(Debug, Default)]
 struct SubscriptionManager {
     desired_subscriptions: HashMap<String, Subscription>,
     active_subscriptions: HashMap<String, Subscription>,
-    subscription_epoch: u64,
 }
 
 impl SubscriptionManager {
@@ -92,7 +114,6 @@ impl SubscriptionManager {
     fn reset(&mut self) {
         self.desired_subscriptions.clear();
         self.active_subscriptions.clear();
-        self.subscription_epoch = self.subscription_epoch.wrapping_add(1);
     }
 
     fn desired_count(&self) -> u32 {
@@ -160,7 +181,8 @@ impl WsHub {
                     backfill_plan_task.clone(),
                     current_generation,
                 )
-                .await {
+                .await
+                {
                     Ok(()) => {
                         info!("ws hub ended gracefully");
                         should_run = false;
@@ -181,7 +203,10 @@ impl WsHub {
         });
 
         (
-            WsHubHandle { cmd_tx, backfill_plan },
+            WsHubHandle {
+                cmd_tx,
+                backfill_plan,
+            },
             event_rx,
         )
     }
@@ -198,7 +223,9 @@ impl WsHubHandle {
     pub async fn resubscribe_from(&self, from_ts: i64) {
         let _ = self
             .cmd_tx
-            .send(HubCommand::Resubscribe { from_ts: Some(from_ts) })
+            .send(HubCommand::Resubscribe {
+                from_ts: Some(from_ts),
+            })
             .await;
     }
 
@@ -467,8 +494,15 @@ async fn connect_and_run(
 async fn subscribe_all(
     cfg: &AlorGatewayConfig,
     token: &str,
-    ws_sink: &mut (impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
-    ws_stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+    ws_sink: &mut (
+             impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+             + Unpin
+         ),
+    ws_stream: &mut (
+             impl futures_util::stream::Stream<
+        Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+    > + Unpin
+         ),
     from_ts: Option<i64>,
     bars_from_ts: i64,
     skip_history: bool,
@@ -489,20 +523,13 @@ async fn subscribe_all(
     for symbol in &cfg.symbols {
         let mut attempt = 0;
         loop {
-            let (guid, msg) = build_bars_subscribe(
-                cfg,
-                symbol,
-                token,
-                bars_from_ts,
-                skip_history,
-            );
+            let (guid, msg) = build_bars_subscribe(cfg, symbol, token, bars_from_ts, skip_history);
             bars_guid_map.insert(guid.clone(), symbol.clone());
             subscription_manager.add_subscription(Subscription {
                 guid: guid.clone(),
                 symbol: symbol.clone(),
                 subscription_type: "bars".to_string(),
                 is_active: false,
-                epoch: subscription_manager.subscription_epoch,
             });
             let _ = event_tx
                 .send(WsEvent::SubscriptionStats {
@@ -550,7 +577,6 @@ async fn subscribe_all(
             symbol: cfg.portfolio.clone(),
             subscription_type: "positions".to_string(),
             is_active: false,
-            epoch: subscription_manager.subscription_epoch,
         });
         let _ = event_tx
             .send(WsEvent::SubscriptionStats {
@@ -597,7 +623,6 @@ async fn subscribe_all(
             symbol: cfg.portfolio.clone(),
             subscription_type: "orders".to_string(),
             is_active: false,
-            epoch: subscription_manager.subscription_epoch,
         });
         let _ = event_tx
             .send(WsEvent::SubscriptionStats {
@@ -644,7 +669,6 @@ async fn subscribe_all(
             symbol: cfg.portfolio.clone(),
             subscription_type: "trades".to_string(),
             is_active: false,
-            epoch: subscription_manager.subscription_epoch,
         });
         let _ = event_tx
             .send(WsEvent::SubscriptionStats {
@@ -682,8 +706,15 @@ async fn subscribe_all(
 }
 
 async fn send_and_ack(
-    ws_sink: &mut (impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
-    ws_stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+    ws_sink: &mut (
+             impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+             + Unpin
+         ),
+    ws_stream: &mut (
+             impl futures_util::stream::Stream<
+        Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+    > + Unpin
+         ),
     guid: &str,
     msg: &str,
     label: &str,
@@ -736,7 +767,11 @@ async fn send_and_ack(
 }
 
 async fn read_until_guid(
-    stream: &mut (impl futures_util::stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+    stream: &mut (
+             impl futures_util::stream::Stream<
+        Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+    > + Unpin
+         ),
     guid: &str,
     timeout_dur: Duration,
     event_tx: &mpsc::Sender<WsEvent>,
@@ -751,7 +786,12 @@ async fn read_until_guid(
             if let Message::Text(txt) = msg {
                 let now = Utc::now().timestamp();
                 last_ws_rx_ts.store(now, Ordering::SeqCst);
-                let _ = event_tx.send(WsEvent::WsRx { ts: now, generation }).await;
+                let _ = event_tx
+                    .send(WsEvent::WsRx {
+                        ts: now,
+                        generation,
+                    })
+                    .await;
                 tracing::trace!(payload = %txt, "ws recv text (awaiting guid)");
                 match serde_json::from_str::<Value>(&txt) {
                     Ok(val) => {
@@ -768,12 +808,21 @@ async fn read_until_guid(
                                     IgnoredReason::UnknownGuid
                                 };
                                 let _ = event_tx
-                                    .send(WsEvent::Ignored { symbol, reason, generation })
+                                    .send(WsEvent::Ignored {
+                                        symbol,
+                                        reason,
+                                        generation,
+                                    })
                                     .await;
                                 continue;
                             }
                         }
-                        let _ = event_tx.send(WsEvent::Raw { value: val, generation }).await;
+                        let _ = event_tx
+                            .send(WsEvent::Raw {
+                                value: val,
+                                generation,
+                            })
+                            .await;
                     }
                     Err(_) => {
                         let _ = event_tx

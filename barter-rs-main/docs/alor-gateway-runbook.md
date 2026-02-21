@@ -1,40 +1,18 @@
 # Alor Gateway Runbook
 
-## 1) Назначение
-`alor-gateway`:
-- принимает market data/private events от Alor (WS/CWS),
-- публикует нормализованные события в Redis streams,
-- принимает команды runtime и маршрутизирует их в CWS,
-- ведёт health/readiness состояние для orchestration.
+**Правило №1:** все актуальные TOML-конфиги лежат в `./configs/`. Другие `.toml` в репозитории считаются legacy.
 
----
+## Config file path
+- `./configs/gateway.live.toml` — основной gateway конфиг (live/paper runtime uses same gateway feed).
+- `./configs/gateway.example.toml` — минимальный шаблон для первичной настройки.
 
-## 2) Конфиг
-Минимально проверьте:
-- `ws_url`, `cws_url`, `oauth_url`;
-- `refresh_token`;
-- `portfolio`, список `symbols`;
-- stream names (`bars`, `orders`, `trades`, `positions`, `acks`, `health`);
-- интервалы heartbeat/reconnect/backoff;
-- `health_listen_addr`.
-
-Пример запуска:
-
-основной с транспортом для redis с информацией для отладки
+## Run command
 ```bash
 RUST_LOG=info,alor_gateway::services::command_consumer=debug,alor_gateway::transport_redis=debug \
-cargo run -p alor-gateway --bin alor_gateway_transport_runner -- --config ./config.live.toml --redis-url redis://127.0.0.1/
+cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
+  --config ./configs/gateway.live.toml \
+  --redis-url redis://127.0.0.1/
 ```
-основной с транспортом для redis
-```bash
-RUST_LOG=info \
-cargo run -p alor-gateway --bin alor_gateway_transport_runner -- --config ./config.live.toml --redis-url redis://127.0.0.1/
-```
-
-```bash
-cargo run -p alor-gateway --bin alor_gateway_runner -- --config config.live.toml
-```
----
 
 ## 3) Health endpoints
 
@@ -99,7 +77,7 @@ curl -sf http://127.0.0.1:8081/readiness
 Рекомендуемый запуск:
 ```bash
 RUST_LOG=info,alor_gateway=debug \
-cargo run -p alor-gateway --bin alor_gateway_runner -- --config config.live.toml
+cargo run -p alor-gateway --bin alor_gateway_runner -- --config ./configs/gateway.live.toml
 ```
 
 ---

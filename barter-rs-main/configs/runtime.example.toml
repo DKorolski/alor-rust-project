@@ -7,9 +7,9 @@ consumer_name = "auto"
 reset_state_on_start = false
 
 [runtime]
-trade_mode = "live"
-allow_live_orders = true # LIVE MODE: sends real orders
-allow_paper_orders = false
+trade_mode = "paper"
+allow_live_orders = false
+allow_paper_orders = true
 guard_log_interval_ms = 5000
 bootstrap_dump = false
 still_blocked_log_period_sec = 60
@@ -31,7 +31,7 @@ acks = "cmd.acks.7502T0U"
 snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.session_gap_standalone.live.7502T0U"
+runtime_state = "runtime.state.session_gap_standalone.paper.7502T0U"
 
 [read]
 block_ms = 500
@@ -66,7 +66,7 @@ session_close_minute = 49
 entry_after_open_min = 0 # required by shared schema, unused by session_gap_standalone
 exit_before_close_min = 0 # required by shared schema, unused by session_gap_standalone
 timezone_offset_hours = 3
-max_silence_bars_sec = 1200
+max_silence_bars_sec = 900
 
 [trading_periods]
 session_start = "09:00:00"
@@ -98,12 +98,12 @@ exit_offset_min = 20
 work_weekends = false
 
 [paper]
-enabled = false
+enabled = true
 output = "stdout"
 file_path = "./strategy-runtime/paper_trades.jsonl"
-trades_csv = "./strategy-runtime/trades.csv"
-summary_json = "./strategy-runtime/summary.json"
-append = false
+trades_csv = "./strategy-runtime/trades0.csv"
+summary_json = "./strategy-runtime/summary0.json"
+append = true
 
 [backtest]
 enabled = false

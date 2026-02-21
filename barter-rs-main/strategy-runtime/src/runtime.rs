@@ -275,8 +275,9 @@ impl StrategyRuntime {
             ws_connected: None,
             cws_authorized: None,
             gateway_scheduler_state: None,
-            scheduler_state: "Unknown".to_string(),
+            scheduler_state: "Unconfigured".to_string(),
             now_local: "unknown".to_string(),
+            scheduler_note: Some("trading_periods missing".to_string()),
             timezone_offset_hours: config.strategy.timezone_offset_hours,
             last_bar_ts_utc: None,
             last_ack_ts_utc: None,
@@ -350,9 +351,11 @@ impl StrategyRuntime {
             .as_ref()
             .map(|h| format!("{:?}", h.gateway_phase))
             .unwrap_or_else(|| "SyncingHistory".to_string());
-        let mut scheduler_state = "Unknown".to_string();
+        let mut scheduler_state = "Unconfigured".to_string();
         let mut now_local = "unknown".to_string();
+        let mut scheduler_note = Some("trading_periods missing".to_string());
         if let Some(periods) = &self.config.strategy.trading_periods {
+            scheduler_note = None;
             let scheduler = Scheduler::new_with_fallback_offset_hours(
                 periods.clone(),
                 self.config.strategy.timezone_offset_hours,
@@ -389,6 +392,7 @@ impl StrategyRuntime {
             .and_then(|h| h.scheduler_state.clone());
         guard.scheduler_state = scheduler_state;
         guard.now_local = now_local;
+        guard.scheduler_note = scheduler_note;
         guard.timezone_offset_hours = self.config.strategy.timezone_offset_hours;
         guard.last_bar_ts_utc = self.metrics.bars_last_seen_close_time_utc;
     }
@@ -2565,6 +2569,20 @@ mod tests {
         let ctx = runtime.strategy_ctx();
         assert!(!runtime.trading_window_allows_order(&ctx, created_ts_utc));
     }
+    #[test]
+    fn runtime_scheduler_snapshot_is_unconfigured_when_periods_missing() {
+        let runtime = test_runtime(TradeMode::Paper);
+        runtime.refresh_health_snapshot();
+        let snapshot = runtime.health_snapshot.read().clone();
+
+        assert_eq!(snapshot.scheduler_state, "Unconfigured");
+        assert_eq!(snapshot.now_local, "unknown");
+        assert_eq!(
+            snapshot.scheduler_note.as_deref(),
+            Some("trading_periods missing")
+        );
+    }
+
     #[test]
     fn grace_period_diagnostics() {
         assert_eq!(

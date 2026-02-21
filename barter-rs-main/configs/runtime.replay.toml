@@ -8,6 +8,7 @@ consumer_name = "auto"
 [runtime]
 trade_mode = "paper" # paper | live | backtest
 allow_live_orders = false
+allow_paper_orders = true
 guard_log_interval_ms = 5000
 bootstrap_dump = false
 
@@ -21,7 +22,7 @@ acks = "cmd.acks.7502T0U"
 snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.session_gap_standalone.7502T0U"
+runtime_state = "runtime.state.session_gap_standalone.replay.7502T0U"
 
 [read]
 block_ms = 500
@@ -51,6 +52,16 @@ session_open_hour = 9
 session_open_minute = 0
 session_close_hour = 23
 session_close_minute = 50
+timezone_offset_hours = 3
+
+[trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:05:00"
+break_start_2 = "18:50:00"
+break_end_2 = "19:05:00"
+weekends_off = true
 timezone_offset_hours = 3
 
 [paper]

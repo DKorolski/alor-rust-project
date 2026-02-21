@@ -9,6 +9,7 @@ reset_state_on_start = false
 [runtime]
 trade_mode = "paper"
 allow_live_orders = false
+allow_paper_orders = true
 guard_log_interval_ms = 5000
 bootstrap_dump = false
 still_blocked_log_period_sec = 60
@@ -64,6 +65,17 @@ session_close_hour = 23
 session_close_minute = 49
 entry_after_open_min = 0 # required by shared schema, unused by session_gap_standalone
 exit_before_close_min = 0 # required by shared schema, unused by session_gap_standalone
+timezone_offset_hours = 3
+max_silence_bars_sec = 1200
+
+[trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:05:00"
+break_start_2 = "18:50:00"
+break_end_2 = "19:05:00"
+weekends_off = true
 timezone_offset_hours = 3
 
 [strategy.session_gap]

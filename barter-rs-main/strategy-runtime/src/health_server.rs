@@ -42,6 +42,7 @@ struct GatewayReadinessResponse {
 struct SchedulerReadinessResponse {
     state: String,
     now_local: String,
+    note: Option<String>,
     timezone_offset_hours: i32,
 }
 
@@ -122,6 +123,7 @@ async fn readiness(
         scheduler: SchedulerReadinessResponse {
             state: guard.scheduler_state,
             now_local: guard.now_local,
+            note: guard.scheduler_note,
             timezone_offset_hours: guard.timezone_offset_hours,
         },
         streams: StreamsReadinessResponse {

@@ -447,6 +447,7 @@ struct RuntimeConfigFile {
     read: Option<ReadConfigFile>,
     trim: Option<TrimConfigFile>,
     strategy: Option<StrategyConfigFile>,
+    trading_periods: Option<TradingPeriods>,
     paper: Option<PaperConfigFile>,
     backtest: Option<BacktestConfigFile>,
     replay: Option<ReplayConfigFile>,
@@ -860,6 +861,12 @@ pub fn load_runtime_config(
             if let Some(value) = &strategy_file.trading_periods {
                 strategy.trading_periods = Some(value.clone());
                 sources.strategy.trading_periods = ConfigSource::File;
+            }
+            if strategy.trading_periods.is_none() {
+                if let Some(value) = &file_config.trading_periods {
+                    strategy.trading_periods = Some(value.clone());
+                    sources.strategy.trading_periods = ConfigSource::File;
+                }
             }
             if let Some(value) = strategy_file.max_silence_bars_sec {
                 strategy.max_silence_bars_sec = value;
@@ -1567,4 +1574,56 @@ fn validate_trade_mode(config: &RuntimeConfig) -> Result<()> {
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     env::var(key).ok().and_then(|value| value.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_temp_config(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "strategy-runtime-{name}-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, body).expect("write temp config");
+        path
+    }
+
+    #[test]
+    fn runtime_reads_trading_periods_from_top_level_when_strategy_section_missing() {
+        let path = write_temp_config(
+            "top-level-periods",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "demo"
+exchange = "MOEX"
+
+[strategy]
+strategy_id = "session_gap_standalone"
+strategy_kind = "session_gap_standalone"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+
+[trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:05:00"
+break_start_2 = "18:50:00"
+break_end_2 = "19:05:00"
+weekends_off = true
+timezone_offset_hours = 3
+"#,
+        );
+
+        let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        let periods = resolved.config.strategy.trading_periods.expect("periods");
+        assert_eq!(periods.timezone_offset_hours, 3);
+        assert_eq!(
+            resolved.sources.strategy.trading_periods,
+            ConfigSource::File
+        );
+        let _ = std::fs::remove_file(path);
+    }
 }

@@ -237,6 +237,7 @@ pub struct RuntimeHealthSnapshot {
     pub gateway_scheduler_state: Option<String>,
     pub scheduler_state: String,
     pub now_local: String,
+    pub scheduler_note: Option<String>,
     pub timezone_offset_hours: i32,
     pub last_bar_ts_utc: Option<i64>,
     pub last_ack_ts_utc: Option<i64>,

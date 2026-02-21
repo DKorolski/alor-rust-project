@@ -1,101 +1,71 @@
-# Barter
-Barter is an algorithmic trading ecosystem of Rust libraries for building high-performance live-trading, paper-trading 
-and back-testing systems.
-* **Fast**: Written in native Rust. Minimal allocations. Data-oriented state management system with direct index lookups.
-* **Robust**: Strongly typed. Thread safe. Extensive test coverage.
-* **Customisable**: Plug and play Strategy and RiskManager components that facilitates most trading strategies (MarketMaking, StatArb, HFT, etc.).
-* **Scalable**: Multithreaded architecture with modular design. Leverages Tokio for I/O. Memory efficient data structures.  
+# Alor Trading Workspace
 
-**See: [`Barter`], [`Barter-Data`], [`Barter-Instrument`], [`Barter-Execution`] & [`Barter-Integration`] for 
-comprehensive documentation and examples for each library.**
+Rust workspace для запуска связки:
+- `alor-gateway` — подключение к Alor WS/CWS, нормализация событий, публикация в Redis streams;
+- `strategy-runtime` — исполнение торговой стратегии в режимах `paper` / `live` / `replay`;
+- `alor-protocol` и `alor-types` — общие протоколы, модели и типы.
 
-[![Crates.io][crates-badge]][crates-url]
-[![MIT licensed][mit-badge]][mit-url]
-[![Discord chat][discord-badge]][discord-url]
+## Состав репозитория
 
-[crates-badge]: https://img.shields.io/crates/v/barter.svg
-[crates-url]: https://crates.io/crates/barter
+- `alor-types/` — доменные типы (включая trading periods / scheduler структуры).
+- `alor-protocol/` — протокольные модели и сериализация для Alor.
+- `alor-gateway/` — gateway-процесс (WS/CWS + Redis transport + health).
+- `strategy-runtime/` — runtime-процесс стратегии + replay/backtest утилиты.
+- `configs/` — **единственная актуальная** папка с TOML-конфигами.
+- `docs/` — runbooks и эксплуатационные инструкции.
 
-[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
-[mit-url]: https://github.com/barter-rs/barter-rs/blob/develop/LICENSE
+## Правило №1 (конфиги)
 
-[discord-badge]: https://img.shields.io/discord/910237311332151317.svg?logo=discord&style=flat-square
-[discord-url]: https://discord.gg/wE7RqhnQMV
+Все актуальные TOML-конфиги лежат в `./configs/`.
+Любые TOML вне `./configs/` считаются legacy и не должны использоваться для запуска.
 
-[`Barter`]: https://crates.io/crates/barter
-[`Barter-Instrument`]: https://crates.io/crates/barter-instrument
-[`Barter-Data`]: https://crates.io/crates/barter-data
-[`Barter-Execution`]: https://crates.io/crates/barter-execution
-[`Barter-Integration`]: https://crates.io/crates/barter-integration
-[API Documentation]: https://docs.rs/barter/latest/barter/
-[Chat]: https://discord.gg/wE7RqhnQMV
+## Быстрый старт
 
-## Overview
-Barter is an algorithmic trading ecosystem of Rust libraries for building high-performance live-trading, paper-trading 
-and back-testing systems. It is made up of several easy-to-use, extensible crates:
-* **Barter**: Algorithmic trading Engine with feature rich state management system.
-* **Barter-Instrument**: Exchange, Instrument and Asset data structures and utilities. 
-* **Barter-Data**: Stream public market data from financial venues. Easily extensible via the MarketStream interface.
-* **Barter-Execution**: Stream private account data and execute orders. Easily extensible via the ExecutionClient interface. 
-* **Barter-Integration**: Low-level frameworks for flexible REST/WebSocket integrations.
+| Сценарий | Gateway | Runtime |
+|---|---|---|
+| Paper | `configs/gateway.live.toml` | `configs/runtime.paper.toml` |
+| Live | `configs/gateway.live.toml` | `configs/runtime.live.toml` |
+| Replay | — | `configs/runtime.replay.toml` |
 
-## Notable Features
-- Stream public market data from financial venues via the [`Barter-Data`] library. 
-- Stream private account data, execute orders (live or mock)** via the [`Barter-Execution`] library.
-- Plug and play Strategy and RiskManager components that facilitate most trading strategies. 
-- Backtest utilities for efficiently running thousands of concurrent backtests.
-- Flexible Engine that facilitates trading strategies that execute on many exchanges simultaneously.
-- Use mock MarketStream or Execution components to enable back-testing on a near-identical trading system as live-trading.  
-- Centralised cache friendly state management system with O(1) constant lookups using indexed data structures.
-- Robust Order management system - use stand-alone or with Barter. 
-- Trading summaries with comprehensive performance metrics (PnL, Sharpe, Sortino, Drawdown, etc.).
-- Turn on/off algorithmic trading from an external process (eg/ UI, Telegram, etc.) whilst still processing market/account data. 
-- Issue Engine Commands from an external process (eg/ UI, Telegram, etc.) to initiate actions (CloseAllPositions, OpenOrders, CancelOrders, etc.).
-- EngineState replica manager that processes the Engine AuditStream to facilitate non-hot path monitoring components (eg/ UI, Telegram, etc.).
-
-[barter-examples]: https://github.com/barter-rs/barter-rs/tree/develop/barter/examples
-
-## Examples
-* See [here][barter-examples] for the compilable example including imports.
-* See sub-crates for further examples of each library.
-
-## Tests
-Run the Alor gateway WebSocket integration tests:
+### 1) Запуск Gateway
 
 ```bash
-cargo test -p alor-gateway --tests ws_integration
-RUST_LOG=debug cargo test -p alor-gateway --tests ws_integration -- --nocapture
+RUST_LOG=info,alor_gateway::services::command_consumer=debug,alor_gateway::transport_redis=debug \
+cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
+  --config ./configs/gateway.live.toml \
+  --redis-url redis://127.0.0.1/
 ```
 
-## Runbooks
-- [Strategy Runtime Runbook](docs/strategy-runtime-runbook.md)
-- [Alor Gateway Runbook](docs/alor-gateway-runbook.md)
-- [Replay / Backtest Guide](docs/replay-backtest-guide.md)
-- [State and Restarts](docs/state-and-restarts.md)
+### 2) Запуск Runtime (paper)
 
-### Quick start
 ```bash
-# 1) Gateway (live market feed + command routing)
-cargo run -p alor-gateway --bin alor_gateway_runner -- --config config.live.toml
-
-# 2) Runtime paper mode
-cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_session_gap_paper_gateway.toml
-
-# 3) Runtime replay mode
-cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_replay.toml
+RUST_LOG=info,strategy_runtime=info \
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- \
+  --config ./configs/runtime.paper.toml
 ```
 
+### 3) Health-check Runtime
 
-### Trading scheduler (sessions & breaks)
-`strategy-runtime` and `alor-gateway` support a shared scheduler config for trading sessions, breaks, and bar-silence control.
+```bash
+curl -sf http://127.0.0.1:8091/liveness
+curl -sf http://127.0.0.1:8091/readiness
+```
 
-Example below shows two daytime breaks: `14:00-14:05` and `18:50-19:05`.
+## Trading scheduler
+
+`strategy-runtime` и `alor-gateway` используют единое расписание торговых окон.
+
+Базовое правило:
+- использовать top-level секцию `[trading_periods]` в runtime/gateway конфиге;
+- `[strategy.trading_periods]` — только для явного override.
+
+Пример:
 
 ```toml
 [strategy]
 max_silence_bars_sec = 900
 
-[strategy.trading_periods]
+[trading_periods]
 session_start = "09:00:00"
 session_end = "23:49:00"
 break_start_1 = "14:00:00"
@@ -106,89 +76,31 @@ weekends_off = true
 timezone_offset_hours = 3
 ```
 
-For gateway-level silence control the same window can be configured in `config.live.toml` under `[trading_periods]`.
+Если расписание отсутствует полностью, runtime readiness возвращает:
+- `scheduler.state = "Unconfigured"`
+- `scheduler.now_local = "unknown"`
+- `scheduler.note = "trading_periods missing"`
 
-## Getting Help
-Firstly, see if the answer to your question can be found in the [API Documentation]. If the answer is not there, I'd be
-happy to help via [Chat] and try answer your question via Discord.
+## Документация
 
-## Support Barter Development
-Help us advance Barter's capabilities by becoming a sponsor (or supporting me with a tip!).
+- [Strategy Runtime Runbook](docs/strategy-runtime-runbook.md)
+- [Alor Gateway Runbook](docs/alor-gateway-runbook.md)
+- [Replay / Backtest Guide](docs/replay-backtest-guide.md)
+- [State and Restarts](docs/state-and-restarts.md)
 
-Your contribution will allow me to dedicate more time to Barter, accelerating feature development and improvements.
+## Тесты
 
-**Please email *justastream.code@gmail.com* for all inquiries**
+Быстрые команды:
 
-### Sponsorship Tiers
-* 🥇 **Sponsor** - Your name, logo, and website link will be displayed below.
-* 🥈 **Supporter** - Your name listed as supporter.
+```bash
+cargo test -p strategy-runtime --lib
+cargo test -p alor-gateway --lib
+```
 
-### Current Sponsors
-*Your name, logo and website link could be here*
+Интеграционные тесты gateway (`alor-gateway/tests/redis_transport.rs`) используют `testcontainers` и требуют установленный Docker.
 
-### Current Supporters
-*Your name could be here*
+## Лицензия и дисклеймер
 
----
-**Thank you to all our sponsors and supporters! 🫶**
+Проект распространяется по лицензии MIT (см. `LICENSE`).
 
-## Contributing
-Thanks in advance for helping to develop the Barter ecosystem! Please do not hesitate to get touch via the Discord [Chat] to discuss development,
-new features, and the future roadmap.
-
-### Licence
-This project is licensed under the [MIT license].
-
-[MIT license]: https://github.com/barter-rs/barter-rs/blob/develop/LICENSE
-
-### Contribution License Agreement
-
-Any contribution you intentionally submit for inclusion in Barter workspace crates shall be:
-1. Licensed under MIT
-2. Subject to all disclaimers and limitations of liability stated below
-3. Provided without any additional terms or conditions
-4. Submitted with the understanding that the educational-only purpose and risk warnings apply
-
-By submitting a contribution, you certify that you have the right to do so under these terms.
-
-## LEGAL DISCLAIMER AND LIMITATION OF LIABILITY
-
-PLEASE READ THIS DISCLAIMER CAREFULLY BEFORE USING THE SOFTWARE. BY ACCESSING OR USING THE SOFTWARE, YOU ACKNOWLEDGE AND AGREE TO BE BOUND BY THE TERMS HEREIN.
-
-1. EDUCATIONAL PURPOSE
-   This software and related documentation ("Software") are provided solely for educational and research purposes. The Software is not intended, designed, tested, verified or certified for commercial deployment, live trading, or production use of any kind.
-
-2. NO FINANCIAL ADVICE
-   Nothing contained in the Software constitutes financial, investment, legal, or tax advice. No aspect of the Software should be relied upon for trading decisions or financial planning. Users are strongly advised to consult qualified professionals for investment guidance specific to their circumstances.
-
-3. ASSUMPTION OF RISK
-   Trading in financial markets, including but not limited to cryptocurrencies, securities, derivatives, and other financial instruments, carries substantial risk of loss. Users acknowledge that:
-   a) They may lose their entire investment;
-   b) Past performance does not indicate future results;
-   c) Hypothetical or simulated performance results have inherent limitations and biases.
-
-4. DISCLAIMER OF WARRANTIES
-   THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE AUTHORS AND COPYRIGHT HOLDERS EXPRESSLY DISCLAIM ALL WARRANTIES, INCLUDING BUT NOT LIMITED TO:
-   a) MERCHANTABILITY
-   b) FITNESS FOR A PARTICULAR PURPOSE
-   c) NON-INFRINGEMENT
-   d) ACCURACY OR RELIABILITY OF RESULTS
-   e) SYSTEM INTEGRATION
-   f) QUIET ENJOYMENT
-
-5. LIMITATION OF LIABILITY
-   IN NO EVENT SHALL THE AUTHORS, COPYRIGHT HOLDERS, CONTRIBUTORS, OR ANY AFFILIATED PARTIES BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING BUT NOT LIMITED TO PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES, LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-6. REGULATORY COMPLIANCE
-   The Software is not registered with, endorsed by, or approved by any financial regulatory authority. Users are solely responsible for:
-   a) Determining whether their use complies with applicable laws and regulations
-   b) Obtaining any required licenses, permits, or registrations
-   c) Meeting any regulatory obligations in their jurisdiction
-
-7. INDEMNIFICATION
-   Users agree to indemnify, defend, and hold harmless the authors, copyright holders, and any affiliated parties from and against any claims, liabilities, damages, losses, and expenses arising from their use of the Software.
-
-8. ACKNOWLEDGMENT
-   BY USING THE SOFTWARE, USERS ACKNOWLEDGE THAT THEY HAVE READ THIS DISCLAIMER, UNDERSTOOD IT, AND AGREE TO BE BOUND BY ITS TERMS AND CONDITIONS.
-
-THE ABOVE LIMITATIONS MAY NOT APPLY IN JURISDICTIONS THAT DO NOT ALLOW THE EXCLUSION OF CERTAIN WARRANTIES OR LIMITATIONS OF LIABILITY.
+ПО предоставляется "как есть" и предназначено для инженерных/исследовательских задач. Использование в торговле и финансовых системах осуществляется на ваш риск; авторы и контрибьюторы не несут ответственности за финансовые потери или косвенный ущерб.

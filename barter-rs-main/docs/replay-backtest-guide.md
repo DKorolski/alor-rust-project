@@ -1,40 +1,20 @@
 # Replay / Backtest Guide
 
-## 1) Когда использовать
-- **Replay**: проверка детерминизма и паритета runtime на фиксированном наборе CSV.
-- **Backtest**: быстрая проверка стратегии на исторических данных без live-инфраструктуры.
+**Правило №1:** все актуальные TOML-конфиги лежат в `./configs/`. Другие `.toml` в репозитории считаются legacy.
 
----
+## Config file path
+- `./configs/runtime.replay.toml` — базовый replay-конфиг для `strategy_runtime_runner`.
+- `./configs/session_gap.replay.toml` — отдельный replay-сценарий SessionGapStandalone.
+- `./configs/strategy_runtime_runner.replay.toml` — алиас-конфиг для runner replay сценариев.
 
-## 2) Запуск replay через `strategy_runtime_runner`
-
+## Run command
 ```bash
-cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_replay.toml
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.replay.toml
 ```
 
-Рекомендуется задавать отдельный output dir:
 ```bash
-REPLAY_OUTPUT_DIR=./strategy-runtime/replay_out_ci \
-cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_replay.toml
+REPLAY_OUTPUT_DIR=replay_out cargo run -p strategy-runtime --bin session_gap_replay
 ```
-
-Проверьте:
-- `replay.enabled = true`,
-- `replay.bars_csv_path` указывает на корректный CSV,
-- при необходимости `replay.reference_trades_csv_path` для сравнения.
-
----
-
-## 3) Запуск replay через `session_gap_replay`
-
-```bash
-set -a; source strategy-runtime/rt_session_gap_standalone.env; set +a
-cargo run -p strategy-runtime --bin session_gap_replay
-```
-
-Используйте этот путь для быстрых проверок SessionGapStandalone без полного runtime-конфига.
-
----
 
 ## 4) Как сравнивать результаты
 
@@ -61,7 +41,7 @@ cargo run -p strategy-runtime --bin session_gap_replay
 
 1. Прогоните replay:
 ```bash
-cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config strategy-runtime/rt_replay.toml
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.replay.toml
 ```
 2. Проверьте, что `trades.csv` не пуст.
 3. Проверьте `summary.json` на PnL/count.

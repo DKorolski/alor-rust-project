@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -9,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum MockWsEvent {
     Connected { id: usize },
@@ -17,6 +21,7 @@ pub enum MockWsEvent {
     Closed { id: usize },
 }
 
+#[allow(dead_code)]
 enum ServerCommand {
     SendText { id: usize, text: String },
     SetRespondToPing { id: usize, respond: bool },
@@ -88,13 +93,7 @@ impl MockWsServer {
             }
         });
 
-        Ok((
-            Self {
-                addr,
-                cmd_tx,
-            },
-            event_rx,
-        ))
+        Ok((Self { addr, cmd_tx }, event_rx))
     }
 
     pub fn ws_url(&self) -> String {
@@ -118,6 +117,7 @@ impl MockWsServer {
             .map_err(|_| anyhow::anyhow!("mock ws command channel closed"))
     }
 
+    #[allow(dead_code)]
     pub async fn close(&self, id: usize) -> anyhow::Result<()> {
         self.cmd_tx
             .send(ServerCommand::Close { id })
