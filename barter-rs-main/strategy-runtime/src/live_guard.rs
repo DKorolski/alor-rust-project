@@ -56,6 +56,9 @@ pub fn evaluate_live_guard(
     state: &LiveGuardState,
     has_bars: bool,
     bars_stream_has_data: bool,
+    now_ts_utc: i64,
+    gateway_health_stale_sec: u64,
+    require_gateway_ready: bool,
 ) -> LiveGuardDecision {
     let mut reasons = Vec::new();
     if trade_mode != TradeMode::Live {
@@ -71,14 +74,69 @@ pub fn evaluate_live_guard(
             reasons.push("waiting_for_first_bar".to_string());
         }
     }
-    let phase = state
-        .health
-        .as_ref()
-        .map(|health| health.gateway_phase)
-        .unwrap_or(GatewayPhase::SyncingHistory);
-    if phase != GatewayPhase::LiveReady {
-        reasons.push(format!("phase={phase:?}"));
+    if require_gateway_ready {
+        let phase = state
+            .health
+            .as_ref()
+            .map(|health| health.gateway_phase)
+            .unwrap_or(GatewayPhase::SyncingHistory);
+        if phase != GatewayPhase::LiveReady {
+            reasons.push(format!("phase={phase:?}"));
+        }
+
+        let stale_sec = i64::try_from(gateway_health_stale_sec).unwrap_or(i64::MAX);
+        let is_stale = state
+            .health
+            .as_ref()
+            .map(|health| {
+                health.last_event_ts <= 0
+                    || now_ts_utc.saturating_sub(health.last_event_ts) > stale_sec
+            })
+            .unwrap_or(true);
+        if is_stale {
+            reasons.push("gateway_health_stale".to_string());
+        }
     }
     let allowed = reasons.is_empty();
     LiveGuardDecision { allowed, reasons }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocks_when_gateway_health_is_stale() {
+        let state = LiveGuardState {
+            health: Some(HealthEvent {
+                gateway_phase: GatewayPhase::LiveReady,
+                readiness: true,
+                cws_authorized: true,
+                last_event_ts: 100,
+            }),
+        };
+
+        let decision =
+            evaluate_live_guard(TradeMode::Live, true, &state, true, true, 130, 20, true);
+
+        assert!(!decision.allowed);
+        assert!(decision.reasons.iter().any(|r| r == "gateway_health_stale"));
+    }
+
+    #[test]
+    fn allows_when_gateway_health_is_fresh() {
+        let state = LiveGuardState {
+            health: Some(HealthEvent {
+                gateway_phase: GatewayPhase::LiveReady,
+                readiness: true,
+                cws_authorized: true,
+                last_event_ts: 115,
+            }),
+        };
+
+        let decision =
+            evaluate_live_guard(TradeMode::Live, true, &state, true, true, 130, 20, true);
+
+        assert!(decision.allowed);
+    }
 }

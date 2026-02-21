@@ -198,6 +198,9 @@ pub struct RuntimeConfig {
     pub trade_mode: TradeMode,
     pub allow_live_orders: bool,
     pub guard_log_interval_ms: u64,
+    pub still_blocked_log_period_sec: u64,
+    pub gateway_health_stale_sec: u64,
+    pub require_gateway_ready: bool,
     pub bootstrap_dump: bool,
     pub read: ReadConfig,
     pub trim: TrimConfig,
@@ -443,11 +446,7 @@ pub fn deterministic_request_id(
 }
 
 pub fn market_request_seq(side: Side) -> u8 {
-    if side == Side::Buy {
-        3
-    } else {
-        4
-    }
+    if side == Side::Buy { 3 } else { 4 }
 }
 
 pub fn deterministic_market_request_id(

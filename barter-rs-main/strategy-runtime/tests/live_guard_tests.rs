@@ -14,7 +14,7 @@ fn live_guard_requires_live_phase() {
         last_event_ts: 1,
     });
 
-    let decision = evaluate_live_guard(TradeMode::Live, true, &state, true, true);
+    let decision = evaluate_live_guard(TradeMode::Live, true, &state, true, true, 10, 20, true);
     assert!(decision.allowed);
 }
 
@@ -28,7 +28,7 @@ fn live_guard_blocks_when_mode_not_live() {
         last_event_ts: 2,
     });
 
-    let decision = evaluate_live_guard(TradeMode::Paper, true, &state, true, true);
+    let decision = evaluate_live_guard(TradeMode::Paper, true, &state, true, true, 10, 20, true);
     assert!(!decision.allowed);
     assert!(decision
         .reasons
@@ -46,7 +46,7 @@ fn blocks_with_waiting_for_next_bar_after_restart_when_stream_has_data_and_no_ba
         last_event_ts: 3,
     });
 
-    let decision = evaluate_live_guard(TradeMode::Live, true, &state, false, true);
+    let decision = evaluate_live_guard(TradeMode::Live, true, &state, false, true, 10, 20, true);
     assert!(!decision.allowed);
     assert!(decision
         .reasons

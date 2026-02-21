@@ -61,6 +61,9 @@ const DEFAULT_HEALTH_STREAM: &str = "events.health";
 const DEFAULT_TRADE_MODE: TradeMode = TradeMode::Paper;
 const DEFAULT_ALLOW_LIVE_ORDERS: bool = false;
 const DEFAULT_GUARD_LOG_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_STILL_BLOCKED_LOG_PERIOD_SEC: u64 = 60;
+const DEFAULT_GATEWAY_HEALTH_STALE_SEC: u64 = 20;
+const DEFAULT_REQUIRE_GATEWAY_READY: bool = true;
 const DEFAULT_BOOTSTRAP_DUMP: bool = false;
 const DEFAULT_PAPER_ENABLED: bool = true;
 const DEFAULT_PAPER_OUTPUT: PaperOutput = PaperOutput::Stdout;
@@ -213,6 +216,9 @@ pub struct RuntimeSources {
     pub trade_mode: ConfigSource,
     pub allow_live_orders: ConfigSource,
     pub guard_log_interval_ms: ConfigSource,
+    pub still_blocked_log_period_sec: ConfigSource,
+    pub gateway_health_stale_sec: ConfigSource,
+    pub require_gateway_ready: ConfigSource,
     pub bootstrap_dump: ConfigSource,
 }
 
@@ -362,6 +368,9 @@ impl Default for RuntimeSources {
             trade_mode: ConfigSource::Default,
             allow_live_orders: ConfigSource::Default,
             guard_log_interval_ms: ConfigSource::Default,
+            still_blocked_log_period_sec: ConfigSource::Default,
+            gateway_health_stale_sec: ConfigSource::Default,
+            require_gateway_ready: ConfigSource::Default,
             bootstrap_dump: ConfigSource::Default,
         }
     }
@@ -437,6 +446,9 @@ struct RuntimeSettingsFile {
     trade_mode: Option<String>,
     allow_live_orders: Option<bool>,
     guard_log_interval_ms: Option<u64>,
+    still_blocked_log_period_sec: Option<u64>,
+    gateway_health_stale_sec: Option<u64>,
+    require_gateway_ready: Option<bool>,
     bootstrap_dump: Option<bool>,
 }
 
@@ -618,6 +630,9 @@ pub fn load_runtime_config(
     let mut trade_mode = DEFAULT_TRADE_MODE;
     let mut allow_live_orders = DEFAULT_ALLOW_LIVE_ORDERS;
     let mut guard_log_interval_ms = DEFAULT_GUARD_LOG_INTERVAL_MS;
+    let mut still_blocked_log_period_sec = DEFAULT_STILL_BLOCKED_LOG_PERIOD_SEC;
+    let mut gateway_health_stale_sec = DEFAULT_GATEWAY_HEALTH_STALE_SEC;
+    let mut require_gateway_ready = DEFAULT_REQUIRE_GATEWAY_READY;
     let mut bootstrap_dump = DEFAULT_BOOTSTRAP_DUMP;
     let mut paper = PaperConfig {
         enabled: DEFAULT_PAPER_ENABLED,
@@ -907,6 +922,18 @@ pub fn load_runtime_config(
                 guard_log_interval_ms = value;
                 sources.runtime.guard_log_interval_ms = ConfigSource::File;
             }
+            if let Some(value) = runtime_file.still_blocked_log_period_sec {
+                still_blocked_log_period_sec = value;
+                sources.runtime.still_blocked_log_period_sec = ConfigSource::File;
+            }
+            if let Some(value) = runtime_file.gateway_health_stale_sec {
+                gateway_health_stale_sec = value;
+                sources.runtime.gateway_health_stale_sec = ConfigSource::File;
+            }
+            if let Some(value) = runtime_file.require_gateway_ready {
+                require_gateway_ready = value;
+                sources.runtime.require_gateway_ready = ConfigSource::File;
+            }
             if let Some(value) = runtime_file.bootstrap_dump {
                 bootstrap_dump = value;
                 sources.runtime.bootstrap_dump = ConfigSource::File;
@@ -1156,6 +1183,18 @@ pub fn load_runtime_config(
         guard_log_interval_ms = value;
         sources.runtime.guard_log_interval_ms = ConfigSource::Env;
     }
+    if let Some(value) = env_parse("STILL_BLOCKED_LOG_PERIOD_SEC") {
+        still_blocked_log_period_sec = value;
+        sources.runtime.still_blocked_log_period_sec = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("GATEWAY_HEALTH_STALE_SEC") {
+        gateway_health_stale_sec = value;
+        sources.runtime.gateway_health_stale_sec = ConfigSource::Env;
+    }
+    if let Some(value) = env::var("REQUIRE_GATEWAY_READY").ok() {
+        require_gateway_ready = value == "1" || value.eq_ignore_ascii_case("true");
+        sources.runtime.require_gateway_ready = ConfigSource::Env;
+    }
     if let Some(value) = env::var("BOOTSTRAP_DUMP").ok() {
         bootstrap_dump = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.bootstrap_dump = ConfigSource::Env;
@@ -1329,6 +1368,9 @@ pub fn load_runtime_config(
         trade_mode,
         allow_live_orders,
         guard_log_interval_ms,
+        still_blocked_log_period_sec,
+        gateway_health_stale_sec,
+        require_gateway_ready,
         bootstrap_dump,
         read,
         trim,

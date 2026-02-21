@@ -188,15 +188,15 @@ struct RuntimeMetrics {
     waiting_for_first_bar_info_logged: bool,
     bars_stream_xlen_last: Option<u64>,
     last_log: Option<Instant>,
-    last_guard_log: Option<Instant>,
-    last_guard_snapshot: Option<GuardSnapshot>,
+    last_live_guard_log_ts_utc: i64,
+    last_live_guard: Option<GuardSnapshot>,
     last_waiting_next_bar_active: bool,
     last_health_poll: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GuardSnapshot {
-    allowed: bool,
+    status: &'static str,
     reasons: Vec<String>,
 }
 
@@ -233,8 +233,8 @@ impl Default for RuntimeMetrics {
             waiting_for_first_bar_info_logged: false,
             bars_stream_xlen_last: None,
             last_log: None,
-            last_guard_log: None,
-            last_guard_snapshot: None,
+            last_live_guard_log_ts_utc: 0,
+            last_live_guard: None,
             last_waiting_next_bar_active: false,
             last_health_poll: None,
         }
@@ -2159,6 +2159,9 @@ impl StrategyRuntime {
             &self.live_guard,
             self.metrics.bars_read_total > 0,
             self.metrics.bars_stream_xlen_last.unwrap_or(0) > 0,
+            chrono::Utc::now().timestamp(),
+            self.config.gateway_health_stale_sec,
+            self.config.require_gateway_ready,
         );
         decision.reasons.extend(self.bootstrap_state.reasons());
         decision.allowed = decision.reasons.is_empty();
@@ -2166,21 +2169,28 @@ impl StrategyRuntime {
     }
 
     fn log_guard_decision_if_due(&mut self, decision: &LiveGuardDecision) -> Result<()> {
-        let now = Instant::now();
-        let interval = Duration::from_millis(self.config.guard_log_interval_ms);
-        let log_due = match self.metrics.last_guard_log {
-            Some(last) => now.duration_since(last) >= interval,
-            None => true,
-        };
-        if !log_due {
+        let now_ts_utc = chrono::Utc::now().timestamp();
+        if decision.allowed {
             return Ok(());
         }
-        self.metrics.last_guard_log = Some(now);
-        if decision.allowed {
-            info!("live_guard=ALLOWED");
-        } else {
-            info!(reasons = ?decision.reasons, "live_guard=BLOCKED");
+        let Some(last) = &self.metrics.last_live_guard else {
+            return Ok(());
+        };
+        let reasons_changed = last.reasons != decision.reasons;
+        if reasons_changed {
+            return Ok(());
         }
+        let elapsed = now_ts_utc.saturating_sub(self.metrics.last_live_guard_log_ts_utc);
+        let period = i64::try_from(self.config.still_blocked_log_period_sec).unwrap_or(i64::MAX);
+        if elapsed < period {
+            return Ok(());
+        }
+        tracing::debug!(
+            reasons = ?decision.reasons,
+            still_blocked_for_sec = elapsed,
+            "live_guard_still_blocked"
+        );
+        self.metrics.last_live_guard_log_ts_utc = now_ts_utc;
         Ok(())
     }
 
@@ -2204,43 +2214,37 @@ impl StrategyRuntime {
         }
         self.metrics.last_waiting_next_bar_active = waiting_next_bar;
 
-        let snapshot = GuardSnapshot {
-            allowed: decision.allowed,
-            reasons: decision.reasons.clone(),
+        let mut reasons = decision.reasons.clone();
+        reasons.sort();
+        let status = if decision.allowed {
+            "ALLOWED"
+        } else {
+            "BLOCKED"
         };
-        let prev = match &self.metrics.last_guard_snapshot {
-            Some(prev) => prev,
-            None => {
-                self.metrics.last_guard_snapshot = Some(snapshot);
-                return Ok(());
+        let snapshot = GuardSnapshot { status, reasons };
+        let now_ts_utc = chrono::Utc::now().timestamp();
+
+        if let Some(prev) = &self.metrics.last_live_guard {
+            if prev != &snapshot {
+                info!(
+                    from = prev.status,
+                    to = snapshot.status,
+                    reasons_before = ?prev.reasons,
+                    reasons_after = ?snapshot.reasons,
+                    phase = ?phase,
+                    "live_guard_changed"
+                );
+                self.metrics.last_live_guard_log_ts_utc = now_ts_utc;
             }
-        };
-        if prev.allowed != snapshot.allowed {
-            let from = if prev.allowed { "ALLOWED" } else { "BLOCKED" };
-            let to = if snapshot.allowed {
-                "ALLOWED"
-            } else {
-                "BLOCKED"
-            };
-            info!(
-                from,
-                to,
-                reasons_before = ?prev.reasons,
-                reasons_after = ?snapshot.reasons,
-                phase = ?phase,
-                "live_guard_transition"
-            );
-        } else if !snapshot.allowed && prev.reasons != snapshot.reasons {
-            info!(
-                from = "BLOCKED",
-                to = "BLOCKED",
-                reasons_before = ?prev.reasons,
-                reasons_after = ?snapshot.reasons,
-                phase = ?phase,
-                "live_guard_transition"
-            );
+        } else {
+            let to = snapshot.status;
+            if to == "BLOCKED" {
+                info!(to, reasons = ?snapshot.reasons, phase = ?phase, "live_guard_changed");
+                self.metrics.last_live_guard_log_ts_utc = now_ts_utc;
+            }
         }
-        self.metrics.last_guard_snapshot = Some(snapshot);
+
+        self.metrics.last_live_guard = Some(snapshot);
         Ok(())
     }
 
@@ -2317,6 +2321,9 @@ mod tests {
             trade_mode,
             allow_live_orders: true,
             guard_log_interval_ms: 1_000,
+            still_blocked_log_period_sec: 60,
+            gateway_health_stale_sec: 20,
+            require_gateway_ready: true,
             bootstrap_dump: false,
             read: ReadConfig {
                 block_ms: 100,
