@@ -13,8 +13,26 @@ cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./config
 ```
 
 ```bash
-REPLAY_OUTPUT_DIR=replay_out cargo run -p strategy-runtime --bin session_gap_replay
+REPLAY_BARS_CSV_PATH=./data_samples/paper_bars_2.csv \
+REPLAY_OUTPUT_DIR=./replay_out \
+cargo run -p strategy-runtime --bin session_gap_replay
 ```
+
+> Важно: команды выше предполагают запуск из корня `barter-rs-main`.
+> Если запускаете из другого `cwd`, используйте абсолютные пути к `data_samples/*`.
+
+### Пример для набора `paper_bars_3`
+
+Если нужно сверять именно индикаторы по новому набору:
+
+```bash
+REPLAY_BARS_CSV_PATH=./data_samples/paper_bars_3.csv \
+REPLAY_OUTPUT_DIR=./replay_out_3 \
+cargo run -p strategy-runtime --bin session_gap_replay
+```
+
+Для этого набора `paper_indicators_3.csv` используется как reference для тестов стратегии,
+а не как вход `session_gap_replay` (replay-бинарь читает бары и опционально сравнивает сделки с reference trades CSV, если он задан/существует).
 
 ## 4) Как сравнивать результаты
 

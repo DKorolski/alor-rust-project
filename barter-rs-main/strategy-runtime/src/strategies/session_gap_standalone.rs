@@ -1073,6 +1073,8 @@ impl Strategy for SessionGapStandaloneStrategy {
 mod tests {
     use super::*;
     use crate::{BarEvent, DataOrigin};
+    use serde::Deserialize;
+    use std::collections::BTreeMap;
 
     fn ctx_live(
         allow_live_orders: bool,
@@ -2222,6 +2224,194 @@ mod tests {
                 ..
             } => assert_eq!(reason, "session_exit"),
             other => panic!("unexpected phase after forced session exit: {other:?}"),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct IndicatorBarCsvRow {
+        time: String,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct IndicatorReferenceCsvRow {
+        session_date: String,
+        traded_session: bool,
+        prev_close: Option<f64>,
+        yesterday_range: Option<f64>,
+        pre_prev_close: Option<f64>,
+        first_min_high: Option<f64>,
+        first_min_low: Option<f64>,
+        first_hour_price: Option<f64>,
+        session_start_ts_utc: Option<i64>,
+        session_end_ts_utc: Option<i64>,
+        session_high: Option<f64>,
+        session_low: Option<f64>,
+        session_close: Option<f64>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SessionSnapshot {
+        traded_session: bool,
+        prev_close: Option<f64>,
+        yesterday_range: Option<f64>,
+        pre_prev_close: Option<f64>,
+        first_min_high: Option<f64>,
+        first_min_low: Option<f64>,
+        first_hour_price: Option<f64>,
+        session_start_ts_utc: Option<i64>,
+        session_end_ts_utc: Option<i64>,
+        session_high: Option<f64>,
+        session_low: Option<f64>,
+        session_close: Option<f64>,
+    }
+
+    #[test]
+    fn indicators_match_reference_for_paper_bars_3_stream() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_backtest();
+        let mut snapshots: BTreeMap<String, SessionSnapshot> = BTreeMap::new();
+
+        let bars_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../data_samples/paper_bars_3.csv");
+        let mut bars_reader = csv::Reader::from_path(bars_path).expect("open paper bars csv");
+        for row in bars_reader.deserialize::<IndicatorBarCsvRow>() {
+            let row = row.expect("valid paper bars row");
+            let dt = DateTime::parse_from_rfc3339(&row.time).expect("rfc3339 bar time");
+            let bar = bar(
+                dt.with_timezone(&Utc).timestamp(),
+                row.open,
+                row.high,
+                row.low,
+                row.close,
+            );
+            let _ = strategy.on_bar(&ctx, &bar);
+
+            if let StrategyState::SessionGapStandalone {
+                session_date,
+                traded_session,
+                prev_close,
+                yesterday_range,
+                pre_prev_close,
+                first_min_high,
+                first_min_low,
+                first_hour_price,
+                session_start_ts_utc,
+                session_end_ts_utc,
+                session_high,
+                session_low,
+                session_close,
+                ..
+            } = &strategy.state
+            {
+                if let Some(session_date) = session_date {
+                    snapshots.insert(
+                        session_date.clone(),
+                        SessionSnapshot {
+                            traded_session: *traded_session,
+                            prev_close: *prev_close,
+                            yesterday_range: *yesterday_range,
+                            pre_prev_close: *pre_prev_close,
+                            first_min_high: *first_min_high,
+                            first_min_low: *first_min_low,
+                            first_hour_price: *first_hour_price,
+                            session_start_ts_utc: *session_start_ts_utc,
+                            session_end_ts_utc: *session_end_ts_utc,
+                            session_high: *session_high,
+                            session_low: *session_low,
+                            session_close: *session_close,
+                        },
+                    );
+                }
+            }
+        }
+
+        let indicators_path =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../data_samples/paper_indicators_3.csv");
+        let mut indicators_reader = csv::Reader::from_path(indicators_path).expect("open indicators csv");
+
+        let approx_eq = |left: Option<f64>, right: Option<f64>, label: &str, session_date: &str| {
+            match (left, right) {
+                (None, None) => {}
+                (Some(left), Some(right)) => {
+                    let diff = (left - right).abs();
+                    assert!(
+                        diff <= 1e-9,
+                        "{label} mismatch for {session_date}: left={left}, right={right}, diff={diff}"
+                    );
+                }
+                (left, right) => panic!(
+                    "{label} mismatch for {session_date}: left={left:?}, right={right:?}"
+                ),
+            }
+        };
+
+        for row in indicators_reader.deserialize::<IndicatorReferenceCsvRow>() {
+            let row = row.expect("valid indicators row");
+            let snapshot = snapshots
+                .get(&row.session_date)
+                .unwrap_or_else(|| panic!("missing snapshot for session {}", row.session_date));
+
+            assert_eq!(snapshot.traded_session, row.traded_session);
+            assert_eq!(snapshot.session_start_ts_utc, row.session_start_ts_utc);
+            assert_eq!(snapshot.session_end_ts_utc, row.session_end_ts_utc);
+
+            approx_eq(
+                snapshot.prev_close,
+                row.prev_close,
+                "prev_close",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.yesterday_range,
+                row.yesterday_range,
+                "yesterday_range",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.pre_prev_close,
+                row.pre_prev_close,
+                "pre_prev_close",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.first_min_high,
+                row.first_min_high,
+                "first_min_high",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.first_min_low,
+                row.first_min_low,
+                "first_min_low",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.first_hour_price,
+                row.first_hour_price,
+                "first_hour_price",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.session_high,
+                row.session_high,
+                "session_high",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.session_low,
+                row.session_low,
+                "session_low",
+                &row.session_date,
+            );
+            approx_eq(
+                snapshot.session_close,
+                row.session_close,
+                "session_close",
+                &row.session_date,
+            );
         }
     }
 }
