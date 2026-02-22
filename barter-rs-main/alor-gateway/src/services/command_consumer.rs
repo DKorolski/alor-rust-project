@@ -472,6 +472,9 @@ fn is_command_expired(command: &OrderCommand) -> bool {
     let Some(ttl_ms) = command.ttl_ms else {
         return false;
     };
+    if ttl_ms == 0 || command.created_ts_utc <= 0 {
+        return false;
+    }
     let now_ms = chrono::Utc::now().timestamp_millis();
     let deadline_ms = command.created_ts_utc.saturating_mul(1_000) + ttl_ms as i64;
     now_ms > deadline_ms
@@ -677,5 +680,49 @@ mod tests {
         assert_eq!(info.message.as_deref(), Some("price out of limits"));
         assert_eq!(info.request_guid.as_deref(), Some("guid-456"));
         assert_eq!(info.order_id, Some(987));
+    }
+
+    fn sample_command(created_ts_utc: i64, ttl_ms: Option<u64>) -> OrderCommand {
+        OrderCommand {
+            request_id: uuid::Uuid::new_v4(),
+            created_ts_utc,
+            strategy_id: "s".to_string(),
+            portfolio: "p".to_string(),
+            exchange: "MOEX".to_string(),
+            symbol: "USDRUBF".to_string(),
+            action: CommandAction::Market(alor_protocol::MarketOrder {
+                side: Side::Buy,
+                qty: 1.0,
+            }),
+            ttl_ms,
+        }
+    }
+
+    #[test]
+    fn command_not_expired_when_ttl_is_zero() {
+        let command = sample_command(chrono::Utc::now().timestamp() - 10, Some(0));
+        assert!(!is_command_expired(&command));
+    }
+
+    #[test]
+    fn command_not_expired_when_ttl_is_set_but_created_ts_missing() {
+        let command = sample_command(0, Some(1_000));
+        assert!(!is_command_expired(&command));
+    }
+
+    #[test]
+    fn command_expired_when_older_than_ttl() {
+        let ttl_ms = 1_000;
+        let created_ts_utc = (chrono::Utc::now().timestamp_millis() - 5_000) / 1_000;
+        let command = sample_command(created_ts_utc, Some(ttl_ms));
+        assert!(is_command_expired(&command));
+    }
+
+    #[test]
+    fn command_not_expired_when_within_ttl() {
+        let ttl_ms = 120_000;
+        let created_ts_utc = (chrono::Utc::now().timestamp_millis() - 1_000) / 1_000;
+        let command = sample_command(created_ts_utc, Some(ttl_ms));
+        assert!(!is_command_expired(&command));
     }
 }

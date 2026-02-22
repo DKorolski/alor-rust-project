@@ -5,7 +5,6 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use tracing::info;
 
-
 use crate::health::{GatewayPhase, HealthState, ResyncMode};
 use alor_types::MarketState;
 
@@ -46,24 +45,35 @@ async fn liveness() -> StatusCode {
     StatusCode::OK
 }
 
-async fn readiness(State(health): State<Arc<RwLock<HealthState>>>) -> Json<ReadinessResponse> {
+async fn readiness(
+    State(health): State<Arc<RwLock<HealthState>>>,
+) -> (StatusCode, Json<ReadinessResponse>) {
     let guard = health.read();
-    Json(ReadinessResponse {
-        readiness: guard.readiness,
-        gateway_phase: guard.gateway_phase,
-        last_resync_mode: guard.last_resync_mode,
-        ws_connected: guard.ws_connected,
-        cws_authorized: guard.cws_authorized,
-        last_bar_age_sec: guard.last_bar_age_sec,
-        ws_last_rx_age_sec: guard.ws_last_rx_age_sec,
-        last_positions_ts: guard.last_positions_ts,
-        last_orders_ts: guard.last_orders_ts,
-        backpressure_lagged: guard.backpressure_lagged,
-        active_subscriptions_count: guard.active_subscriptions_count,
-        desired_subscriptions_count: guard.desired_subscriptions_count,
-        scheduler_state: guard.scheduler_state,
-        last_gap_backfill_sec: guard.last_gap_backfill_sec,
-        last_gap_backfill_bars: guard.last_gap_backfill_bars,
-        ws_reconnects_total: guard.ws_reconnects_total,
-    })
+    let status = if guard.readiness {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(ReadinessResponse {
+            readiness: guard.readiness,
+            gateway_phase: guard.gateway_phase,
+            last_resync_mode: guard.last_resync_mode,
+            ws_connected: guard.ws_connected,
+            cws_authorized: guard.cws_authorized,
+            last_bar_age_sec: guard.last_bar_age_sec,
+            ws_last_rx_age_sec: guard.ws_last_rx_age_sec,
+            last_positions_ts: guard.last_positions_ts,
+            last_orders_ts: guard.last_orders_ts,
+            backpressure_lagged: guard.backpressure_lagged,
+            active_subscriptions_count: guard.active_subscriptions_count,
+            desired_subscriptions_count: guard.desired_subscriptions_count,
+            scheduler_state: guard.scheduler_state,
+            last_gap_backfill_sec: guard.last_gap_backfill_sec,
+            last_gap_backfill_bars: guard.last_gap_backfill_bars,
+            ws_reconnects_total: guard.ws_reconnects_total,
+        }),
+    )
 }
