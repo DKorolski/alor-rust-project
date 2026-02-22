@@ -7,7 +7,7 @@ exchange = "MOEX"
 instrument_group = "RFUD"
 # used for market order routing in CWS (create:market)
 symbols = ["USDRUBF"]
-refresh_token = ""
+refresh_token = "742b4849-a27b-45fb-99e0-22e12ed92e87"
 
 tf_sec = 60
 from_ts = 0
@@ -35,8 +35,8 @@ backoff_multiplier = 2
 
 max_silence_bars_sec = 1200
 
-history_sessions = 3
-history_days_back = 3
+history_sessions = 7
+history_days_back = 7
 session_rollover_hour_utc = 6
 health_listen_addr = "127.0.0.1:8081"
 
@@ -61,7 +61,7 @@ subscribe_ack_retries = 3
 [reconnect]
 warm_reconnect_max_gap_sec = 21600
 gap_backfill_padding_bars = 2
-cold_start_history_days_back = 4 # set to 0 + history_sessions/history_days_back 0 => NoHistory
+cold_start_history_days_back = 7 # set to 0 + history_sessions/history_days_back 0 => NoHistory
 bar_silence_resync_min_sec = 1200
 
 [general]
