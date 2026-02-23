@@ -72,9 +72,9 @@ max_silence_bars_sec = 1200
 session_start = "09:00:00"
 session_end = "23:49:00"
 break_start_1 = "14:00:00"
-break_end_1 = "14:05:00"
+break_end_1 = "14:04:59"
 break_start_2 = "18:50:00"
-break_end_2 = "19:05:00"
+break_end_2 = "19:04:59"
 weekends_off = true
 timezone_offset_hours = 3
 

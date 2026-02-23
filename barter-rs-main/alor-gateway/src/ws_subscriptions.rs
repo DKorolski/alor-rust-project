@@ -62,6 +62,15 @@ pub fn build_orders_subscribe(
     (guid, msg.to_string())
 }
 
+pub fn build_unsubscribe(guid: &str, access_token: &str) -> String {
+    let msg = json!({
+        "opcode": "unsubscribe",
+        "guid": guid,
+        "token": access_token,
+    });
+    msg.to_string()
+}
+
 pub fn build_trades_subscribe(
     cfg: &AlorGatewayConfig,
     access_token: &str,
@@ -81,4 +90,17 @@ pub fn build_trades_subscribe(
 
 fn new_guid() -> String {
     Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_unsubscribe_payload_contains_opcode_guid_and_token() {
+        let payload = build_unsubscribe("g-1", "tkn");
+        assert!(payload.contains("\"opcode\":\"unsubscribe\""));
+        assert!(payload.contains("\"guid\":\"g-1\""));
+        assert!(payload.contains("\"token\":\"tkn\""));
+    }
 }

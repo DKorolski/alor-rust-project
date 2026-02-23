@@ -20,7 +20,8 @@ use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::ResyncMode;
 use crate::models::DataOrigin;
 use crate::ws_subscriptions::{
-    build_bars_subscribe, build_orders_subscribe, build_positions_subscribe, build_trades_subscribe,
+    build_bars_subscribe, build_orders_subscribe, build_positions_subscribe,
+    build_trades_subscribe, build_unsubscribe,
 };
 
 #[derive(Debug)]
@@ -139,6 +140,16 @@ impl SubscriptionManager {
             }
         }
         pending
+    }
+
+    fn all_guids(&self) -> Vec<String> {
+        let mut guids =
+            Vec::with_capacity(self.desired_subscriptions.len() + self.active_subscriptions.len());
+        guids.extend(self.active_subscriptions.keys().cloned());
+        guids.extend(self.desired_subscriptions.keys().cloned());
+        guids.sort();
+        guids.dedup();
+        guids
     }
 }
 
@@ -403,6 +414,15 @@ async fn connect_and_run(
                     }
                     Some(HubCommand::Shutdown) | None => {
                         info!("ws hub shutdown requested");
+                        if let Err(error) = best_effort_unsubscribe_all(
+                            &mut ws_sink,
+                            &subscription_manager,
+                            &token,
+                        )
+                        .await
+                        {
+                            warn!(?error, "best-effort unsubscribe failed during shutdown");
+                        }
                         return Ok(());
                     }
                 }
@@ -489,6 +509,27 @@ async fn connect_and_run(
             }
         }
     }
+}
+
+async fn best_effort_unsubscribe_all(
+    ws_sink: &mut (
+             impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+             + Unpin
+         ),
+    subscription_manager: &SubscriptionManager,
+    access_token: &str,
+) -> anyhow::Result<()> {
+    let guids = subscription_manager.all_guids();
+    if guids.is_empty() {
+        return Ok(());
+    }
+
+    for guid in guids {
+        let payload = build_unsubscribe(&guid, access_token);
+        ws_sink.send(Message::Text(payload.into())).await?;
+    }
+
+    Ok(())
 }
 
 async fn subscribe_all(
