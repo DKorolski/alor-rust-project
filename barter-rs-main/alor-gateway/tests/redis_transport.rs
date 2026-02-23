@@ -1,12 +1,36 @@
 use std::time::Duration;
 
-use alor_protocol::{CommandAck, CommandAction, Envelope, MessageType, OrderCommand, PlaceOrder, SCHEMA_VERSION};
 use alor_gateway::models::{BarEvent, DataOrigin};
-use alor_gateway::transport::{CommandSink, CommandSource, EventSink, StreamNames, TransportConfig};
+use alor_gateway::transport::{
+    CommandSink, CommandSource, EventSink, StreamNames, TransportConfig,
+};
 use alor_gateway::transport_redis::{RedisCommandSink, RedisCommandSource, RedisEventSink};
+use alor_protocol::{
+    CommandAck, CommandAction, Envelope, MessageType, OrderCommand, PlaceOrder, SCHEMA_VERSION,
+};
 use redis::AsyncCommands;
-use testcontainers::{clients::Cli, core::WaitFor, GenericImage};
+use testcontainers::{GenericImage, clients::Cli, core::WaitFor};
 use tokio::time::sleep;
+
+fn docker_integration_enabled() -> bool {
+    std::env::var("RUN_DOCKER_TESTS")
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
+fn skip_without_docker() -> bool {
+    if docker_integration_enabled() {
+        false
+    } else {
+        eprintln!(
+            "skipping docker-backed redis integration test (set RUN_DOCKER_TESTS=1 to enable)"
+        );
+        true
+    }
+}
 
 fn redis_image() -> GenericImage {
     GenericImage::new("redis", "7-alpine")
@@ -58,6 +82,10 @@ async fn pending_count(config: &TransportConfig) -> anyhow::Result<i64> {
 
 #[tokio::test]
 async fn command_path_acknowledges_and_publishes_ack() {
+    if skip_without_docker() {
+        return;
+    }
+
     let docker = Cli::default();
     let node = docker.run(redis_image());
     let port = node.get_host_port_ipv4(6379);
@@ -87,7 +115,10 @@ async fn command_path_acknowledges_and_publishes_ack() {
         .expect("command read failed")
         .expect("command missing");
     assert_eq!(envelope.command.request_id, command.request_id);
-    source.ack(envelope.message_id.as_ref().unwrap()).await.unwrap();
+    source
+        .ack(envelope.message_id.as_ref().unwrap())
+        .await
+        .unwrap();
     sink.publish_ack(CommandAck::accepted(command.request_id))
         .await
         .unwrap();
@@ -101,6 +132,10 @@ async fn command_path_acknowledges_and_publishes_ack() {
 
 #[tokio::test]
 async fn pending_recovery_claims_idle_message() {
+    if skip_without_docker() {
+        return;
+    }
+
     let docker = Cli::default();
     let node = docker.run(redis_image());
     let port = node.get_host_port_ipv4(6379);
@@ -149,6 +184,10 @@ async fn pending_recovery_claims_idle_message() {
 
 #[tokio::test]
 async fn poison_messages_go_to_dlq() {
+    if skip_without_docker() {
+        return;
+    }
+
     let docker = Cli::default();
     let node = docker.run(redis_image());
     let port = node.get_host_port_ipv4(6379);
@@ -205,6 +244,10 @@ async fn poison_messages_go_to_dlq() {
 
 #[tokio::test]
 async fn stream_trim_keeps_length_bounded() {
+    if skip_without_docker() {
+        return;
+    }
+
     let docker = Cli::default();
     let node = docker.run(redis_image());
     let port = node.get_host_port_ipv4(6379);

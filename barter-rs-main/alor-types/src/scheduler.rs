@@ -135,9 +135,9 @@ impl Scheduler {
 
 fn in_window(now: NaiveTime, start: NaiveTime, end: NaiveTime) -> bool {
     if start <= end {
-        now >= start && now <= end
+        now >= start && now < end
     } else {
-        now >= start || now <= end
+        now >= start || now < end
     }
 }
 
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn boundaries_are_inclusive() {
+    fn boundaries_are_start_inclusive_and_end_exclusive() {
         let scheduler = scheduler();
         assert_eq!(
             scheduler.market_state(t("09:00"), Weekday::Mon),
@@ -213,8 +213,30 @@ mod tests {
         );
         assert_eq!(
             scheduler.market_state(t("14:05"), Weekday::Mon),
-            MarketState::Break1
+            MarketState::Open
         );
+    }
+
+    #[test]
+    fn end_exclusive_window_logic_supports_wraparound() {
+        let start = NaiveTime::from_hms_opt(23, 0, 0).unwrap();
+        let end = NaiveTime::from_hms_opt(1, 0, 0).unwrap();
+
+        assert!(in_window(
+            NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
+            start,
+            end
+        ));
+        assert!(in_window(
+            NaiveTime::from_hms_opt(0, 59, 59).unwrap(),
+            start,
+            end
+        ));
+        assert!(!in_window(
+            NaiveTime::from_hms_opt(1, 0, 0).unwrap(),
+            start,
+            end
+        ));
     }
 
     #[test]

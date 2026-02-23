@@ -20,6 +20,9 @@ Gateway поднимает HTTP health server:
 - `GET /liveness` — процесс жив (ожидается `200 OK`).
 - `GET /readiness` — JSON со статусом готовности (`readiness`) и диагностикой фаз.
 
+`/readiness` возвращает HTTP `503 Service Unavailable`, когда `readiness=false`.
+Это ожидаемое поведение для orchestration/k8s: endpoint должен использоваться именно как readiness-probe.
+
 > Примечание: endpoint `/startup` в текущей реализации отсутствует. Для startup-probe используйте `/liveness` до появления отдельного `/startup`.
 
 Критичные поля `/readiness`:
@@ -32,6 +35,29 @@ Gateway поднимает HTTP health server:
 ```bash
 curl -sf http://127.0.0.1:8081/readiness
 ```
+
+### 3.1 Рекомендация для Kubernetes probes
+
+```yaml
+startupProbe:
+  httpGet:
+    path: /liveness
+    port: 8081
+
+livenessProbe:
+  httpGet:
+    path: /liveness
+    port: 8081
+
+readinessProbe:
+  httpGet:
+    path: /readiness
+    port: 8081
+```
+
+- `liveness` отвечает только за «процесс жив».
+- `readiness` отвечает за готовность принимать боевой трафик и может временно возвращать `503`.
+
 ---
 
 ## 4) Типовые сбои и что делать

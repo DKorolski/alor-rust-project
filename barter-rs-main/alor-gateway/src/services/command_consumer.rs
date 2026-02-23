@@ -6,6 +6,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use alor_protocol::{CommandAck, CommandAction, OrderCommand, Side};
+use alor_types::MarketState;
 
 use crate::health::{GatewayPhase, HealthState};
 use crate::transport::{CommandEnvelope, CommandSink, CommandSource};
@@ -161,6 +162,7 @@ pub async fn run_command_consumer(
 ) -> anyhow::Result<()> {
     let mut error_backoff = config.error_backoff_base;
     let mut last_no_message_log = Instant::now().checked_sub(config.no_message_log_interval);
+    let mut last_trading_window_warn = Instant::now().checked_sub(Duration::from_secs(30));
     {
         let mut guard = health.write();
         guard.command_consumer_alive = true;
@@ -258,6 +260,21 @@ pub async fn run_command_consumer(
                     increment_counter(&health, |h| {
                         h.commands_rejected_total = h.commands_rejected_total.saturating_add(1)
                     });
+                    if error_code == "trading_window_closed"
+                        && last_trading_window_warn
+                            .map(|last| last.elapsed() >= Duration::from_secs(30))
+                            .unwrap_or(true)
+                    {
+                        warn!(
+                            request_id = %request_id,
+                            strategy_id = %command.strategy_id,
+                            symbol = %command.symbol,
+                            action = %command_action_label(&command.action),
+                            scheduler_state = ?health.read().scheduler_state,
+                            "command rejected: trading window closed"
+                        );
+                        last_trading_window_warn = Some(Instant::now());
+                    }
                     let ack = CommandAck::rejected(request_id, error_code, "validation failed");
                     sink.publish_ack(ack.clone()).await?;
                     info!(
@@ -428,7 +445,13 @@ fn validate_command(
     if pause_when_degraded && guard.event_sink_degraded {
         return Some("gateway_degraded");
     }
+    let scheduler_state = guard.scheduler_state;
     drop(guard);
+    if !matches!(&command.action, CommandAction::Cancel(_))
+        && !matches!(scheduler_state, Some(MarketState::Open))
+    {
+        return Some("trading_window_closed");
+    }
     match &command.action {
         CommandAction::Place(payload) => {
             if payload.price <= 0.0 || payload.qty <= 0.0 {
@@ -724,5 +747,31 @@ mod tests {
         let created_ts_utc = (chrono::Utc::now().timestamp_millis() - 1_000) / 1_000;
         let command = sample_command(created_ts_utc, Some(ttl_ms));
         assert!(!is_command_expired(&command));
+    }
+    #[test]
+    fn validate_command_rejects_trading_actions_when_market_not_open() {
+        let command = sample_command(chrono::Utc::now().timestamp(), None);
+        let health = Arc::new(parking_lot::RwLock::new(HealthState {
+            gateway_phase: GatewayPhase::LiveReady,
+            scheduler_state: Some(MarketState::Break1),
+            ..HealthState::default()
+        }));
+
+        let error = validate_command(&command, 0.01, 1.0, &health, true);
+        assert_eq!(error, Some("trading_window_closed"));
+    }
+
+    #[test]
+    fn validate_command_allows_cancel_when_market_not_open() {
+        let mut command = sample_command(chrono::Utc::now().timestamp(), None);
+        command.action = CommandAction::Cancel(alor_protocol::CancelOrder { order_id: 42 });
+        let health = Arc::new(parking_lot::RwLock::new(HealthState {
+            gateway_phase: GatewayPhase::LiveReady,
+            scheduler_state: Some(MarketState::Break2),
+            ..HealthState::default()
+        }));
+
+        let error = validate_command(&command, 0.01, 1.0, &health, true);
+        assert_eq!(error, None);
     }
 }
