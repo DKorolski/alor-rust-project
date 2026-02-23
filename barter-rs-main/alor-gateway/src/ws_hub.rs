@@ -98,6 +98,17 @@ struct SubscriptionManager {
 
 impl SubscriptionManager {
     fn add_subscription(&mut self, subscription: Subscription) {
+        let duplicate_pending_guid =
+            self.desired_subscriptions
+                .iter()
+                .find_map(|(guid, existing)| {
+                    (existing.subscription_type == subscription.subscription_type
+                        && existing.symbol == subscription.symbol)
+                        .then(|| guid.clone())
+                });
+        if let Some(guid) = duplicate_pending_guid {
+            self.desired_subscriptions.remove(&guid);
+        }
         self.desired_subscriptions
             .insert(subscription.guid.clone(), subscription);
     }
@@ -962,4 +973,45 @@ fn jittered(duration: Duration) -> Duration {
     let upper = millis + offset;
     let jittered = lower + (rand::random::<f64>() * (upper - lower));
     Duration::from_millis(jittered.max(0.0) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subscription(
+        guid: &str,
+        symbol: &str,
+        subscription_type: &str,
+        active: bool,
+    ) -> Subscription {
+        Subscription {
+            guid: guid.to_string(),
+            symbol: symbol.to_string(),
+            subscription_type: subscription_type.to_string(),
+            is_active: active,
+        }
+    }
+
+    #[test]
+    fn desired_count_includes_trades_subscription() {
+        let mut manager = SubscriptionManager::default();
+        manager.add_subscription(subscription("g-bars", "S1", "bars", false));
+        manager.add_subscription(subscription("g-pos", "P", "positions", false));
+        manager.add_subscription(subscription("g-ord", "P", "orders", false));
+        manager.add_subscription(subscription("g-trd", "P", "trades", false));
+
+        assert_eq!(manager.desired_count(), 4);
+    }
+
+    #[test]
+    fn retry_replaces_pending_subscription_for_same_symbol_and_type() {
+        let mut manager = SubscriptionManager::default();
+        manager.add_subscription(subscription("old-guid", "7502T0U", "positions", false));
+        manager.add_subscription(subscription("new-guid", "7502T0U", "positions", false));
+
+        assert_eq!(manager.desired_count(), 1);
+        assert!(manager.desired_subscriptions.contains_key("new-guid"));
+        assert!(!manager.desired_subscriptions.contains_key("old-guid"));
+    }
 }
