@@ -322,13 +322,13 @@ impl AlorGatewayConfig {
                 path: path.clone(),
                 source: err,
             })?;
-
         let symbols = file_cfg
             .symbols
             .clone()
             .unwrap_or_else(|| vec!["USDRUBF".to_string()]);
         let log_positions_filter = file_cfg
             .log_positions_filter
+            .clone()
             .unwrap_or_else(|| symbols.clone());
         let subscribe_ack_timeout_ms = file_cfg
             .ws
@@ -340,6 +340,7 @@ impl AlorGatewayConfig {
             .as_ref()
             .and_then(|ws| ws.subscribe_ack_timeout_positions_ms)
             .unwrap_or(subscribe_ack_timeout_ms);
+        let (refresh_token, _refresh_token_source) = resolve_refresh_token_from_file(&file_cfg)?;
 
         Ok(Self {
             portfolio: file_cfg
@@ -361,9 +362,7 @@ impl AlorGatewayConfig {
             oauth_url: file_cfg
                 .oauth_url
                 .unwrap_or_else(|| "https://oauth.alor.ru/refresh".into()),
-            refresh_token: file_cfg
-                .refresh_token
-                .ok_or(ConfigError::MissingField("refresh_token"))?,
+            refresh_token,
             skip_history_bars: file_cfg.skip_history_bars.unwrap_or(false),
             skip_history_positions: file_cfg.skip_history_positions.unwrap_or(false),
             skip_history_orders: file_cfg.skip_history_orders.unwrap_or(false),
@@ -456,7 +455,6 @@ impl AlorGatewayConfig {
                 path: path.clone(),
                 source: err,
             })?;
-
         let mut sources = BTreeMap::new();
         let source_label = |field: &'static str| format!("file:{}", field);
         let default_label = |field: &'static str| format!("default:{}", field);
@@ -519,6 +517,8 @@ impl AlorGatewayConfig {
             },
         );
 
+        let (refresh_token, refresh_token_source) = resolve_refresh_token_from_file(&file_cfg)?;
+
         let config = Self {
             portfolio: file_cfg
                 .portfolio
@@ -547,10 +547,7 @@ impl AlorGatewayConfig {
                 .oauth_url
                 .clone()
                 .unwrap_or_else(|| "https://oauth.alor.ru/refresh".into()),
-            refresh_token: file_cfg
-                .refresh_token
-                .clone()
-                .ok_or(ConfigError::MissingField("refresh_token"))?,
+            refresh_token,
             skip_history_bars: file_cfg.skip_history_bars.unwrap_or(false),
             skip_history_positions: file_cfg.skip_history_positions.unwrap_or(false),
             skip_history_orders: file_cfg.skip_history_orders.unwrap_or(false),
@@ -638,6 +635,7 @@ impl AlorGatewayConfig {
         };
 
         track_file_sources(&file_cfg, &mut sources);
+        sources.insert("refresh_token", refresh_token_source.to_string());
         sources.insert("config_path", format!("file:{}", path));
         let derived = derive_config(&config);
         Ok(ResolvedConfig {
@@ -646,6 +644,26 @@ impl AlorGatewayConfig {
             derived,
         })
     }
+}
+
+fn resolve_refresh_token_from_file(
+    file_cfg: &FileConfig,
+) -> Result<(String, &'static str), ConfigError> {
+    if let Ok(value) = env::var("ALOR_REFRESH_TOKEN") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok((trimmed.to_string(), "env:ALOR_REFRESH_TOKEN"));
+        }
+    }
+
+    if let Some(value) = file_cfg.refresh_token.as_ref() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok((trimmed.to_string(), "file:refresh_token"));
+        }
+    }
+
+    Err(ConfigError::MissingField("refresh_token"))
 }
 
 #[derive(Debug, Error)]
@@ -1194,4 +1212,75 @@ pub fn detect_config_path(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn write_temp_config(name: &str, body: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "alor-gateway-{name}-{}-{}.toml",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, body).expect("write temp config");
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn file_config_uses_env_refresh_token_override() {
+        let _guard = env_lock().lock().expect("lock env");
+        unsafe {
+            std::env::set_var("ALOR_REFRESH_TOKEN", "env-token");
+        }
+
+        let path = write_temp_config(
+            "env-refresh-override",
+            r#"
+portfolio = "demo"
+refresh_token = "file-token"
+"#,
+        );
+
+        let resolved =
+            AlorGatewayConfig::from_file_with_sources(path.clone()).expect("load config");
+        assert_eq!(resolved.config.refresh_token, "env-token");
+        assert_eq!(
+            resolved.sources.get("refresh_token").map(String::as_str),
+            Some("env:ALOR_REFRESH_TOKEN")
+        );
+
+        unsafe {
+            std::env::remove_var("ALOR_REFRESH_TOKEN");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_config_fails_when_refresh_token_missing_or_blank() {
+        let _guard = env_lock().lock().expect("lock env");
+        unsafe {
+            std::env::remove_var("ALOR_REFRESH_TOKEN");
+        }
+
+        let path = write_temp_config(
+            "missing-refresh-token",
+            r#"
+portfolio = "demo"
+refresh_token = "   "
+"#,
+        );
+
+        let err = AlorGatewayConfig::from_file_with_sources(path.clone()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::MissingField("refresh_token")));
+
+        let _ = std::fs::remove_file(path);
+    }
 }

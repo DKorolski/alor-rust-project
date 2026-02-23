@@ -7,7 +7,6 @@ exchange = "MOEX"
 instrument_group = "RFUD"
 # used for market order routing in CWS (create:market)
 symbols = ["USDRUBF"]
-refresh_token = ""
 
 tf_sec = 60
 from_ts = 0

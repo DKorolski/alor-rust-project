@@ -1452,6 +1452,7 @@ pub fn load_runtime_config(
     };
 
     validate_trade_mode(&config)?;
+    validate_timezone_offset_hours(&config)?;
 
     Ok(ResolvedRuntimeConfig {
         config,
@@ -1572,6 +1573,15 @@ fn validate_trade_mode(config: &RuntimeConfig) -> Result<()> {
     );
 }
 
+fn validate_timezone_offset_hours(config: &RuntimeConfig) -> Result<()> {
+    let value = config.strategy.timezone_offset_hours;
+    if (-23..=23).contains(&value) {
+        return Ok(());
+    }
+
+    anyhow::bail!("invalid strategy.timezone_offset_hours={value}; expected range -23..=23");
+}
+
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     env::var(key).ok().and_then(|value| value.parse().ok())
 }
@@ -1624,6 +1634,34 @@ timezone_offset_hours = 3
             resolved.sources.strategy.trading_periods,
             ConfigSource::File
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_rejects_invalid_timezone_offset_hours() {
+        let path = write_temp_config(
+            "invalid-timezone-offset",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "demo"
+exchange = "MOEX"
+
+[strategy]
+strategy_id = "session_gap_standalone"
+strategy_kind = "session_gap_standalone"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+timezone_offset_hours = 30
+"#,
+        );
+
+        let err = load_runtime_config(path.clone(), false)
+            .expect_err("must fail for invalid timezone offset");
+        let message = format!("{err:#}");
+        assert!(message.contains("timezone_offset_hours"));
+        assert!(message.contains("-23..=23"));
+
         let _ = std::fs::remove_file(path);
     }
 }
