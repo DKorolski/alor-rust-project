@@ -1,0 +1,126 @@
+# DevOps Runbook: paper launch (gateway + runtime)
+
+Документ для быстрого старта в pre-prod/paper режиме.
+
+## 1) Подготовка окружения
+
+Создайте локальный файл `.env.preprod` на основе `docs/preprod-env.example` и заполните секреты (минимум `ALOR_REFRESH_TOKEN`).
+
+Загрузите переменные в текущую shell-сессию:
+
+```bash
+set -a
+source ./.env.preprod
+set +a
+```
+
+Проверка обязательных переменных:
+
+```bash
+echo "$ALOR_GATEWAY_CONFIG"
+echo "$ALOR_REFRESH_TOKEN" | wc -c
+```
+
+## 2) Запуск Redis (если не запущен)
+
+Локально:
+
+```bash
+redis-server
+```
+
+Проверка:
+
+```bash
+redis-cli PING
+```
+
+Ожидается: `PONG`.
+
+## 3) Запуск gateway (terminal #1)
+
+Рекомендуемая команда:
+
+```bash
+RUST_LOG=info,alor_gateway::supervisor=info,alor_gateway::ws_hub=info \
+cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
+  --config ./configs/gateway.live.toml \
+  --redis-url redis://127.0.0.1/
+```
+
+Health проверка gateway:
+
+```bash
+curl -sS http://127.0.0.1:8081/liveness
+curl -sS http://127.0.0.1:8081/readiness
+```
+
+## 4) Запуск strategy-runtime в режиме paper (terminal #2)
+
+Запуск с paper-конфигом:
+
+```bash
+RUST_LOG=info,strategy_runtime=info \
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- \
+  --config ./configs/runtime.paper.toml
+```
+
+Health проверка runtime:
+
+```bash
+curl -sS http://127.0.0.1:8091/liveness
+curl -sS http://127.0.0.1:8091/readiness
+```
+
+## 5) Базовая диагностика потоков Redis
+
+Проверить, что бары идут в stream:
+
+```bash
+redis-cli XLEN md.bars.7502T0U.1m
+redis-cli --raw XREVRANGE md.bars.7502T0U.1m + - COUNT 1
+```
+
+Проверить runtime-state stream:
+
+```bash
+redis-cli XLEN runtime.state.session_gap_standalone.live.7502T0U
+```
+
+> Подставьте фактические stream names из вашего `runtime.paper.toml`.
+
+## 6) Kubernetes probes (рекомендация)
+
+Используйте `/liveness` строго как liveness/startup, а `/readiness` — как readiness.
+
+```yaml
+startupProbe:
+  httpGet:
+    path: /liveness
+    port: 8081
+
+livenessProbe:
+  httpGet:
+    path: /liveness
+    port: 8081
+
+readinessProbe:
+  httpGet:
+    path: /readiness
+    port: 8081
+```
+
+Пояснение:
+- `liveness` проверяет, что процесс жив.
+- `readiness` проверяет, что сервис готов к трафику и может возвращать `503`, пока не готов.
+
+## 7) Аккуратная остановка
+
+Остановите runtime и gateway через `Ctrl+C` (или SIGTERM в orchestrator).
+
+После остановки можно проверить, что процессы завершились, и при необходимости собрать postmortem:
+
+```bash
+curl -sS http://127.0.0.1:8081/readiness || true
+curl -sS http://127.0.0.1:8091/readiness || true
+```
