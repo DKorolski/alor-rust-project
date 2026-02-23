@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use tokio::signal;
+use tokio::sync::watch;
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
 
@@ -68,18 +69,39 @@ async fn main() -> Result<()> {
     );
 
     let mut runtime = StrategyRuntime::new(config).await?;
-    tokio::select! {
-        result = runtime.run() => {
-            if let Err(error) = result {
-                return Err(error);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let signal_shutdown_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        let mut term_signal =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("shutdown requested (SIGINT)");
+            }
+            _ = async {
+                #[cfg(unix)]
+                {
+                    let _ = term_signal.recv().await;
+                }
+                #[cfg(not(unix))]
+                {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                info!("shutdown requested (SIGTERM)");
             }
         }
-        _ = signal::ctrl_c() => {
-            info!("shutdown requested");
-            if let Err(error) = runtime.flush_reports().await {
-                tracing::warn!(?error, "failed to flush trade ledger reports");
-            }
-        }
+
+        let _ = signal_shutdown_tx.send(true);
+    });
+
+    runtime.run_until_shutdown(shutdown_rx).await?;
+    if let Err(error) = runtime.flush_reports().await {
+        tracing::warn!(?error, "failed to flush trade ledger reports");
     }
 
     Ok(())

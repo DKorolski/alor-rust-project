@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::watch;
 use tokio::time::{sleep, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -311,6 +312,14 @@ impl StrategyRuntime {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        self.run_until_shutdown(shutdown_rx).await
+    }
+
+    pub async fn run_until_shutdown(
+        &mut self,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
         if self.config.replay.enabled {
             return self.run_replay().await;
         }
@@ -318,10 +327,37 @@ impl StrategyRuntime {
         self.bootstrap().await?;
         self.start_health_server();
         loop {
-            self.poll_once().await?;
-            self.refresh_health_snapshot();
-            sleep(Duration::from_millis(self.config.read.poll_interval_ms)).await;
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        self.mark_shutting_down();
+                        break;
+                    }
+                }
+                result = self.poll_once() => {
+                    result?;
+                    self.refresh_health_snapshot();
+                }
+            }
+
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        self.mark_shutting_down();
+                        break;
+                    }
+                }
+                _ = sleep(Duration::from_millis(self.config.read.poll_interval_ms)) => {}
+            }
         }
+
+        Ok(())
+    }
+
+    fn mark_shutting_down(&self) {
+        let mut guard = self.health_snapshot.write();
+        guard.readiness = false;
+        guard.runtime_phase = "ShuttingDown".to_string();
     }
 
     fn start_health_server(&mut self) {

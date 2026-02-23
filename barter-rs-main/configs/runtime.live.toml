@@ -75,7 +75,7 @@ break_start_1 = "14:00:00"
 break_end_1 = "14:05:00"
 break_start_2 = "18:50:00"
 break_end_2 = "19:05:00"
-weekends_off = false
+weekends_off = true
 timezone_offset_hours = 3
 
 [strategy.session_gap]
