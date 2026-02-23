@@ -18,7 +18,7 @@ REPLAY_OUTPUT_DIR=./replay_out \
 cargo run -p strategy-runtime --bin session_gap_replay
 ```
 
-> Важно: команды выше предполагают запуск из корня `barter-rs-main`.
+> Важно: команды выше предполагают запуск из корня `alor-rs-main`.
 > Если запускаете из другого `cwd`, используйте абсолютные пути к `data_samples/*`.
 
 ### Пример для набора `paper_bars_3`
