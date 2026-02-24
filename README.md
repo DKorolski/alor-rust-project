@@ -10,7 +10,7 @@ A Rust trading workspace for MOEX/Alor integration.
 - **Runtime (`strategy-runtime`)**: strategy execution in `paper` / `live` / `replay` modes.
 - **Transport**: Redis Streams as the contract between gateway and runtime.
 
-> Main project code and runbooks live in `./barter-rs-main/`.
+> Main project code and runbooks live in `./alor-rs-main/`.
 
 ---
 
@@ -30,7 +30,7 @@ flowchart LR
 
 ## ⚠️ Rule #1: configs
 
-**All active TOML configs must be taken from `./barter-rs-main/configs/`.**
+**All active TOML configs must be taken from `./alor-rs-main/configs/`.**
 Any `.toml` outside that directory is legacy and should not be used for launches.
 
 ---
@@ -40,7 +40,7 @@ Any `.toml` outside that directory is legacy and should not be used for launches
 ### 1) Enter project folder
 
 ```bash
-cd ./barter-rs-main
+cd ./alor-rs-main
 ```
 
 ### 2) Start Redis (Docker)
@@ -93,7 +93,7 @@ For k8s probes use:
 
 ## Tests
 
-From `./barter-rs-main`:
+From `./alor-rs-main`:
 
 ```bash
 cargo test -p strategy-runtime --lib
@@ -153,9 +153,9 @@ Full report: `reports/run_c/summary.md`
 
 ## Where to go next
 
-- Main README (project-internal): `./barter-rs-main/README.md`
-- Gateway runbook: `./barter-rs-main/docs/alor-gateway-runbook.md`
-- Runtime runbook: `./barter-rs-main/docs/strategy-runtime-runbook.md`
-- DevOps paper runbook: `./barter-rs-main/docs/devops-paper-runbook.md`
-- Replay/backtest guide: `./barter-rs-main/docs/replay-backtest-guide.md`
-- State and restarts: `./barter-rs-main/docs/state-and-restarts.md`
+- Main README (project-internal): `./alor-rs-main/README.md`
+- Gateway runbook: `./alor-rs-main/docs/alor-gateway-runbook.md`
+- Runtime runbook: `./alor-rs-main/docs/strategy-runtime-runbook.md`
+- DevOps paper runbook: `./alor-rs-main/docs/devops-paper-runbook.md`
+- Replay/backtest guide: `./alor-rs-main/docs/replay-backtest-guide.md`
+- State and restarts: `./alor-rs-main/docs/state-and-restarts.md`
