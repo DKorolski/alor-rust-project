@@ -54,10 +54,11 @@ runtime_state = 2000
 # - mock_live_probe.place_market_once
 # - mock_live_probe.place_limit_bad_price
 # - mock_live_probe.place_limit_bad_step
+# - mock_live_probe.place_boc_cross_spread
 # - mock_live_probe.cancel_after_terminal
-strategy_id = "mock_live_probe.place_limit_bad_step"
+strategy_id = "mock_live_probe.place_boc_cross_spread"
 strategy_kind = "mock_live_probe"
-symbol = "USDRUBF"
+symbol = "IMOEXF"
 qty = 1.0
 side = "buy"
 place_offset_ticks = 0

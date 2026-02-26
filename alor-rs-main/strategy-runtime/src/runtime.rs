@@ -248,6 +248,13 @@ impl Default for RuntimeMetrics {
 }
 
 impl StrategyRuntime {
+    fn test_delay_before_publish_ms() -> u64 {
+        std::env::var("RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
     pub async fn new(config: RuntimeConfig) -> Result<Self> {
         let transport = RedisRuntimeTransport::new(config.clone())?;
         let strategy: Box<dyn Strategy + Send + Sync> = match config.strategy.strategy_kind {
@@ -2080,6 +2087,15 @@ impl StrategyRuntime {
                         request_id = %command.request_id,
                         "intent_emitted"
                     );
+                    let test_delay_ms = Self::test_delay_before_publish_ms();
+                    if test_delay_ms > 0 {
+                        warn!(
+                            request_id = %command.request_id,
+                            delay_ms = test_delay_ms,
+                            "test_delay_before_publish"
+                        );
+                        sleep(Duration::from_millis(test_delay_ms)).await;
+                    }
                     self.persist_state(Some(&command)).await?;
                     self.our_request_ids.insert(command.request_id);
                 }

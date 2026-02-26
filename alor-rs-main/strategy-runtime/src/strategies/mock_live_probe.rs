@@ -13,6 +13,7 @@ pub enum MockLiveProbeMode {
     PlaceMarketOnce,
     PlaceLimitBadPrice,
     PlaceLimitBadStep,
+    PlaceBocCrossSpread,
     CancelAfterTerminal,
 }
 
@@ -26,6 +27,9 @@ impl MockLiveProbeMode {
         match suffix {
             "place_limit_bad_price" | "bad_price" => Self::PlaceLimitBadPrice,
             "place_limit_bad_step" | "bad_step" => Self::PlaceLimitBadStep,
+            "place_boc_cross_spread" | "boc_cross_spread" | "boc_reject" => {
+                Self::PlaceBocCrossSpread
+            }
             "cancel_after_terminal" | "terminal_cancel" => Self::CancelAfterTerminal,
             _ => Self::PlaceMarketOnce,
         }
@@ -36,6 +40,7 @@ impl MockLiveProbeMode {
             Self::PlaceMarketOnce => "place_market_once",
             Self::PlaceLimitBadPrice => "place_limit_bad_price",
             Self::PlaceLimitBadStep => "place_limit_bad_step",
+            Self::PlaceBocCrossSpread => "place_boc_cross_spread",
             Self::CancelAfterTerminal => "cancel_after_terminal",
         }
     }
@@ -116,6 +121,16 @@ impl MockLiveProbeStrategy {
                 };
                 (bar.close + dir * half_step).max(0.01)
             }
+            MockLiveProbeMode::PlaceBocCrossSpread => {
+                let step = self.config.tick_size.abs().max(0.01);
+                let aggressive_offset = step * 50.0;
+                match self.config.side {
+                    // Aggressive buy price to trigger BOC immediate-exec reject.
+                    Side::Buy => (bar.close + aggressive_offset).max(step),
+                    // Aggressive sell price to trigger BOC immediate-exec reject.
+                    Side::Sell => (bar.close - aggressive_offset).max(step),
+                }
+            }
             _ => {
                 let offset = self.config.offset_ticks as f64 * self.config.tick_size;
                 match self.config.side {
@@ -150,7 +165,9 @@ impl MockLiveProbeStrategy {
                     self.config.side,
                 )
             }
-            MockLiveProbeMode::PlaceLimitBadPrice | MockLiveProbeMode::PlaceLimitBadStep => {
+            MockLiveProbeMode::PlaceLimitBadPrice
+            | MockLiveProbeMode::PlaceLimitBadStep
+            | MockLiveProbeMode::PlaceBocCrossSpread => {
                 crate::deterministic_request_id(
                     &ctx.strategy_id,
                     &ctx.portfolio,
@@ -205,7 +222,9 @@ impl MockLiveProbeStrategy {
                     fill_price: None,
                 }]
             }
-            MockLiveProbeMode::PlaceLimitBadPrice | MockLiveProbeMode::PlaceLimitBadStep => {
+            MockLiveProbeMode::PlaceLimitBadPrice
+            | MockLiveProbeMode::PlaceLimitBadStep
+            | MockLiveProbeMode::PlaceBocCrossSpread => {
                 let price = self.compute_limit_price(bar);
                 self.phase = ProbePhase::WaitingAck;
                 self.state = StrategyState::Placed {
@@ -438,6 +457,10 @@ mod tests {
         assert_eq!(
             MockLiveProbeMode::parse("mock_live_probe:bad_step"),
             MockLiveProbeMode::PlaceLimitBadStep
+        );
+        assert_eq!(
+            MockLiveProbeMode::parse("mock_live_probe.boc_cross_spread"),
+            MockLiveProbeMode::PlaceBocCrossSpread
         );
         assert_eq!(
             MockLiveProbeMode::parse("mock_live_probe-terminal_cancel"),

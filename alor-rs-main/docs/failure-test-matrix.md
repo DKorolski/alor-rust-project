@@ -100,6 +100,7 @@
 
 - иметь заявку, которая гарантированно перейдет в terminal state;
 - затем инициировать cancel через обычный command path.
+- допустимый ускоренный вариант для troubleshooting: использовать уже известный historical `order_id` в terminal state (например из `broker.orders` snapshot/лога) и отправить `Cancel` как negative test.
 
 Шаги (manual / рекомендуется ускоренный path через `mock_live_probe.cancel_after_terminal`):
 
@@ -128,7 +129,15 @@
 
 Статус:
 
-- `TODO` (ускоренный path подготовлен через `mock_live_probe.cancel_after_terminal`)
+- `PASS` (manual command via Redis command path, historical terminal `order_id`)
+
+Подтвержденное поведение (наблюдение):
+
+- test input: `Cancel` на historical terminal order (`filled`) через `cmd.orders.<portfolio>`
+- gateway отправил `delete:limit`
+- CWS вернул `httpCode=400`, `message="Order to cancel not found"`
+- gateway опубликовал `cmd.ack status=Rejected` с `error_code="cws_http_400"`
+- `command_consumer` продолжил работу штатно (poll loop жив)
 
 ---
 
@@ -185,7 +194,26 @@
 
 Статус:
 
-- `TODO` (ускоренный path подготовлен через `mock_live_probe`)
+- `PARTIAL` (несколько подтипов уже подтверждены, family в целом еще не закрыт)
+
+Первые наблюдения (уже подтверждено):
+
+- `FT-02A` (`insufficient funds / margin`) — `PASS`
+  - подтвержден `cws_http_code=400`
+  - пример broker/CWS message: `"Нехватка средств по лимитам клиента."`
+  - `cmd.ack status=Rejected`
+  - runtime логирует `command rejected` и контур продолжает работать
+
+- `FT-02F` (`invalid price step`) — `PARTIAL`
+  - через текущий gateway path сценарий воспроизводился как валидная заявка (`cmd.ack=Accepted`, далее `working/fill`)
+  - вероятная причина: нормализация/округление цены до `price_step` до отправки в CWS (или аналогичная server-side normalization)
+  - вывод: как broker reject в текущем path ненадежен, не использовать как основной regression reject scenario
+
+- `FT-02G` (`BookOrCancel` immediate execution reject`) — `PASS`
+  - подтвержден `cws_http_code=400`
+  - `cmd.ack status=Rejected`
+  - runtime логирует `command rejected` с `error_code/error_msg/cws_http_code/cws_request_guid`
+  - gateway/runtime продолжают работать штатно
 
 ---
 
@@ -232,7 +260,24 @@
 
 Статус:
 
-- `TODO`
+- `PASS` (manual execution on live stand)
+
+Подтвержденное поведение (наблюдение):
+
+- runtime переходил `ALLOWED -> BLOCKED` с причиной `gateway_health_stale` после остановки gateway и истечения stale timeout
+- `runtime /readiness` до остановки gateway:
+  - `readiness=true`
+  - `live_guard=ALLOWED`
+- `runtime /readiness` после stale timeout:
+  - `readiness=false`
+  - `live_guard=BLOCKED`
+  - `live_guard_reasons=["gateway_health_stale"]`
+- `gateway.health_age_sec` в runtime readiness вырос (наблюдалось `35s` при `gateway_health_stale_sec=20`)
+
+Нюанс семантики (ожидаемо и полезно):
+
+- даже в состоянии stale runtime может показывать последние известные `gateway_ready/ws_connected/cws_authorized=true`;
+- блокировка определяется freshness health-событий (`gateway_health_stale`), а не только последними флагами готовности.
 
 ---
 
@@ -378,6 +423,9 @@
 - `place_limit_bad_step`
   - цена, не кратная `price_step` (для `FT-02F`)
 
+- `place_boc_cross_spread`
+  - агрессивная лимитная цена (через `BookOrCancel`) для детерминированного reject (для `FT-02G`)
+
 - `cancel_after_terminal`
   - create -> дождаться terminal (через ack/order/trade/position path) -> отправить cancel (для `FT-01`)
 
@@ -385,7 +433,6 @@
 
 - `place_limit_bad_lot` (для `FT-02E`)
 - `place_invalid_symbol` (для `FT-02D`)
-- `place_boc_cross_spread` (для `FT-02G`)
 
 ### Минимальные observability требования к `mock_live_probe`
 
@@ -418,7 +465,13 @@ cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./config
 - `mock_live_probe.place_market_once`
 - `mock_live_probe.place_limit_bad_price`
 - `mock_live_probe.place_limit_bad_step`
+- `mock_live_probe.place_boc_cross_spread`
 - `mock_live_probe.cancel_after_terminal`
+
+Примечание по артефактам:
+
+- при `reset_state_on_start = true` runtime не восстанавливает state, но backlog в `broker.orders`/`broker.trades` streams может давать startup-шум (`orphan_trade`, historical `existing=true` events);
+- для оценки сценария ориентироваться на события после `probe_emitting_intent`.
 
 ## Шаблон результата по сценарию
 
