@@ -41,9 +41,15 @@
 - причина по наблюдениям: ограничение объема исторической выборки/батча (порядка ~5000) в подписочном сценарии и отсутствие пагинации;
 - для глубокого исторического прогона использовался старый standalone backtest/replay flow.
 
+6. Подготовлен и использовался replay-контур как компенсация ограничения history bootstrap в gateway:
+- при подгружаемой истории порядка ~5000 баров (примерно 3-4 дня в `gateway.live`) глубокая проверка логики выполнялась через replay;
+- replay-тест показал воспроизведение логики standalone backtest;
+- наблюдались небольшие отклонения, но они были оценены как несущественные и приемлемые.
+
 Вывод для аудита:
 - базовая operational механика (reconnect/resync, dedup, paper/live path) имеет **положительное эмпирическое подтверждение**;
-- приоритет смещается на negative/failure-path coverage и формализацию контрактов.
+- replay используется как практический workaround/verification path при ограниченном cold-start history;
+- приоритет смещается на negative/failure-path coverage, формализацию контрактов и документирование допустимых расхождений replay vs standalone.
 
 ## Что уже выглядит хорошо (сильные стороны)
 
@@ -75,6 +81,9 @@
 - live reconnect/resync проходили;
 - paper flow с записью сделки проходил;
 - отдельные live order scenarios выполнялись успешно.
+
+7. Есть replay-контур для проверки стратегии при ограниченной глубине history bootstrap:
+- replay-проверка воспроизводит standalone backtest с допустимыми небольшими отклонениями.
 
 ## Краткое резюме (на текущем этапе)
 
@@ -307,6 +316,362 @@
 - явно документировать limit/ограничение;
 - добавить preflight warning/validation;
 - определить supported path для deep history (replay/standalone/export path).
+- зафиксировать policy для оценки расхождений replay vs standalone (что считается допустимым отклонением).
+
+## Deep Dive: runtime-only panic path audit (production code, не тесты)
+
+Ниже — targeted pass по `unwrap/expect/panic` в production-path. Цель: отделить реальный риск от шумных test-only мест.
+
+### Итог высокого уровня
+
+- Массовой production panic-проблемы (как в первом коннекторе) **не выявлено**.
+- Большинство совпадений `unwrap/expect/panic` находятся в:
+  - `#[cfg(test)]` блоках,
+  - тестовых сценариях стратегий,
+  - replay/утилитных бинарях.
+- В production-path остались точечные места (в основном hardening/гигиена, а не архитектурная аварийность).
+
+Это хорошо согласуется с твоими эмпирическими результатами:
+
+- live reconnect/resync проходили;
+- артефакты последовательны и без дублей;
+- paper/live базовые сценарии отрабатывают.
+
+### Что проверено вручную (production / near-production)
+
+#### 1) `strategy-runtime` runner: SIGTERM handler install (`expect`)
+
+- `strategy-runtime/src/bin/strategy_runtime_runner.rs:79`
+
+Текущее поведение:
+- `tokio::signal::unix::signal(...).expect("install SIGTERM handler")`
+
+Оценка риска:
+- `P2` (операционно редко падает, но это реальный startup panic path в production binary).
+
+Рекомендация:
+- заменить на graceful fallback:
+  - `warn!` + работа только через `ctrl_c`.
+
+#### 2) Time conversions в `alor-gateway` helper (`unwrap` fallback)
+
+- `alor-gateway/src/ws_hub.rs:959`
+- `alor-gateway/src/supervisor.rs:1130`
+
+Паттерн:
+- `DateTime::from_timestamp(...).unwrap_or_else(|| Utc.timestamp_opt(0,0).unwrap())`
+
+Оценка риска:
+- `P2` (низкий риск, но формально panic path есть во внутреннем fallback).
+
+Комментарий:
+- на практике почти безопасно, но легко зачистить.
+
+#### 3) Timezone/timestamp mapping в `alor-gateway/src/strategy_adapter.rs`
+
+- `alor-gateway/src/strategy_adapter.rs:129`
+- `alor-gateway/src/strategy_adapter.rs:133`
+- `alor-gateway/src/strategy_adapter.rs:235`
+
+Текущее поведение:
+- `FixedOffset::east_opt(...).unwrap()`
+- `timestamp_opt(...).single().expect(...)`
+
+Оценка риска:
+- `P1/P2` (production path, зависит от корректности входных timestamps; при поврежденных данных/контракте возможен panic).
+
+Рекомендация:
+- перевести на `Result`/skip + diagnostics.
+
+#### 4) Timezone/timestamp conversion в `session_gap_standalone` production logic
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:139`
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:142`
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:1019`
+
+Текущее поведение:
+- `expect("valid fixed offset")`
+- fallback через `Utc.timestamp_opt(...).unwrap()`
+
+Оценка риска:
+- `P1/P2` (стратегический production path; риск небольшой, но это уже не test-only код).
+
+Рекомендация:
+- hardening в отдельном небольшом patch-set (без изменения торговой логики).
+
+### Что НЕ является production blocker (хотя grep показывает много совпадений)
+
+#### Test-only места (подтверждено по `#[cfg(test)]`)
+
+- `alor-gateway/src/router.rs` (`expect("position/order/trade")`) — test-only (`#[cfg(test)]` с `router.rs:366`)
+- `alor-gateway/src/cws_client.rs` payload shape `expect(...)` — test-only (`#[cfg(test)]` с `cws_client.rs:475`)
+- большая часть `strategy-runtime/src/runtime.rs` `unwrap` на линиях ~2564+ — test module (`#[cfg(test)]` с `runtime.rs:2442`)
+- `strategy-runtime/src/state.rs` `unwrap/panic` — test module (`#[cfg(test)]` с `state.rs:191`)
+- значительная часть `session_gap_standalone.rs` после ~1072 — test section (`#[cfg(test)]` с `session_gap_standalone.rs:1072`)
+
+#### Utility / replay binaries
+
+- `strategy-runtime/src/bin/session_gap_replay.rs` содержит `unwrap/expect`, но это отдельный replay-утилитный путь, не основной runtime live/paper loop.
+
+### Вывод для roadmap
+
+По panic-path hygiene:
+
+- можно сделать **малый low-risk hardening patch** (небольшая итерация) без влияния на core механику:
+  - убрать `expect` в `strategy_runtime_runner` (SIGTERM handler)
+  - заменить production `unwrap/expect` в timezone/timestamp conversions на `warn + fallback` / `Result`
+
+Это не должно быть приоритетнее failure-mode testing, но хорошо подходит как “быстрая инженерная уборка” перед deeper changes.
+
+## Deep Dive: стратегия `session_gap_standalone` (основной production path)
+
+Аудит этого раздела основан на том, что ты запускаешь runtime с:
+
+- `cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.live.toml`
+- `strategy_id = "session_gap_standalone"`
+
+То есть именно эта стратегия является **главным production path** для текущего контура.
+
+### Что выглядит сильно (по коду и по тестам)
+
+#### 1) Явная live state-machine с фазами
+
+Стратегия использует `SessionGapLivePhase` и явно разделяет состояния:
+
+- `Flat`
+- `PendingEntry`
+- `InPosition`
+- `PendingExit`
+- `Blocked`
+
+Это хороший признак:
+- поведение в live не “размазано” по флагам;
+- таймауты/реакции на ack/position выражены через фазовые переходы;
+- легче диагностировать и тестировать.
+
+Ключевые места:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:678`
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:829`
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:872`
+
+#### 2) Встроенный dedup на баре + перенос маркера в persisted state
+
+На входе `on_bar`:
+
+- проверка `last_processed_bar_ts`
+- игнор баров `<= last_processed_bar_ts`
+
+Это критически важно для at-least-once модели Redis Streams и рестартов.
+
+Ключевое место:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:639`
+
+Плюс:
+- стратегия сохраняет `last_bar_ts` и индикаторы в `StrategyState::SessionGapStandalone`
+- `on_runtime_state_restored` восстанавливает их обратно в RAM-поля стратегии
+
+Ключевые места:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:565`
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:982`
+
+Это отлично согласуется с твоим наблюдением про последовательные артефакты и отсутствие дублей.
+
+#### 3) Reconcile с bootstrap snapshot встроен в стратегию (а не только в runtime)
+
+`on_bootstrap_snapshot()` вызывает `transition_live_reconcile_with_snapshot(...)`, который:
+
+- сравнивает persisted phase и фактическую позицию брокера (`snapshot_qty`)
+- корректирует state (`PendingEntry -> InPosition`, `InPosition/PendingExit -> Flat`)
+- при этом старается не ломать persisted timestamps/markers
+
+Ключевые места:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:415`
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:940`
+
+Это архитектурно сильное решение, потому что reconcile знает доменную phase-логику стратегии.
+
+#### 4) Live-guard gating встроен прямо в `on_bar`
+
+Перед эмиссией live-intents стратегия проверяет:
+
+- `trade_mode == Live`
+- `bar.origin == Live`
+- `allow_live_orders`
+- `gateway_phase == LiveReady`
+
+Ключевое место:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:525`
+
+Это хорошо:
+- безопасность не только в runtime layer, но и на уровне стратегии;
+- “двойной guard” снижает шанс случайной live-эмиссии.
+
+#### 5) Хорошее покрытие тестами именно этой стратегии
+
+По именам тестов видно, что уже покрыты важные инварианты:
+
+- restore/reconcile и сохранение `last_bar_ts`
+- live guard blocked path
+- ack timeout -> blocked
+- rollover behavior
+- conflict bars / forced exit
+
+Это сильная сторона проекта.
+
+### Основные риски / зоны внимания (не как “всё плохо”, а как next-step hardening)
+
+#### A. `on_order()` фактически no-op, а критическая live эволюция фазы сидит в `on_ack()` + `on_position()`
+
+Текущее поведение:
+
+- `on_order(...)` возвращает `Vec::new()`
+- state transitions идут через:
+  - `on_ack()` (ставит `acked = true`, блокирует на reject)
+  - `on_position()` (фиксирует фактическое изменение позиции)
+
+Ключевое место:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:868`
+
+Почему это не обязательно плохо:
+- это может быть сознательная модель (“order event informational, position is source-of-truth”).
+
+Но риск:
+- некоторые broker edge-cases отражаются в `order` раньше/детальнее, чем в `position`;
+- при нестандартных последовательностях событий можно получить затяжное `Pending*`/`Blocked`.
+
+Рекомендация:
+- зафиксировать это как явный контракт стратегии:
+  - source-of-truth для progression — `position` + `ack`
+  - `order` используется только runtime ledger/observability layer.
+
+#### B. `AckStatus::Duplicate` считается успешным ack (`acked = true`) — корректно, но требует тестов на повторную доставку и stale duplicate
+
+В `on_ack()`:
+
+- `Accepted | Confirmed | Duplicate` -> `acked = true`
+
+Ключевое место:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:841`
+
+Это, вероятно, правильное решение для idempotent command path.
+
+Риск:
+- duplicate ack от старого запроса/фазы (если request_id collision/bug вне стратегии) может сдвинуть фазу в “ack получен”.
+
+Что смягчает риск:
+- сравнение по `request_id` внутри текущей `Pending*` фазы.
+
+Что стоит добавить:
+- targeted тест на late duplicate ack after phase changed.
+
+#### C. `Blocked` фаза выглядит терминальной без встроенного auto-recovery механизма
+
+Текущее поведение:
+
+- `SessionGapLivePhase::Blocked { .. } => phase` в `on_bar`
+- стратегия сама не пытается восстановиться из `Blocked`
+
+Ключевое место:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:816`
+
+Это может быть правильным safety-by-default поведением.
+
+Но нужно явно решить и задокументировать:
+
+- кто и как “разблокирует” стратегию:
+  - operator action / restart / reset state
+  - reconcile via snapshot/position
+  - специальный runtime command
+
+С учетом live сценариев и troubleshooting это важная operational policy.
+
+#### D. Broker reject handling сейчас грубо агрегируется в `Blocked(reason = "ack_failed:...")`
+
+В `on_ack()` reject/error/expired переводят в:
+
+- `Blocked { reason: format!("ack_failed:{:?}", ack.status) }`
+
+Ключевое место:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:846`
+
+Риск:
+- теряется детализация причины (`insufficient funds`, broker code, cws_http_code и т.п.) на уровне phase reason.
+
+Рекомендация:
+- расширить `Blocked.reason` (или structured blocked metadata) хотя бы ключевыми полями:
+  - `ack.status`
+  - `ack.error_code`
+  - `ack.cws_http_code`
+
+Это особенно полезно для твоего next-step сценария с troubleshooting tests.
+
+#### E. Таймауты `entry_*` / `exit_*` завязаны на bar-driven progression
+
+В `on_bar()` таймауты `ack`/`fill` проверяются через разницу `bar.close_time_utc - sent_ts`.
+
+Ключевые места:
+
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:718`
+- `strategy-runtime/src/strategies/session_gap_standalone.rs:800`
+
+Плюс:
+- стратегия детерминирована относительно bar timeline.
+
+Риск/нюанс:
+- при разреженном потоке баров, паузах/сессиях и unusual latency фактическое wall-clock время может сильно отличаться.
+- это не обязательно ошибка, но важно документировать как **bar-time driven timeouts**, а не wall-clock.
+
+### Что особенно важно проверить следующей волной тестов (для этой стратегии)
+
+С учетом твоих комментариев о непокрытых сценариях:
+
+1. Terminal cancel / stale command ack path
+- попытка отмены уже `filled/canceled/rejected`
+- ожидаемое поведение strategy/runtime:
+  - не сломать фазу
+  - не уйти в ложный `Blocked`, если это операционно допустимый no-op
+  - или уйти в `Blocked`, но с понятной причиной
+
+2. Insufficient funds / broker reject
+- проверить:
+  - `on_ack()` перевод в `Blocked`
+  - качество причины в логах/runtime state
+  - отсутствие повторной эмиссии intents без operator action
+
+3. Late ack / duplicate ack after phase transition
+- особенно после `PendingEntry -> InPosition` по `on_position()`
+- проверить, что поздний duplicate ack не портит state
+
+4. Position snapshot reconcile в конфликтных кейсах
+- snapshot показывает позицию, а фаза уже `Blocked`
+- snapshot показывает `Flat`, а фаза `PendingExit`
+- убедиться, что `last_bar_ts` и phase timestamps не деградируют
+
+### Вывод по стратегии `session_gap_standalone`
+
+Это не “игрушечная” стратегия в терминах runtime engineering:
+
+- есть state-machine,
+- restore/reconcile,
+- dedup,
+- live guard gating,
+- хорошие тесты на state invariants.
+
+С учетом твоих успешных live/paper проверок, основной следующий выигрыш — не переписывать логику стратегии, а:
+
+- расширить failure-path coverage,
+- улучшить диагностику причин `Blocked`,
+- формализовать operational policy разблокировки/восстановления,
+- зафиксировать допустимые отклонения replay vs standalone (как regression baseline).
 
 ## Предварительный список вопросов (для следующего этапа, перед code changes)
 
@@ -438,3 +803,7 @@
 3. Сделать targeted code-review проход по runtime-only panic paths.
 4. Выбрать 3-4 failure scenarios для первой волны интеграционных тестов (начать с broker reject/terminal cancel/Redis publish fail).
 5. Только после этого — точечные code changes.
+
+## Связанный документ для следующего этапа
+
+- Матрица отказных сценариев (execution checklist): `docs/failure-test-matrix.md`
