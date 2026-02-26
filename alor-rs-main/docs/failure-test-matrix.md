@@ -21,6 +21,12 @@
 - runtime: `cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.live.toml`
 - strategy: `strategy_id = "session_gap_standalone"`
 
+Дополнительный ускоренный path для отказных сценариев (`FT-01..FT-03`):
+
+- runtime config: `configs/runtime.mock-live.toml`
+- `strategy_kind = "mock_live_probe"`
+- сценарий выбирается по суффиксу `strategy_id` (например `mock_live_probe.place_limit_bad_step`)
+
 Известное ограничение:
 
 - deep cold-start history через gateway ограничен (порядка ~5000 баров / ~3–4 дня);
@@ -95,7 +101,7 @@
 - иметь заявку, которая гарантированно перейдет в terminal state;
 - затем инициировать cancel через обычный command path.
 
-Шаги (manual):
+Шаги (manual / рекомендуется ускоренный path через `mock_live_probe.cancel_after_terminal`):
 
 1. Запустить gateway + runtime.
 2. Дождаться `gateway_phase=LiveReady`, `runtime live_guard=ALLOWED` (если live scenario).
@@ -122,15 +128,15 @@
 
 Статус:
 
-- `TODO`
+- `TODO` (ускоренный path подготовлен через `mock_live_probe.cancel_after_terminal`)
 
 ---
 
-### FT-02: Broker reject / insufficient funds
+### FT-02: Broker reject scenarios (family)
 
 Цель:
 
-- проверить end-to-end поведение на отказе брокера/риска (например, нехватка средств).
+- проверить end-to-end поведение на отказах брокера/биржи/валидации заявки.
 
 Почему важно:
 
@@ -141,11 +147,22 @@
 
 - безопасный способ воспроизвести reject (бумажный режим с искусственным reject path / live малым объемом и контролируемым условием).
 
-Шаги (manual/controlled):
+Подтипы (минимальный набор):
+
+- `FT-02A` — insufficient funds / margin
+- `FT-02B` — price out of range / price limits
+- `FT-02C` — outside trading session / weekend
+- `FT-02D` — invalid symbol / unavailable instrument for account type
+- `FT-02E` — invalid lot size
+- `FT-02F` — invalid price step
+- `FT-02G` — `BookOrCancel` reject (цена пересекает спред / приводит к немедленному исполнению)
+
+Шаги (manual/controlled, рекомендуется `mock_live_probe`):
 
 1. Запустить gateway + runtime.
-2. Сгенерировать команду, которая гарантированно будет отклонена брокером.
-3. Зафиксировать `cmd.ack`, runtime logs, strategy phase.
+2. Выбрать один подтип (`FT-02A..FT-02G`).
+3. Сгенерировать команду, которая гарантированно вызовет выбранный reject.
+4. Зафиксировать `cmd.ack`, runtime logs, strategy phase.
 
 Ожидаемое поведение (целевая модель):
 
@@ -164,10 +181,11 @@
 - `cmd.acks` payload (error_code/error_msg/cws_http_code/cws_request_guid)
 - runtime logs + phase transition
 - `runtime /readiness`
+- для каждого подтипа: фактический broker message / error text (для каталога отказов)
 
 Статус:
 
-- `TODO`
+- `TODO` (ускоренный path подготовлен через `mock_live_probe`)
 
 ---
 
@@ -322,6 +340,86 @@
 
 - `PARTIAL` (по словам пользователя replay уже сравнивался и принят как близкий к standalone; formalized baseline policy еще нет)
 
+## Черновой контракт test strategy `mock_live_probe` (для ускорения FT-01..FT-03)
+
+Статус:
+
+- `v1 implemented`
+- код: `strategy-runtime/src/strategies/mock_live_probe.rs`
+- конфиг запуска: `configs/runtime.mock-live.toml`
+
+Идея:
+
+- добавить простую live-стратегию для runtime, которая быстро и детерминированно эмитит intents;
+- использовать её для failure-path тестов runtime/gateway без ожидания редких сигналов `session_gap_standalone`.
+
+### Зачем
+
+- сокращает время ожидания интента;
+- уменьшает шум от доменной логики основной стратегии;
+- упрощает воспроизведение `FT-01..FT-03`.
+
+### Принципы
+
+- работает в `TradeMode::Live` (или `paper` при необходимости dry-run проверки path)
+- эмитит intent на раннем этапе (`1-2` live бара)
+- максимально простая state-machine
+- режим сценария выбирается через суффикс `strategy_id` (v1)
+
+### Режимы `mock_live_probe` (v1 реализованы)
+
+- `place_market_once`
+  - одна market команда после `N` live баров (`N = strategy.max_wait_bars_for_ack`)
+  - базовый smoke для command path / `FT-03`
+
+- `place_limit_bad_price`
+  - лимитная заявка с заведомо некорректной ценой (для `FT-02B`)
+
+- `place_limit_bad_step`
+  - цена, не кратная `price_step` (для `FT-02F`)
+
+- `cancel_after_terminal`
+  - create -> дождаться terminal (через ack/order/trade/position path) -> отправить cancel (для `FT-01`)
+
+### План режимов `mock_live_probe` (v2)
+
+- `place_limit_bad_lot` (для `FT-02E`)
+- `place_invalid_symbol` (для `FT-02D`)
+- `place_boc_cross_spread` (для `FT-02G`)
+
+### Минимальные observability требования к `mock_live_probe`
+
+Логи стратегии должны явно писать:
+
+- `scenario=<...>`
+- `intent_emitted`
+- `request_id` (если известен на уровне runtime/strategy)
+- stage transitions (`waiting_live_bar`, `sent_create`, `waiting_terminal`, `sent_cancel`)
+
+### Что не делать в v1
+
+- не пытаться воспроизводить всю логику `session_gap_standalone`
+- не делать сложный reconcile/state restore
+- не смешивать много сценариев в одном запуске
+
+### Как использовать в матрице
+
+- `FT-01..FT-03` можно выполнять на `mock_live_probe`
+- `FT-04`, `FT-05`, `FT-06` остаются привязанными к runtime/health/strategy semantics (`session_gap_standalone` / replay)
+
+### Быстрый запуск `mock_live_probe`
+
+```bash
+cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.mock-live.toml
+```
+
+Режим меняется через `strategy.strategy_id`:
+
+- `mock_live_probe.place_market_once`
+- `mock_live_probe.place_limit_bad_price`
+- `mock_live_probe.place_limit_bad_step`
+- `mock_live_probe.cancel_after_terminal`
+
 ## Шаблон результата по сценарию
 
 ```md
@@ -348,4 +446,3 @@
 4. `FT-03` (Redis publish failure) — критично, но сложнее воспроизводить
 5. `FT-05` (late/duplicate ack) — лучше через controlled test harness
 6. `FT-06` (replay baseline policy) — formalization step, не срочный hotfix
-

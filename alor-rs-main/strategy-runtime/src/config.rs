@@ -1520,6 +1520,7 @@ fn parse_trade_mode(value: &str) -> TradeMode {
 fn parse_strategy_kind(value: &str) -> StrategyKind {
     match value.to_lowercase().as_str() {
         "market_buy_and_close" | "marketbuyandclose" => StrategyKind::MarketBuyAndClose,
+        "mock_live_probe" | "mockliveprobe" => StrategyKind::MockLiveProbe,
         "toy_session_timing" | "toysessiontiming" => StrategyKind::ToySessionTiming,
         "session_gap_standalone" | "sessiongapstandalone" => StrategyKind::SessionGapStandalone,
         _ => StrategyKind::LimitCancel,

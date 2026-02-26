@@ -2275,7 +2275,10 @@ mod tests {
         let ctx = ctx_backtest();
         let mut snapshots: BTreeMap<String, SessionSnapshot> = BTreeMap::new();
 
-        let bars_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../data_samples/paper_bars_3.csv");
+        let bars_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../data_samples/paper_bars_3.csv"
+        );
         let mut bars_reader = csv::Reader::from_path(bars_path).expect("open paper bars csv");
         for row in bars_reader.deserialize::<IndicatorBarCsvRow>() {
             let row = row.expect("valid paper bars row");
@@ -2328,9 +2331,12 @@ mod tests {
             }
         }
 
-        let indicators_path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../data_samples/paper_indicators_3.csv");
-        let mut indicators_reader = csv::Reader::from_path(indicators_path).expect("open indicators csv");
+        let indicators_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../data_samples/paper_indicators_3.csv"
+        );
+        let mut indicators_reader =
+            csv::Reader::from_path(indicators_path).expect("open indicators csv");
 
         let approx_eq = |left: Option<f64>, right: Option<f64>, label: &str, session_date: &str| {
             match (left, right) {
@@ -2342,9 +2348,9 @@ mod tests {
                         "{label} mismatch for {session_date}: left={left}, right={right}, diff={diff}"
                     );
                 }
-                (left, right) => panic!(
-                    "{label} mismatch for {session_date}: left={left:?}, right={right:?}"
-                ),
+                (left, right) => {
+                    panic!("{label} mismatch for {session_date}: left={left:?}, right={right:?}")
+                }
             }
         };
 

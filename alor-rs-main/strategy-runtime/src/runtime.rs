@@ -20,6 +20,7 @@ use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
+use crate::strategies::mock_live_probe::MockLiveProbeStrategy;
 use crate::strategies::session_gap_standalone::SessionGapStandaloneStrategy;
 use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
@@ -261,6 +262,9 @@ impl StrategyRuntime {
             )),
             StrategyKind::SessionGapStandalone => Box::new(SessionGapStandaloneStrategy::new(
                 config.strategy.to_session_gap_standalone_config(),
+            )),
+            StrategyKind::MockLiveProbe => Box::new(MockLiveProbeStrategy::new(
+                config.strategy.to_mock_live_probe_config(),
             )),
         };
         let now = chrono::Utc::now().timestamp();

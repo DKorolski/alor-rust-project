@@ -1,7 +1,7 @@
-use strategy_runtime::TradeMode;
 use strategy_runtime::live_guard::{
-    GatewayPhase, HealthEvent, LiveGuardState, evaluate_live_guard,
+    evaluate_live_guard, GatewayPhase, HealthEvent, LiveGuardState,
 };
+use strategy_runtime::TradeMode;
 
 fn state(health: Option<HealthEvent>) -> LiveGuardState {
     LiveGuardState { health }

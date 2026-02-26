@@ -807,3 +807,4 @@
 ## Связанный документ для следующего этапа
 
 - Матрица отказных сценариев (execution checklist): `docs/failure-test-matrix.md`
+- Для ускорения `FT-01..FT-03` добавлен test strategy path `mock_live_probe` (`strategy-runtime/src/strategies/mock_live_probe.rs`, config `configs/runtime.mock-live.toml`)

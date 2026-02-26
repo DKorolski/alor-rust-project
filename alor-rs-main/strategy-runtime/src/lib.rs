@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::strategies::limit_cancel::LimitCancelConfig;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseConfig;
+use crate::strategies::mock_live_probe::{MockLiveProbeConfig, MockLiveProbeMode};
 use crate::strategies::session_gap_standalone::SessionGapStandaloneConfig;
 use crate::strategies::toy_session_timing::ToySessionTimingConfig;
 
@@ -356,6 +357,7 @@ pub enum StrategyKind {
     MarketBuyAndClose,
     ToySessionTiming,
     SessionGapStandalone,
+    MockLiveProbe,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -438,6 +440,18 @@ impl StrategyConfig {
             entry_after_open_min: self.entry_after_open_min,
             exit_before_close_min: self.exit_before_close_min,
             timezone_offset_hours: self.timezone_offset_hours,
+        }
+    }
+
+    pub fn to_mock_live_probe_config(&self) -> MockLiveProbeConfig {
+        MockLiveProbeConfig {
+            symbol: self.symbol.clone(),
+            qty: self.qty,
+            side: self.side,
+            tick_size: self.tick_size,
+            offset_ticks: self.place_offset_ticks,
+            trigger_after_live_bars: self.max_wait_bars_for_ack.max(1),
+            mode: MockLiveProbeMode::parse(&self.strategy_id),
         }
     }
 

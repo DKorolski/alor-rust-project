@@ -2,7 +2,7 @@ use std::env;
 use std::fs::File;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Timelike};
 use serde::Deserialize;
 use serde::Serialize;

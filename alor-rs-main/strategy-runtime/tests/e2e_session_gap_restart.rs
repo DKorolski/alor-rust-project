@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::{FixedOffset, TimeZone, Utc};
 use serde::Serialize;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
 use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, Side};
