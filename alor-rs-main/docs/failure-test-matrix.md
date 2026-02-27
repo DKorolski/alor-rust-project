@@ -260,24 +260,20 @@
 
 Статус:
 
-- `PASS` (manual execution on live stand)
+- `PASS` (manual execution with forced Redis restart during pre-publish delay window)
 
 Подтвержденное поведение (наблюдение):
 
-- runtime переходил `ALLOWED -> BLOCKED` с причиной `gateway_health_stale` после остановки gateway и истечения stale timeout
-- `runtime /readiness` до остановки gateway:
-  - `readiness=true`
-  - `live_guard=ALLOWED`
-- `runtime /readiness` после stale timeout:
-  - `readiness=false`
-  - `live_guard=BLOCKED`
-  - `live_guard_reasons=["gateway_health_stale"]`
-- `gateway.health_age_sec` в runtime readiness вырос (наблюдалось `35s` при `gateway_health_stale_sec=20`)
-
-Нюанс семантики (ожидаемо и полезно):
-
-- даже в состоянии stale runtime может показывать последние известные `gateway_ready/ws_connected/cws_authorized=true`;
-- блокировка определяется freshness health-событий (`gateway_health_stale`), а не только последними флагами готовности.
+- тест выполнялся с тестовым хуком:
+  - `RUNTIME_ENABLE_TEST_HOOKS=true`
+  - `RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS=5000`
+  для попадания в publish window;
+- runtime эмитил intent и входил в `test_delay_before_publish`;
+- во время задержки был restart Redis (`broken pipe`, `NOGROUP`, `BusyLoadingError` на read paths);
+- в gateway не было `command received` по тестовому `request_id`;
+- в Redis stream `cmd.orders.7502T0U` не найден тестовый `request_id` (проверка `XREVRANGE ... | rg <request_id>`);
+- неконтролируемого флуда команд/заявок не наблюдалось;
+- после восстановления Redis gateway/runtime вернулись в рабочий цикл polling/readiness.
 
 ---
 
@@ -320,7 +316,24 @@
 
 Статус:
 
-- `TODO`
+- `PASS` (manual execution on live stand)
+
+Подтвержденное поведение (наблюдение):
+
+- runtime переходил `ALLOWED -> BLOCKED` с причиной `gateway_health_stale` после остановки gateway и истечения stale timeout
+- `runtime /readiness` до остановки gateway:
+  - `readiness=true`
+  - `live_guard=ALLOWED`
+- `runtime /readiness` после stale timeout:
+  - `readiness=false`
+  - `live_guard=BLOCKED`
+  - `live_guard_reasons=["gateway_health_stale"]`
+- `gateway.health_age_sec` в runtime readiness вырос (наблюдалось `35s` при `gateway_health_stale_sec=20`)
+
+Нюанс семантики (ожидаемо и полезно):
+
+- даже в состоянии stale runtime может показывать последние известные `gateway_ready/ws_connected/cws_authorized=true`;
+- блокировка определяется freshness health-событий (`gateway_health_stale`), а не только последними флагами готовности.
 
 ---
 

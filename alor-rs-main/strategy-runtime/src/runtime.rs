@@ -249,10 +249,30 @@ impl Default for RuntimeMetrics {
 
 impl StrategyRuntime {
     fn test_delay_before_publish_ms() -> u64 {
-        std::env::var("RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS")
+        let requested = std::env::var("RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if requested == 0 {
+            return 0;
+        }
+        let hooks_enabled = std::env::var("RUNTIME_ENABLE_TEST_HOOKS")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        if !hooks_enabled {
+            warn!(
+                requested_delay_ms = requested,
+                "test_delay_before_publish_ignored_hooks_disabled"
+            );
+            return 0;
+        }
+        requested
     }
 
     pub async fn new(config: RuntimeConfig) -> Result<Self> {

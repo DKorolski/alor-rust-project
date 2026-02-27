@@ -124,3 +124,26 @@ readinessProbe:
 curl -sS http://127.0.0.1:8081/readiness || true
 curl -sS http://127.0.0.1:8091/readiness || true
 ```
+
+## 8) Failure-Matrix Status (актуально на сейчас)
+
+Текущий статус выполнения отказных сценариев:
+
+- `FT-01` terminal cancel — `PASS`
+- `FT-02A` insufficient funds — `PASS`
+- `FT-02B` price out of range — `PASS`
+- `FT-02G` BookOrCancel immediate-exec reject — `PASS`
+- `FT-02F` invalid price step — `PARTIAL` (недетерминированно как broker reject)
+- `FT-03` publish failure around runtime command/state publish — `PASS`
+- `FT-04` stale health -> runtime blocked — `PASS`
+
+Подробности и артефактные ожидания:
+
+- `docs/failure-test-matrix.md`
+- `docs/AUDIT_AND_ROADMAP_GATEWAY_RUNTIME.md`
+
+Примечание для воспроизводимости `FT-03`:
+
+- используется тестовый env-хук (test-only):
+  - `RUNTIME_ENABLE_TEST_HOOKS=true`
+  - `RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS=<ms>`

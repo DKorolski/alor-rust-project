@@ -88,6 +88,16 @@ timezone_offset_hours = 3
 - [Replay / Backtest Guide](docs/replay-backtest-guide.md)
 - [State and Restarts](docs/state-and-restarts.md)
 
+## Итоги аудита
+
+Проведен критический аудит `gateway + strategy-runtime` и выполнена первая волна failure-сценариев.
+
+- Core-контур (live/paper/reconnect) подтвержден практическими прогонами.
+- Ключевые сценарии `FT-01..FT-04` покрыты и зафиксированы (включая `terminal cancel`, broker rejects, `stale health -> BLOCKED`, publish-failure path).
+- Подробные результаты, риски и roadmap:
+  - [Audit and Roadmap](docs/AUDIT_AND_ROADMAP_GATEWAY_RUNTIME.md)
+  - [Failure Test Matrix](docs/failure-test-matrix.md)
+
 ## Тесты
 
 Быстрые команды:

@@ -105,6 +105,28 @@
 - формализовать invariants/контракты;
 - усилить confidence в edge-cases перед pre-prod/live.
 
+## Execution Status (первая волна failure scenarios)
+
+Статус выполнения матрицы (`docs/failure-test-matrix.md`) на текущий момент:
+
+- `FT-01` (cancel terminal order) — `PASS`
+  - manual cancel на historical terminal `order_id` через `cmd.orders`
+  - `gateway -> cws delete:limit -> httpCode=400 -> cmd.ack Rejected`
+  - `command_consumer` остается жив
+- `FT-02A` (insufficient funds / limits) — `PASS`
+- `FT-02B` (price out of range) — `PASS`
+- `FT-02G` (BookOrCancel immediate execution reject) — `PASS`
+- `FT-02F` (invalid price step) — `PARTIAL`
+  - в текущем path нередко не дает broker reject (вероятна нормализация/округление цены)
+- `FT-03` (Redis publish failure around `publish_command_and_state`) — `PASS`
+  - подтвержден сценарий с искусственной задержкой перед publish:
+    `RUNTIME_ENABLE_TEST_HOOKS=true` + `RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS=5000`
+  - при restart Redis в delay-window тестовый `request_id` отсутствует в `cmd.orders`,
+    в gateway нет `command received`, флуда заявок нет
+- `FT-04` (stale health -> runtime BLOCKED) — `PASS`
+  - runtime корректно переходит `ALLOWED -> BLOCKED` по `gateway_health_stale`
+  - readiness переключается в `false`
+
 ## Findings (P0 / P1 / P2)
 
 ### P0 / P1: Надежность торгового контура и консистентность состояния
@@ -796,15 +818,20 @@
 - Есть воспроизводимый smoke/rollback workflow
 - Основные инциденты диагностируются по логам/health without code digging
 
-## Рекомендуемый порядок следующего шага (после утверждения этого аудита)
+## Рекомендуемый следующий шаг (после выполнения первой волны)
 
-1. Зафиксировать в runbook/README, что основной путь gateway для runtime — `alor_gateway_transport_runner`.
-2. Добавить в docs явное ограничение `cold_start_history_days_back` (без пагинации) и supported workaround.
-3. Сделать targeted code-review проход по runtime-only panic paths.
-4. Выбрать 3-4 failure scenarios для первой волны интеграционных тестов (начать с broker reject/terminal cancel/Redis publish fail).
-5. Только после этого — точечные code changes.
+1. Зафиксировать “phase-1 complete” в release/checklist документах:
+   - что именно покрыто (`FT-01/02A/02B/02G/03/04`)
+   - что осталось (`FT-02C/02D/02E`, `FT-05`, `FT-06`)
+2. Убрать/ограничить тестовый хук `RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS`:
+   - оставить как тестовый инструмент, но явно пометить non-prod usage.
+3. Перейти к `FT-05` (late/duplicate ack) через controlled integration harness.
+4. Формализовать policy для `FT-06` (replay vs standalone tolerance thresholds).
+5. После этого — targeted code changes по остаточным findings (по приоритету из матрицы).
 
 ## Связанный документ для следующего этапа
 
 - Матрица отказных сценариев (execution checklist): `docs/failure-test-matrix.md`
 - Для ускорения `FT-01..FT-03` добавлен test strategy path `mock_live_probe` (`strategy-runtime/src/strategies/mock_live_probe.rs`, config `configs/runtime.mock-live.toml`)
+- Для воспроизводимого `FT-03` добавлен тестовый pre-publish delay hook:
+  `RUNTIME_ENABLE_TEST_HOOKS=true` + `RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS=<ms>` (использовать только в тестовых прогонах).
