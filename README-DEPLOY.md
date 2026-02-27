@@ -87,7 +87,9 @@ This will start:
 
 Security/network notes:
 
-- Compose network `app_net` is configured as `internal: true`.
+- Compose defines two networks:
+  - `app_net` with `internal: true` (Redis and internal traffic only),
+  - `ext_net` as a normal network (gateway/runtime use it for outbound WS/CWS to Alor).
 - No service ports are published externally by default.
 - Access health endpoints via `docker compose exec`, SSH tunnel, or VPN.
 

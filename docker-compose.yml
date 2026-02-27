@@ -18,13 +18,14 @@ services:
         max-file: "3"
 
   alor-gateway:
-    image: ghcr.io/dkorolski/alor-gateway:${IMAGE_TAG}
+    image: ghcr.io/dkorolski/alor-rust-project/alor-gateway:${IMAGE_TAG}
     container_name: trading_alor_gateway
     restart: unless-stopped
     depends_on:
       - redis
     networks:
       - app_net
+      - ext_net
     env_file:
       - .env
     environment:
@@ -38,6 +39,7 @@ services:
       nofile:
         soft: ${NOFILE_SOFT:-65535}
         hard: ${NOFILE_HARD:-1048576}
+    command: ["alor_gateway_transport_runner", "--config", "${GATEWAY_CONFIG}", "--redis-url", "${REDIS_URL}"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/liveness"]
       interval: 15s
@@ -51,7 +53,7 @@ services:
         max-file: "3"
 
   strategy-runtime:
-    image: ghcr.io/dkorolski/strategy-runtime:${IMAGE_TAG}
+    image: ghcr.io/dkorolski/alor-rust-project/strategy-runtime:${IMAGE_TAG}
     container_name: trading_strategy_runtime
     restart: unless-stopped
     depends_on:
@@ -59,6 +61,7 @@ services:
       - alor-gateway
     networks:
       - app_net
+      - ext_net
     env_file:
       - .env
     environment:
@@ -74,6 +77,7 @@ services:
       nofile:
         soft: ${NOFILE_SOFT:-65535}
         hard: ${NOFILE_HARD:-1048576}
+    command: ["strategy_runtime_runner", "--config", "${RUNTIME_CONFIG}"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8091/liveness"]
       interval: 15s
@@ -89,3 +93,5 @@ services:
 networks:
   app_net:
     internal: true
+  ext_net:
+    # normal network with outbound internet access for WS/CWS
