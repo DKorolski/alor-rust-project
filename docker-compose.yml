@@ -1,0 +1,97 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: trading_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    networks:
+      - app_net
+    volumes:
+      - ${REDIS_DATA_DIR:-/opt/trading/volumes/redis}:/data
+    mem_limit: ${REDIS_MEM_LIMIT:-512m}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  alor-gateway:
+    image: ghcr.io/dkorolski/alor-rust-project/alor-gateway:${IMAGE_TAG}
+    container_name: trading_alor_gateway
+    restart: unless-stopped
+    depends_on:
+      - redis
+    networks:
+      - app_net
+      - ext_net
+    env_file:
+      - .env
+    environment:
+      RUST_LOG: ${GATEWAY_RUST_LOG:-info,alor_gateway::supervisor=info}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/}
+      GATEWAY_CONFIG: ${GATEWAY_CONFIG:-/configs/gateway.live.toml}
+    volumes:
+      - ${CONFIG_DIR:-/opt/trading/configs}:/configs:ro
+    mem_limit: ${GATEWAY_MEM_LIMIT:-1500m}
+    ulimits:
+      nofile:
+        soft: ${NOFILE_SOFT:-65535}
+        hard: ${NOFILE_HARD:-1048576}
+    command: ["alor_gateway_transport_runner", "--config", "${GATEWAY_CONFIG}", "--redis-url", "${REDIS_URL}"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/liveness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  strategy-runtime:
+    image: ghcr.io/dkorolski/alor-rust-project/strategy-runtime:${IMAGE_TAG}
+    container_name: trading_strategy_runtime
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - alor-gateway
+    networks:
+      - app_net
+      - ext_net
+    env_file:
+      - .env
+    environment:
+      RUST_LOG: ${RUNTIME_RUST_LOG:-info,strategy_runtime=info}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/}
+      RUNTIME_CONFIG: ${RUNTIME_CONFIG:-/configs/runtime.paper.toml}
+      RUNTIME_ENABLE_TEST_HOOKS: "false"
+    volumes:
+      - ${CONFIG_DIR:-/opt/trading/configs}:/configs:ro
+      - ${REPORTS_DIR:-/opt/trading/volumes/reports}:/reports
+    mem_limit: ${RUNTIME_MEM_LIMIT:-1500m}
+    ulimits:
+      nofile:
+        soft: ${NOFILE_SOFT:-65535}
+        hard: ${NOFILE_HARD:-1048576}
+    command: ["strategy_runtime_runner", "--config", "${RUNTIME_CONFIG}"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8091/liveness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+networks:
+  app_net:
+    internal: true
+  ext_net:
+    # normal network with outbound internet access for WS/CWS

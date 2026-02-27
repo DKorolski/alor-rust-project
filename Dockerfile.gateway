@@ -1,0 +1,27 @@
+FROM rust:1.76 as builder
+
+WORKDIR /app
+
+# Copy full workspace (simple, not highly optimized, but clear)
+COPY . .
+
+WORKDIR /app/alor-rs-main
+
+RUN cargo build --release -p alor-gateway --bin alor_gateway_transport_runner
+
+FROM debian:12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/alor-rs-main/target/release/alor_gateway_transport_runner /usr/local/bin/alor_gateway_transport_runner
+
+ENV RUST_LOG=info,alor_gateway::supervisor=info
+
+# Configs are mounted read-only at /configs by docker-compose.
+CMD ["alor_gateway_transport_runner", "--config", "/configs/gateway.live.toml", "--redis-url", "redis://redis:6379/"]
+
