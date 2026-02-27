@@ -149,6 +149,13 @@ Full report: `reports/run_c/summary.md`
 - Reproducibility depends on fixed data snapshot, config, and binary commit; keep them pinned in reports.
 - Docker-backed integration tests are opt-in in constrained CI/pod environments.
 
+## Audit Status
+
+Critical audit for `gateway + strategy-runtime` is completed, and first-wave failure scenarios are executed and tracked.
+
+- Main findings/roadmap: `./alor-rs-main/docs/AUDIT_AND_ROADMAP_GATEWAY_RUNTIME.md`
+- Execution status by scenario: `./alor-rs-main/docs/failure-test-matrix.md`
+
 ---
 
 ## Where to go next
