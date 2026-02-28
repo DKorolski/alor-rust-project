@@ -451,7 +451,10 @@ fn redact_token(payload: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(payload) else {
         return "<unparseable payload>".to_string();
     };
-    if let Some(obj) = value.as_object_mut().filter(|obj| obj.contains_key("token")) {
+    if let Some(obj) = value
+        .as_object_mut()
+        .filter(|obj| obj.contains_key("token"))
+    {
         obj.insert("token".to_string(), Value::String("***".to_string()));
     }
     value.to_string()
