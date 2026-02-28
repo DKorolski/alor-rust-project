@@ -20,6 +20,7 @@ target/
 **/summary.json
 **/parity_report.json
 **/*.log
+.local/
 
 # OS / editor metadata
 **/.DS_Store

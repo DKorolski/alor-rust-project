@@ -1,0 +1,12 @@
+services:
+  alor-gateway:
+    build:
+      context: .
+      dockerfile: ./Dockerfile.gateway
+    image: alor-rust-project/alor-gateway:local
+
+  strategy-runtime:
+    build:
+      context: .
+      dockerfile: ./Dockerfile.runtime
+    image: alor-rust-project/strategy-runtime:local

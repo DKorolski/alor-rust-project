@@ -4,6 +4,13 @@ This document describes how to deploy the trading gateway + runtime + Redis on a
 
 It is aligned with the main project README and the internal runbooks in `alor-rs-main/docs/`.
 
+Local validation note:
+
+- the stack was validated locally with `docker-compose.local.yml`;
+- all three containers (`redis`, `alor-gateway`, `strategy-runtime`) reached `healthy`;
+- `liveness` endpoints responded correctly;
+- `readiness` can legitimately return `503` outside an active trading session or when the configured instrument is not trading at the current time.
+
 ---
 
 ### 1. Prerequisites on VPS
@@ -120,6 +127,12 @@ docker compose exec -T alor-gateway curl -fsS http://127.0.0.1:8081/readiness
 docker compose exec -T strategy-runtime curl -fsS http://127.0.0.1:8091/liveness
 docker compose exec -T strategy-runtime curl -fsS http://127.0.0.1:8091/readiness
 ```
+
+Interpretation:
+
+- `liveness` should return `200`;
+- `readiness` should return `200` when the service is fully ready and the configured market/session is active;
+- `readiness=503` can be expected outside an active session and does not by itself indicate a deploy failure.
 
 ---
 

@@ -33,6 +33,7 @@ Expected:
 
 - `liveness` returns 200.
 - `readiness` eventually returns 200 when gateway/runtime are ready.
+- Outside an active session (or if the configured instrument is not trading at that time), `readiness=503` can be expected and does not by itself mean the deploy is broken.
 
 Redis basic check (if CLI installed on host or in a helper container):
 
@@ -176,4 +177,3 @@ Repeat preflight health checks (paper or live) and review logs for any startup w
     - perform paper preflight checks.
 
 Document results of the restore test (date, image tag, success/fail) in this file or a separate ops log.
-

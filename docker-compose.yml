@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   redis:
     image: redis:7-alpine
@@ -46,7 +44,14 @@ services:
       nofile:
         soft: ${NOFILE_SOFT:-65535}
         hard: ${NOFILE_HARD:-1048576}
-    command: ["alor_gateway_transport_runner", "--config", "${GATEWAY_CONFIG}", "--redis-url", "${REDIS_URL}"]
+    command:
+      [
+        "alor_gateway_transport_runner",
+        "--config",
+        "${GATEWAY_CONFIG:-/configs/gateway.live.toml}",
+        "--redis-url",
+        "${REDIS_URL:-redis://redis:6379/}",
+      ]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/liveness"]
       interval: 15s
@@ -86,7 +91,7 @@ services:
       nofile:
         soft: ${NOFILE_SOFT:-65535}
         hard: ${NOFILE_HARD:-1048576}
-    command: ["strategy_runtime_runner", "--config", "${RUNTIME_CONFIG}"]
+    command: ["strategy_runtime_runner", "--config", "${RUNTIME_CONFIG:-/configs/runtime.paper.toml}"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8091/liveness"]
       interval: 15s
