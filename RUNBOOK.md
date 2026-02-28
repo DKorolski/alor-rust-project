@@ -97,7 +97,62 @@ docker compose restart strategy-runtime
 
 ---
 
-### 4. Incident snapshot (first diagnostics)
+### 4. Deployment operations (day-to-day)
+
+Standard deploy flow after a code change:
+
+1. Push changes to `main`:
+
+```bash
+git push origin main
+```
+
+2. Wait for GitHub Actions workflow `CI and Docker images` to finish successfully.
+
+3. On VPS, pull fresh images:
+
+```bash
+cd /opt/trading
+docker compose pull
+```
+
+4. Recreate containers with the new image:
+
+```bash
+docker compose up -d
+```
+
+5. Verify:
+
+```bash
+docker compose ps
+docker compose logs --tail=200
+```
+
+For paper, `IMAGE_TAG=latest` is acceptable as a convenience.
+
+For live, use only a fixed tag in `/opt/trading/.env`:
+
+- `IMAGE_TAG=sha-...`
+- or `IMAGE_TAG=vX.Y.Z`
+
+Then run:
+
+```bash
+cd /opt/trading
+docker compose pull
+docker compose up -d
+```
+
+If `docker compose pull` fails:
+
+- check that GitHub Actions completed successfully,
+- confirm GHCR login on VPS (`docker login ghcr.io`),
+- confirm that the requested `IMAGE_TAG` exists in GHCR.
+
+---
+
+### 5. Incident snapshot (first diagnostics)
 
 When something looks wrong (alerts, no trades, repeated reconnects, etc.), take a quick snapshot **before** changing anything:
 
@@ -126,7 +181,7 @@ docker events --since 10m > /tmp/docker-events-$(date +%s).log &
 
 ---
 
-### 5. Rollback procedure
+### 6. Rollback procedure
 
 If a new deployment causes issues and you need to quickly roll back:
 
@@ -146,7 +201,7 @@ docker compose up -d
 
 ---
 
-### 6. Reboot and persistence checks
+### 7. Reboot and persistence checks
 
 After planned or unplanned VPS reboot:
 
@@ -161,7 +216,7 @@ Repeat preflight health checks (paper or live) and review logs for any startup w
 
 ---
 
-### 7. Backups and restore (summary)
+### 8. Backups and restore (summary)
 
 - Regularly back up:
   - `/opt/trading/.env`
