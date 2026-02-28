@@ -221,10 +221,8 @@ impl BarValidator {
         bar: &BarEvent,
         last_emitted_ts: Option<i64>,
     ) -> Result<(), RejectReason> {
-        if let Some(last_ts) = last_emitted_ts {
-            if bar.close_time_utc <= last_ts {
-                return Err(RejectReason::DuplicateOrOld);
-            }
+        if last_emitted_ts.is_some_and(|last_ts| bar.close_time_utc <= last_ts) {
+            return Err(RejectReason::DuplicateOrOld);
         }
 
         if self.cfg.tf_sec > 0 && bar.close_time_utc % self.cfg.tf_sec != 0 {
