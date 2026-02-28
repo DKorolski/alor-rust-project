@@ -4,30 +4,20 @@ use serde::Serialize;
 
 use alor_types::MarketState;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum GatewayPhase {
+    #[default]
     SyncingHistory,
     Reconnecting,
     SyncingGap,
     LiveReady,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum ResyncMode {
+    #[default]
     Cold,
     Warm,
-}
-
-impl Default for ResyncMode {
-    fn default() -> Self {
-        Self::Cold
-    }
-}
-
-impl Default for GatewayPhase {
-    fn default() -> Self {
-        Self::SyncingHistory
-    }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]

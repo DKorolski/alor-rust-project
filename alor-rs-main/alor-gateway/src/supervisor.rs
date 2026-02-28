@@ -505,10 +505,8 @@ impl Supervisor {
                 while let Some(order) = orders_rx.recv().await {
                     let mut order = order;
                     let event_request_id = order.request_id;
-                    if let Some(request_id) =
-                        request_map_orders.read().get(&order.order_id).copied()
-                    {
-                        if event_request_id != Some(request_id) {
+                    match request_map_orders.read().get(&order.order_id).copied() {
+                        Some(request_id) if event_request_id != Some(request_id) => {
                             info!(
                                 order_id = order.order_id,
                                 event_request_id = ?event_request_id,
@@ -517,6 +515,7 @@ impl Supervisor {
                             );
                             order.request_id = Some(request_id);
                         }
+                        _ => {}
                     }
                     {
                         let mut guard = health.write();

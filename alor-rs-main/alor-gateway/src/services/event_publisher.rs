@@ -164,11 +164,12 @@ async fn publish_with_retry(
         if degraded_since.is_none() {
             *degraded_since = Some(Instant::now());
         }
-        if let Some(start) = degraded_since {
-            if start.elapsed().as_secs() >= config.degraded_threshold_sec {
-                let mut guard = health.write();
-                guard.event_sink_degraded = true;
-            }
+        if degraded_since
+            .as_ref()
+            .is_some_and(|start| start.elapsed().as_secs() >= config.degraded_threshold_sec)
+        {
+            let mut guard = health.write();
+            guard.event_sink_degraded = true;
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_millis(config.retry_max_ms));

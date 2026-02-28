@@ -412,10 +412,11 @@ async fn read_until_guid(
         while let Some(msg) = stream.next().await {
             let msg = msg?;
             if let Message::Text(txt) = msg {
-                if let Ok(val) = serde_json::from_str::<Value>(&txt) {
-                    if guid_of(&val).as_deref() == Some(guid) {
-                        return Ok(val);
-                    }
+                let Ok(val) = serde_json::from_str::<Value>(&txt) else {
+                    continue;
+                };
+                if guid_of(&val).as_deref() == Some(guid) {
+                    return Ok(val);
                 }
             }
         }
