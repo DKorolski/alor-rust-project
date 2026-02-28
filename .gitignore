@@ -6,6 +6,12 @@
 venv/
 env/
 
+# Local env files / secrets
+.env
+.env.*
+!.env.example
+!env.example
+
 # Rust
 target/
 

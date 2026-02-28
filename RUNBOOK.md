@@ -72,7 +72,66 @@ docker compose up -d
 
 ---
 
-### 3. Normal operations
+### 3. Example: switch instrument (`USDRUBF` -> `IMOEXF`)
+
+If you want to test or run on another instrument, change configs first, then recreate containers.
+
+Files to update:
+
+- `alor-rs-main/configs/gateway.live.toml`
+- `alor-rs-main/configs/runtime.paper.toml`
+- `alor-rs-main/configs/runtime.live.toml`
+
+Minimum changes:
+
+1. In `gateway.live.toml`:
+
+- `symbols = ["IMOEXF"]`
+- `log_positions_filter = ["IMOEXF"]`
+
+2. In `runtime.paper.toml` and `runtime.live.toml`:
+
+- `[strategy].symbol = "IMOEXF"`
+
+3. Review instrument-specific parameters:
+
+- `[strategy].tick_size`
+- `[general].price_step`
+- `trading_periods`
+- `weekends_off`
+
+Do not assume they are identical across instruments. Validate them against the actual market/instrument contract.
+
+4. Recommended: change runtime state stream name to avoid mixing old state with a previous instrument:
+
+- paper:
+  - from `runtime.state.session_gap_standalone.paper.7502T0U`
+  - to e.g. `runtime.state.session_gap_standalone.paper.imoexf.7502T0U`
+- live:
+  - from `runtime.state.session_gap_standalone.live.7502T0U`
+  - to e.g. `runtime.state.session_gap_standalone.live.imoexf.7502T0U`
+
+5. After copying updated configs to VPS:
+
+```bash
+cd /opt/trading
+docker compose up -d
+docker compose ps
+docker compose logs --tail=200
+```
+
+6. Re-check health:
+
+```bash
+docker compose exec -T alor-gateway curl -s http://127.0.0.1:8081/readiness || true
+docker compose exec -T strategy-runtime curl -s http://127.0.0.1:8091/readiness || true
+```
+
+If you switch to an instrument with an active session at the current time, this is the right moment to validate whether `readiness` becomes `200`.
+
+---
+
+### 4. Normal operations
 
 - View container list:
 
@@ -97,7 +156,7 @@ docker compose restart strategy-runtime
 
 ---
 
-### 4. Deployment operations (day-to-day)
+### 5. Deployment operations (day-to-day)
 
 Standard deploy flow after a code change:
 
@@ -152,7 +211,7 @@ If `docker compose pull` fails:
 
 ---
 
-### 5. Incident snapshot (first diagnostics)
+### 6. Incident snapshot (first diagnostics)
 
 When something looks wrong (alerts, no trades, repeated reconnects, etc.), take a quick snapshot **before** changing anything:
 
@@ -181,7 +240,7 @@ docker events --since 10m > /tmp/docker-events-$(date +%s).log &
 
 ---
 
-### 6. Rollback procedure
+### 7. Rollback procedure
 
 If a new deployment causes issues and you need to quickly roll back:
 
@@ -201,7 +260,7 @@ docker compose up -d
 
 ---
 
-### 7. Reboot and persistence checks
+### 8. Reboot and persistence checks
 
 After planned or unplanned VPS reboot:
 
@@ -216,7 +275,7 @@ Repeat preflight health checks (paper or live) and review logs for any startup w
 
 ---
 
-### 8. Backups and restore (summary)
+### 9. Backups and restore (summary)
 
 - Regularly back up:
   - `/opt/trading/.env`
