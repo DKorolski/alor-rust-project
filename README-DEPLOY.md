@@ -49,6 +49,11 @@ Tag policy:
 - `paper`: `latest` is acceptable if you intentionally allow frequent updates.
 - `live`: use only fixed tags (`:<git-sha>` or `:vX.Y.Z`) to make rollback deterministic.
 
+CI/CD behavior:
+
+- test job runs on `main` and `devops/vps-setup`;
+- image build/push to GHCR runs only on `main` and release tags (`v*.*.*`).
+
 3. Configure GHCR pull auth on VPS (one-time):
 
 ```bash
@@ -84,6 +89,12 @@ This will start:
 - `redis`
 - `alor-gateway`
 - `strategy-runtime` (by default with `RUNTIME_CONFIG` from `.env`, usually paper mode)
+
+Startup behavior:
+
+- `redis` has an explicit healthcheck (`redis-cli PING`);
+- `alor-gateway` waits for healthy Redis before starting;
+- `strategy-runtime` also waits for healthy Redis before starting.
 
 Security/network notes:
 

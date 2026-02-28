@@ -11,6 +11,12 @@ services:
     volumes:
       - ${REDIS_DATA_DIR:-/opt/trading/volumes/redis}:/data
     mem_limit: ${REDIS_MEM_LIMIT:-512m}
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     logging:
       driver: "json-file"
       options:
@@ -22,7 +28,8 @@ services:
     container_name: trading_alor_gateway
     restart: unless-stopped
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     networks:
       - app_net
       - ext_net
@@ -57,8 +64,10 @@ services:
     container_name: trading_strategy_runtime
     restart: unless-stopped
     depends_on:
-      - redis
-      - alor-gateway
+      redis:
+        condition: service_healthy
+      alor-gateway:
+        condition: service_started
     networks:
       - app_net
       - ext_net

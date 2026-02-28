@@ -167,16 +167,14 @@ impl MockLiveProbeStrategy {
             }
             MockLiveProbeMode::PlaceLimitBadPrice
             | MockLiveProbeMode::PlaceLimitBadStep
-            | MockLiveProbeMode::PlaceBocCrossSpread => {
-                crate::deterministic_request_id(
-                    &ctx.strategy_id,
-                    &ctx.portfolio,
-                    &bar.symbol,
-                    "place",
-                    bar.close_time_utc,
-                    0,
-                )
-            }
+            | MockLiveProbeMode::PlaceBocCrossSpread => crate::deterministic_request_id(
+                &ctx.strategy_id,
+                &ctx.portfolio,
+                &bar.symbol,
+                "place",
+                bar.close_time_utc,
+                0,
+            ),
         }
     }
 
