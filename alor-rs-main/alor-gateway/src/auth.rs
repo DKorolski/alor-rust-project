@@ -62,26 +62,24 @@ impl TokenProvider {
     pub async fn access_token(&self) -> anyhow::Result<String> {
         {
             let guard = self.state.read().await;
-            if let Some(token) = guard.token.as_ref() {
-                if guard
-                    .expires_at
-                    .map(|at| at > Instant::now())
-                    .unwrap_or(true)
-                {
-                    return Ok(token.clone());
-                }
+            let token = guard.token.as_ref();
+            let not_expired = guard
+                .expires_at
+                .map(|at| at > Instant::now())
+                .unwrap_or(true);
+            if let (Some(token), true) = (token, not_expired) {
+                return Ok(token.clone());
             }
         }
 
         let mut guard = self.state.write().await;
-        if let Some(token) = guard.token.as_ref() {
-            if guard
-                .expires_at
-                .map(|at| at > Instant::now())
-                .unwrap_or(true)
-            {
-                return Ok(token.clone());
-            }
+        let token = guard.token.as_ref();
+        let not_expired = guard
+            .expires_at
+            .map(|at| at > Instant::now())
+            .unwrap_or(true);
+        if let (Some(token), true) = (token, not_expired) {
+            return Ok(token.clone());
         }
 
         info!("refreshing alor access token");

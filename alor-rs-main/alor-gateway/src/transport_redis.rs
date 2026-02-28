@@ -237,10 +237,11 @@ impl RedisCommandSource {
             _ => return None,
         };
         for chunk in fields.chunks(2) {
-            if let [redis::Value::Data(key), redis::Value::Data(value)] = chunk {
-                if key == b"payload" {
+            match chunk {
+                [redis::Value::Data(key), redis::Value::Data(value)] if key == b"payload" => {
                     return Some(String::from_utf8_lossy(value).to_string());
                 }
+                _ => {}
             }
         }
         None

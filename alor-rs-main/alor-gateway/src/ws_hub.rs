@@ -924,10 +924,8 @@ fn redact_token(payload: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(payload) else {
         return "<unparseable payload>".to_string();
     };
-    if let Some(obj) = value.as_object_mut() {
-        if obj.contains_key("token") {
-            obj.insert("token".to_string(), Value::String("***".to_string()));
-        }
+    if let Some(obj) = value.as_object_mut().filter(|obj| obj.contains_key("token")) {
+        obj.insert("token".to_string(), Value::String("***".to_string()));
     }
     value.to_string()
 }
@@ -941,16 +939,18 @@ fn attach_symbol(mut value: Value, bars_guid_map: &HashMap<String, String>) -> V
     let Some(data) = value.get_mut("data") else {
         return value;
     };
-    if let Some(obj) = data.as_object_mut() {
-        if !obj.contains_key("symbol") && !obj.contains_key("code") {
-            obj.insert("symbol".to_string(), Value::String(symbol.clone()));
-        }
+    if let Some(obj) = data
+        .as_object_mut()
+        .filter(|obj| !obj.contains_key("symbol") && !obj.contains_key("code"))
+    {
+        obj.insert("symbol".to_string(), Value::String(symbol.clone()));
     } else if let Some(arr) = data.as_array_mut() {
         for item in arr.iter_mut() {
-            if let Some(obj) = item.as_object_mut() {
-                if !obj.contains_key("symbol") && !obj.contains_key("code") {
-                    obj.insert("symbol".to_string(), Value::String(symbol.clone()));
-                }
+            if let Some(obj) = item
+                .as_object_mut()
+                .filter(|obj| !obj.contains_key("symbol") && !obj.contains_key("code"))
+            {
+                obj.insert("symbol".to_string(), Value::String(symbol.clone()));
             }
         }
     }
