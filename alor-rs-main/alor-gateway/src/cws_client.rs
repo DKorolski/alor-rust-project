@@ -134,6 +134,7 @@ impl CwsHandle {
         self.send(payload).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn replace(
         &self,
         portfolio: &str,
@@ -266,10 +267,10 @@ async fn run_session(
                             .unwrap_or_else(new_guid);
                         pending.insert(guid.clone(), cmd.resp_tx);
                         let mut payload = cmd.payload;
-                        payload.as_object_mut().map(|map| {
+                        if let Some(map) = payload.as_object_mut() {
                             map.insert("guid".to_string(), Value::String(guid.clone()));
                             map.insert("token".to_string(), Value::String(token.clone()));
-                        });
+                        }
                         let opcode = payload.get("opcode").and_then(Value::as_str).unwrap_or("unknown");
                         info!(opcode, guid, "cws send");
                         let redacted_payload = redact_token(&payload.to_string());

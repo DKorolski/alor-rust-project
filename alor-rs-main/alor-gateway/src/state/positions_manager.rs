@@ -46,7 +46,7 @@ impl PositionsManager {
                 let should_log = log_filter.contains(&symbol_upper)
                     || (log_cash_positions && cash_filter.contains(&symbol_upper));
                 let last_qty = last_qty_by_symbol.get(&event.symbol).copied();
-                if should_log && last_qty.map_or(true, |qty| qty != event.qty) {
+                if should_log && (last_qty != Some(event.qty)) {
                     debug!(
                         symbol = %event.symbol,
                         qty = event.qty,

@@ -1071,6 +1071,8 @@ impl Strategy for SessionGapStandaloneStrategy {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
     use crate::{BarEvent, DataOrigin};
     use serde::Deserialize;
@@ -2293,7 +2295,7 @@ mod tests {
             let _ = strategy.on_bar(&ctx, &bar);
 
             if let StrategyState::SessionGapStandalone {
-                session_date,
+                session_date: Some(session_date),
                 traded_session,
                 prev_close,
                 yesterday_range,
@@ -2309,25 +2311,23 @@ mod tests {
                 ..
             } = &strategy.state
             {
-                if let Some(session_date) = session_date {
-                    snapshots.insert(
-                        session_date.clone(),
-                        SessionSnapshot {
-                            traded_session: *traded_session,
-                            prev_close: *prev_close,
-                            yesterday_range: *yesterday_range,
-                            pre_prev_close: *pre_prev_close,
-                            first_min_high: *first_min_high,
-                            first_min_low: *first_min_low,
-                            first_hour_price: *first_hour_price,
-                            session_start_ts_utc: *session_start_ts_utc,
-                            session_end_ts_utc: *session_end_ts_utc,
-                            session_high: *session_high,
-                            session_low: *session_low,
-                            session_close: *session_close,
-                        },
-                    );
-                }
+                snapshots.insert(
+                    session_date.clone(),
+                    SessionSnapshot {
+                        traded_session: *traded_session,
+                        prev_close: *prev_close,
+                        yesterday_range: *yesterday_range,
+                        pre_prev_close: *pre_prev_close,
+                        first_min_high: *first_min_high,
+                        first_min_low: *first_min_low,
+                        first_hour_price: *first_hour_price,
+                        session_start_ts_utc: *session_start_ts_utc,
+                        session_end_ts_utc: *session_end_ts_utc,
+                        session_high: *session_high,
+                        session_low: *session_low,
+                        session_close: *session_close,
+                    },
+                );
             }
         }
 

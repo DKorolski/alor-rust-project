@@ -10,6 +10,7 @@ use crate::models::{
     BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot, TradeEvent,
 };
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum EventMessage {
     Bar(BarEvent),

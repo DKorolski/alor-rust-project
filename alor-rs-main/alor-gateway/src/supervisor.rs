@@ -1072,9 +1072,7 @@ async fn handle_shutdown(
 }
 
 fn open_bar_dump(path: Option<&str>) -> Option<std::io::BufWriter<std::fs::File>> {
-    let Some(path) = path else {
-        return None;
-    };
+    let path = path?;
     let file = OpenOptions::new().create(true).append(true).open(path);
     match file {
         Ok(file) => {
@@ -1113,15 +1111,8 @@ async fn record_emitted(
     if let Some(writer) = bar_dump.lock().as_mut() {
         let _ = writeln!(
             writer,
-            "{},{},{},{},{},{},{},{}",
-            bar.symbol,
-            bar.close_time_utc,
-            bar.o,
-            bar.h,
-            bar.l,
-            bar.c,
-            bar.v,
-            format!("{:?}", bar.origin)
+            "{},{},{},{},{},{},{},{:?}",
+            bar.symbol, bar.close_time_utc, bar.o, bar.h, bar.l, bar.c, bar.v, bar.origin
         );
     }
 }
@@ -1186,7 +1177,7 @@ async fn emit_bar(
     bar: &BarEvent,
 ) -> EmitResult {
     let last_emitted_ts = last_emitted.read().get(&bar.symbol).copied();
-    if last_emitted_ts.map_or(false, |ts| bar.close_time_utc <= ts) {
+    if last_emitted_ts.is_some_and(|ts| bar.close_time_utc <= ts) {
         debug!(
             symbol = %bar.symbol,
             close_time_utc = bar.close_time_utc,
@@ -1207,6 +1198,7 @@ async fn emit_bar(
     EmitResult::SendFailed
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn flush_pending_live(
     bars_tx: &mpsc::Sender<BarEvent>,
     last_emitted: &Arc<RwLock<HashMap<String, i64>>>,

@@ -1303,21 +1303,19 @@ impl StrategyRuntime {
                 return Err(error);
             }
             self.metrics.commands_sent_total = self.metrics.commands_sent_total.saturating_add(1);
-        } else {
-            if let Err(error) = self
-                .transport
-                .xadd_state(
-                    &self.config.streams.runtime_state,
-                    &payload,
-                    self.config.trim.runtime_state,
-                )
-                .await
-            {
-                self.metrics.publish_failures_total =
-                    self.metrics.publish_failures_total.saturating_add(1);
-                error!(?error, "failed to persist runtime state");
-                return Err(error);
-            }
+        } else if let Err(error) = self
+            .transport
+            .xadd_state(
+                &self.config.streams.runtime_state,
+                &payload,
+                self.config.trim.runtime_state,
+            )
+            .await
+        {
+            self.metrics.publish_failures_total =
+                self.metrics.publish_failures_total.saturating_add(1);
+            error!(?error, "failed to persist runtime state");
+            return Err(error);
         }
         Ok(())
     }
@@ -1606,9 +1604,9 @@ impl StrategyRuntime {
                 SimOrderType::Market => Some(bar.o),
                 SimOrderType::Limit => {
                     let price = order.price.unwrap_or(0.0);
-                    if order.side == "buy" && bar.l <= price {
-                        Some(price)
-                    } else if order.side == "sell" && bar.h >= price {
+                    if (order.side == "buy" && bar.l <= price)
+                        || (order.side == "sell" && bar.h >= price)
+                    {
                         Some(price)
                     } else {
                         None
@@ -2467,7 +2465,7 @@ fn bars_stream_diagnostic(elapsed: Duration, xlen: i64) -> BarsStreamDiagnostic 
 }
 
 fn bars_tf_seconds(stream: &str) -> Option<u64> {
-    let tf = stream.split('.').last()?;
+    let tf = stream.split('.').next_back()?;
     let (value, unit) = tf.split_at(tf.len().saturating_sub(1));
     let amount: u64 = value.parse().ok()?;
     match unit {

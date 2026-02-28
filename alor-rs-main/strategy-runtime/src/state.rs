@@ -47,8 +47,10 @@ fn default_session_gap_live_phase() -> SessionGapLivePhase {
     SessionGapLivePhase::Flat
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum StrategyState {
+    #[default]
     Idle,
     Placed {
         place_request_id: Uuid,
@@ -156,12 +158,6 @@ pub enum StrategyState {
     Done {
         last_bar_ts: i64,
     },
-}
-
-impl Default for StrategyState {
-    fn default() -> Self {
-        StrategyState::Idle
-    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

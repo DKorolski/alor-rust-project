@@ -147,6 +147,7 @@ impl IdempotencyStore for RedisIdempotencyStore {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_command_consumer(
     mut source: Box<dyn CommandSource>,
     sink: Arc<dyn CommandSink>,

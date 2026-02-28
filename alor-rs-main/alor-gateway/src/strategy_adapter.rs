@@ -29,6 +29,7 @@ impl<S> StrategyRunner<S>
 where
     S: StrategyCore + Send + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         strategy: S,
         positions: PositionsManagerHandle,

@@ -103,7 +103,7 @@ impl Strategy for LimitCancelStrategy {
                     *cancel_due = true;
                     *cancel_bar_ts = Some(bar.close_time_utc);
                     let existing_order_id = *order_id;
-                    let cancel_intent = existing_order_id.map(|order_id| {
+                    existing_order_id.map(|order_id| {
                         let intent = self.build_cancel_intent(order_id);
                         self.state = StrategyState::CancelSent {
                             cancel_request_id: crate::deterministic_request_id(
@@ -118,8 +118,7 @@ impl Strategy for LimitCancelStrategy {
                             last_bar_ts: bar.close_time_utc,
                         };
                         intent
-                    });
-                    cancel_intent
+                    })
                 }
             }
             StrategyState::CancelSent { last_bar_ts, .. } => {

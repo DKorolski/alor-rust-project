@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::TradeMode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayPhase {
     #[serde(alias = "SyncingHistory", alias = "syncingHistory")]
+    #[default]
     SyncingHistory,
     #[serde(alias = "Reconnecting", alias = "reconnecting")]
     Reconnecting,
@@ -13,12 +14,6 @@ pub enum GatewayPhase {
     SyncingGap,
     #[serde(alias = "LiveReady", alias = "liveReady")]
     LiveReady,
-}
-
-impl Default for GatewayPhase {
-    fn default() -> Self {
-        Self::SyncingHistory
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +49,7 @@ pub struct LiveGuardDecision {
     pub reasons: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_live_guard(
     trade_mode: TradeMode,
     allow_live_orders: bool,

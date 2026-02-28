@@ -1071,27 +1071,27 @@ pub fn load_runtime_config(
         }
     }
 
-    if let Some(value) = env::var("REDIS_URL").ok() {
+    if let Ok(value) = env::var("REDIS_URL") {
         redis_url = value;
         sources.redis_url = ConfigSource::Env;
     }
-    if let Some(value) = env::var("PORTFOLIO").ok() {
+    if let Ok(value) = env::var("PORTFOLIO") {
         portfolio = value;
         sources.portfolio = ConfigSource::Env;
     }
-    if let Some(value) = env::var("EXCHANGE").ok() {
+    if let Ok(value) = env::var("EXCHANGE") {
         exchange = value;
         sources.exchange = ConfigSource::Env;
     }
-    if let Some(value) = env::var("SOURCE").ok() {
+    if let Ok(value) = env::var("SOURCE") {
         source = value;
         sources.source = ConfigSource::Env;
     }
-    if let Some(value) = env::var("CONSUMER_GROUP").ok() {
+    if let Ok(value) = env::var("CONSUMER_GROUP") {
         consumer_group = value;
         sources.consumer_group = ConfigSource::Env;
     }
-    if let Some(value) = env::var("CONSUMER_NAME").ok() {
+    if let Ok(value) = env::var("CONSUMER_NAME") {
         consumer_name = value;
         sources.consumer_name = ConfigSource::Env;
     }
@@ -1143,15 +1143,15 @@ pub fn load_runtime_config(
         trim.runtime_state = value;
         sources.trim.runtime_state = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STRATEGY_ID").ok() {
+    if let Ok(value) = env::var("STRATEGY_ID") {
         strategy.strategy_id = value;
         sources.strategy.strategy_id = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STRATEGY_KIND").ok() {
+    if let Ok(value) = env::var("STRATEGY_KIND") {
         strategy.strategy_kind = parse_strategy_kind(&value);
         sources.strategy.strategy_kind = ConfigSource::Env;
     }
-    if let Some(value) = env::var("SYMBOL").ok() {
+    if let Ok(value) = env::var("SYMBOL") {
         strategy.symbol = value;
         sources.strategy.symbol = ConfigSource::Env;
     }
@@ -1159,7 +1159,7 @@ pub fn load_runtime_config(
         strategy.qty = value;
         sources.strategy.qty = ConfigSource::Env;
     }
-    if let Some(value) = env::var("SIDE").ok() {
+    if let Ok(value) = env::var("SIDE") {
         strategy.side = parse_side(&value);
         sources.strategy.side = ConfigSource::Env;
     }
@@ -1175,7 +1175,7 @@ pub fn load_runtime_config(
         strategy.max_wait_bars_for_ack = value;
         sources.strategy.max_wait_bars_for_ack = ConfigSource::Env;
     }
-    if let Some(value) = env::var("CLOSE_TRIGGER").ok() {
+    if let Ok(value) = env::var("CLOSE_TRIGGER") {
         strategy.close_trigger = parse_close_trigger(&value);
         sources.strategy.close_trigger = ConfigSource::Env;
     }
@@ -1223,15 +1223,15 @@ pub fn load_runtime_config(
         strategy.timezone_offset_hours = value;
         sources.strategy.timezone_offset_hours = ConfigSource::Env;
     }
-    if let Some(value) = env::var("TRADE_MODE").ok() {
+    if let Ok(value) = env::var("TRADE_MODE") {
         trade_mode = parse_trade_mode(&value);
         sources.runtime.trade_mode = ConfigSource::Env;
     }
-    if let Some(value) = env::var("ALLOW_LIVE_ORDERS").ok() {
+    if let Ok(value) = env::var("ALLOW_LIVE_ORDERS") {
         allow_live_orders = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.allow_live_orders = ConfigSource::Env;
     }
-    if let Some(value) = env::var("ALLOW_PAPER_ORDERS").ok() {
+    if let Ok(value) = env::var("ALLOW_PAPER_ORDERS") {
         allow_paper_orders = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.allow_paper_orders = ConfigSource::Env;
     }
@@ -1247,43 +1247,43 @@ pub fn load_runtime_config(
         gateway_health_stale_sec = value;
         sources.runtime.gateway_health_stale_sec = ConfigSource::Env;
     }
-    if let Some(value) = env::var("REQUIRE_GATEWAY_READY").ok() {
+    if let Ok(value) = env::var("REQUIRE_GATEWAY_READY") {
         require_gateway_ready = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.require_gateway_ready = ConfigSource::Env;
     }
-    if let Some(value) = env::var("BOOTSTRAP_DUMP").ok() {
+    if let Ok(value) = env::var("BOOTSTRAP_DUMP") {
         bootstrap_dump = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.bootstrap_dump = ConfigSource::Env;
     }
-    if let Some(value) = env::var("RUNTIME_HEALTH_ENABLED").ok() {
+    if let Ok(value) = env::var("RUNTIME_HEALTH_ENABLED") {
         health.enabled = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.health_enabled = ConfigSource::Env;
     }
-    if let Some(value) = env::var("RUNTIME_HEALTH_LISTEN_ADDR").ok() {
+    if let Ok(value) = env::var("RUNTIME_HEALTH_LISTEN_ADDR") {
         health.listen_addr = value;
         sources.runtime.health_listen_addr = ConfigSource::Env;
     }
-    if let Some(value) = env::var("RUNTIME_HEALTH_EXPOSE_METRICS").ok() {
+    if let Ok(value) = env::var("RUNTIME_HEALTH_EXPOSE_METRICS") {
         health.expose_metrics = value == "1" || value.eq_ignore_ascii_case("true");
         sources.runtime.health_expose_metrics = ConfigSource::Env;
     }
-    if let Some(value) = env::var("PAPER_ENABLED").ok() {
+    if let Ok(value) = env::var("PAPER_ENABLED") {
         paper.enabled = value == "1" || value.eq_ignore_ascii_case("true");
         sources.paper.enabled = ConfigSource::Env;
     }
-    if let Some(value) = env::var("PAPER_OUTPUT").ok() {
+    if let Ok(value) = env::var("PAPER_OUTPUT") {
         paper.output = parse_paper_output(&value);
         sources.paper.output = ConfigSource::Env;
     }
-    if let Some(value) = env::var("PAPER_FILE_PATH").ok() {
+    if let Ok(value) = env::var("PAPER_FILE_PATH") {
         paper.file_path = value;
         sources.paper.file_path = ConfigSource::Env;
     }
-    if let Some(value) = env::var("PAPER_TRADES_CSV").ok() {
+    if let Ok(value) = env::var("PAPER_TRADES_CSV") {
         paper.trades_csv = value;
         sources.paper.trades_csv = ConfigSource::Env;
     }
-    if let Some(value) = env::var("PAPER_SUMMARY_JSON").ok() {
+    if let Ok(value) = env::var("PAPER_SUMMARY_JSON") {
         paper.summary_json = value;
         sources.paper.summary_json = ConfigSource::Env;
     }
@@ -1291,19 +1291,19 @@ pub fn load_runtime_config(
         paper.append = value;
         sources.paper.append = ConfigSource::Env;
     }
-    if let Some(value) = env::var("BACKTEST_ENABLED").ok() {
+    if let Ok(value) = env::var("BACKTEST_ENABLED") {
         backtest.enabled = value == "1" || value.eq_ignore_ascii_case("true");
         sources.backtest.enabled = ConfigSource::Env;
     }
-    if let Some(value) = env::var("BACKTEST_TRADE_LOG").ok() {
+    if let Ok(value) = env::var("BACKTEST_TRADE_LOG") {
         backtest.trade_log = value;
         sources.backtest.trade_log = ConfigSource::Env;
     }
-    if let Some(value) = env::var("BACKTEST_TRADES_CSV").ok() {
+    if let Ok(value) = env::var("BACKTEST_TRADES_CSV") {
         backtest.trades_csv = value;
         sources.backtest.trades_csv = ConfigSource::Env;
     }
-    if let Some(value) = env::var("BACKTEST_SUMMARY_JSON").ok() {
+    if let Ok(value) = env::var("BACKTEST_SUMMARY_JSON") {
         backtest.summary_json = value;
         sources.backtest.summary_json = ConfigSource::Env;
     }
@@ -1311,19 +1311,19 @@ pub fn load_runtime_config(
         backtest.append = value;
         sources.backtest.append = ConfigSource::Env;
     }
-    if let Some(value) = env::var("REPLAY_ENABLED").ok() {
+    if let Ok(value) = env::var("REPLAY_ENABLED") {
         replay.enabled = value == "1" || value.eq_ignore_ascii_case("true");
         sources.replay.enabled = ConfigSource::Env;
     }
-    if let Some(value) = env::var("REPLAY_BARS_CSV_PATH").ok() {
+    if let Ok(value) = env::var("REPLAY_BARS_CSV_PATH") {
         replay.bars_csv_path = Some(value);
         sources.replay.bars_csv_path = ConfigSource::Env;
     }
-    if let Some(value) = env::var("REPLAY_REFERENCE_TRADES_CSV_PATH").ok() {
+    if let Ok(value) = env::var("REPLAY_REFERENCE_TRADES_CSV_PATH") {
         replay.reference_trades_csv_path = Some(value);
         sources.replay.reference_trades_csv_path = ConfigSource::Env;
     }
-    if let Some(value) = env::var("REPLAY_OUTPUT_DIR").ok() {
+    if let Ok(value) = env::var("REPLAY_OUTPUT_DIR") {
         replay.output_dir = value;
         sources.replay.output_dir = ConfigSource::Env;
     }
@@ -1335,7 +1335,7 @@ pub fn load_runtime_config(
         replay.strict_dedup = value;
         sources.replay.strict_dedup = ConfigSource::Env;
     }
-    if let Some(value) = env::var("RESET_STATE_ON_START").ok() {
+    if let Ok(value) = env::var("RESET_STATE_ON_START") {
         reset_state_on_start = value == "1" || value.eq_ignore_ascii_case("true");
         sources.reset_state_on_start = ConfigSource::Env;
     }
@@ -1384,43 +1384,43 @@ pub fn load_runtime_config(
         }
     }
 
-    if let Some(value) = env::var("STREAM_BARS").ok() {
+    if let Ok(value) = env::var("STREAM_BARS") {
         streams.bars = value;
         sources.streams.bars = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STREAM_ORDERS").ok() {
+    if let Ok(value) = env::var("STREAM_ORDERS") {
         streams.orders = value;
         sources.streams.orders = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STREAM_TRADES").ok() {
+    if let Ok(value) = env::var("STREAM_TRADES") {
         streams.trades = value;
         sources.streams.trades = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STREAM_POSITIONS").ok() {
+    if let Ok(value) = env::var("STREAM_POSITIONS") {
         streams.positions = value;
         sources.streams.positions = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STREAM_COMMANDS").ok() {
+    if let Ok(value) = env::var("STREAM_COMMANDS") {
         streams.commands = value;
         sources.streams.commands = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STREAM_ACKS").ok() {
+    if let Ok(value) = env::var("STREAM_ACKS") {
         streams.acks = value;
         sources.streams.acks = ConfigSource::Env;
     }
-    if let Some(value) = env::var("SNAPSHOTS_STREAM").ok() {
+    if let Ok(value) = env::var("SNAPSHOTS_STREAM") {
         streams.snapshots = parse_optional_stream(&value);
         sources.streams.snapshots = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STREAM_HEALTH").ok() {
+    if let Ok(value) = env::var("STREAM_HEALTH") {
         streams.health = parse_optional_stream(&value);
         sources.streams.health = ConfigSource::Env;
     }
-    if let Some(value) = env::var("STREAM_DLQ_PREFIX").ok() {
+    if let Ok(value) = env::var("STREAM_DLQ_PREFIX") {
         streams.dlq_prefix = value;
         sources.streams.dlq_prefix = ConfigSource::Env;
     }
-    if let Some(value) = env::var("RUNTIME_STATE_STREAM").ok() {
+    if let Ok(value) = env::var("RUNTIME_STATE_STREAM") {
         streams.runtime_state = value;
         sources.streams.runtime_state = ConfigSource::Env;
     }

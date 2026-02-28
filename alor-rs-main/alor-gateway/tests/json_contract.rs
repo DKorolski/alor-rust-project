@@ -9,9 +9,9 @@ fn json_fixtures_parse() {
     ];
     for fixture in fixtures {
         let contents = fs::read_to_string(fixture)
-            .unwrap_or_else(|err| panic!("failed to read {}: {}", fixture, err));
+            .unwrap_or_else(|err| panic!("failed to read {fixture}: {err}"));
         let value: serde_json::Value = serde_json::from_str(&contents)
-            .unwrap_or_else(|err| panic!("failed to parse {}: {}", fixture, err));
-        assert!(value.is_object(), "fixture {} should be object", fixture);
+            .unwrap_or_else(|err| panic!("failed to parse {fixture}: {err}"));
+        assert!(value.is_object(), "fixture {fixture} should be object");
     }
 }

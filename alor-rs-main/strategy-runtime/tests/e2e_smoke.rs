@@ -277,7 +277,7 @@ async fn read_next_command(
         redis::Value::Bulk(values) => values,
         _ => return Err(anyhow::anyhow!("invalid entry")),
     };
-    let message_id = match entry.get(0) {
+    let message_id = match entry.first() {
         Some(redis::Value::Data(data)) => String::from_utf8_lossy(data).to_string(),
         _ => return Err(anyhow::anyhow!("missing message id")),
     };

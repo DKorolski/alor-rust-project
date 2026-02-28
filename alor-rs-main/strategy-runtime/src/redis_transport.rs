@@ -460,13 +460,9 @@ impl RedisRuntimeTransport {
             _ => return None,
         };
         for chunk in fields.chunks(2) {
-            if let [key, value] = chunk {
-                if let redis::Value::Data(key) = key {
-                    if key == PAYLOAD_FIELD.as_bytes() {
-                        if let redis::Value::Data(value) = value {
-                            return Some(String::from_utf8_lossy(value).to_string());
-                        }
-                    }
+            if let [redis::Value::Data(key), redis::Value::Data(value)] = chunk {
+                if key == PAYLOAD_FIELD.as_bytes() {
+                    return Some(String::from_utf8_lossy(value).to_string());
                 }
             }
         }

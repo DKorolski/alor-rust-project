@@ -412,6 +412,7 @@ impl ReplayState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn exit_position(
         &mut self,
         symbol: &str,
@@ -531,7 +532,7 @@ impl ReplayState {
                     bar_ts: bar.ts_utc,
                     symbol: symbol.to_string(),
                     intent_type: "signal".to_string(),
-                    side: format!("{:?}", direction).to_lowercase(),
+                    side: format!("{direction:?}").to_lowercase(),
                     qty: size,
                     reason_code: "signal_threshold".to_string(),
                     state_snapshot: self.snapshot(),

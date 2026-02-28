@@ -72,7 +72,7 @@ impl LimitCancelStrategy {
     }
 
     fn can_act_after_status(&self, bar_ts: i64) -> bool {
-        self.last_status_bar_ts.map_or(true, |ts| bar_ts > ts)
+        self.last_status_bar_ts.is_none_or(|ts| bar_ts > ts)
     }
 
     fn normalize_status(status: &str) -> String {

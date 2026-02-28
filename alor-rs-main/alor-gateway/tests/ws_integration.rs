@@ -39,7 +39,7 @@ async fn reconnect_resubscribe_no_duplicates() {
             bar_dump.path().to_string_lossy().to_string(),
         );
         let supervisor = Supervisor::new_with_token(cfg, "test-token".to_string());
-        let handle = supervisor.start_with_handle(TestStrategy::default());
+        let handle = supervisor.start_with_handle(TestStrategy);
         let mut emitted = handle.subscribe_emitted_bars();
 
         let first_conn = wait_for_connection(&mut ws_events).await;
@@ -98,7 +98,7 @@ async fn request_reconnect_opens_new_connection() {
             bar_dump.path().to_string_lossy().to_string(),
         );
         let supervisor = Supervisor::new_with_token(cfg, "test-token".to_string());
-        let handle = supervisor.start_with_handle(TestStrategy::default());
+        let handle = supervisor.start_with_handle(TestStrategy);
 
         let first_conn = wait_for_connection(&mut ws_events).await;
         let _ = ack_subscriptions(&ws_server, &mut ws_events, first_conn).await;
@@ -134,7 +134,7 @@ async fn ping_timeout_triggers_reconnect() {
             bar_dump.path().to_string_lossy().to_string(),
         );
         let supervisor = Supervisor::new_with_token(cfg, "test-token".to_string());
-        let handle = supervisor.start_with_handle(TestStrategy::default());
+        let handle = supervisor.start_with_handle(TestStrategy);
 
         let first_conn = wait_for_connection(&mut ws_events).await;
         let _ = ack_subscriptions(&ws_server, &mut ws_events, first_conn).await;
@@ -173,7 +173,7 @@ async fn stale_guid_after_reconnect_ignored() {
             bar_dump.path().to_string_lossy().to_string(),
         );
         let supervisor = Supervisor::new_with_token(cfg, "test-token".to_string());
-        let handle = supervisor.start_with_handle(TestStrategy::default());
+        let handle = supervisor.start_with_handle(TestStrategy);
         let mut emitted = handle.subscribe_emitted_bars();
 
         let first_conn = wait_for_connection(&mut ws_events).await;
@@ -242,7 +242,7 @@ async fn delayed_ack_retry_ignores_old_guid() {
             bar_dump.path().to_string_lossy().to_string(),
         );
         let supervisor = Supervisor::new_with_token(cfg, "test-token".to_string());
-        let handle = supervisor.start_with_handle(TestStrategy::default());
+        let handle = supervisor.start_with_handle(TestStrategy);
         let mut emitted = handle.subscribe_emitted_bars();
 
         let conn = wait_for_connection(&mut ws_events).await;

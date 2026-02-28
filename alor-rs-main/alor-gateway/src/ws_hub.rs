@@ -543,6 +543,7 @@ async fn best_effort_unsubscribe_all(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn subscribe_all(
     cfg: &AlorGatewayConfig,
     token: &str,
@@ -757,6 +758,7 @@ async fn subscribe_all(
     Ok(bars_guid_map)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_and_ack(
     ws_sink: &mut (
              impl futures_util::sink::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
@@ -818,6 +820,7 @@ async fn send_and_ack(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_until_guid(
     stream: &mut (
              impl futures_util::stream::Stream<

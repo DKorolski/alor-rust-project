@@ -456,8 +456,8 @@ impl AlorGatewayConfig {
                 source: err,
             })?;
         let mut sources = BTreeMap::new();
-        let source_label = |field: &'static str| format!("file:{}", field);
-        let default_label = |field: &'static str| format!("default:{}", field);
+        let source_label = |field: &'static str| format!("file:{field}");
+        let default_label = |field: &'static str| format!("default:{field}");
 
         let symbols = file_cfg
             .symbols
@@ -636,7 +636,7 @@ impl AlorGatewayConfig {
 
         track_file_sources(&file_cfg, &mut sources);
         sources.insert("refresh_token", refresh_token_source.to_string());
-        sources.insert("config_path", format!("file:{}", path));
+        sources.insert("config_path", format!("file:{path}"));
         let derived = derive_config(&config);
         Ok(ResolvedConfig {
             config,
@@ -860,9 +860,8 @@ fn get_required_with_source(
     sources: &mut BTreeMap<&'static str, String>,
 ) -> Result<String, ConfigError> {
     env::var(key)
-        .map(|value| {
+        .inspect(|_| {
             sources.insert(key, "env".to_string());
-            value
         })
         .map_err(|_| ConfigError::MissingVar(key))
 }

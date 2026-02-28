@@ -480,7 +480,6 @@ impl StrategyConfig {
             cash_factor: self.session_gap_cash_factor,
             start_cash: self.session_gap_start_cash,
             max_entry_hour: self.session_gap_max_entry_hour,
-            ..SessionGapStandaloneConfig::default()
         }
     }
 }
