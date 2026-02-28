@@ -5,11 +5,24 @@ use crate::health::ResyncMode;
 #[derive(Debug)]
 pub enum GatewayEvent {
     Connected,
-    Reconnecting { attempt: u64 },
-    Subscribed { symbol: String, subscription_type: String },
-    AckTimeout { symbol: String, subscription_type: String },
-    Lagged { duration_ms: u64 },
-    ResyncStarted { mode: ResyncMode, reason: &'static str },
+    Reconnecting {
+        attempt: u64,
+    },
+    Subscribed {
+        symbol: String,
+        subscription_type: String,
+    },
+    AckTimeout {
+        symbol: String,
+        subscription_type: String,
+    },
+    Lagged {
+        duration_ms: u64,
+    },
+    ResyncStarted {
+        mode: ResyncMode,
+        reason: &'static str,
+    },
     ResyncDone {
         mode: ResyncMode,
         gap_sec: u64,
@@ -45,12 +58,7 @@ pub fn log_event(event: GatewayEvent) {
             gap_sec,
             bars_backfilled,
         } => {
-            info!(
-                ?mode,
-                gap_sec,
-                bars_backfilled,
-                "Resync completed"
-            )
+            info!(?mode, gap_sec, bars_backfilled, "Resync completed")
         }
         GatewayEvent::CwsAuthorization {
             success,

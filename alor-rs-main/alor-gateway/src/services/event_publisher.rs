@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, watch};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
 use crate::health::HealthState;
@@ -46,7 +46,8 @@ impl EventPublisherHandle {
             Err(TrySendError::Full(_)) => {
                 let mut guard = self.health.write();
                 guard.event_backpressure_lagged = true;
-                guard.event_queue_full_drops_total = guard.event_queue_full_drops_total.saturating_add(1);
+                guard.event_queue_full_drops_total =
+                    guard.event_queue_full_drops_total.saturating_add(1);
                 warn!("event queue full; dropping lossy event");
             }
             Err(TrySendError::Closed(_)) => {
@@ -144,14 +145,17 @@ async fn publish_with_retry(
             Ok(Err(error)) => {
                 let mut guard = health.write();
                 guard.event_publish_fail_total = guard.event_publish_fail_total.saturating_add(1);
-                guard.event_publish_retries_total = guard.event_publish_retries_total.saturating_add(1);
+                guard.event_publish_retries_total =
+                    guard.event_publish_retries_total.saturating_add(1);
                 guard.event_sink_degraded = true;
                 warn!(?error, "event publish failed; retrying");
             }
             Err(_) => {
                 let mut guard = health.write();
-                guard.event_publish_timeout_total = guard.event_publish_timeout_total.saturating_add(1);
-                guard.event_publish_retries_total = guard.event_publish_retries_total.saturating_add(1);
+                guard.event_publish_timeout_total =
+                    guard.event_publish_timeout_total.saturating_add(1);
+                guard.event_publish_retries_total =
+                    guard.event_publish_retries_total.saturating_add(1);
                 guard.event_sink_degraded = true;
                 warn!("event publish timed out; retrying");
             }
@@ -256,10 +260,7 @@ mod tests {
     async fn critical_blocks_when_queue_full() {
         let health = Arc::new(parking_lot::RwLock::new(HealthState::default()));
         let (tx, _rx) = mpsc::channel(1);
-        let publisher = EventPublisherHandle {
-            tx,
-            health,
-        };
+        let publisher = EventPublisherHandle { tx, health };
         publisher
             .publish_critical(EventMessage::Health(HealthState::default()))
             .await;

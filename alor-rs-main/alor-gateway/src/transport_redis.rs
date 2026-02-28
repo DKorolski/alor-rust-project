@@ -32,7 +32,12 @@ impl RedisEventSink {
         payload: &T,
     ) -> Result<()> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let envelope = Envelope::new(Utc::now().timestamp(), &self.config.source, msg_type, payload);
+        let envelope = Envelope::new(
+            Utc::now().timestamp(),
+            &self.config.source,
+            msg_type,
+            payload,
+        );
         let json = serde_json::to_string(&envelope)?;
         let _: redis::Value = redis::cmd("XADD")
             .arg(stream)
@@ -276,7 +281,10 @@ impl RedisCommandSource {
             _ => return None,
         };
         let payload = self.extract_payload(&entry[1]);
-        Some(StreamEntry { message_id, payload })
+        Some(StreamEntry {
+            message_id,
+            payload,
+        })
     }
 
     fn parse_autoclaim_entry(&self, reply: redis::Value) -> Option<StreamEntry> {
@@ -305,7 +313,10 @@ impl RedisCommandSource {
             _ => return None,
         };
         let payload = self.extract_payload(&entry[1]);
-        Some(StreamEntry { message_id, payload })
+        Some(StreamEntry {
+            message_id,
+            payload,
+        })
     }
 
     async fn handle_payload(&self, entry: StreamEntry) -> Option<CommandEnvelope> {
@@ -436,7 +447,12 @@ impl RedisCommandSink {
         payload: &T,
     ) -> Result<()> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let envelope = Envelope::new(Utc::now().timestamp(), &self.config.source, msg_type, payload);
+        let envelope = Envelope::new(
+            Utc::now().timestamp(),
+            &self.config.source,
+            msg_type,
+            payload,
+        );
         let json = serde_json::to_string(&envelope)?;
         let _: redis::Value = redis::cmd("XADD")
             .arg(stream)

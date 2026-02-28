@@ -31,8 +31,10 @@ impl PositionsManager {
         let store_clone = store.clone();
         let synced_clone = synced.clone();
         let last_ts_clone = last_ts.clone();
-        let log_filter: HashSet<String> =
-            log_positions_filter.into_iter().map(|s| s.to_uppercase()).collect();
+        let log_filter: HashSet<String> = log_positions_filter
+            .into_iter()
+            .map(|s| s.to_uppercase())
+            .collect();
         let cash_filter: HashSet<String> =
             cash_symbols.into_iter().map(|s| s.to_uppercase()).collect();
         let mut last_qty_by_symbol: HashMap<String, f64> = HashMap::new();

@@ -200,10 +200,7 @@ pub fn build_data_report(
     (report, imbalances)
 }
 
-pub fn write_data_report(
-    path: &str,
-    report: &DataQualityReport,
-) -> anyhow::Result<()> {
+pub fn write_data_report(path: &str, report: &DataQualityReport) -> anyhow::Result<()> {
     let file = std::fs::File::create(path)?;
     serde_json::to_writer_pretty(file, report)?;
     Ok(())
@@ -239,11 +236,7 @@ impl BarValidator {
             return Err(RejectReason::NotClosedYet);
         }
 
-        if !bar.o.is_finite()
-            || !bar.h.is_finite()
-            || !bar.l.is_finite()
-            || !bar.c.is_finite()
-        {
+        if !bar.o.is_finite() || !bar.h.is_finite() || !bar.l.is_finite() || !bar.c.is_finite() {
             return Err(RejectReason::NonFinite);
         }
 

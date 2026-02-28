@@ -146,7 +146,9 @@ impl InprocTransport {
         }
     }
 
-    pub fn split(self) -> (
+    pub fn split(
+        self,
+    ) -> (
         InprocEventSink,
         InprocEventSource,
         InprocCommandSink,

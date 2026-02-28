@@ -293,14 +293,14 @@ fn parse_trade(value: &Value) -> Option<TradeEvent> {
         .get("orderno")
         .or_else(|| data.get("orderNo"))
         .and_then(to_i64)?;
-    let trade_id = data
-        .get("id")
-        .or_else(|| data.get("tradeId"))
-        .and_then(|value| match value {
-            Value::String(value) => Some(value.clone()),
-            Value::Number(value) => Some(value.to_string()),
-            _ => None,
-        })?;
+    let trade_id =
+        data.get("id")
+            .or_else(|| data.get("tradeId"))
+            .and_then(|value| match value {
+                Value::String(value) => Some(value.clone()),
+                Value::Number(value) => Some(value.to_string()),
+                _ => None,
+            })?;
     let symbol = data
         .get("symbol")
         .or_else(|| data.get("code"))

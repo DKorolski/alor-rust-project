@@ -63,7 +63,11 @@ impl TokenProvider {
         {
             let guard = self.state.read().await;
             if let Some(token) = guard.token.as_ref() {
-                if guard.expires_at.map(|at| at > Instant::now()).unwrap_or(true) {
+                if guard
+                    .expires_at
+                    .map(|at| at > Instant::now())
+                    .unwrap_or(true)
+                {
                     return Ok(token.clone());
                 }
             }
@@ -71,7 +75,11 @@ impl TokenProvider {
 
         let mut guard = self.state.write().await;
         if let Some(token) = guard.token.as_ref() {
-            if guard.expires_at.map(|at| at > Instant::now()).unwrap_or(true) {
+            if guard
+                .expires_at
+                .map(|at| at > Instant::now())
+                .unwrap_or(true)
+            {
                 return Ok(token.clone());
             }
         }
@@ -95,8 +103,7 @@ impl TokenProvider {
 
         debug!(
             refresh_count = guard.refresh_count,
-            expires_in,
-            "token refreshed"
+            expires_in, "token refreshed"
         );
 
         Ok(payload.access_token)

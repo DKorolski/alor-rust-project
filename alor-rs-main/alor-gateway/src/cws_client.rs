@@ -478,16 +478,12 @@ mod tests {
 
     #[test]
     fn build_create_market_payload_includes_required_fields() {
-        let payload = build_create_market_payload(
-            "D39004",
-            "MOEX",
-            "SBER",
-            "TQBR",
-            300,
-            "buy",
-        );
+        let payload = build_create_market_payload("D39004", "MOEX", "SBER", "TQBR", 300, "buy");
         let obj = payload.as_object().expect("payload object");
-        assert_eq!(obj.get("opcode").and_then(Value::as_str), Some("create:market"));
+        assert_eq!(
+            obj.get("opcode").and_then(Value::as_str),
+            Some("create:market")
+        );
         assert_eq!(obj.get("side").and_then(Value::as_str), Some("buy"));
         assert_eq!(obj.get("quantity").and_then(Value::as_i64), Some(300));
         assert_eq!(
