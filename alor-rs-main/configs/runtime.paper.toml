@@ -31,7 +31,7 @@ acks = "cmd.acks.7502T0U"
 snapshots = "broker.snapshots.7502T0U"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.session_gap_standalone.paper.imoexf.7502T0U"
+runtime_state = "runtime.state.session_gap_standalone.paper.usdrubf.7502T0U"
 
 [read]
 block_ms = 500
@@ -52,11 +52,11 @@ runtime_state = 2000
 [strategy]
 strategy_id = "session_gap_standalone"
 strategy_kind = "session_gap_standalone"
-symbol = "IMOEXF"
+symbol = "USDRUBF"
 qty = 1.0
 side = "buy"
 place_offset_ticks = 0
-tick_size = 0.5
+tick_size = 0.01
 max_wait_bars_for_ack = 1 # required by shared schema, unused by session_gap_standalone
 close_trigger = "next_bar" # required by shared schema, unused by session_gap_standalone
 session_open_hour = 0 # required by shared schema, unused by session_gap_standalone
@@ -75,7 +75,7 @@ break_start_1 = "14:00:00"
 break_end_1 = "14:04:59"
 break_start_2 = "18:50:00"
 break_end_2 = "19:04:59"
-weekends_off = false
+weekends_off = true
 timezone_offset_hours = 3
 
 [strategy.session_gap]
@@ -95,7 +95,7 @@ close_hour = 23
 close_minute = 49
 session_gap_min = 60.0
 exit_offset_min = 20
-work_weekends = true
+work_weekends = false
 
 [paper]
 enabled = true

@@ -6,7 +6,7 @@ portfolio = "7502T0U"
 exchange = "MOEX"
 instrument_group = "RFUD"
 # used for market order routing in CWS (create:market)
-symbols = ["IMOEXF"]
+symbols = ["USDRUBF"]
 
 tf_sec = 60
 from_ts = 0
@@ -16,7 +16,7 @@ cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
 
 
-log_positions_filter = ["IMOEXF"]
+log_positions_filter = ["USDRUBF"]
 log_cash_positions = false
 cash_symbols = ["RUB", "SUR"]
 log_existing_snapshot_orders = false
@@ -34,8 +34,8 @@ backoff_multiplier = 2
 
 max_silence_bars_sec = 1200
 
-history_sessions = 5
-history_days_back = 5
+history_sessions = 4
+history_days_back = 4
 session_rollover_hour_utc = 6
 health_listen_addr = "127.0.0.1:8081"
 
@@ -46,7 +46,7 @@ break_start_1 = "14:00:00"
 break_end_1 = "14:04:59"
 break_start_2 = "18:50:00"
 break_end_2 = "19:04:59"
-weekends_off = false
+weekends_off = true
 timezone_offset_hours = 3
 
 
@@ -64,5 +64,5 @@ cold_start_history_days_back = 5 # set to 0 + history_sessions/history_days_back
 bar_silence_resync_min_sec = 1200
 
 [general]
-price_step = 0.5
+price_step = 0.01
 volume_step = 1
