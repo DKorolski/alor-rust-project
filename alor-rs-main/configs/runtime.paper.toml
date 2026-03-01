@@ -100,9 +100,9 @@ work_weekends = true
 [paper]
 enabled = true
 output = "stdout"
-file_path = "./strategy-runtime/paper_trades.jsonl"
-trades_csv = "./strategy-runtime/trades0.csv"
-summary_json = "./strategy-runtime/summary0.json"
+file_path = "/reports/paper_trades.jsonl"
+trades_csv = "/reports/trades0.csv"
+summary_json = "/reports/summary0.json"
 append = true
 
 [backtest]
