@@ -63,12 +63,23 @@ docker compose up -d
 
 3. Run paper smoke on the same image/tag (as per project docs).
 
+Paper baseline used before live cutover (March 6, 2026):
+
+- `session_gap_standalone` on `USDRUBF`;
+- `trades_total=3`, `win_rate=1.0`, `pnl_net_total=204.7248` (from `summary0.json`).
+
 4. Check health as in paper preflight, plus:
 
 - Gateway readiness indicates `LiveReady` phase.
 - Runtime readiness is `true` and scheduler state is `Open`.
 
 5. Only after all checks, enable live orders according to the strategy/runtime configuration (see `alor-rs-main/docs/strategy-runtime-runbook.md`).
+
+6. For micro-account live testing, keep strategy sizing behavior explicit:
+
+- `session_gap_standalone` forces live entry size to `1` in code
+  (`strategy-runtime/src/strategies/session_gap_standalone.rs`, live call `maybe_generate_signal(..., true)`).
+- Do not rely on `[strategy].qty` in TOML for this strategy's live sizing.
 
 ---
 

@@ -11,6 +11,18 @@ Local validation note:
 - `liveness` endpoints responded correctly;
 - `readiness` can legitimately return `503` outside an active trading session or when the configured instrument is not trading at the current time.
 
+Paper validation snapshot (March 6, 2026):
+
+- strategy: `session_gap_standalone` (`USDRUBF`);
+- reports file: `/opt/trading/volumes/reports/summary0.json`;
+- result: `trades_total=3`, `win_rate=1.0`, `pnl_net_total=204.7248`.
+
+Live micro-account sizing note:
+
+- for `session_gap_standalone`, live order size is forced to `1` in strategy code
+  (`strategy-runtime/src/strategies/session_gap_standalone.rs`, live path calls `maybe_generate_signal(..., true)`).
+- `strategy.qty` in runtime TOML is not the sizing source for this strategy.
+
 ---
 
 ### 1. Prerequisites on VPS

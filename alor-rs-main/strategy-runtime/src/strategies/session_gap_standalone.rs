@@ -328,7 +328,12 @@ impl SessionGapStandaloneStrategy {
         })
     }
 
-    fn maybe_generate_signal(&mut self, bar_dt: DateTime<FixedOffset>, bar: &BarEvent) {
+    fn maybe_generate_signal(
+        &mut self,
+        bar_dt: DateTime<FixedOffset>,
+        bar: &BarEvent,
+        force_single_size: bool,
+    ) {
         if self.traded_session {
             return;
         }
@@ -380,8 +385,12 @@ impl SessionGapStandaloneStrategy {
                 if self.pending_entry.is_some() {
                     return;
                 }
-                let available_cash = self.config.cash_factor * self.cash;
-                let mut size = (available_cash / bar.close).floor() as i64;
+                let mut size = if force_single_size {
+                    1
+                } else {
+                    let available_cash = self.config.cash_factor * self.cash;
+                    (available_cash / bar.close).floor() as i64
+                };
                 if size < 1 {
                     size = 1;
                 }
@@ -662,7 +671,7 @@ impl Strategy for SessionGapStandaloneStrategy {
             if let Some(exit) = self.maybe_close_position(bar_dt, bar) {
                 intents.push(exit);
             }
-            self.maybe_generate_signal(bar_dt, bar);
+            self.maybe_generate_signal(bar_dt, bar, false);
             self.last_processed_bar_ts = Some(bar.close_time_utc);
             self.persist_state_snapshot(current_session_date, phase, bar.close_time_utc);
             return intents;
@@ -676,7 +685,7 @@ impl Strategy for SessionGapStandaloneStrategy {
         }
 
         let phase = self.persisted_phase_or_flat();
-        self.maybe_generate_signal(bar_dt, bar);
+        self.maybe_generate_signal(bar_dt, bar, true);
 
         let mut intents = Vec::new();
         let previous_phase = phase.clone();
