@@ -1,3 +1,4 @@
+pub mod hybrid_intraday;
 pub mod limit_cancel;
 pub mod market_buy_and_close;
 pub mod mock_live_probe;
