@@ -1,0 +1,9 @@
+{
+  "split": "golden",
+  "final_value": 100528.79492857143,
+  "total_return_pct": 0.52879492857143,
+  "annualized_sharpe": 13.707897562379232,
+  "max_drawdown_pct": 0.3448625433178532,
+  "trade_count": 4,
+  "win_rate_pct": 75.0
+}
