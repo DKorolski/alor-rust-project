@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -131,8 +131,8 @@ struct PreparedBarCsv {
     high: f64,
     low: f64,
     close: f64,
-    close_prev: f64,
-    dayrangeprev: f64,
+    close_prev: Option<f64>,
+    dayrangeprev: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -217,6 +217,7 @@ struct Position {
     entry_ts: NaiveDateTime,
     entry_price: f64,
     size: i64,
+    entry_fee: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -279,7 +280,7 @@ fn main() -> Result<()> {
     let mut orchestrator = build_orchestrator();
     let mut state = EngineState::new(cli.cash, cli.commission);
     run_replay(&cli, &bars, &mut orchestrator, &mut state)?;
-    let summary = build_summary(cli.split, cli.cash, &state);
+    let summary = build_summary(cli.split, cli.cash, &bars, &state);
 
     write_outputs(&cli, &state.action_rows, &state.trade_rows, &summary)?;
     let parity = if cli.check && cli.split.has_expected() {
@@ -408,7 +409,7 @@ fn read_prepared_bars(path: &Path, allow_non_strict: bool) -> Result<Vec<Prepare
                 bail!("non-monotonic timestamp: {ts} <= {prev}");
             }
         }
-        for v in [row.open, row.high, row.low, row.close, row.close_prev, row.dayrangeprev] {
+        for v in [row.open, row.high, row.low, row.close] {
             if !v.is_finite() {
                 bail!("non-finite numeric value at {}", row.datetime);
             }
@@ -419,8 +420,8 @@ fn read_prepared_bars(path: &Path, allow_non_strict: bool) -> Result<Vec<Prepare
             high: row.high,
             low: row.low,
             close: row.close,
-            close_prev: row.close_prev,
-            day_range_prev: row.dayrangeprev,
+            close_prev: row.close_prev.unwrap_or(f64::NAN),
+            day_range_prev: row.dayrangeprev.unwrap_or(f64::NAN),
         });
         prev_ts = Some(ts);
     }
@@ -447,6 +448,17 @@ fn run_replay(
             continue;
         }
 
+        if bar.close == 0.0 {
+            continue;
+        }
+
+        if bar.close_prev.is_nan() || bar.day_range_prev.is_nan() {
+            state
+                .equity_curve
+                .push((bar.ts, mark_to_market_equity(state, bar.close)));
+            continue;
+        }
+
         let actions = orchestrator.on_bar(strategy_runtime::strategies::hybrid_intraday::orchestrator::BarInput {
             dt: bar.ts,
             open: bar.open,
@@ -459,6 +471,9 @@ fn run_replay(
             has_live_orders: state.has_live_orders(),
         });
         if is_weekend && matches!(cli.weekend_policy, WeekendPolicy::NoTradeButUpdate) {
+            state
+                .equity_curve
+                .push((bar.ts, mark_to_market_equity(state, bar.close)));
             continue;
         }
 
@@ -569,33 +584,30 @@ fn process_pending_entry(
     if pending.submitted_ts >= bar.ts {
         return;
     }
-    if let Some(valid_until) = pending.valid_until {
-        if bar.ts > valid_until {
-            orchestrator.on_order_rejected("entry");
-            state.pending_entry = None;
-            return;
-        }
-    }
-
     let fill_price = bar.open;
+    let entry_fee = (pending.size.abs() as f64) * fill_price * state.commission;
+    state.cash -= entry_fee;
     state.position = Some(Position {
         owner: pending.owner,
         side: pending.side,
         entry_ts: bar.ts,
         entry_price: fill_price,
         size: pending.size,
+        entry_fee,
     });
     state.pending_entry = None;
     if let (Some(stop), Some(take), Some(valid_until)) =
         (pending.stop_price, pending.take_price, pending.valid_until)
     {
-        state.bracket = Some(ActiveBracket {
-            owner: pending.owner,
-            side: pending.side,
-            stop_price: stop,
-            take_price: take,
-            valid_until,
-        });
+        if bar.ts <= valid_until {
+            state.bracket = Some(ActiveBracket {
+                owner: pending.owner,
+                side: pending.side,
+                stop_price: stop,
+                take_price: take,
+                valid_until,
+            });
+        }
     }
     orchestrator.on_order_filled("entry", pending.owner, Some(pending.side));
 }
@@ -706,10 +718,10 @@ fn close_trade(ts: NaiveDateTime, exit_price: f64, position: &Position, reason: 
     } else {
         (position.entry_price - exit_price) * (-size) as f64
     };
-    let fees =
-        ((size.abs() as f64) * position.entry_price + (size.abs() as f64) * exit_price) * state.commission;
+    let exit_fee = (size.abs() as f64) * exit_price * state.commission;
+    let fees = position.entry_fee + exit_fee;
     let pnl_comm = pnl - fees;
-    state.cash += pnl_comm;
+    state.cash += pnl - exit_fee;
     state.trade_rows.push(TradeRow {
         owner: position.owner.as_str().to_string(),
         side: position.side.as_str().to_string(),
@@ -737,7 +749,12 @@ fn mark_to_market_equity(state: &EngineState, close_price: f64) -> f64 {
     }
 }
 
-fn build_summary(split: Split, initial_cash: f64, state: &EngineState) -> SummaryRow {
+fn build_summary(split: Split, initial_cash: f64, bars: &[PreparedBar], state: &EngineState) -> SummaryRow {
+    let mut all_days = BTreeSet::<NaiveDate>::new();
+    for bar in bars {
+        all_days.insert(bar.ts.date());
+    }
+
     let mut by_day = BTreeMap::<NaiveDate, f64>::new();
     let mut max_equity = initial_cash;
     let mut max_dd = 0.0;
@@ -755,19 +772,11 @@ fn build_summary(split: Split, initial_cash: f64, state: &EngineState) -> Summar
     }
     let mut daily_returns = Vec::new();
     let mut prev = initial_cash;
-    if let (Some(first_day), Some(last_day)) = (by_day.keys().next().copied(), by_day.keys().last().copied())
-    {
-        let mut day = first_day;
-        while day <= last_day {
-            let equity = by_day.get(&day).copied().unwrap_or(prev);
-            let ret = if prev != 0.0 { equity / prev - 1.0 } else { 0.0 };
-            daily_returns.push(ret);
-            prev = equity;
-            if day == last_day {
-                break;
-            }
-            day = day.succ_opt().unwrap_or(day);
-        }
+    for day in all_days {
+        let equity = by_day.get(&day).copied().unwrap_or(prev);
+        let ret = if prev != 0.0 { equity / prev - 1.0 } else { 0.0 };
+        daily_returns.push(ret);
+        prev = equity;
     }
     let mean = if daily_returns.is_empty() {
         0.0
