@@ -172,6 +172,10 @@ pub enum StrategyState {
         #[serde(default)]
         pending_exit_request_id: Option<Uuid>,
         #[serde(default)]
+        safe_mode_close_only: bool,
+        #[serde(default)]
+        safe_mode_reason: Option<String>,
+        #[serde(default)]
         entry_ready: bool,
     },
     CancelSent {

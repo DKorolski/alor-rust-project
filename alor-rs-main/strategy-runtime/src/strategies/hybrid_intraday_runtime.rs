@@ -61,6 +61,8 @@ pub struct HybridIntradayRuntimeStrategy {
     sl_stop_order_id: Option<String>,
     sl_exchange_order_id: Option<i64>,
     active_cycle_id: Option<[u8; 10]>,
+    safe_mode_close_only: bool,
+    safe_mode_reason: Option<String>,
     next_cycle_seq: u32,
     last_bar_close: Option<f64>,
     last_day_local: Option<NaiveDate>,
@@ -99,6 +101,8 @@ impl HybridIntradayRuntimeStrategy {
             sl_stop_order_id: None,
             sl_exchange_order_id: None,
             active_cycle_id: None,
+            safe_mode_close_only: false,
+            safe_mode_reason: None,
             next_cycle_seq: 0,
             last_bar_close: None,
             last_day_local: None,
@@ -345,15 +349,6 @@ impl HybridIntradayRuntimeStrategy {
         intents
     }
 
-    fn infer_owner_for_recovered_position(pos_qty: f64) -> (Owner, Side) {
-        let side = if pos_qty >= 0.0 {
-            Side::Long
-        } else {
-            Side::Short
-        };
-        (Owner::MeanReversion, side)
-    }
-
     fn sync_state(&mut self) {
         self.state = StrategyState::HybridIntradayRuntime {
             active_cycle_id: self.active_cycle_id.map(|v| Self::format_cycle_id(&v)),
@@ -369,8 +364,15 @@ impl HybridIntradayRuntimeStrategy {
                 .map(|v| Self::format_cycle_id(&v.cycle_id)),
             pending_entry_request_id: self.pending_entry_request_id,
             pending_exit_request_id: self.pending_exit_request_id,
+            safe_mode_close_only: self.safe_mode_close_only,
+            safe_mode_reason: self.safe_mode_reason.clone(),
             entry_ready: self.entry_ready,
         };
+    }
+
+    fn enter_safe_mode(&mut self, reason: impl Into<String>) {
+        self.safe_mode_close_only = true;
+        self.safe_mode_reason = Some(reason.into());
     }
 
     fn side_to_order_side(side: Side) -> OrderSide {
@@ -412,7 +414,7 @@ impl HybridIntradayRuntimeStrategy {
     ) -> Vec<Intent> {
         match action {
             Action::SubmitEntry(entry) => {
-                if !self.entry_ready {
+                if !self.entry_ready || self.safe_mode_close_only {
                     return Vec::new();
                 }
                 let cycle_id = self.next_cycle_id(created_ts_utc);
@@ -759,6 +761,40 @@ mod tests {
             )
         }));
     }
+
+    #[test]
+    fn recovered_position_without_owner_enters_safe_mode_and_blocks_entry() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(HybridIntradayRuntimeConfig {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            timezone_offset_hours: 3,
+        });
+        strategy.entry_ready = true;
+        let ctx = test_ctx(Some(0.0));
+        let pos = PositionEvent {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            existing: true,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_200,
+        };
+        let _ = strategy.on_position(&ctx, &pos);
+        assert!(strategy.safe_mode_close_only);
+
+        let intents = strategy.map_action_to_intents(
+            &ctx,
+            1_700_000_260,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Bracket,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: Some(99.0),
+                take_price: Some(101.0),
+            }),
+        );
+        assert!(intents.is_empty());
+    }
 }
 
 impl Strategy for HybridIntradayRuntimeStrategy {
@@ -815,6 +851,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.tp_order_id = None;
                 self.sl_stop_order_id = None;
                 self.sl_exchange_order_id = None;
+                self.enter_safe_mode("entry_rejected");
             } else if matches!(
                 ack.status,
                 AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate
@@ -972,12 +1009,12 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     .on_order_filled("entry", entry.owner, Some(entry.side));
                 intents.extend(self.emit_mr_bracket_intents(ctx, pos, entry));
             } else {
-                let (owner, side) = Self::infer_owner_for_recovered_position(cur);
-                self.current_owner = Some(owner);
-                self.current_side = Some(side);
+                self.current_owner = None;
+                self.current_side = None;
                 if self.active_cycle_id.is_none() {
                     self.active_cycle_id = Some(self.next_cycle_id(pos.ts_utc));
                 }
+                self.enter_safe_mode("recovered_position_owner_unknown");
             }
         } else if prev.abs() > f64::EPSILON && cur.abs() <= f64::EPSILON {
             let closing_side = self.current_side;
@@ -989,6 +1026,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.pending_entry_request_id = None;
             self.pending_exit_request_id = None;
             self.active_cycle_id = None;
+            self.safe_mode_close_only = false;
+            self.safe_mode_reason = None;
             intents.extend(self.emit_cancel_all_protection(closing_side));
         }
         self.last_position_qty = cur;
@@ -1023,6 +1062,12 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         }
         if let Some(position) = snapshot.positions_strategy.get(&self.config.symbol) {
             self.last_position_qty = position.qty;
+            if position.qty.abs() > f64::EPSILON
+                && self.pending_entry.is_none()
+                && self.active_cycle_id.is_none()
+            {
+                self.enter_safe_mode("bootstrap_position_owner_unknown");
+            }
         }
         self.sync_state();
         Vec::new()
@@ -1044,6 +1089,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             pending_entry_cycle_id,
             pending_entry_request_id,
             pending_exit_request_id,
+            safe_mode_close_only,
+            safe_mode_reason,
             entry_ready,
         } = &state
         {
@@ -1071,6 +1118,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             };
             self.pending_entry_request_id = *pending_entry_request_id;
             self.pending_exit_request_id = *pending_exit_request_id;
+            self.safe_mode_close_only = *safe_mode_close_only;
+            self.safe_mode_reason = safe_mode_reason.clone();
             self.entry_ready = *entry_ready;
         }
         self.state = state;
