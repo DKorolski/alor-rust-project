@@ -1463,6 +1463,10 @@ impl StrategyRuntime {
 
     async fn simulate_intents(&mut self, bar: &BarEvent, intents: Vec<Intent>) -> Result<()> {
         for intent in intents {
+            let mut intent = intent;
+            while let Intent::Classified { intent: inner, .. } = intent {
+                intent = *inner;
+            }
             match intent {
                 Intent::Place { price, qty, side } => {
                     let order_id = self.next_sim_order_id;
@@ -1589,6 +1593,7 @@ impl StrategyRuntime {
                         });
                     }
                 }
+                Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
             }
         }
         Ok(())
@@ -2008,7 +2013,15 @@ impl StrategyRuntime {
         order_ids
     }
 
-    fn trading_window_allows_order(&self, ctx: &StrategyCtx, created_ts_utc: i64) -> bool {
+    fn trading_window_allows_order(
+        &self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent_class: alor_protocol::IntentClass,
+    ) -> bool {
+        if !matches!(intent_class, alor_protocol::IntentClass::Entry) {
+            return true;
+        }
         let Some(periods) = &self.config.strategy.trading_periods else {
             return true;
         };
@@ -2080,16 +2093,30 @@ impl StrategyRuntime {
         self.health_snapshot.write().last_intent_ts_utc = Some(created_ts_utc);
         match self.config.trade_mode {
             TradeMode::Live => {
-                if !self.trading_window_allows_order(ctx, created_ts_utc) {
+                let mut accepted = Vec::new();
+                for intent in intents {
+                    let intent_class = self.resolve_intent_class(ctx, &intent);
+                    if !self.trading_window_allows_order(ctx, created_ts_utc, intent_class) {
+                        info!(
+                            action = self.intent_action_name(&intent),
+                            class = ?intent_class,
+                            "intent_dropped_by_trading_window"
+                        );
+                        continue;
+                    }
+                    accepted.push((intent, intent_class));
+                }
+                if accepted.is_empty() {
                     self.persist_state(None).await?;
                     return Ok(());
                 }
                 let decision = self.evaluate_guard_decision();
                 if !decision.allowed {
                     self.log_guard_decision_if_due(&decision)?;
-                    for intent in intents {
+                    for (intent, intent_class) in accepted {
                         info!(
                             action = self.intent_action_name(&intent),
+                            class = ?intent_class,
                             reasons = ?decision.reasons,
                             "intent_dropped_by_guard"
                         );
@@ -2097,9 +2124,10 @@ impl StrategyRuntime {
                     self.persist_state(None).await?;
                     return Ok(());
                 }
-                for intent in intents {
+                for (intent, intent_class) in accepted {
                     let action = self.intent_action_name(&intent);
-                    let command = self.intent_to_command(ctx, created_ts_utc, intent);
+                    let command =
+                        self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
                     info!(
                         action,
                         request_id = %command.request_id,
@@ -2157,13 +2185,16 @@ impl StrategyRuntime {
         ctx: &StrategyCtx,
         created_ts_utc: i64,
         intent: Intent,
+        intent_class: alor_protocol::IntentClass,
     ) -> alor_protocol::OrderCommand {
-        let (action, seq, action_name, intent_class) = match intent {
+        let (action, seq, action_name) = match intent {
+            Intent::Classified { intent, .. } => {
+                return self.intent_to_command(ctx, created_ts_utc, *intent, intent_class);
+            }
             Intent::Place { price, qty, side } => (
                 alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder { price, qty, side }),
                 0,
                 "place",
-                alor_protocol::IntentClass::Entry,
             ),
             Intent::Market {
                 qty,
@@ -2177,13 +2208,11 @@ impl StrategyRuntime {
                     4
                 },
                 "market",
-                alor_protocol::IntentClass::Entry,
             ),
             Intent::Cancel { order_id } => (
                 alor_protocol::CommandAction::Cancel(alor_protocol::CancelOrder { order_id }),
                 1,
                 "cancel",
-                alor_protocol::IntentClass::CancelCleanup,
             ),
             Intent::Replace {
                 order_id,
@@ -2197,7 +2226,6 @@ impl StrategyRuntime {
                 }),
                 2,
                 "replace",
-                alor_protocol::IntentClass::ProtectiveRepair,
             ),
         };
         let request_id = if action_name == "market" {
@@ -2232,6 +2260,32 @@ impl StrategyRuntime {
             action,
             intent_class: Some(intent_class),
             ttl_ms: None,
+        }
+    }
+
+    fn resolve_intent_class(
+        &self,
+        ctx: &StrategyCtx,
+        intent: &Intent,
+    ) -> alor_protocol::IntentClass {
+        if let Some(explicit) = intent.explicit_class() {
+            return explicit;
+        }
+        match intent.base_intent() {
+            Intent::Cancel { .. } => alor_protocol::IntentClass::CancelCleanup,
+            Intent::Replace { .. } => alor_protocol::IntentClass::ProtectiveRepair,
+            Intent::Place { .. } => alor_protocol::IntentClass::Entry,
+            Intent::Market { side, .. } => {
+                let qty = ctx.position_qty.unwrap_or(0.0);
+                if (qty > 0.0 && *side == alor_protocol::Side::Sell)
+                    || (qty < 0.0 && *side == alor_protocol::Side::Buy)
+                {
+                    alor_protocol::IntentClass::Exit
+                } else {
+                    alor_protocol::IntentClass::Entry
+                }
+            }
+            Intent::Classified { intent, .. } => self.resolve_intent_class(ctx, intent),
         }
     }
 
@@ -2439,11 +2493,12 @@ impl StrategyRuntime {
     }
 
     fn intent_action_name(&self, intent: &Intent) -> &'static str {
-        match intent {
+        match intent.base_intent() {
             Intent::Place { .. } => "place",
             Intent::Market { .. } => "market",
             Intent::Cancel { .. } => "cancel",
             Intent::Replace { .. } => "replace",
+            Intent::Classified { .. } => unreachable!("base_intent flattens classified variant"),
         }
     }
 }
@@ -2646,7 +2701,41 @@ mod tests {
             .timestamp();
 
         let ctx = runtime.strategy_ctx();
-        assert!(!runtime.trading_window_allows_order(&ctx, created_ts_utc));
+        assert!(!runtime.trading_window_allows_order(
+            &ctx,
+            created_ts_utc,
+            alor_protocol::IntentClass::Entry
+        ));
+        assert!(runtime.trading_window_allows_order(
+            &ctx,
+            created_ts_utc,
+            alor_protocol::IntentClass::Exit
+        ));
+    }
+
+    #[test]
+    fn market_intent_classified_as_exit_against_open_position() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.state.positions.insert(
+            runtime.config.strategy.symbol.clone(),
+            PositionEvent {
+                symbol: runtime.config.strategy.symbol.clone(),
+                qty: 1.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        let ctx = runtime.strategy_ctx();
+        let intent = Intent::Market {
+            qty: 1.0,
+            side: alor_protocol::Side::Sell,
+            fill_price: None,
+        };
+        assert_eq!(
+            runtime.resolve_intent_class(&ctx, &intent),
+            alor_protocol::IntentClass::Exit
+        );
     }
     #[test]
     fn runtime_scheduler_snapshot_is_unconfigured_when_periods_missing() {
@@ -2925,6 +3014,10 @@ struct VirtualTradeLog {
 
 impl VirtualTradeLog {
     fn from_intent(created_ts_utc: i64, config: &RuntimeConfig, intent: Intent) -> Self {
+        let intent = match intent {
+            Intent::Classified { intent, .. } => *intent,
+            other => other,
+        };
         match intent {
             Intent::Place { price, qty, side } => Self {
                 ts_utc: created_ts_utc,
@@ -2986,6 +3079,7 @@ impl VirtualTradeLog {
                 new_price: Some(new_price),
                 new_qty: Some(new_qty),
             },
+            Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
         }
     }
 }

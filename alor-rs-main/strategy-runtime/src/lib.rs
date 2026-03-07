@@ -23,6 +23,10 @@ use crate::strategies::toy_session_timing::ToySessionTimingConfig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Intent {
+    Classified {
+        intent: Box<Intent>,
+        intent_class: IntentClass,
+    },
     Place {
         price: f64,
         qty: f64,
@@ -41,6 +45,29 @@ pub enum Intent {
         new_price: f64,
         new_qty: f64,
     },
+}
+
+impl Intent {
+    pub fn with_class(self, intent_class: IntentClass) -> Self {
+        Self::Classified {
+            intent: Box::new(self),
+            intent_class,
+        }
+    }
+
+    pub fn explicit_class(&self) -> Option<IntentClass> {
+        match self {
+            Intent::Classified { intent_class, .. } => Some(*intent_class),
+            _ => None,
+        }
+    }
+
+    pub fn base_intent(&self) -> &Intent {
+        match self {
+            Intent::Classified { intent, .. } => intent.base_intent(),
+            _ => self,
+        }
+    }
 }
 
 pub trait Strategy: Send + Sync {
