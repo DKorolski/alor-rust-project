@@ -568,6 +568,10 @@ impl StrategyConfig {
             symbol: self.symbol.clone(),
             qty: self.qty.max(1.0),
             timezone_offset_hours: self.timezone_offset_hours,
+            repair_deadline_sec: 180,
+            max_repair_retries: 3,
+            repair_backoff_base_sec: 5,
+            repair_backoff_max_sec: 60,
         }
     }
 }

@@ -172,6 +172,28 @@ pub enum StrategyState {
         #[serde(default)]
         pending_exit_request_id: Option<Uuid>,
         #[serde(default)]
+        pending_tp_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_sl_request_id: Option<Uuid>,
+        #[serde(default)]
+        tp_order_id: Option<i64>,
+        #[serde(default)]
+        sl_stop_order_id: Option<String>,
+        #[serde(default)]
+        sl_exchange_order_id: Option<i64>,
+        #[serde(default)]
+        mr_take_price: Option<f64>,
+        #[serde(default)]
+        mr_stop_price: Option<f64>,
+        #[serde(default)]
+        repair_deadline_ts: Option<i64>,
+        #[serde(default)]
+        next_repair_at_ts: Option<i64>,
+        #[serde(default)]
+        repair_backoff_level: u32,
+        #[serde(default)]
+        repair_attempts: u32,
+        #[serde(default)]
         safe_mode_close_only: bool,
         #[serde(default)]
         safe_mode_reason: Option<String>,
