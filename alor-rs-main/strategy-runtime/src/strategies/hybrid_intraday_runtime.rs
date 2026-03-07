@@ -234,6 +234,34 @@ mod tests {
         let intents_ready = strategy.map_action_to_intents(&ctx, entry_action);
         assert_eq!(intents_ready.len(), 1);
     }
+
+    #[test]
+    fn ignores_foreign_working_orders_for_live_order_gate() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(HybridIntradayRuntimeConfig {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            timezone_offset_hours: 3,
+        });
+        let ctx = test_ctx(Some(0.0));
+        let _ = strategy.on_order(
+            &ctx,
+            &OrderEvent {
+                order_id: 42,
+                request_id: None,
+                symbol: "IMOEXF".to_string(),
+                status: "working".to_string(),
+                side: "buy".to_string(),
+                order_type: "limit".to_string(),
+                qty: 1.0,
+                filled: 0.0,
+                price: 100.0,
+                existing: false,
+                comment: None,
+                ts_utc: 1,
+            },
+        );
+        assert!(!strategy.has_live_orders());
+    }
 }
 
 impl Strategy for HybridIntradayRuntimeStrategy {
@@ -291,6 +319,10 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         if ord.symbol != self.config.symbol {
             return Vec::new();
         }
+        let is_ours = ord.request_id.is_some();
+        if !is_ours {
+            return Vec::new();
+        }
         let status = ord.status.to_ascii_lowercase();
         if matches!(
             status.as_str(),
@@ -305,6 +337,13 @@ impl Strategy for HybridIntradayRuntimeStrategy {
 
     fn on_stop_order(&mut self, _ctx: &StrategyCtx, ord: &StopOrderEvent) -> Vec<Intent> {
         if ord.symbol != self.config.symbol {
+            return Vec::new();
+        }
+        let is_ours = ord
+            .comment
+            .as_deref()
+            .is_some_and(|comment| comment.contains("HYB|"));
+        if !is_ours {
             return Vec::new();
         }
         let status = ord.status.to_ascii_lowercase();
