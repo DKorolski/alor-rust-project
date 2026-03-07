@@ -1830,6 +1830,9 @@ impl StrategyRuntime {
                         });
                     }
                 }
+                Intent::CreateStopLimit { .. } | Intent::DeleteStopLimit { .. } => {
+                    // Backtest/paper simulator does not emulate broker-side stop-order lifecycle.
+                }
                 Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
             }
         }
@@ -2517,6 +2520,50 @@ impl StrategyRuntime {
                 2,
                 "replace",
             ),
+            Intent::CreateStopLimit {
+                side,
+                qty,
+                trigger_price,
+                price,
+                condition,
+                stop_end_unix_time,
+                comment,
+                instrument_group,
+                check_duplicates,
+            } => (
+                alor_protocol::CommandAction::CreateStopLimit(
+                    alor_protocol::CreateStopLimitOrder {
+                        side,
+                        qty,
+                        trigger_price,
+                        price,
+                        condition,
+                        stop_end_unix_time,
+                        comment: Self::sanitize_comment(
+                            comment.or_else(|| fallback_comment.clone()),
+                        ),
+                        instrument_group,
+                        check_duplicates,
+                    },
+                ),
+                5,
+                "create_stop_limit",
+            ),
+            Intent::DeleteStopLimit {
+                order_id,
+                side,
+                check_duplicates,
+            } => (
+                alor_protocol::CommandAction::DeleteStopLimit(
+                    alor_protocol::DeleteStopLimitOrder {
+                        order_id,
+                        side,
+                        check_duplicates,
+                    },
+                ),
+                6,
+                "delete_stop_limit",
+            ),
         };
         let request_id = if action_name == "market" {
             let side = match &action {
@@ -2601,6 +2648,8 @@ impl StrategyRuntime {
             Intent::Cancel { .. } => alor_protocol::IntentClass::CancelCleanup,
             Intent::Replace { .. } => alor_protocol::IntentClass::Entry,
             Intent::Place { .. } => alor_protocol::IntentClass::Entry,
+            Intent::CreateStopLimit { .. } => alor_protocol::IntentClass::ProtectiveRepair,
+            Intent::DeleteStopLimit { .. } => alor_protocol::IntentClass::CancelCleanup,
             Intent::Market { side, .. } => {
                 let qty = ctx.position_qty.unwrap_or(0.0);
                 if (qty > 0.0 && *side == alor_protocol::Side::Sell)
@@ -2850,6 +2899,8 @@ impl StrategyRuntime {
             Intent::Market { .. } => "market",
             Intent::Cancel { .. } => "cancel",
             Intent::Replace { .. } => "replace",
+            Intent::CreateStopLimit { .. } => "create_stop_limit",
+            Intent::DeleteStopLimit { .. } => "delete_stop_limit",
             Intent::Classified { .. } => unreachable!("base_intent flattens classified variant"),
         }
     }
@@ -3510,6 +3561,32 @@ impl VirtualTradeLog {
                 order_id: Some(order_id),
                 new_price: Some(new_price),
                 new_qty: Some(new_qty),
+            },
+            Intent::CreateStopLimit { .. } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "create_stop_limit".to_string(),
+                qty: None,
+                price: None,
+                side: None,
+                order_id: None,
+                new_price: None,
+                new_qty: None,
+            },
+            Intent::DeleteStopLimit { .. } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "delete_stop_limit".to_string(),
+                qty: None,
+                price: None,
+                side: None,
+                order_id: None,
+                new_price: None,
+                new_qty: None,
             },
             Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
         }

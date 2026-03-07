@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 
-use alor_protocol::{AckStatus, CommandAck, IntentClass, Side as OrderSide};
+use alor_protocol::{AckStatus, CommandAck, IntentClass, Side as OrderSide, StopLimitCondition};
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
 use uuid::Uuid;
 
 use crate::state::StrategyState;
 use crate::strategies::hybrid_intraday::{
-    Action, BreakoutEodMode, HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig,
-    IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine, Owner, Side,
+    Action, BreakoutEodMode, EntryStyle, HybridOrchestrator, HybridOrchestratorConfig,
+    IntradayBreakoutConfig, IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine,
+    Owner, Side,
 };
 use crate::{BarEvent, Intent, OrderEvent, PositionEvent, StopOrderEvent, Strategy, StrategyCtx};
 
@@ -23,18 +24,25 @@ struct PendingEntry {
     owner: Owner,
     side: Side,
     cycle_id: [u8; 10],
+    entry_style: EntryStyle,
+    stop_price: Option<f64>,
+    take_price: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
 struct HybridTag {
     sid: String,
     cycle: String,
+    role: Option<TagRole>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TagRole {
     Entry,
+    Tp,
+    Sl,
     Exit,
+    Cancel,
 }
 
 #[derive(Debug)]
@@ -49,6 +57,9 @@ pub struct HybridIntradayRuntimeStrategy {
     pending_entry: Option<PendingEntry>,
     pending_entry_request_id: Option<Uuid>,
     pending_exit_request_id: Option<Uuid>,
+    tp_order_id: Option<i64>,
+    sl_stop_order_id: Option<String>,
+    sl_exchange_order_id: Option<i64>,
     active_cycle_id: Option<[u8; 10]>,
     next_cycle_seq: u32,
     last_bar_close: Option<f64>,
@@ -84,6 +95,9 @@ impl HybridIntradayRuntimeStrategy {
             pending_entry: None,
             pending_entry_request_id: None,
             pending_exit_request_id: None,
+            tp_order_id: None,
+            sl_stop_order_id: None,
+            sl_exchange_order_id: None,
             active_cycle_id: None,
             next_cycle_seq: 0,
             last_bar_close: None,
@@ -119,7 +133,10 @@ impl HybridIntradayRuntimeStrategy {
     fn role_code(role: TagRole) -> &'static str {
         match role {
             TagRole::Entry => "ENTRY",
+            TagRole::Tp => "TP",
+            TagRole::Sl => "SL",
             TagRole::Exit => "EXIT",
+            TagRole::Cancel => "CANCEL",
         }
     }
 
@@ -162,17 +179,32 @@ impl HybridIntradayRuntimeStrategy {
         }
         let mut sid = None;
         let mut cycle = None;
+        let mut role = None;
         for part in comment.split('|').skip(1) {
             let (key, value) = part.split_once('=')?;
             match key {
                 "sid" => sid = Some(value.to_string()),
                 "c" => cycle = Some(value.to_string()),
+                "o" => {
+                    let _ = value;
+                }
+                "r" => {
+                    role = match value {
+                        "ENTRY" => Some(TagRole::Entry),
+                        "TP" => Some(TagRole::Tp),
+                        "SL" => Some(TagRole::Sl),
+                        "EXIT" => Some(TagRole::Exit),
+                        "CANCEL" => Some(TagRole::Cancel),
+                        _ => None,
+                    }
+                }
                 _ => {}
             }
         }
         Some(HybridTag {
             sid: sid?,
             cycle: cycle?,
+            role,
         })
     }
 
@@ -207,6 +239,110 @@ impl HybridIntradayRuntimeStrategy {
         let role = Self::role_code(role);
         // HYB|sid=<sid>|c=<cycle>|o=<MR|BO>|r=<ENTRY|EXIT>
         format!("HYB|sid={}|c={cycle}|o={owner}|r={role}", ctx.strategy_id)
+    }
+
+    fn stop_side_for_entry_side(side: Side) -> OrderSide {
+        match side {
+            Side::Long => OrderSide::Sell,
+            Side::Short => OrderSide::Buy,
+        }
+    }
+
+    fn stop_condition_for_entry_side(side: Side) -> StopLimitCondition {
+        match side {
+            Side::Long => StopLimitCondition::LessOrEqual,
+            Side::Short => StopLimitCondition::MoreOrEqual,
+        }
+    }
+
+    fn stop_limit_price(stop_side: OrderSide, trigger_price: f64, tick_size: f64) -> f64 {
+        let offset = tick_size.max(0.000_000_1);
+        match stop_side {
+            OrderSide::Buy => trigger_price + offset,
+            OrderSide::Sell => trigger_price - offset,
+        }
+    }
+
+    fn emit_mr_bracket_intents(
+        &mut self,
+        ctx: &StrategyCtx,
+        pos: &PositionEvent,
+        entry: PendingEntry,
+    ) -> Vec<Intent> {
+        if entry.owner != Owner::MeanReversion || entry.entry_style != EntryStyle::Bracket {
+            return Vec::new();
+        }
+        let qty = pos.qty.abs();
+        if qty <= f64::EPSILON {
+            return Vec::new();
+        }
+        let mut intents = Vec::new();
+        if let Some(take_price) = entry.take_price {
+            let tp_side = Self::stop_side_for_entry_side(entry.side);
+            let comment = self.build_comment(ctx, &entry.cycle_id, entry.owner, TagRole::Tp);
+            intents.push(
+                Intent::Place {
+                    price: take_price,
+                    qty,
+                    side: tp_side,
+                    comment: Some(comment),
+                }
+                .with_class(IntentClass::ProtectiveRepair),
+            );
+        }
+        if let Some(stop_price) = entry.stop_price {
+            let stop_side = Self::stop_side_for_entry_side(entry.side);
+            let condition = Self::stop_condition_for_entry_side(entry.side);
+            let limit_price = Self::stop_limit_price(stop_side, stop_price, ctx.tick_size);
+            let comment = self.build_comment(ctx, &entry.cycle_id, entry.owner, TagRole::Sl);
+            intents.push(
+                Intent::CreateStopLimit {
+                    side: stop_side,
+                    qty,
+                    trigger_price: stop_price,
+                    price: limit_price,
+                    condition,
+                    stop_end_unix_time: pos.ts_utc.saturating_add(86_400),
+                    comment: Some(comment),
+                    instrument_group: None,
+                    check_duplicates: Some(true),
+                }
+                .with_class(IntentClass::ProtectiveRepair),
+            );
+        }
+        intents
+    }
+
+    fn emit_cancel_all_protection(&mut self, side: Option<Side>) -> Vec<Intent> {
+        let mut intents = Vec::new();
+        if let Some(tp_order_id) = self.tp_order_id.take() {
+            intents.push(
+                Intent::Cancel {
+                    order_id: tp_order_id,
+                }
+                .with_class(IntentClass::CancelCleanup),
+            );
+        }
+        if let Some(stop_order_id) = self.sl_stop_order_id.take() {
+            let stop_side = side.map(Self::stop_side_for_entry_side);
+            intents.push(
+                Intent::DeleteStopLimit {
+                    order_id: stop_order_id,
+                    side: stop_side,
+                    check_duplicates: Some(true),
+                }
+                .with_class(IntentClass::CancelCleanup),
+            );
+        }
+        if let Some(exchange_order_id) = self.sl_exchange_order_id.take() {
+            intents.push(
+                Intent::Cancel {
+                    order_id: exchange_order_id,
+                }
+                .with_class(IntentClass::CancelCleanup),
+            );
+        }
+        intents
     }
 
     fn infer_owner_for_recovered_position(pos_qty: f64) -> (Owner, Side) {
@@ -284,6 +420,9 @@ impl HybridIntradayRuntimeStrategy {
                     owner: entry.owner,
                     side: entry.side,
                     cycle_id,
+                    entry_style: entry.entry_style,
+                    stop_price: entry.stop_price,
+                    take_price: entry.take_price,
                 });
                 self.pending_entry_request_id = Some(crate::deterministic_market_request_id(
                     &ctx.strategy_id,
@@ -527,6 +666,99 @@ mod tests {
         assert!(strategy.pending_entry.is_none());
         assert!(strategy.pending_entry_request_id.is_none());
     }
+
+    #[test]
+    fn mr_entry_fill_emits_tp_and_sl_protective_intents() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(HybridIntradayRuntimeConfig {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            timezone_offset_hours: 3,
+        });
+        let ctx = test_ctx(Some(0.0));
+        strategy.entry_ready = true;
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            1_700_000_000,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Bracket,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: Some(99.0),
+                take_price: Some(101.0),
+            }),
+        );
+        let pos = PositionEvent {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            existing: false,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_060,
+        };
+        let intents = strategy.on_position(&ctx, &pos);
+        assert_eq!(intents.len(), 2);
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::ProtectiveRepair
+                } if matches!(intent.as_ref(), Intent::Place { .. })
+            )
+        }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::ProtectiveRepair
+                } if matches!(intent.as_ref(), Intent::CreateStopLimit { .. })
+            )
+        }));
+    }
+
+    #[test]
+    fn flat_transition_emits_cancel_all_protection() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(HybridIntradayRuntimeConfig {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            timezone_offset_hours: 3,
+        });
+        strategy.last_position_qty = 1.0;
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.tp_order_id = Some(111);
+        strategy.sl_stop_order_id = Some("abc".to_string());
+        strategy.sl_exchange_order_id = Some(222);
+        let ctx = test_ctx(Some(1.0));
+        let pos = PositionEvent {
+            symbol: "IMOEXF".to_string(),
+            qty: 0.0,
+            existing: false,
+            avg_price: 0.0,
+            ts_utc: 1_700_000_120,
+        };
+        let intents = strategy.on_position(&ctx, &pos);
+        assert_eq!(intents.len(), 3);
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::CancelCleanup
+                } if matches!(intent.as_ref(), Intent::Cancel { order_id: 111 })
+            )
+        }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::CancelCleanup
+                } if matches!(intent.as_ref(), Intent::DeleteStopLimit { order_id, .. } if order_id == "abc")
+            )
+        }));
+    }
 }
 
 impl Strategy for HybridIntradayRuntimeStrategy {
@@ -580,6 +812,9 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.pending_entry = None;
                 self.pending_entry_request_id = None;
                 self.active_cycle_id = None;
+                self.tp_order_id = None;
+                self.sl_stop_order_id = None;
+                self.sl_exchange_order_id = None;
             } else if matches!(
                 ack.status,
                 AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate
@@ -612,7 +847,33 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             return Vec::new();
         }
         self.ensure_active_cycle_from_comment(ord.comment.as_deref());
+        let mut intents = Vec::new();
         let status = ord.status.to_ascii_lowercase();
+        let tag = Self::parse_hybrid_tag(ord.comment.as_deref());
+        if tag.as_ref().and_then(|v| v.role) == Some(TagRole::Tp) {
+            if ord.order_id > 0 {
+                self.tp_order_id = Some(ord.order_id);
+            }
+            if status == "filled" {
+                if let Some(stop_order_id) = self.sl_stop_order_id.take() {
+                    intents.push(
+                        Intent::DeleteStopLimit {
+                            order_id: stop_order_id,
+                            side: self.current_side.map(Self::stop_side_for_entry_side),
+                            check_duplicates: Some(true),
+                        }
+                        .with_class(IntentClass::CancelCleanup),
+                    );
+                }
+                self.sl_exchange_order_id = None;
+            }
+            if matches!(
+                status.as_str(),
+                "filled" | "canceled" | "cancelled" | "expired" | "rejected"
+            ) {
+                self.tp_order_id = None;
+            }
+        }
         if matches!(
             status.as_str(),
             "filled" | "canceled" | "cancelled" | "expired" | "rejected"
@@ -622,7 +883,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.working_orders.insert(ord.order_id);
         }
         self.sync_state();
-        Vec::new()
+        intents
     }
 
     fn on_stop_order(&mut self, ctx: &StrategyCtx, ord: &StopOrderEvent) -> Vec<Intent> {
@@ -634,7 +895,45 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             return Vec::new();
         }
         self.ensure_active_cycle_from_comment(ord.comment.as_deref());
+        let mut intents = Vec::new();
         let status = ord.status.to_ascii_lowercase();
+        let tag = Self::parse_hybrid_tag(ord.comment.as_deref());
+        if tag.as_ref().and_then(|v| v.role) == Some(TagRole::Sl) {
+            if !ord.stop_order_id.trim().is_empty() {
+                self.sl_stop_order_id = Some(ord.stop_order_id.clone());
+            }
+            if let Some(exchange_order_id) = ord.exchange_order_id {
+                self.sl_exchange_order_id = Some(exchange_order_id);
+            }
+            if matches!(
+                status.as_str(),
+                "filled" | "executed" | "triggered" | "done" | "completed"
+            ) {
+                if let Some(tp_order_id) = self.tp_order_id.take() {
+                    intents.push(
+                        Intent::Cancel {
+                            order_id: tp_order_id,
+                        }
+                        .with_class(IntentClass::CancelCleanup),
+                    );
+                }
+            }
+            if matches!(
+                status.as_str(),
+                "filled"
+                    | "canceled"
+                    | "cancelled"
+                    | "expired"
+                    | "rejected"
+                    | "executed"
+                    | "triggered"
+                    | "done"
+                    | "completed"
+            ) {
+                self.sl_stop_order_id = None;
+                self.sl_exchange_order_id = None;
+            }
+        }
         if matches!(
             status.as_str(),
             "filled"
@@ -652,13 +951,14 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.working_stop_orders.insert(ord.stop_order_id.clone());
         }
         self.sync_state();
-        Vec::new()
+        intents
     }
 
-    fn on_position(&mut self, _ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
+    fn on_position(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
         if pos.symbol != self.config.symbol {
             return Vec::new();
         }
+        let mut intents = Vec::new();
         let prev = self.last_position_qty;
         let cur = pos.qty;
         if prev.abs() <= f64::EPSILON && cur.abs() > f64::EPSILON {
@@ -670,6 +970,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.pending_entry_request_id = None;
                 self.orchestrator
                     .on_order_filled("entry", entry.owner, Some(entry.side));
+                intents.extend(self.emit_mr_bracket_intents(ctx, pos, entry));
             } else {
                 let (owner, side) = Self::infer_owner_for_recovered_position(cur);
                 self.current_owner = Some(owner);
@@ -679,6 +980,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 }
             }
         } else if prev.abs() > f64::EPSILON && cur.abs() <= f64::EPSILON {
+            let closing_side = self.current_side;
             let owner = self.current_owner.unwrap_or(Owner::MeanReversion);
             self.orchestrator.on_order_filled("exit", owner, None);
             self.current_owner = None;
@@ -687,10 +989,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.pending_entry_request_id = None;
             self.pending_exit_request_id = None;
             self.active_cycle_id = None;
+            intents.extend(self.emit_cancel_all_protection(closing_side));
         }
         self.last_position_qty = cur;
         self.sync_state();
-        Vec::new()
+        intents
     }
 
     fn on_bootstrap_snapshot(
@@ -760,6 +1063,9 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     owner,
                     side,
                     cycle_id,
+                    entry_style: EntryStyle::Market,
+                    stop_price: None,
+                    take_price: None,
                 }),
                 _ => None,
             };

@@ -48,6 +48,22 @@ pub enum Intent {
         new_price: f64,
         new_qty: f64,
     },
+    CreateStopLimit {
+        side: Side,
+        qty: f64,
+        trigger_price: f64,
+        price: f64,
+        condition: alor_protocol::StopLimitCondition,
+        stop_end_unix_time: i64,
+        comment: Option<String>,
+        instrument_group: Option<String>,
+        check_duplicates: Option<bool>,
+    },
+    DeleteStopLimit {
+        order_id: String,
+        side: Option<Side>,
+        check_duplicates: Option<bool>,
+    },
 }
 
 impl Intent {
