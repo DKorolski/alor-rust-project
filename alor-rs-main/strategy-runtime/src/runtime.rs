@@ -21,13 +21,14 @@ use crate::state::{RuntimeState, StrategyState};
 use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
 use crate::strategies::mock_live_probe::MockLiveProbeStrategy;
+use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeStrategy;
 use crate::strategies::session_gap_standalone::SessionGapStandaloneStrategy;
 use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PaperConfig,
     PaperOutput, PositionEvent, RuntimeConfig, RuntimeHealthSnapshot, RuntimeStateRestored,
-    Strategy, StrategyCtx, StrategyKind, TradeEvent, TradeMode,
+    StopOrderEvent, Strategy, StrategyCtx, StrategyKind, TradeEvent, TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -38,6 +39,17 @@ const SNAPSHOT_SCAN_COUNT: usize = 200;
 const TRADE_DEDUP_LIMIT: usize = 512;
 const NON_WORKING_ORDER_STATUSES: [&str; 5] =
     ["filled", "canceled", "cancelled", "expired", "rejected"];
+const NON_WORKING_STOP_ORDER_STATUSES: [&str; 9] = [
+    "canceled",
+    "cancelled",
+    "rejected",
+    "expired",
+    "filled",
+    "executed",
+    "triggered",
+    "done",
+    "completed",
+];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
@@ -55,6 +67,11 @@ struct RuntimeStateSnapshot {
 #[derive(Debug, Deserialize)]
 struct OrdersSnapshot {
     pub orders: HashMap<i64, OrderEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StopOrdersSnapshot {
+    pub stop_orders: HashMap<String, StopOrderEvent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,6 +310,9 @@ impl StrategyRuntime {
             )),
             StrategyKind::MockLiveProbe => Box::new(MockLiveProbeStrategy::new(
                 config.strategy.to_mock_live_probe_config(),
+            )),
+            StrategyKind::HybridIntraday => Box::new(HybridIntradayRuntimeStrategy::new(
+                config.strategy.to_hybrid_intraday_runtime_config(),
             )),
         };
         let now = chrono::Utc::now().timestamp();
@@ -597,7 +617,7 @@ impl StrategyRuntime {
 
         self.recover_pending(&streams.acks, MessageType::CommandAck, trim_acks)
             .await?;
-        self.recover_pending(&streams.orders, MessageType::Order, trim_orders)
+        self.recover_pending_orders_stream(&streams.orders, trim_orders)
             .await?;
         self.recover_pending(&streams.trades, MessageType::Trade, trim_trades)
             .await?;
@@ -656,6 +676,7 @@ impl StrategyRuntime {
             .xrevrange_last_n(stream, SNAPSHOT_SCAN_COUNT)
             .await?;
         let mut orders_snapshot: Option<OrdersSnapshot> = None;
+        let mut stop_orders_snapshot: Option<StopOrdersSnapshot> = None;
         let mut positions_snapshot: Option<PositionsSnapshot> = None;
         for payload in payloads {
             let envelope = match serde_json::from_str::<Envelope<serde_json::Value>>(&payload) {
@@ -686,9 +707,22 @@ impl StrategyRuntime {
                         }
                     }
                 }
+                MessageType::SnapshotStopOrders if stop_orders_snapshot.is_none() => {
+                    match serde_json::from_str::<Envelope<StopOrdersSnapshot>>(&payload) {
+                        Ok(envelope) => {
+                            stop_orders_snapshot = Some(envelope.payload);
+                        }
+                        Err(error) => {
+                            warn!(?error, "failed to parse stop-orders snapshot");
+                        }
+                    }
+                }
                 _ => {}
             }
-            if orders_snapshot.is_some() && positions_snapshot.is_some() {
+            if orders_snapshot.is_some()
+                && positions_snapshot.is_some()
+                && stop_orders_snapshot.is_some()
+            {
                 break;
             }
         }
@@ -696,6 +730,7 @@ impl StrategyRuntime {
         let strategy_symbol = self.config.strategy.symbol.clone();
         let mut positions_strategy = HashMap::new();
         let mut working_orders_strategy = HashMap::new();
+        let mut working_stop_orders_strategy = HashMap::new();
         let mut snapshot_ts_utc = None;
         let mut positions_total_all = 0usize;
         let mut positions_open_all = 0usize;
@@ -705,6 +740,10 @@ impl StrategyRuntime {
         let mut orders_open_all = 0usize;
         let mut orders_total_strategy = 0usize;
         let mut orders_open_strategy = 0usize;
+        let mut stop_orders_total_all = 0usize;
+        let mut stop_orders_open_all = 0usize;
+        let mut stop_orders_total_strategy = 0usize;
+        let mut stop_orders_open_strategy = 0usize;
 
         if let Some(snapshot) = orders_snapshot {
             let mut strategy_orders = HashMap::new();
@@ -730,6 +769,31 @@ impl StrategyRuntime {
             }
             self.state.orders = strategy_orders;
             self.bootstrap_state.orders_snapshot_loaded = true;
+        }
+        if let Some(snapshot) = stop_orders_snapshot {
+            let mut strategy_stop_orders = HashMap::new();
+            for (stop_order_id, stop_order) in snapshot.stop_orders {
+                stop_orders_total_all += 1;
+                if self.is_working_stop_order(&stop_order) {
+                    stop_orders_open_all += 1;
+                }
+                if stop_order.symbol == strategy_symbol {
+                    if self.is_working_stop_order(&stop_order) {
+                        stop_orders_open_strategy += 1;
+                        working_stop_orders_strategy
+                            .insert(stop_order_id.clone(), stop_order.clone());
+                    }
+                    stop_orders_total_strategy += 1;
+                    if stop_order.ts_utc > 0 {
+                        snapshot_ts_utc = Some(
+                            snapshot_ts_utc
+                                .map_or(stop_order.ts_utc, |ts: i64| ts.max(stop_order.ts_utc)),
+                        );
+                    }
+                    strategy_stop_orders.insert(stop_order_id, stop_order);
+                }
+            }
+            self.state.stop_orders = strategy_stop_orders;
         }
         if let Some(snapshot) = positions_snapshot {
             let mut strategy_positions = HashMap::new();
@@ -768,6 +832,10 @@ impl StrategyRuntime {
                 orders_open_all,
                 orders_total_strategy,
                 orders_open_strategy,
+                stop_orders_total_all,
+                stop_orders_open_all,
+                stop_orders_total_strategy,
+                stop_orders_open_strategy,
                 "bootstrap: snapshots filtered"
             );
             self.log_bootstrap_dump(
@@ -780,6 +848,7 @@ impl StrategyRuntime {
             self.bootstrap_snapshot = Some(BootstrapSnapshot {
                 positions_strategy,
                 working_orders_strategy,
+                working_stop_orders_strategy,
                 snapshot_ts_utc,
             });
         }
@@ -912,6 +981,33 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    async fn recover_pending_orders_stream(&mut self, stream: &str, trim_maxlen: usize) -> Result<()> {
+        let mut start = "0-0".to_string();
+        for _ in 0..MAX_PENDING_LOOPS {
+            let reply = match self
+                .transport
+                .claim_idle(stream, &start, self.config.read.claim_batch)
+                .await
+            {
+                Ok(reply) => reply,
+                Err(error) => {
+                    warn!(?error, stream, "orders pending autoclaim failed");
+                    break;
+                }
+            };
+            let (next_start, entries) = self.transport.parse_autoclaim_entries(stream, reply);
+            if entries.is_empty() {
+                break;
+            }
+            start = next_start;
+            for entry in entries {
+                self.decode_and_dispatch_orders_entry(stream, trim_maxlen, entry)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn poll_once(&mut self) -> Result<()> {
         let streams = self.config.streams.clone();
         let trim_acks = self.config.trim.acks;
@@ -922,7 +1018,7 @@ impl StrategyRuntime {
 
         self.drain_stream(&streams.acks, MessageType::CommandAck, trim_acks, 10)
             .await?;
-        self.drain_stream(&streams.orders, MessageType::Order, trim_orders, 10)
+        self.drain_orders_stream(&streams.orders, trim_orders, 10)
             .await?;
         self.drain_stream(&streams.trades, MessageType::Trade, trim_trades, 10)
             .await?;
@@ -985,6 +1081,105 @@ impl StrategyRuntime {
                     self.metrics.bars_decode_failed_total.saturating_add(1);
             }
         }
+        Ok(())
+    }
+
+    async fn drain_orders_stream(
+        &mut self,
+        stream: &str,
+        trim_maxlen: usize,
+        count: usize,
+    ) -> Result<()> {
+        let reply = match self.transport.read_group(stream, count).await {
+            Ok(reply) => reply,
+            Err(error) => {
+                warn!(?error, stream, "orders xreadgroup failed");
+                self.metrics.redis_read_errors_total =
+                    self.metrics.redis_read_errors_total.saturating_add(1);
+                return Ok(());
+            }
+        };
+        let entries = self.transport.parse_read_group_entries(stream, reply);
+        if entries.is_empty() {
+            self.metrics.redis_empty_polls_total =
+                self.metrics.redis_empty_polls_total.saturating_add(1);
+            return Ok(());
+        }
+        for entry in entries {
+            self.decode_and_dispatch_orders_entry(stream, trim_maxlen, entry)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn decode_and_dispatch_orders_entry(
+        &mut self,
+        stream: &str,
+        trim_maxlen: usize,
+        entry: crate::redis_transport::RedisStreamMessage,
+    ) -> Result<()> {
+        let message_id = entry.id;
+        let payload = entry.payload;
+        if payload.is_empty() {
+            self.transport
+                .write_dlq(stream, &message_id, &payload, "missing_payload", trim_maxlen)
+                .await?;
+            self.transport.xack(stream, &message_id).await?;
+            return Ok(());
+        }
+
+        let envelope: Envelope<serde_json::Value> = match serde_json::from_str(&payload) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                let reason = format!("parse_error: {error}");
+                self.transport
+                    .write_dlq(stream, &message_id, &payload, &reason, trim_maxlen)
+                    .await?;
+                self.transport.xack(stream, &message_id).await?;
+                return Ok(());
+            }
+        };
+        if envelope.schema_version > alor_protocol::SCHEMA_VERSION {
+            self.transport
+                .write_dlq(
+                    stream,
+                    &message_id,
+                    &payload,
+                    "unsupported_schema",
+                    trim_maxlen,
+                )
+                .await?;
+            self.transport.xack(stream, &message_id).await?;
+            return Ok(());
+        }
+
+        let message = RuntimeMessage {
+            stream: stream.to_string(),
+            message_id,
+            payload: envelope.payload,
+        };
+
+        match envelope.msg_type {
+            MessageType::Order => self.dispatch_message(message).await?,
+            MessageType::StopOrder => {
+                let stop_order: StopOrderEvent = serde_json::from_value(message.payload)?;
+                self.handle_stop_order(message.stream, message.message_id, stop_order)
+                    .await?;
+            }
+            _ => {
+                self.transport
+                    .write_dlq(
+                        stream,
+                        &message.message_id,
+                        &payload,
+                        "unexpected_msg_type",
+                        trim_maxlen,
+                    )
+                    .await?;
+                self.transport.xack(stream, &message.message_id).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1103,6 +1298,32 @@ impl StrategyRuntime {
         self.apply_intents(&ctx, event_ts, intents).await?;
         self.update_ledger_from_order(&order)?;
         self.state.orders.insert(order.order_id, order);
+        self.transport.xack(&stream, &message_id).await?;
+        Ok(())
+    }
+
+    async fn handle_stop_order(
+        &mut self,
+        stream: String,
+        message_id: String,
+        stop_order: StopOrderEvent,
+    ) -> Result<()> {
+        if self.config.trade_mode != TradeMode::Live {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        if stop_order.symbol != self.config.strategy.symbol {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        let event_ts = self.normalize_event_ts(stop_order.ts_utc);
+        let ctx = self.strategy_ctx();
+        let intents = self.strategy.on_stop_order(&ctx, &stop_order);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.apply_intents(&ctx, event_ts, intents).await?;
+        self.state
+            .stop_orders
+            .insert(stop_order.stop_order_id.clone(), stop_order);
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
     }
@@ -1912,6 +2133,14 @@ impl StrategyRuntime {
         !NON_WORKING_ORDER_STATUSES.contains(&status.as_str())
     }
 
+    fn is_working_stop_order(&self, order: &StopOrderEvent) -> bool {
+        if order.stop_order_id.trim().is_empty() {
+            return false;
+        }
+        let status = order.status.to_lowercase();
+        !NON_WORKING_STOP_ORDER_STATUSES.contains(&status.as_str())
+    }
+
     fn log_bootstrap_dump(
         &self,
         positions_strategy: &HashMap<String, PositionEvent>,
@@ -1958,6 +2187,7 @@ impl StrategyRuntime {
             positions_open_strategy,
             orders_open_strategy,
             open_order_excluded_statuses = ?NON_WORKING_ORDER_STATUSES,
+            open_stop_order_excluded_statuses = ?NON_WORKING_STOP_ORDER_STATUSES,
             "bootstrap_dump"
         );
     }
@@ -3102,6 +3332,35 @@ mod tests {
             assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
             assert_eq!(runtime.ledger.order(1).unwrap().price, 11.0);
         });
+    }
+
+    #[test]
+    fn stop_order_working_status_table() {
+        let runtime = test_runtime(TradeMode::Live);
+        let mk = |status: &str| StopOrderEvent {
+            stop_order_id: "s1".to_string(),
+            exchange_order_id: None,
+            symbol: "SBER".to_string(),
+            status: status.to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            filled: 0.0,
+            stop_price: 100.0,
+            price: 101.0,
+            existing: false,
+            comment: None,
+            end_time: None,
+            ts_utc: 1,
+        };
+
+        assert!(runtime.is_working_stop_order(&mk("working")));
+        assert!(runtime.is_working_stop_order(&mk("new")));
+        assert!(!runtime.is_working_stop_order(&mk("canceled")));
+        assert!(!runtime.is_working_stop_order(&mk("rejected")));
+        assert!(!runtime.is_working_stop_order(&mk("expired")));
+        assert!(!runtime.is_working_stop_order(&mk("executed")));
+        assert!(!runtime.is_working_stop_order(&mk("triggered")));
+        assert!(!runtime.is_working_stop_order(&mk("done")));
     }
 }
 

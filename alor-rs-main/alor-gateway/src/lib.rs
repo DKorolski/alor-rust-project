@@ -18,4 +18,5 @@ pub mod ws_subscriptions;
 pub mod state {
     pub mod orders_manager;
     pub mod positions_manager;
+    pub mod stop_orders_manager;
 }

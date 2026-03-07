@@ -159,6 +159,25 @@ cargo run -p alor-gateway --bin stop_limit_smoke -- \
   --limit-price 999
 ```
 
+StopOrders WS smoke (subscribe + verify status lifecycle for created stop order):
+
+```bash
+cargo run -p alor-gateway --bin stop_orders_ws_smoke -- \
+  --config ./configs/gateway.live.toml \
+  --live-confirm \
+  --symbol IMOEXF \
+  --side buy \
+  --qty 1 \
+  --trigger-price 1000 \
+  --limit-price 999
+```
+
+Runtime/Event bus contract note:
+
+- `streams.orders` now carries both `Order` and `StopOrder` envelopes.
+- Consumers must route by `message_type` (`order` vs `stop_order`).
+- Unknown `message_type` must be ignored (or sent to DLQ), not treated as hard failure.
+
 Интеграционные тесты gateway (`alor-gateway/tests/redis_transport.rs`) используют `testcontainers` и требуют установленный Docker.
 
 ## Лицензия и дисклеймер

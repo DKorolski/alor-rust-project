@@ -1438,6 +1438,7 @@ mod tests {
                 },
             )]),
             working_orders_strategy: std::collections::HashMap::new(),
+            working_stop_orders_strategy: std::collections::HashMap::new(),
             snapshot_ts_utc: Some(ts_snapshot),
         };
 
@@ -1519,6 +1520,7 @@ mod tests {
                 },
             )]),
             working_orders_strategy: std::collections::HashMap::new(),
+            working_stop_orders_strategy: std::collections::HashMap::new(),
             snapshot_ts_utc: Some(ts_snapshot),
         };
         let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);

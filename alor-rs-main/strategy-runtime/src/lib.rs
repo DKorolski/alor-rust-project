@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::strategies::limit_cancel::LimitCancelConfig;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseConfig;
 use crate::strategies::mock_live_probe::{MockLiveProbeConfig, MockLiveProbeMode};
+use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeConfig;
 use crate::strategies::session_gap_standalone::SessionGapStandaloneConfig;
 use crate::strategies::toy_session_timing::ToySessionTimingConfig;
 
@@ -74,6 +75,9 @@ pub trait Strategy: Send + Sync {
     fn on_bar(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent>;
     fn on_ack(&mut self, ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent>;
     fn on_order(&mut self, ctx: &StrategyCtx, ord: &OrderEvent) -> Vec<Intent>;
+    fn on_stop_order(&mut self, _ctx: &StrategyCtx, _ord: &StopOrderEvent) -> Vec<Intent> {
+        Vec::new()
+    }
     fn on_position(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent>;
     fn on_bootstrap_snapshot(
         &mut self,
@@ -185,6 +189,35 @@ pub struct TradeEvent {
     pub ts_utc: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StopOrderEvent {
+    pub stop_order_id: String,
+    #[serde(default)]
+    pub exchange_order_id: Option<i64>,
+    #[serde(default)]
+    pub symbol: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub side: String,
+    #[serde(default)]
+    pub qty: f64,
+    #[serde(default)]
+    pub filled: f64,
+    #[serde(default)]
+    pub stop_price: f64,
+    #[serde(default)]
+    pub price: f64,
+    #[serde(default)]
+    pub existing: bool,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub end_time: Option<i64>,
+    #[serde(default)]
+    pub ts_utc: i64,
+}
+
 impl Default for OrderEvent {
     fn default() -> Self {
         Self {
@@ -281,6 +314,7 @@ pub struct RuntimeHealthSnapshot {
 pub struct BootstrapSnapshot {
     pub positions_strategy: HashMap<String, PositionEvent>,
     pub working_orders_strategy: HashMap<i64, OrderEvent>,
+    pub working_stop_orders_strategy: HashMap<String, StopOrderEvent>,
     pub snapshot_ts_utc: Option<i64>,
 }
 
@@ -385,6 +419,7 @@ pub enum StrategyKind {
     ToySessionTiming,
     SessionGapStandalone,
     MockLiveProbe,
+    HybridIntraday,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -507,6 +542,14 @@ impl StrategyConfig {
             cash_factor: self.session_gap_cash_factor,
             start_cash: self.session_gap_start_cash,
             max_entry_hour: self.session_gap_max_entry_hour,
+        }
+    }
+
+    pub fn to_hybrid_intraday_runtime_config(&self) -> HybridIntradayRuntimeConfig {
+        HybridIntradayRuntimeConfig {
+            symbol: self.symbol.clone(),
+            qty: self.qty.max(1.0),
+            timezone_offset_hours: self.timezone_offset_hours,
         }
     }
 }

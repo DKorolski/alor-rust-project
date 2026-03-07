@@ -4,7 +4,7 @@ use alor_protocol::Side;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{OrderEvent, PositionEvent};
+use crate::{OrderEvent, PositionEvent, StopOrderEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionGapLivePhase {
@@ -165,6 +165,8 @@ pub struct RuntimeState {
     pub last_processed_bar_ts: HashMap<String, i64>,
     pub strategy_state: StrategyState,
     pub orders: HashMap<i64, OrderEvent>,
+    #[serde(default)]
+    pub stop_orders: HashMap<String, StopOrderEvent>,
     pub positions: HashMap<String, PositionEvent>,
     pub last_trade_ts: Option<i64>,
     pub last_trade_id: Option<String>,
