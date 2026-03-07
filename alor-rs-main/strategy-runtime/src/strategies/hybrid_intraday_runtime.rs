@@ -37,6 +37,7 @@ struct PendingEntry {
 struct HybridTag {
     sid: String,
     cycle: String,
+    owner: Option<Owner>,
     role: Option<TagRole>,
 }
 
@@ -203,6 +204,7 @@ impl HybridIntradayRuntimeStrategy {
         }
         let mut sid = None;
         let mut cycle = None;
+        let mut owner = None;
         let mut role = None;
         for part in comment.split('|').skip(1) {
             let (key, value) = part.split_once('=')?;
@@ -210,7 +212,11 @@ impl HybridIntradayRuntimeStrategy {
                 "sid" => sid = Some(value.to_string()),
                 "c" => cycle = Some(value.to_string()),
                 "o" => {
-                    let _ = value;
+                    owner = match value {
+                        "MR" => Some(Owner::MeanReversion),
+                        "BO" => Some(Owner::IntradayBreakout),
+                        _ => None,
+                    };
                 }
                 "r" => {
                     role = match value {
@@ -228,6 +234,7 @@ impl HybridIntradayRuntimeStrategy {
         Some(HybridTag {
             sid: sid?,
             cycle: cycle?,
+            owner,
             role,
         })
     }
@@ -700,6 +707,10 @@ mod tests {
         ctx
     }
 
+    fn tag(owner: &str, cycle: &str, role: &str) -> String {
+        format!("HYB|sid=hyb-test|c={cycle}|o={owner}|r={role}")
+    }
+
     #[test]
     fn submit_exit_uses_current_position_qty_without_flip() {
         let mut cfg = test_config();
@@ -963,6 +974,138 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_adopts_working_mr_bracket_and_skips_repair() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        let mut snapshot = crate::BootstrapSnapshot {
+            positions_strategy: std::collections::HashMap::new(),
+            working_orders_strategy: std::collections::HashMap::new(),
+            working_stop_orders_strategy: std::collections::HashMap::new(),
+            snapshot_ts_utc: Some(1_700_000_300),
+        };
+        snapshot.positions_strategy.insert(
+            "IMOEXF".to_string(),
+            PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: 1.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_300,
+            },
+        );
+        snapshot.working_orders_strategy.insert(
+            111,
+            OrderEvent {
+                order_id: 111,
+                request_id: None,
+                symbol: "IMOEXF".to_string(),
+                status: "working".to_string(),
+                side: "sell".to_string(),
+                order_type: "limit".to_string(),
+                qty: 1.0,
+                filled: 0.0,
+                price: 101.0,
+                existing: true,
+                comment: Some(tag("MR", "abc1230001", "TP")),
+                ts_utc: 1_700_000_301,
+            },
+        );
+        snapshot.working_stop_orders_strategy.insert(
+            "sl-1".to_string(),
+            StopOrderEvent {
+                stop_order_id: "sl-1".to_string(),
+                exchange_order_id: Some(222),
+                symbol: "IMOEXF".to_string(),
+                status: "working".to_string(),
+                side: "sell".to_string(),
+                qty: 1.0,
+                filled: 0.0,
+                stop_price: 99.0,
+                price: 98.5,
+                existing: true,
+                comment: Some(tag("MR", "abc1230001", "SL")),
+                end_time: Some(1_700_086_400),
+                ts_utc: 1_700_000_301,
+            },
+        );
+
+        let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);
+        assert!(!strategy.safe_mode_close_only);
+        assert_eq!(strategy.current_owner, Some(Owner::MeanReversion));
+        assert_eq!(strategy.current_side, Some(Side::Long));
+        assert_eq!(strategy.tp_order_id, Some(111));
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+        assert_eq!(strategy.sl_exchange_order_id, Some(222));
+
+        let intents = strategy.maybe_emit_repair_intents(&ctx, 1_700_000_305);
+        assert!(intents.is_empty());
+    }
+
+    #[test]
+    fn stop_order_lag_event_adopts_sl_state() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.pending_sl_request_id = Some(uuid::Uuid::new_v4());
+
+        let intents = strategy.on_stop_order(
+            &ctx,
+            &StopOrderEvent {
+                stop_order_id: "sl-lag".to_string(),
+                exchange_order_id: Some(333),
+                symbol: "IMOEXF".to_string(),
+                status: "working".to_string(),
+                side: "sell".to_string(),
+                qty: 1.0,
+                filled: 0.0,
+                stop_price: 99.0,
+                price: 98.5,
+                existing: false,
+                comment: Some(tag("MR", "abc1230001", "SL")),
+                end_time: None,
+                ts_utc: 1_700_000_320,
+            },
+        );
+        assert!(intents.is_empty());
+        assert!(strategy.pending_sl_request_id.is_none());
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-lag"));
+        assert_eq!(strategy.sl_exchange_order_id, Some(333));
+        assert!(strategy.working_stop_orders.contains("sl-lag"));
+    }
+
+    #[test]
+    fn bootstrap_open_position_without_owner_enters_safe_mode_even_with_cycle() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        let ctx = test_ctx(Some(1.0));
+        let mut snapshot = crate::BootstrapSnapshot {
+            positions_strategy: std::collections::HashMap::new(),
+            working_orders_strategy: std::collections::HashMap::new(),
+            working_stop_orders_strategy: std::collections::HashMap::new(),
+            snapshot_ts_utc: Some(1_700_000_400),
+        };
+        snapshot.positions_strategy.insert(
+            "IMOEXF".to_string(),
+            PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: 1.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_400,
+            },
+        );
+
+        let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("bootstrap_position_owner_unknown")
+        );
+    }
+
+    #[test]
     fn repair_is_deferred_with_backoff_when_gateway_not_live_ready() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.current_owner = Some(Owner::MeanReversion);
@@ -981,6 +1124,63 @@ mod tests {
         let next = strategy.next_repair_at_ts.unwrap_or_default();
         let intents_again = strategy.maybe_emit_repair_intents(&ctx, next.saturating_sub(1));
         assert!(intents_again.is_empty());
+    }
+
+    #[test]
+    fn repair_deadline_forces_market_exit_and_safe_mode() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(strategy.next_cycle_id(1_700_000_000));
+        strategy.mr_take_price = Some(101.0);
+        strategy.mr_stop_price = Some(99.0);
+        strategy.repair_deadline_ts = Some(1_700_000_100);
+        let ctx = test_ctx(Some(2.0));
+        let intents = strategy.maybe_emit_repair_intents(&ctx, 1_700_000_101);
+        assert_eq!(intents.len(), 1);
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("repair_deadline_force_flatten")
+        );
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Classified {
+                intent,
+                intent_class: IntentClass::Exit
+            }] if matches!(intent.as_ref(), Intent::Market { qty, side: OrderSide::Sell, .. } if (*qty - 2.0).abs() <= f64::EPSILON)
+        ));
+    }
+
+    #[test]
+    fn repair_retries_exhausted_enters_safe_mode() {
+        let mut cfg = test_config();
+        cfg.max_repair_retries = 1;
+        cfg.repair_backoff_base_sec = 1;
+        cfg.repair_backoff_max_sec = 1;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(strategy.next_cycle_id(1_700_000_000));
+        strategy.mr_take_price = Some(101.0);
+        strategy.mr_stop_price = Some(99.0);
+        strategy.repair_deadline_ts = Some(1_700_010_000);
+        let ctx = test_ctx(Some(1.0));
+        let first = strategy.maybe_emit_repair_intents(&ctx, 1_700_000_100);
+        assert!(!first.is_empty());
+        let tp_req = strategy.pending_tp_request_id.expect("tp req");
+        let sl_req = strategy.pending_sl_request_id.expect("sl req");
+        let _ = strategy.on_ack(&ctx, &CommandAck::rejected(tp_req, "x", "y"));
+        let _ = strategy.on_ack(&ctx, &CommandAck::rejected(sl_req, "x", "y"));
+        strategy.repair_deadline_ts = None;
+        let next_repair_at = strategy.next_repair_at_ts.unwrap_or(i64::MAX - 1);
+        let second = strategy.maybe_emit_repair_intents(&ctx, next_repair_at);
+        assert!(second.is_empty());
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("repair_retries_exhausted")
+        );
     }
 }
 
@@ -1266,6 +1466,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
     ) -> Vec<Intent> {
         self.working_orders.clear();
         self.working_stop_orders.clear();
+        self.tp_order_id = None;
+        self.sl_stop_order_id = None;
+        self.sl_exchange_order_id = None;
+        let mut owner_from_tags: Option<Owner> = None;
+
         for (order_id, order) in &snapshot.working_orders_strategy {
             if order.symbol != self.config.symbol {
                 continue;
@@ -1273,6 +1478,16 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             if self.is_our_tag(ctx, order.comment.as_deref()) {
                 self.working_orders.insert(*order_id);
                 self.ensure_active_cycle_from_comment(order.comment.as_deref());
+                if let Some(tag) = Self::parse_hybrid_tag(order.comment.as_deref()) {
+                    if owner_from_tags.is_none() {
+                        owner_from_tags = tag.owner;
+                    } else if tag.owner.is_some() && tag.owner != owner_from_tags {
+                        self.enter_safe_mode("bootstrap_conflicting_owner_tags");
+                    }
+                    if tag.role == Some(TagRole::Tp) {
+                        self.tp_order_id = Some(*order_id);
+                    }
+                }
             }
         }
         for (stop_order_id, stop_order) in &snapshot.working_stop_orders_strategy {
@@ -1282,13 +1497,34 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             if self.is_our_tag(ctx, stop_order.comment.as_deref()) {
                 self.working_stop_orders.insert(stop_order_id.clone());
                 self.ensure_active_cycle_from_comment(stop_order.comment.as_deref());
+                if let Some(tag) = Self::parse_hybrid_tag(stop_order.comment.as_deref()) {
+                    if owner_from_tags.is_none() {
+                        owner_from_tags = tag.owner;
+                    } else if tag.owner.is_some() && tag.owner != owner_from_tags {
+                        self.enter_safe_mode("bootstrap_conflicting_owner_tags");
+                    }
+                    if tag.role == Some(TagRole::Sl) {
+                        self.sl_stop_order_id = Some(stop_order_id.clone());
+                        self.sl_exchange_order_id = stop_order.exchange_order_id;
+                    }
+                }
             }
+        }
+        if self.current_owner.is_none() {
+            self.current_owner = owner_from_tags;
         }
         if let Some(position) = snapshot.positions_strategy.get(&self.config.symbol) {
             self.last_position_qty = position.qty;
+            if self.current_side.is_none() && position.qty.abs() > f64::EPSILON {
+                self.current_side = Some(if position.qty >= 0.0 {
+                    Side::Long
+                } else {
+                    Side::Short
+                });
+            }
             if position.qty.abs() > f64::EPSILON
                 && self.pending_entry.is_none()
-                && self.active_cycle_id.is_none()
+                && self.current_owner.is_none()
             {
                 self.enter_safe_mode("bootstrap_position_owner_unknown");
             }
