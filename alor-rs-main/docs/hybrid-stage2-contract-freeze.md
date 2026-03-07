@@ -13,7 +13,7 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
 - `valid_until`, `cooldown_until`, `repair_deadline`, `sl_escalate_timeout` are stored and compared in event-time domain.
 - Runtime keeps monotonic strategy time:
   - `strategy_now_ts_utc = max(last_now_ts_utc, event_ts_utc)`,
-  - ignore invalid timestamps (`ts <= 0`).
+  - if `event_ts_utc <= 0`: set `event_ts_utc = last_now_ts_utc` (no time advance) and continue.
 - Timeout comparisons must use saturating arithmetic to avoid regressions on out-of-order events.
 - Wall clock is allowed only for infrastructure watchdogs/telemetry, not for strategy transitions.
 
@@ -48,10 +48,12 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
 
 - Keep `next available bar` semantics for progression.
 - Silence is computed as:
-  - `bar_gap_sec = cur_bar.close_time_utc - prev_bar.close_time_utc`.
+  - `bar_gap_sec = cur_bar.close_time_utc.saturating_sub(prev_bar.close_time_utc)`.
 - Add stale-input protection for entries:
   - if `bar_gap_sec > max_silence_bars_sec`, block ENTRY on current bar.
   - exits/cancel/repair remain allowed.
+- If `prev_bar.close_time_utc <= 0` or `cur_bar.close_time_utc <= 0`, silence gate is not applied.
+- ENTRY is blocked only on the first bar where large gap is detected (the current bar of that gap).
 - This gate is additional to warmup/day-aggregate readiness gate.
 
 ## 6. Protocol/Gateway Rollout Sequence (P0)
@@ -73,10 +75,24 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
   - `IntentClass::Exit`,
   - `IntentClass::CancelCleanup`,
   - `IntentClass::ProtectiveRepair`.
-- Closed/Break/silence restrictions apply to `Entry` only (and optionally to new protective placements by policy), but not to `Exit/CancelCleanup`.
+- Normative mapping for classification:
+  - `Entry`: `MarketEntry`, `PlaceEntryLimit/MarketableLimit`, any intent increasing exposure.
+  - `Exit`: `MarketExit/PlaceExit` (if present), intents reducing exposure toward flat.
+  - `CancelCleanup`: `Cancel(order_id)`, `CancelAll`, `DeleteStopLimit(stop_id)`, OCO cleanup actions.
+  - `ProtectiveRepair`: `PlaceTP/ReplaceTP`, `CreateStopLimitSL/ReplaceStopLimitSL` (or delete+create), any protection repair for an already open position.
+- Closed/Break/silence restrictions apply to `Entry` only.
+- Runtime guard must not drop `Exit`, `CancelCleanup`, or `ProtectiveRepair`.
+- At Closed/Break, adapter handles `ProtectiveRepair` with defer/backoff (`next_repair_at_ts`) and bounded retries; no tight loop. On next Open, repair is retried.
 - This resolves current `drop whole batch` behavior conflict in `runtime.rs` and is mandatory before Stage-2B integration tests.
 
-## 8. Acceptance for Stage-2A
+## 8. Backward Compatibility for Intent Class (P0)
+
+- Intent payload uses backward-compatible field:
+  - `intent_class: Option<IntentClass>` with `#[serde(default)]`.
+- Legacy messages with `intent_class = None` are treated as `Entry` by default.
+- `hybrid_intraday` must always set explicit `intent_class`.
+
+## 9. Acceptance for Stage-2A
 
 Stage-2A is complete when:
 
