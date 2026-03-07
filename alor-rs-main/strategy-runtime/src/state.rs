@@ -168,6 +168,10 @@ pub enum StrategyState {
         #[serde(default)]
         pending_entry_cycle_id: Option<String>,
         #[serde(default)]
+        pending_entry_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_exit_request_id: Option<Uuid>,
+        #[serde(default)]
         entry_ready: bool,
     },
     CancelSent {

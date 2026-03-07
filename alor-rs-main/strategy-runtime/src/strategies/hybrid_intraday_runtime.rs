@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use alor_protocol::{AckStatus, CommandAck, IntentClass, Side as OrderSide};
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
+use uuid::Uuid;
 
 use crate::state::StrategyState;
 use crate::strategies::hybrid_intraday::{
@@ -46,6 +47,8 @@ pub struct HybridIntradayRuntimeStrategy {
     current_owner: Option<Owner>,
     current_side: Option<Side>,
     pending_entry: Option<PendingEntry>,
+    pending_entry_request_id: Option<Uuid>,
+    pending_exit_request_id: Option<Uuid>,
     active_cycle_id: Option<[u8; 10]>,
     next_cycle_seq: u32,
     last_bar_close: Option<f64>,
@@ -79,6 +82,8 @@ impl HybridIntradayRuntimeStrategy {
             current_owner: None,
             current_side: None,
             pending_entry: None,
+            pending_entry_request_id: None,
+            pending_exit_request_id: None,
             active_cycle_id: None,
             next_cycle_seq: 0,
             last_bar_close: None,
@@ -226,6 +231,8 @@ impl HybridIntradayRuntimeStrategy {
                 .pending_entry
                 .as_ref()
                 .map(|v| Self::format_cycle_id(&v.cycle_id)),
+            pending_entry_request_id: self.pending_entry_request_id,
+            pending_exit_request_id: self.pending_exit_request_id,
             entry_ready: self.entry_ready,
         };
     }
@@ -278,6 +285,13 @@ impl HybridIntradayRuntimeStrategy {
                     side: entry.side,
                     cycle_id,
                 });
+                self.pending_entry_request_id = Some(crate::deterministic_market_request_id(
+                    &ctx.strategy_id,
+                    &ctx.portfolio,
+                    &ctx.symbol,
+                    created_ts_utc,
+                    Self::side_to_order_side(entry.side),
+                ));
                 self.active_cycle_id = Some(cycle_id);
                 let comment = self.build_comment(ctx, &cycle_id, entry.owner, TagRole::Entry);
                 self.sync_state();
@@ -307,6 +321,13 @@ impl HybridIntradayRuntimeStrategy {
                     .unwrap_or_else(|| self.next_cycle_id(created_ts_utc));
                 self.active_cycle_id = Some(cycle_id);
                 self.current_owner = Some(owner);
+                self.pending_exit_request_id = Some(crate::deterministic_market_request_id(
+                    &ctx.strategy_id,
+                    &ctx.portfolio,
+                    &ctx.symbol,
+                    created_ts_utc,
+                    side,
+                ));
                 let comment = self.build_comment(ctx, &cycle_id, owner, TagRole::Exit);
                 self.sync_state();
                 vec![Intent::Market {
@@ -472,6 +493,40 @@ mod tests {
         );
         assert!(strategy.has_live_orders());
     }
+
+    #[test]
+    fn ack_reject_clears_only_matching_pending_entry() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(HybridIntradayRuntimeConfig {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            timezone_offset_hours: 3,
+        });
+        let ctx = test_ctx(Some(0.0));
+        strategy.entry_ready = true;
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            100,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: crate::strategies::hybrid_intraday::EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        let matching = strategy
+            .pending_entry_request_id
+            .expect("entry request id must exist");
+        let stale = uuid::Uuid::new_v4();
+
+        let _ = strategy.on_ack(&ctx, &CommandAck::rejected(stale, "x", "y"));
+        assert!(strategy.pending_entry.is_some());
+
+        let _ = strategy.on_ack(&ctx, &CommandAck::rejected(matching, "x", "y"));
+        assert!(strategy.pending_entry.is_none());
+        assert!(strategy.pending_entry_request_id.is_none());
+    }
 }
 
 impl Strategy for HybridIntradayRuntimeStrategy {
@@ -516,16 +571,35 @@ impl Strategy for HybridIntradayRuntimeStrategy {
     }
 
     fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
-        if matches!(
-            ack.status,
-            AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
-        ) && self.pending_entry.is_some()
-        {
-            self.orchestrator.on_order_rejected("entry");
-            self.pending_entry = None;
-            self.active_cycle_id = None;
+        if Some(ack.request_id) == self.pending_entry_request_id {
+            if matches!(
+                ack.status,
+                AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
+            ) {
+                self.orchestrator.on_order_rejected("entry");
+                self.pending_entry = None;
+                self.pending_entry_request_id = None;
+                self.active_cycle_id = None;
+            } else if matches!(
+                ack.status,
+                AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate
+            ) {
+                // entry still pending until PositionEvent confirms qty transition.
+            }
             self.sync_state();
+            return Vec::new();
         }
+        if Some(ack.request_id) == self.pending_exit_request_id {
+            if matches!(
+                ack.status,
+                AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
+            ) {
+                self.orchestrator.on_order_rejected("exit");
+            }
+            self.sync_state();
+            return Vec::new();
+        }
+        // Stale/foreign ack: ignore.
         Vec::new()
     }
 
@@ -593,6 +667,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.current_owner = Some(entry.owner);
                 self.current_side = Some(entry.side);
                 self.active_cycle_id = Some(entry.cycle_id);
+                self.pending_entry_request_id = None;
                 self.orchestrator
                     .on_order_filled("entry", entry.owner, Some(entry.side));
             } else {
@@ -609,6 +684,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.current_owner = None;
             self.current_side = None;
             self.pending_entry = None;
+            self.pending_entry_request_id = None;
+            self.pending_exit_request_id = None;
             self.active_cycle_id = None;
         }
         self.last_position_qty = cur;
@@ -662,6 +739,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             pending_entry_owner,
             pending_entry_side,
             pending_entry_cycle_id,
+            pending_entry_request_id,
+            pending_exit_request_id,
             entry_ready,
         } = &state
         {
@@ -684,6 +763,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 }),
                 _ => None,
             };
+            self.pending_entry_request_id = *pending_entry_request_id;
+            self.pending_exit_request_id = *pending_exit_request_id;
             self.entry_ready = *entry_ready;
         }
         self.state = state;
