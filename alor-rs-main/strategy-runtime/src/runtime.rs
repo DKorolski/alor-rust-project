@@ -2273,7 +2273,7 @@ impl StrategyRuntime {
         }
         match intent.base_intent() {
             Intent::Cancel { .. } => alor_protocol::IntentClass::CancelCleanup,
-            Intent::Replace { .. } => alor_protocol::IntentClass::ProtectiveRepair,
+            Intent::Replace { .. } => alor_protocol::IntentClass::Entry,
             Intent::Place { .. } => alor_protocol::IntentClass::Entry,
             Intent::Market { side, .. } => {
                 let qty = ctx.position_qty.unwrap_or(0.0);
@@ -2735,6 +2735,28 @@ mod tests {
         assert_eq!(
             runtime.resolve_intent_class(&ctx, &intent),
             alor_protocol::IntentClass::Exit
+        );
+    }
+
+    #[test]
+    fn replace_requires_explicit_class_for_protective_repair() {
+        let runtime = test_runtime(TradeMode::Live);
+        let ctx = runtime.strategy_ctx();
+
+        let legacy_replace = Intent::Replace {
+            order_id: 1,
+            new_price: 100.0,
+            new_qty: 1.0,
+        };
+        assert_eq!(
+            runtime.resolve_intent_class(&ctx, &legacy_replace),
+            alor_protocol::IntentClass::Entry
+        );
+
+        let protective_replace = legacy_replace.with_class(alor_protocol::IntentClass::ProtectiveRepair);
+        assert_eq!(
+            runtime.resolve_intent_class(&ctx, &protective_replace),
+            alor_protocol::IntentClass::ProtectiveRepair
         );
     }
     #[test]
