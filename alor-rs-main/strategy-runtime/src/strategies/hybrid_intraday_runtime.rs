@@ -99,7 +99,9 @@ impl HybridIntradayRuntimeStrategy {
     }
 
     fn has_live_orders(&self) -> bool {
-        !self.working_orders.is_empty() || !self.working_stop_orders.is_empty()
+        self.pending_entry.is_some()
+            || !self.working_orders.is_empty()
+            || !self.working_stop_orders.is_empty()
     }
 
     fn owner_code(owner: Owner) -> &'static str {
@@ -445,6 +447,30 @@ mod tests {
             },
         );
         assert!(!strategy.has_live_orders());
+    }
+
+    #[test]
+    fn pending_entry_is_counted_as_live_order() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(HybridIntradayRuntimeConfig {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            timezone_offset_hours: 3,
+        });
+        let ctx = test_ctx(Some(0.0));
+        strategy.entry_ready = true;
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            10,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: crate::strategies::hybrid_intraday::EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        assert!(strategy.has_live_orders());
     }
 }
 

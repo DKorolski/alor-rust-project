@@ -50,6 +50,7 @@ pub struct OrderEvent {
     pub filled: f64,
     pub price: f64,
     pub existing: bool,
+    pub comment: Option<String>,
     pub ts_utc: i64,
 }
 

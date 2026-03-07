@@ -1523,6 +1523,7 @@ fn parse_strategy_kind(value: &str) -> StrategyKind {
         "mock_live_probe" | "mockliveprobe" => StrategyKind::MockLiveProbe,
         "toy_session_timing" | "toysessiontiming" => StrategyKind::ToySessionTiming,
         "session_gap_standalone" | "sessiongapstandalone" => StrategyKind::SessionGapStandalone,
+        "hybrid_intraday" | "hybridintraday" | "hybrid" => StrategyKind::HybridIntraday,
         _ => StrategyKind::LimitCancel,
     }
 }
@@ -1663,6 +1664,32 @@ timezone_offset_hours = 30
         assert!(message.contains("timezone_offset_hours"));
         assert!(message.contains("-23..=23"));
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_parses_hybrid_strategy_kind_aliases() {
+        let path = write_temp_config(
+            "hybrid-kind",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "demo"
+exchange = "MOEX"
+
+[strategy]
+strategy_id = "hybrid_intraday"
+strategy_kind = "hybrid"
+symbol = "IMOEXF"
+qty = 1.0
+side = "buy"
+"#,
+        );
+
+        let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        assert_eq!(
+            resolved.config.strategy.strategy_kind,
+            StrategyKind::HybridIntraday
+        );
         let _ = std::fs::remove_file(path);
     }
 }

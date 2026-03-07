@@ -289,6 +289,11 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
             .get("existing")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        comment: data
+            .get("comment")
+            .or_else(|| data.get("user"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         ts_utc: data
             .get("updateTime")
             .or_else(|| data.get("transTime"))
@@ -560,6 +565,7 @@ mod tests {
                 "filled": 1.0,
                 "price": 99.5,
                 "existing": true,
+                "comment": "HYB|sid=hyb|c=abcd|o=MR|r=ENTRY",
                 "timestamp": 1700000001
             }
         });
@@ -573,6 +579,10 @@ mod tests {
         assert_eq!(order.filled, 1.0);
         assert_eq!(order.price, 99.5);
         assert!(order.existing);
+        assert_eq!(
+            order.comment.as_deref(),
+            Some("HYB|sid=hyb|c=abcd|o=MR|r=ENTRY")
+        );
         assert_eq!(order.ts_utc, 1700000001);
     }
 
