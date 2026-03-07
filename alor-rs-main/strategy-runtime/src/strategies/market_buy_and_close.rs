@@ -743,6 +743,7 @@ mod tests {
             cws_http_code: None,
             cws_request_guid: None,
             broker_order_id: None,
+            broker_order_id_str: None,
             processed_ts_utc: 2_001,
         };
         let _ = strategy.on_ack(&ctx, &ack);

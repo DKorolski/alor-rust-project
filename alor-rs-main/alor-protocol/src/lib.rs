@@ -46,6 +46,17 @@ pub enum CommandAction {
     Market(MarketOrder),
     Cancel(CancelOrder),
     Replace(ReplaceOrder),
+    CreateStopLimit(CreateStopLimitOrder),
+    DeleteStopLimit(DeleteStopLimitOrder),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentClass {
+    Entry,
+    Exit,
+    CancelCleanup,
+    ProtectiveRepair,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -58,6 +69,8 @@ pub struct OrderCommand {
     pub exchange: String,
     pub symbol: String,
     pub action: CommandAction,
+    #[serde(default)]
+    pub intent_class: Option<IntentClass>,
     pub ttl_ms: Option<u64>,
 }
 
@@ -81,6 +94,7 @@ impl OrderCommand {
             exchange: exchange.into(),
             symbol: symbol.into(),
             action,
+            intent_class: None,
             ttl_ms: None,
         }
     }
@@ -88,6 +102,10 @@ impl OrderCommand {
     pub fn with_ttl_ms(mut self, ttl_ms: u64) -> Self {
         self.ttl_ms = Some(ttl_ms);
         self
+    }
+
+    pub fn effective_intent_class(&self) -> IntentClass {
+        infer_intent_class(self.intent_class, &self.action)
     }
 }
 
@@ -107,6 +125,8 @@ pub struct CommandAck {
     pub request_id: Uuid,
     pub status: AckStatus,
     pub broker_order_id: Option<i64>,
+    #[serde(default)]
+    pub broker_order_id_str: Option<String>,
     pub error_code: Option<String>,
     pub error_msg: Option<String>,
     #[serde(default)]
@@ -125,6 +145,7 @@ impl CommandAck {
             request_id,
             status: AckStatus::Confirmed,
             broker_order_id,
+            broker_order_id_str: broker_order_id.map(|v| v.to_string()),
             error_code: None,
             error_msg: None,
             cws_http_code: None,
@@ -139,6 +160,7 @@ impl CommandAck {
             request_id,
             status: AckStatus::Duplicate,
             broker_order_id: None,
+            broker_order_id_str: None,
             error_code: None,
             error_msg: None,
             cws_http_code: None,
@@ -157,6 +179,7 @@ impl CommandAck {
             request_id,
             status: AckStatus::Rejected,
             broker_order_id: None,
+            broker_order_id_str: None,
             error_code: Some(error_code.into()),
             error_msg: Some(error_msg.into()),
             cws_http_code: None,
@@ -171,6 +194,7 @@ impl CommandAck {
             request_id,
             status: AckStatus::Accepted,
             broker_order_id: None,
+            broker_order_id_str: None,
             error_code: None,
             error_msg: None,
             cws_http_code: None,
@@ -185,6 +209,7 @@ impl CommandAck {
             request_id,
             status: AckStatus::Expired,
             broker_order_id: None,
+            broker_order_id_str: None,
             error_code: Some("expired".to_string()),
             error_msg: Some(error_msg.into()),
             cws_http_code: None,
@@ -203,6 +228,7 @@ impl CommandAck {
             request_id,
             status: AckStatus::Error,
             broker_order_id: None,
+            broker_order_id_str: None,
             error_code: Some(error_code.into()),
             error_msg: Some(error_msg.into()),
             cws_http_code: None,
@@ -242,9 +268,106 @@ pub struct ReplaceOrder {
     pub new_qty: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateStopLimitOrder {
+    pub side: Side,
+    pub qty: f64,
+    pub trigger_price: f64,
+    pub price: f64,
+    pub condition: StopLimitCondition,
+    pub stop_end_unix_time: i64,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub instrument_group: Option<String>,
+    #[serde(default)]
+    pub check_duplicates: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeleteStopLimitOrder {
+    pub order_id: String,
+    #[serde(default)]
+    pub side: Option<Side>,
+    #[serde(default)]
+    pub check_duplicates: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopLimitCondition {
+    More,
+    Less,
+    MoreOrEqual,
+    LessOrEqual,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     Buy,
     Sell,
+}
+
+pub fn infer_intent_class(explicit: Option<IntentClass>, action: &CommandAction) -> IntentClass {
+    explicit.unwrap_or_else(|| match action {
+        CommandAction::Cancel(_) | CommandAction::DeleteStopLimit(_) => IntentClass::CancelCleanup,
+        CommandAction::Market(_) => IntentClass::Entry,
+        CommandAction::Place(_) => IntentClass::Entry,
+        CommandAction::Replace(_) => IntentClass::ProtectiveRepair,
+        CommandAction::CreateStopLimit(_) => IntentClass::ProtectiveRepair,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn infer_intent_class_from_delete_stop_limit() {
+        let action = CommandAction::DeleteStopLimit(DeleteStopLimitOrder {
+            order_id: "12345".to_string(),
+            side: None,
+            check_duplicates: None,
+        });
+        assert_eq!(
+            infer_intent_class(None, &action),
+            IntentClass::CancelCleanup
+        );
+    }
+
+    #[test]
+    fn infer_intent_class_respects_explicit_value() {
+        let action = CommandAction::Market(MarketOrder {
+            qty: 1.0,
+            side: Side::Sell,
+        });
+        assert_eq!(
+            infer_intent_class(Some(IntentClass::Exit), &action),
+            IntentClass::Exit
+        );
+    }
+
+    #[test]
+    fn deserialize_order_command_without_intent_class_is_supported() {
+        let payload = json!({
+            "request_id": Uuid::new_v4(),
+            "created_ts_utc": 1,
+            "strategy_id": "s",
+            "portfolio": "p",
+            "exchange": "MOEX",
+            "symbol": "SBER",
+            "action": {
+                "market": {
+                    "qty": 1.0,
+                    "side": "buy"
+                }
+            },
+            "ttl_ms": null
+        });
+        let cmd: OrderCommand = serde_json::from_value(payload).expect("deserialize order command");
+        assert_eq!(cmd.intent_class, None);
+        assert_eq!(cmd.effective_intent_class(), IntentClass::Entry);
+    }
 }

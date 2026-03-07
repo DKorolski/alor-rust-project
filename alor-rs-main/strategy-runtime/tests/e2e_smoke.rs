@@ -500,6 +500,7 @@ async fn e2e_restart_without_duplicate_place() -> Result<()> {
             request_id: place_request_id,
             status: AckStatus::Confirmed,
             broker_order_id: Some(456),
+            broker_order_id_str: Some("456".to_string()),
             error_code: None,
             error_msg: None,
             cws_http_code: None,

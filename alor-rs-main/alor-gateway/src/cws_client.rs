@@ -10,6 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use alor_protocol::StopLimitCondition;
+
 use crate::auth::TokenProvider;
 use crate::config::AlorGatewayConfig;
 use crate::gateway_events::{GatewayEvent, log_event};
@@ -132,6 +134,95 @@ impl CwsHandle {
             "checkDuplicates": true,
         });
         self.send(payload).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_stop_limit(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        symbol: &str,
+        side: &str,
+        qty: f64,
+        trigger_price: f64,
+        price: f64,
+        condition: StopLimitCondition,
+        stop_end_unix_time: i64,
+        comment: Option<&str>,
+        instrument_group: Option<&str>,
+        check_duplicates: bool,
+    ) -> anyhow::Result<Value> {
+        let guid = new_guid();
+        let qty = qty.round() as i64;
+        let mut payload = Map::new();
+        payload.insert(
+            "opcode".to_string(),
+            Value::String("create:stopLimit".to_string()),
+        );
+        payload.insert("guid".to_string(), Value::String(guid));
+        payload.insert("side".to_string(), Value::String(side.to_string()));
+        payload.insert("quantity".to_string(), Value::from(qty));
+        payload.insert("triggerPrice".to_string(), Value::from(trigger_price));
+        payload.insert("price".to_string(), Value::from(price));
+        payload.insert(
+            "condition".to_string(),
+            Value::String(stop_limit_condition_str(condition).to_string()),
+        );
+        payload.insert(
+            "stopEndUnixTime".to_string(),
+            Value::from(stop_end_unix_time),
+        );
+        payload.insert(
+            "instrument".to_string(),
+            serde_json::json!({"symbol": symbol, "exchange": exchange}),
+        );
+        payload.insert(
+            "user".to_string(),
+            serde_json::json!({"portfolio": portfolio}),
+        );
+        payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
+        payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
+        if let Some(comment) = comment {
+            payload.insert("comment".to_string(), Value::String(comment.to_string()));
+        }
+        if let Some(group) = instrument_group {
+            payload.insert(
+                "instrumentGroup".to_string(),
+                Value::String(group.to_string()),
+            );
+        }
+        self.send(Value::Object(payload)).await
+    }
+
+    pub async fn delete_stop_limit(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        stop_order_id: &str,
+        side: Option<&str>,
+        check_duplicates: bool,
+    ) -> anyhow::Result<Value> {
+        let guid = new_guid();
+        let mut payload = Map::new();
+        payload.insert(
+            "opcode".to_string(),
+            Value::String("delete:stopLimit".to_string()),
+        );
+        payload.insert("guid".to_string(), Value::String(guid));
+        payload.insert(
+            "orderId".to_string(),
+            Value::String(stop_order_id.to_string()),
+        );
+        payload.insert("exchange".to_string(), Value::String(exchange.to_string()));
+        payload.insert(
+            "user".to_string(),
+            serde_json::json!({"portfolio": portfolio}),
+        );
+        payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
+        if let Some(side) = side {
+            payload.insert("side".to_string(), Value::String(side.to_string()));
+        }
+        self.send(Value::Object(payload)).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -458,6 +549,15 @@ fn redact_token(payload: &str) -> String {
         obj.insert("token".to_string(), Value::String("***".to_string()));
     }
     value.to_string()
+}
+
+fn stop_limit_condition_str(cond: StopLimitCondition) -> &'static str {
+    match cond {
+        StopLimitCondition::More => "more",
+        StopLimitCondition::Less => "less",
+        StopLimitCondition::MoreOrEqual => "moreorequal",
+        StopLimitCondition::LessOrEqual => "lessorequal",
+    }
 }
 
 fn next_backoff(current: Duration, cfg: &AlorGatewayConfig) -> Duration {

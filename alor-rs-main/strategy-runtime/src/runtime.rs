@@ -2158,11 +2158,12 @@ impl StrategyRuntime {
         created_ts_utc: i64,
         intent: Intent,
     ) -> alor_protocol::OrderCommand {
-        let (action, seq, action_name) = match intent {
+        let (action, seq, action_name, intent_class) = match intent {
             Intent::Place { price, qty, side } => (
                 alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder { price, qty, side }),
                 0,
                 "place",
+                alor_protocol::IntentClass::Entry,
             ),
             Intent::Market {
                 qty,
@@ -2176,11 +2177,13 @@ impl StrategyRuntime {
                     4
                 },
                 "market",
+                alor_protocol::IntentClass::Entry,
             ),
             Intent::Cancel { order_id } => (
                 alor_protocol::CommandAction::Cancel(alor_protocol::CancelOrder { order_id }),
                 1,
                 "cancel",
+                alor_protocol::IntentClass::CancelCleanup,
             ),
             Intent::Replace {
                 order_id,
@@ -2194,6 +2197,7 @@ impl StrategyRuntime {
                 }),
                 2,
                 "replace",
+                alor_protocol::IntentClass::ProtectiveRepair,
             ),
         };
         let request_id = if action_name == "market" {
@@ -2226,6 +2230,7 @@ impl StrategyRuntime {
             exchange: ctx.exchange.clone(),
             symbol: ctx.symbol.clone(),
             action,
+            intent_class: Some(intent_class),
             ttl_ms: None,
         }
     }

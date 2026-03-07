@@ -10,7 +10,7 @@ pub mod trade_ledger;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use alor_protocol::{CommandAction, OrderCommand, PlaceOrder, Side};
+use alor_protocol::{CommandAction, IntentClass, OrderCommand, PlaceOrder, Side};
 use alor_types::TradingPeriods;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -552,6 +552,7 @@ pub fn build_place_command(
             qty: config.qty,
             side: config.side,
         }),
+        intent_class: Some(IntentClass::Entry),
         ttl_ms: None,
     }
 }
@@ -573,6 +574,7 @@ pub fn build_cancel_command(
         exchange: exchange.to_string(),
         symbol: symbol.to_string(),
         action: CommandAction::Cancel(alor_protocol::CancelOrder { order_id }),
+        intent_class: Some(IntentClass::CancelCleanup),
         ttl_ms: None,
     }
 }
