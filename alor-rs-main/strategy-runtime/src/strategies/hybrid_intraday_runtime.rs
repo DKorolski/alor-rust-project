@@ -38,6 +38,7 @@ pub struct HybridIntradayRuntimeStrategy {
     current_day_high: Option<f64>,
     current_day_low: Option<f64>,
     prev_day_range: Option<f64>,
+    entry_ready: bool,
     working_orders: HashSet<i64>,
     working_stop_orders: HashSet<String>,
 }
@@ -68,6 +69,7 @@ impl HybridIntradayRuntimeStrategy {
             current_day_high: None,
             current_day_low: None,
             prev_day_range: None,
+            entry_ready: false,
             working_orders: HashSet::new(),
             working_stop_orders: HashSet::new(),
         }
@@ -110,11 +112,15 @@ impl HybridIntradayRuntimeStrategy {
                 self.current_day_low = Some(low);
             }
         }
+        self.entry_ready = self.prev_day_range.is_some();
     }
 
     fn map_action_to_intents(&mut self, ctx: &StrategyCtx, action: Action) -> Vec<Intent> {
         match action {
             Action::SubmitEntry(entry) => {
+                if !self.entry_ready {
+                    return Vec::new();
+                }
                 self.pending_entry = Some(PendingEntry {
                     owner: entry.owner,
                     side: entry.side,
@@ -202,6 +208,31 @@ mod tests {
             }
             other => panic!("expected classified intent, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn warmup_blocks_entry_until_prev_day_range_ready() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(HybridIntradayRuntimeConfig {
+            symbol: "IMOEXF".to_string(),
+            qty: 1.0,
+            timezone_offset_hours: 3,
+        });
+        let ctx = test_ctx(Some(0.0));
+        let entry_action = Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+            owner: Owner::MeanReversion,
+            side: Side::Long,
+            entry_style: crate::strategies::hybrid_intraday::EntryStyle::Market,
+            reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+            stop_price: None,
+            take_price: None,
+        });
+
+        let intents_blocked = strategy.map_action_to_intents(&ctx, entry_action.clone());
+        assert!(intents_blocked.is_empty());
+
+        strategy.entry_ready = true;
+        let intents_ready = strategy.map_action_to_intents(&ctx, entry_action);
+        assert_eq!(intents_ready.len(), 1);
     }
 }
 
