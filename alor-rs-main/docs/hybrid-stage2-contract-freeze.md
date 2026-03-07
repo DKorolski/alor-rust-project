@@ -11,6 +11,10 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
   - bars (`BarEvent.close_time_utc`),
   - positions/orders/stop-orders timestamps from transport payloads.
 - `valid_until`, `cooldown_until`, `repair_deadline`, `sl_escalate_timeout` are stored and compared in event-time domain.
+- Runtime keeps monotonic strategy time:
+  - `strategy_now_ts_utc = max(last_now_ts_utc, event_ts_utc)`,
+  - ignore invalid timestamps (`ts <= 0`).
+- Timeout comparisons must use saturating arithmetic to avoid regressions on out-of-order events.
 - Wall clock is allowed only for infrastructure watchdogs/telemetry, not for strategy transitions.
 
 ## 2. Position Cardinality & Ambiguous Snapshot (P0)
@@ -43,8 +47,10 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
 ## 5. FeatureBuilder Silence Gate (P0)
 
 - Keep `next available bar` semantics for progression.
+- Silence is computed as:
+  - `bar_gap_sec = cur_bar.close_time_utc - prev_bar.close_time_utc`.
 - Add stale-input protection for entries:
-  - if bar silence exceeds configured threshold (`max_silence_bars_sec`), new entries are blocked.
+  - if `bar_gap_sec > max_silence_bars_sec`, block ENTRY on current bar.
   - exits/cancel/repair remain allowed.
 - This gate is additional to warmup/day-aggregate readiness gate.
 
@@ -56,13 +62,19 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
   3. Deploy runtime with `hybrid_intraday`.
 - Runtime hybrid must not be enabled against gateway versions without stop-order support.
 
-## 7. Entry-Only Gate Placement (P0)
+## 7. Entry-Only Gate Placement and Runtime Guard (P0)
 
-- Selected variant for Stage-2: **Variant A**.
-- Entry-only gate is implemented in `hybrid_intraday` wrapper:
+- Selected Stage-2 policy: **intent-aware gating** (runtime + wrapper compatible).
+- Entry-only gate remains in `hybrid_intraday` wrapper:
   - blocks `ENTRY` in no-trade windows/weekends/warmup/not-ready/stale-input,
   - allows `EXIT`, `CANCEL`, `repair`, `OCO cleanup`.
-- Runtime global guard remains generic and non-owner-specific.
+- Runtime guard must classify intents and never drop non-entry intents:
+  - `IntentClass::Entry`,
+  - `IntentClass::Exit`,
+  - `IntentClass::CancelCleanup`,
+  - `IntentClass::ProtectiveRepair`.
+- Closed/Break/silence restrictions apply to `Entry` only (and optionally to new protective placements by policy), but not to `Exit/CancelCleanup`.
+- This resolves current `drop whole batch` behavior conflict in `runtime.rs` and is mandatory before Stage-2B integration tests.
 
 ## 8. Acceptance for Stage-2A
 
