@@ -140,6 +140,7 @@ impl Strategy for LimitCancelStrategy {
                 *last_bar_ts = Some(bar.close_time_utc);
                 None
             }
+            StrategyState::HybridIntradayRuntime { .. } => None,
             StrategyState::Done { last_bar_ts } => {
                 *last_bar_ts = bar.close_time_utc;
                 None

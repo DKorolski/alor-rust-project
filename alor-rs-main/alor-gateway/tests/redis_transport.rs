@@ -105,6 +105,7 @@ async fn command_path_acknowledges_and_publishes_ack() {
             price: 1.0,
             qty: 1.0,
             side: alor_protocol::Side::Buy,
+            comment: None,
         }),
     );
     sink.publish_command(command.clone()).await.unwrap();
@@ -157,6 +158,7 @@ async fn pending_recovery_claims_idle_message() {
             price: 1.0,
             qty: 1.0,
             side: alor_protocol::Side::Buy,
+            comment: None,
         }),
     );
     sink.publish_command(command.clone()).await.unwrap();
@@ -222,6 +224,7 @@ async fn poison_messages_go_to_dlq() {
                 price: 1.0,
                 qty: 1.0,
                 side: alor_protocol::Side::Buy,
+                comment: None,
             }),
         ),
     };

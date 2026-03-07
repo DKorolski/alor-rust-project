@@ -940,7 +940,8 @@ impl StrategyRuntime {
             StrategyState::Idle
             | StrategyState::Done { .. }
             | StrategyState::MarketLiveInPosition { .. }
-            | StrategyState::Blocked { .. } => Vec::new(),
+            | StrategyState::Blocked { .. }
+            | StrategyState::HybridIntradayRuntime { .. } => Vec::new(),
         }
     }
 
@@ -2454,41 +2455,50 @@ impl StrategyRuntime {
         intent: Intent,
         intent_class: alor_protocol::IntentClass,
     ) -> alor_protocol::OrderCommand {
-        let comment = self.intent_comment_tag(ctx, created_ts_utc, intent_class);
+        let fallback_comment = self.intent_comment_tag(ctx, created_ts_utc, intent_class);
         let (action, seq, action_name) = match intent {
             Intent::Classified { intent, .. } => {
                 return self.intent_to_command(ctx, created_ts_utc, *intent, intent_class);
             }
             Intent::Place {
-                price, qty, side, ..
-            } => (
-                alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder {
-                    price,
-                    qty,
-                    side,
-                    comment: comment.clone(),
-                }),
-                0,
-                "place",
-            ),
+                price,
+                qty,
+                side,
+                comment,
+            } => {
+                let comment = Self::sanitize_comment(comment.or_else(|| fallback_comment.clone()));
+                (
+                    alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder {
+                        price,
+                        qty,
+                        side,
+                        comment,
+                    }),
+                    0,
+                    "place",
+                )
+            }
             Intent::Market {
                 qty,
                 side,
                 fill_price: _,
-                ..
-            } => (
-                alor_protocol::CommandAction::Market(alor_protocol::MarketOrder {
-                    qty,
-                    side,
-                    comment: comment.clone(),
-                }),
-                if side == alor_protocol::Side::Buy {
-                    3
-                } else {
-                    4
-                },
-                "market",
-            ),
+                comment,
+            } => {
+                let comment = Self::sanitize_comment(comment.or_else(|| fallback_comment.clone()));
+                (
+                    alor_protocol::CommandAction::Market(alor_protocol::MarketOrder {
+                        qty,
+                        side,
+                        comment,
+                    }),
+                    if side == alor_protocol::Side::Buy {
+                        3
+                    } else {
+                        4
+                    },
+                    "market",
+                )
+            }
             Intent::Cancel { order_id } => (
                 alor_protocol::CommandAction::Cancel(alor_protocol::CancelOrder { order_id }),
                 1,
@@ -2541,6 +2551,18 @@ impl StrategyRuntime {
             intent_class: Some(intent_class),
             ttl_ms: None,
         }
+    }
+
+    fn sanitize_comment(raw: Option<String>) -> Option<String> {
+        let comment = raw?
+            .chars()
+            .filter(|c| c.is_ascii() && *c != '\n' && *c != '\r')
+            .take(100)
+            .collect::<String>();
+        if comment.trim().is_empty() {
+            return None;
+        }
+        Some(comment)
     }
 
     fn intent_comment_tag(

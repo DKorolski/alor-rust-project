@@ -150,6 +150,26 @@ pub enum StrategyState {
         #[serde(default)]
         last_bar_ts: Option<i64>,
     },
+    HybridIntradayRuntime {
+        #[serde(default)]
+        active_cycle_id: Option<String>,
+        #[serde(default)]
+        next_cycle_seq: u32,
+        #[serde(default)]
+        last_position_qty: f64,
+        #[serde(default)]
+        current_owner: Option<crate::strategies::hybrid_intraday::Owner>,
+        #[serde(default)]
+        current_side: Option<crate::strategies::hybrid_intraday::Side>,
+        #[serde(default)]
+        pending_entry_owner: Option<crate::strategies::hybrid_intraday::Owner>,
+        #[serde(default)]
+        pending_entry_side: Option<crate::strategies::hybrid_intraday::Side>,
+        #[serde(default)]
+        pending_entry_cycle_id: Option<String>,
+        #[serde(default)]
+        entry_ready: bool,
+    },
     CancelSent {
         cancel_request_id: Uuid,
         order_id: i64,

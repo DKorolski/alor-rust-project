@@ -21,6 +21,19 @@ pub struct HybridIntradayRuntimeConfig {
 struct PendingEntry {
     owner: Owner,
     side: Side,
+    cycle_id: [u8; 10],
+}
+
+#[derive(Debug, Clone)]
+struct HybridTag {
+    sid: String,
+    cycle: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TagRole {
+    Entry,
+    Exit,
 }
 
 #[derive(Debug)]
@@ -33,6 +46,8 @@ pub struct HybridIntradayRuntimeStrategy {
     current_owner: Option<Owner>,
     current_side: Option<Side>,
     pending_entry: Option<PendingEntry>,
+    active_cycle_id: Option<[u8; 10]>,
+    next_cycle_seq: u32,
     last_bar_close: Option<f64>,
     last_day_local: Option<NaiveDate>,
     current_day_high: Option<f64>,
@@ -64,6 +79,8 @@ impl HybridIntradayRuntimeStrategy {
             current_owner: None,
             current_side: None,
             pending_entry: None,
+            active_cycle_id: None,
+            next_cycle_seq: 0,
             last_bar_close: None,
             last_day_local: None,
             current_day_high: None,
@@ -83,6 +100,132 @@ impl HybridIntradayRuntimeStrategy {
 
     fn has_live_orders(&self) -> bool {
         !self.working_orders.is_empty() || !self.working_stop_orders.is_empty()
+    }
+
+    fn owner_code(owner: Owner) -> &'static str {
+        match owner {
+            Owner::MeanReversion => "MR",
+            Owner::IntradayBreakout => "BO",
+        }
+    }
+
+    fn role_code(role: TagRole) -> &'static str {
+        match role {
+            TagRole::Entry => "ENTRY",
+            TagRole::Exit => "EXIT",
+        }
+    }
+
+    fn format_cycle_id(cycle: &[u8; 10]) -> String {
+        let mut out = String::with_capacity(10);
+        for b in cycle {
+            out.push(*b as char);
+        }
+        out
+    }
+
+    fn parse_cycle_id(raw: &str) -> Option<[u8; 10]> {
+        if raw.len() != 10 || !raw.is_ascii() {
+            return None;
+        }
+        let mut out = [b'0'; 10];
+        for (i, b) in raw.as_bytes().iter().enumerate() {
+            if !(*b as char).is_ascii_hexdigit() {
+                return None;
+            }
+            out[i] = *b;
+        }
+        Some(out)
+    }
+
+    fn next_cycle_id(&mut self, ts_utc: i64) -> [u8; 10] {
+        let ts = (ts_utc.max(0) as u64) & 0xffff_ffff;
+        let seq = self.next_cycle_seq & 0xff;
+        self.next_cycle_seq = self.next_cycle_seq.wrapping_add(1);
+        let value = format!("{ts:08x}{seq:02x}");
+        let mut out = [b'0'; 10];
+        out.copy_from_slice(value.as_bytes());
+        out
+    }
+
+    fn parse_hybrid_tag(comment: Option<&str>) -> Option<HybridTag> {
+        let comment = comment?;
+        if !comment.is_ascii() || !comment.starts_with("HYB|") {
+            return None;
+        }
+        let mut sid = None;
+        let mut cycle = None;
+        for part in comment.split('|').skip(1) {
+            let (key, value) = part.split_once('=')?;
+            match key {
+                "sid" => sid = Some(value.to_string()),
+                "c" => cycle = Some(value.to_string()),
+                _ => {}
+            }
+        }
+        Some(HybridTag {
+            sid: sid?,
+            cycle: cycle?,
+        })
+    }
+
+    fn is_our_tag(&self, ctx: &StrategyCtx, comment: Option<&str>) -> bool {
+        let Some(tag) = Self::parse_hybrid_tag(comment) else {
+            return false;
+        };
+        tag.sid == ctx.strategy_id
+    }
+
+    fn ensure_active_cycle_from_comment(&mut self, comment: Option<&str>) {
+        if self.active_cycle_id.is_some() {
+            return;
+        }
+        let Some(tag) = Self::parse_hybrid_tag(comment) else {
+            return;
+        };
+        if let Some(cycle) = Self::parse_cycle_id(&tag.cycle) {
+            self.active_cycle_id = Some(cycle);
+        }
+    }
+
+    fn build_comment(
+        &self,
+        ctx: &StrategyCtx,
+        cycle_id: &[u8; 10],
+        owner: Owner,
+        role: TagRole,
+    ) -> String {
+        let cycle = Self::format_cycle_id(cycle_id);
+        let owner = Self::owner_code(owner);
+        let role = Self::role_code(role);
+        // HYB|sid=<sid>|c=<cycle>|o=<MR|BO>|r=<ENTRY|EXIT>
+        format!("HYB|sid={}|c={cycle}|o={owner}|r={role}", ctx.strategy_id)
+    }
+
+    fn infer_owner_for_recovered_position(pos_qty: f64) -> (Owner, Side) {
+        let side = if pos_qty >= 0.0 {
+            Side::Long
+        } else {
+            Side::Short
+        };
+        (Owner::MeanReversion, side)
+    }
+
+    fn sync_state(&mut self) {
+        self.state = StrategyState::HybridIntradayRuntime {
+            active_cycle_id: self.active_cycle_id.map(|v| Self::format_cycle_id(&v)),
+            next_cycle_seq: self.next_cycle_seq,
+            last_position_qty: self.last_position_qty,
+            current_owner: self.current_owner,
+            current_side: self.current_side,
+            pending_entry_owner: self.pending_entry.map(|v| v.owner),
+            pending_entry_side: self.pending_entry.map(|v| v.side),
+            pending_entry_cycle_id: self
+                .pending_entry
+                .as_ref()
+                .map(|v| Self::format_cycle_id(&v.cycle_id)),
+            entry_ready: self.entry_ready,
+        };
     }
 
     fn side_to_order_side(side: Side) -> OrderSide {
@@ -116,21 +259,31 @@ impl HybridIntradayRuntimeStrategy {
         self.entry_ready = self.prev_day_range.is_some();
     }
 
-    fn map_action_to_intents(&mut self, ctx: &StrategyCtx, action: Action) -> Vec<Intent> {
+    fn map_action_to_intents(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        action: Action,
+    ) -> Vec<Intent> {
         match action {
             Action::SubmitEntry(entry) => {
                 if !self.entry_ready {
                     return Vec::new();
                 }
+                let cycle_id = self.next_cycle_id(created_ts_utc);
                 self.pending_entry = Some(PendingEntry {
                     owner: entry.owner,
                     side: entry.side,
+                    cycle_id,
                 });
+                self.active_cycle_id = Some(cycle_id);
+                let comment = self.build_comment(ctx, &cycle_id, entry.owner, TagRole::Entry);
+                self.sync_state();
                 vec![Intent::Market {
                     qty: self.config.qty.max(1.0),
                     side: Self::side_to_order_side(entry.side),
                     fill_price: None,
-                    comment: None,
+                    comment: Some(comment),
                 }
                 .with_class(IntentClass::Entry)]
             }
@@ -147,12 +300,18 @@ impl HybridIntradayRuntimeStrategy {
                 } else {
                     OrderSide::Buy
                 };
+                let cycle_id = self
+                    .active_cycle_id
+                    .unwrap_or_else(|| self.next_cycle_id(created_ts_utc));
+                self.active_cycle_id = Some(cycle_id);
                 self.current_owner = Some(owner);
+                let comment = self.build_comment(ctx, &cycle_id, owner, TagRole::Exit);
+                self.sync_state();
                 vec![Intent::Market {
                     qty,
                     side,
                     fill_price: None,
-                    comment: None,
+                    comment: Some(comment),
                 }
                 .with_class(IntentClass::Exit)]
             }
@@ -191,6 +350,7 @@ mod tests {
         let ctx = test_ctx(Some(1.0));
         let intents = strategy.map_action_to_intents(
             &ctx,
+            1,
             Action::SubmitExit {
                 owner: Owner::MeanReversion,
                 reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
@@ -205,9 +365,15 @@ mod tests {
             } => {
                 assert_eq!(*intent_class, IntentClass::Exit);
                 match intent.as_ref() {
-                    Intent::Market { qty, side, .. } => {
+                    Intent::Market {
+                        qty, side, comment, ..
+                    } => {
                         assert!((*qty - 1.0).abs() <= f64::EPSILON);
                         assert_eq!(*side, OrderSide::Sell);
+                        let comment = comment.clone().unwrap_or_default();
+                        assert!(comment.contains("HYB|sid=hyb-test|"));
+                        assert!(comment.contains("|o=MR|"));
+                        assert!(comment.contains("|r=EXIT"));
                     }
                     other => panic!("unexpected base intent: {other:?}"),
                 }
@@ -233,12 +399,24 @@ mod tests {
             take_price: None,
         });
 
-        let intents_blocked = strategy.map_action_to_intents(&ctx, entry_action.clone());
+        let intents_blocked = strategy.map_action_to_intents(&ctx, 1, entry_action.clone());
         assert!(intents_blocked.is_empty());
 
         strategy.entry_ready = true;
-        let intents_ready = strategy.map_action_to_intents(&ctx, entry_action);
+        let intents_ready = strategy.map_action_to_intents(&ctx, 2, entry_action);
         assert_eq!(intents_ready.len(), 1);
+        match &intents_ready[0] {
+            Intent::Classified { intent, .. } => match intent.as_ref() {
+                Intent::Market { comment, .. } => {
+                    let comment = comment.clone().unwrap_or_default();
+                    assert!(comment.contains("HYB|sid=hyb-test|"));
+                    assert!(comment.contains("|o=MR|"));
+                    assert!(comment.contains("|r=ENTRY"));
+                }
+                other => panic!("unexpected base intent: {other:?}"),
+            },
+            other => panic!("expected classified intent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -304,10 +482,10 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 });
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.last_bar_close = Some(bar.close);
-        self.state = StrategyState::Idle;
+        self.sync_state();
         actions
             .into_iter()
-            .flat_map(|action| self.map_action_to_intents(ctx, action))
+            .flat_map(|action| self.map_action_to_intents(ctx, bar.close_time_utc, action))
             .collect()
     }
 
@@ -319,18 +497,21 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         {
             self.orchestrator.on_order_rejected("entry");
             self.pending_entry = None;
+            self.active_cycle_id = None;
+            self.sync_state();
         }
         Vec::new()
     }
 
-    fn on_order(&mut self, _ctx: &StrategyCtx, ord: &OrderEvent) -> Vec<Intent> {
+    fn on_order(&mut self, ctx: &StrategyCtx, ord: &OrderEvent) -> Vec<Intent> {
         if ord.symbol != self.config.symbol {
             return Vec::new();
         }
-        let is_ours = ord.request_id.is_some();
+        let is_ours = self.is_our_tag(ctx, ord.comment.as_deref());
         if !is_ours {
             return Vec::new();
         }
+        self.ensure_active_cycle_from_comment(ord.comment.as_deref());
         let status = ord.status.to_ascii_lowercase();
         if matches!(
             status.as_str(),
@@ -340,20 +521,19 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         } else if ord.order_id > 0 {
             self.working_orders.insert(ord.order_id);
         }
+        self.sync_state();
         Vec::new()
     }
 
-    fn on_stop_order(&mut self, _ctx: &StrategyCtx, ord: &StopOrderEvent) -> Vec<Intent> {
+    fn on_stop_order(&mut self, ctx: &StrategyCtx, ord: &StopOrderEvent) -> Vec<Intent> {
         if ord.symbol != self.config.symbol {
             return Vec::new();
         }
-        let is_ours = ord
-            .comment
-            .as_deref()
-            .is_some_and(|comment| comment.contains("HYB|"));
+        let is_ours = self.is_our_tag(ctx, ord.comment.as_deref());
         if !is_ours {
             return Vec::new();
         }
+        self.ensure_active_cycle_from_comment(ord.comment.as_deref());
         let status = ord.status.to_ascii_lowercase();
         if matches!(
             status.as_str(),
@@ -371,6 +551,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         } else if !ord.stop_order_id.trim().is_empty() {
             self.working_stop_orders.insert(ord.stop_order_id.clone());
         }
+        self.sync_state();
         Vec::new()
     }
 
@@ -385,8 +566,16 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             if let Some(entry) = filled {
                 self.current_owner = Some(entry.owner);
                 self.current_side = Some(entry.side);
+                self.active_cycle_id = Some(entry.cycle_id);
                 self.orchestrator
                     .on_order_filled("entry", entry.owner, Some(entry.side));
+            } else {
+                let (owner, side) = Self::infer_owner_for_recovered_position(cur);
+                self.current_owner = Some(owner);
+                self.current_side = Some(side);
+                if self.active_cycle_id.is_none() {
+                    self.active_cycle_id = Some(self.next_cycle_id(pos.ts_utc));
+                }
             }
         } else if prev.abs() > f64::EPSILON && cur.abs() <= f64::EPSILON {
             let owner = self.current_owner.unwrap_or(Owner::MeanReversion);
@@ -394,8 +583,42 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.current_owner = None;
             self.current_side = None;
             self.pending_entry = None;
+            self.active_cycle_id = None;
         }
         self.last_position_qty = cur;
+        self.sync_state();
+        Vec::new()
+    }
+
+    fn on_bootstrap_snapshot(
+        &mut self,
+        ctx: &StrategyCtx,
+        snapshot: &crate::BootstrapSnapshot,
+    ) -> Vec<Intent> {
+        self.working_orders.clear();
+        self.working_stop_orders.clear();
+        for (order_id, order) in &snapshot.working_orders_strategy {
+            if order.symbol != self.config.symbol {
+                continue;
+            }
+            if self.is_our_tag(ctx, order.comment.as_deref()) {
+                self.working_orders.insert(*order_id);
+                self.ensure_active_cycle_from_comment(order.comment.as_deref());
+            }
+        }
+        for (stop_order_id, stop_order) in &snapshot.working_stop_orders_strategy {
+            if stop_order.symbol != self.config.symbol {
+                continue;
+            }
+            if self.is_our_tag(ctx, stop_order.comment.as_deref()) {
+                self.working_stop_orders.insert(stop_order_id.clone());
+                self.ensure_active_cycle_from_comment(stop_order.comment.as_deref());
+            }
+        }
+        if let Some(position) = snapshot.positions_strategy.get(&self.config.symbol) {
+            self.last_position_qty = position.qty;
+        }
+        self.sync_state();
         Vec::new()
     }
 
@@ -404,6 +627,39 @@ impl Strategy for HybridIntradayRuntimeStrategy {
     }
 
     fn set_state(&mut self, state: StrategyState) {
+        if let StrategyState::HybridIntradayRuntime {
+            active_cycle_id,
+            next_cycle_seq,
+            last_position_qty,
+            current_owner,
+            current_side,
+            pending_entry_owner,
+            pending_entry_side,
+            pending_entry_cycle_id,
+            entry_ready,
+        } = &state
+        {
+            self.active_cycle_id = active_cycle_id.as_deref().and_then(Self::parse_cycle_id);
+            self.next_cycle_seq = *next_cycle_seq;
+            self.last_position_qty = *last_position_qty;
+            self.current_owner = *current_owner;
+            self.current_side = *current_side;
+            self.pending_entry = match (
+                *pending_entry_owner,
+                *pending_entry_side,
+                pending_entry_cycle_id
+                    .as_deref()
+                    .and_then(Self::parse_cycle_id),
+            ) {
+                (Some(owner), Some(side), Some(cycle_id)) => Some(PendingEntry {
+                    owner,
+                    side,
+                    cycle_id,
+                }),
+                _ => None,
+            };
+            self.entry_ready = *entry_ready;
+        }
         self.state = state;
     }
 }
