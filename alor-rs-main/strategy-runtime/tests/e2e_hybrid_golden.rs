@@ -8,7 +8,11 @@ fn hybrid_replay_mini_golden_passes_check() {
     let bin = env!("CARGO_BIN_EXE_hybrid_replay");
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let bundle_dir = manifest_dir.join("tests/fixtures/hybrid_mini_bundle");
-    assert!(bundle_dir.exists(), "missing fixture bundle: {}", bundle_dir.display());
+    assert!(
+        bundle_dir.exists(),
+        "missing fixture bundle: {}",
+        bundle_dir.display()
+    );
 
     let out_dir = tempdir().expect("temp dir");
     let output = Command::new(bin)

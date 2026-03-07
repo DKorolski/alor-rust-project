@@ -18,10 +18,10 @@ use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
+use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeStrategy;
 use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
 use crate::strategies::mock_live_probe::MockLiveProbeStrategy;
-use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeStrategy;
 use crate::strategies::session_gap_standalone::SessionGapStandaloneStrategy;
 use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
@@ -981,7 +981,11 @@ impl StrategyRuntime {
         Ok(())
     }
 
-    async fn recover_pending_orders_stream(&mut self, stream: &str, trim_maxlen: usize) -> Result<()> {
+    async fn recover_pending_orders_stream(
+        &mut self,
+        stream: &str,
+        trim_maxlen: usize,
+    ) -> Result<()> {
         let mut start = "0-0".to_string();
         for _ in 0..MAX_PENDING_LOOPS {
             let reply = match self
@@ -1122,7 +1126,13 @@ impl StrategyRuntime {
         let payload = entry.payload;
         if payload.is_empty() {
             self.transport
-                .write_dlq(stream, &message_id, &payload, "missing_payload", trim_maxlen)
+                .write_dlq(
+                    stream,
+                    &message_id,
+                    &payload,
+                    "missing_payload",
+                    trim_maxlen,
+                )
                 .await?;
             self.transport.xack(stream, &message_id).await?;
             return Ok(());
@@ -1691,7 +1701,9 @@ impl StrategyRuntime {
                 intent = *inner;
             }
             match intent {
-                Intent::Place { price, qty, side } => {
+                Intent::Place {
+                    price, qty, side, ..
+                } => {
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
                     let side = format!("{side:?}").to_lowercase();
@@ -1720,6 +1732,7 @@ impl StrategyRuntime {
                     qty,
                     side,
                     fill_price,
+                    ..
                 } => {
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
@@ -2381,8 +2394,7 @@ impl StrategyRuntime {
                 }
                 for (intent, intent_class) in accepted {
                     let action = self.intent_action_name(&intent);
-                    let command =
-                        self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+                    let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
                     info!(
                         action,
                         request_id = %command.request_id,
@@ -2442,12 +2454,20 @@ impl StrategyRuntime {
         intent: Intent,
         intent_class: alor_protocol::IntentClass,
     ) -> alor_protocol::OrderCommand {
+        let comment = self.intent_comment_tag(ctx, created_ts_utc, intent_class);
         let (action, seq, action_name) = match intent {
             Intent::Classified { intent, .. } => {
                 return self.intent_to_command(ctx, created_ts_utc, *intent, intent_class);
             }
-            Intent::Place { price, qty, side } => (
-                alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder { price, qty, side }),
+            Intent::Place {
+                price, qty, side, ..
+            } => (
+                alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder {
+                    price,
+                    qty,
+                    side,
+                    comment: comment.clone(),
+                }),
                 0,
                 "place",
             ),
@@ -2455,8 +2475,13 @@ impl StrategyRuntime {
                 qty,
                 side,
                 fill_price: _,
+                ..
             } => (
-                alor_protocol::CommandAction::Market(alor_protocol::MarketOrder { qty, side }),
+                alor_protocol::CommandAction::Market(alor_protocol::MarketOrder {
+                    qty,
+                    side,
+                    comment: comment.clone(),
+                }),
                 if side == alor_protocol::Side::Buy {
                     3
                 } else {
@@ -2516,6 +2541,30 @@ impl StrategyRuntime {
             intent_class: Some(intent_class),
             ttl_ms: None,
         }
+    }
+
+    fn intent_comment_tag(
+        &self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent_class: alor_protocol::IntentClass,
+    ) -> Option<String> {
+        if !matches!(
+            self.config.strategy.strategy_kind,
+            StrategyKind::HybridIntraday
+        ) {
+            return None;
+        }
+        let sid = ctx.strategy_id.as_str();
+        let cycle = format!("{:08x}", created_ts_utc.max(0));
+        let role = match intent_class {
+            alor_protocol::IntentClass::Entry => "ENTRY",
+            alor_protocol::IntentClass::Exit => "EXIT",
+            alor_protocol::IntentClass::CancelCleanup => "CANCEL",
+            alor_protocol::IntentClass::ProtectiveRepair => "REPAIR",
+        };
+        let comment = format!("HYB|sid={sid}|c={cycle}|r={role}");
+        Some(comment.chars().filter(|c| c.is_ascii()).take(100).collect())
     }
 
     fn resolve_intent_class(
@@ -3012,6 +3061,7 @@ mod tests {
             qty: 1.0,
             side: alor_protocol::Side::Sell,
             fill_price: None,
+            comment: None,
         };
         assert_eq!(
             runtime.resolve_intent_class(&ctx, &intent),
@@ -3034,7 +3084,8 @@ mod tests {
             alor_protocol::IntentClass::Entry
         );
 
-        let protective_replace = legacy_replace.with_class(alor_protocol::IntentClass::ProtectiveRepair);
+        let protective_replace =
+            legacy_replace.with_class(alor_protocol::IntentClass::ProtectiveRepair);
         assert_eq!(
             runtime.resolve_intent_class(&ctx, &protective_replace),
             alor_protocol::IntentClass::ProtectiveRepair
@@ -3044,26 +3095,13 @@ mod tests {
     #[test]
     fn guard_close_only_path_allows_exit_cancel_repair_only_with_open_position() {
         let runtime = test_runtime(TradeMode::Live);
-        assert!(!runtime.guard_allows_intent_when_blocked(
-            alor_protocol::IntentClass::Exit,
-            false
-        ));
-        assert!(runtime.guard_allows_intent_when_blocked(
-            alor_protocol::IntentClass::Exit,
-            true
-        ));
-        assert!(runtime.guard_allows_intent_when_blocked(
-            alor_protocol::IntentClass::CancelCleanup,
-            true
-        ));
-        assert!(runtime.guard_allows_intent_when_blocked(
-            alor_protocol::IntentClass::ProtectiveRepair,
-            true
-        ));
-        assert!(!runtime.guard_allows_intent_when_blocked(
-            alor_protocol::IntentClass::Entry,
-            true
-        ));
+        assert!(!runtime.guard_allows_intent_when_blocked(alor_protocol::IntentClass::Exit, false));
+        assert!(runtime.guard_allows_intent_when_blocked(alor_protocol::IntentClass::Exit, true));
+        assert!(runtime
+            .guard_allows_intent_when_blocked(alor_protocol::IntentClass::CancelCleanup, true));
+        assert!(runtime
+            .guard_allows_intent_when_blocked(alor_protocol::IntentClass::ProtectiveRepair, true));
+        assert!(!runtime.guard_allows_intent_when_blocked(alor_protocol::IntentClass::Entry, true));
     }
 
     #[test]
@@ -3264,6 +3302,7 @@ mod tests {
                         qty: 1.0,
                         side: alor_protocol::Side::Buy,
                         fill_price: Some(123.45),
+                        comment: None,
                     }],
                 )
                 .await
@@ -3312,6 +3351,7 @@ mod tests {
                         qty: 1.0,
                         side: alor_protocol::Side::Buy,
                         fill_price: None,
+                        comment: None,
                     }],
                 )
                 .await
@@ -3386,7 +3426,9 @@ impl VirtualTradeLog {
             other => other,
         };
         match intent {
-            Intent::Place { price, qty, side } => Self {
+            Intent::Place {
+                price, qty, side, ..
+            } => Self {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
@@ -3403,6 +3445,7 @@ impl VirtualTradeLog {
                 qty,
                 side,
                 fill_price,
+                ..
             } => Self {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),

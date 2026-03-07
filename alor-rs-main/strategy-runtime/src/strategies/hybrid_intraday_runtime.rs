@@ -77,7 +77,8 @@ impl HybridIntradayRuntimeStrategy {
 
     fn utc_to_local_naive(&self, ts_utc: i64) -> Option<NaiveDateTime> {
         let offset = FixedOffset::east_opt(self.config.timezone_offset_hours.saturating_mul(3600))?;
-        chrono::DateTime::from_timestamp(ts_utc, 0).map(|dt| dt.with_timezone(&offset).naive_local())
+        chrono::DateTime::from_timestamp(ts_utc, 0)
+            .map(|dt| dt.with_timezone(&offset).naive_local())
     }
 
     fn has_live_orders(&self) -> bool {
@@ -129,6 +130,7 @@ impl HybridIntradayRuntimeStrategy {
                     qty: self.config.qty.max(1.0),
                     side: Self::side_to_order_side(entry.side),
                     fill_price: None,
+                    comment: None,
                 }
                 .with_class(IntentClass::Entry)]
             }
@@ -150,6 +152,7 @@ impl HybridIntradayRuntimeStrategy {
                     qty,
                     side,
                     fill_price: None,
+                    comment: None,
                 }
                 .with_class(IntentClass::Exit)]
             }
@@ -196,7 +199,10 @@ mod tests {
 
         assert_eq!(intents.len(), 1);
         match &intents[0] {
-            Intent::Classified { intent, intent_class } => {
+            Intent::Classified {
+                intent,
+                intent_class,
+            } => {
                 assert_eq!(*intent_class, IntentClass::Exit);
                 match intent.as_ref() {
                     Intent::Market { qty, side, .. } => {
@@ -283,17 +289,19 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let close_prev = self.last_bar_close.unwrap_or(bar.close);
         let day_range_prev = self.prev_day_range.unwrap_or(0.0);
         let has_open_position = ctx.position_qty.unwrap_or(0.0).abs() > f64::EPSILON;
-        let actions = self.orchestrator.on_bar(crate::strategies::hybrid_intraday::orchestrator::BarInput {
-            dt: dt_local,
-            open: bar.o,
-            high: bar.h,
-            low: bar.l,
-            close: bar.close,
-            close_prev,
-            day_range_prev,
-            has_open_position,
-            has_live_orders: self.has_live_orders(),
-        });
+        let actions =
+            self.orchestrator
+                .on_bar(crate::strategies::hybrid_intraday::orchestrator::BarInput {
+                    dt: dt_local,
+                    open: bar.o,
+                    high: bar.h,
+                    low: bar.l,
+                    close: bar.close,
+                    close_prev,
+                    day_range_prev,
+                    has_open_position,
+                    has_live_orders: self.has_live_orders(),
+                });
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.last_bar_close = Some(bar.close);
         self.state = StrategyState::Idle;
@@ -349,7 +357,15 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let status = ord.status.to_ascii_lowercase();
         if matches!(
             status.as_str(),
-            "filled" | "canceled" | "cancelled" | "expired" | "rejected" | "executed" | "triggered" | "done" | "completed"
+            "filled"
+                | "canceled"
+                | "cancelled"
+                | "expired"
+                | "rejected"
+                | "executed"
+                | "triggered"
+                | "done"
+                | "completed"
         ) {
             self.working_stop_orders.remove(&ord.stop_order_id);
         } else if !ord.stop_order_id.trim().is_empty() {

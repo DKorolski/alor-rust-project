@@ -188,7 +188,15 @@ async fn execute_action(
             let price = normalize_step(price, price_step);
             let qty = normalize_step(qty, volume_step);
             let _ = cws
-                .create_limit(portfolio, exchange, &symbol, price, qty, side.as_str())
+                .create_limit(
+                    portfolio,
+                    exchange,
+                    &symbol,
+                    price,
+                    qty,
+                    side.as_str(),
+                    None,
+                )
                 .await?;
         }
         Action::Cancel { order_id } => {

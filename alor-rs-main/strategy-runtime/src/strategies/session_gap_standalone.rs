@@ -275,6 +275,7 @@ impl SessionGapStandaloneStrategy {
             qty: pending.size as f64,
             side: Self::entry_side(pending.direction),
             fill_price: Some(bar.o),
+            comment: None,
         })
     }
 
@@ -325,6 +326,7 @@ impl SessionGapStandaloneStrategy {
             qty: position.size as f64,
             side: Self::exit_side(position.direction),
             fill_price: Some(exit_price),
+            comment: None,
         })
     }
 
@@ -699,6 +701,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         qty,
                         side,
                         fill_price: None,
+                        comment: None,
                     });
                     SessionGapLivePhase::PendingEntry {
                         request_id: crate::deterministic_market_request_id(
@@ -786,6 +789,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         qty,
                         side: exit_side,
                         fill_price: None,
+                        comment: None,
                     });
                     SessionGapLivePhase::PendingExit {
                         request_id: crate::deterministic_market_request_id(

@@ -15,10 +15,10 @@ use alor_types::TradingPeriods;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeConfig;
 use crate::strategies::limit_cancel::LimitCancelConfig;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseConfig;
 use crate::strategies::mock_live_probe::{MockLiveProbeConfig, MockLiveProbeMode};
-use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeConfig;
 use crate::strategies::session_gap_standalone::SessionGapStandaloneConfig;
 use crate::strategies::toy_session_timing::ToySessionTimingConfig;
 
@@ -32,11 +32,13 @@ pub enum Intent {
         price: f64,
         qty: f64,
         side: Side,
+        comment: Option<String>,
     },
     Market {
         qty: f64,
         side: Side,
         fill_price: Option<f64>,
+        comment: Option<String>,
     },
     Cancel {
         order_id: i64,
@@ -621,6 +623,7 @@ pub fn build_place_command(
             price,
             qty: config.qty,
             side: config.side,
+            comment: None,
         }),
         intent_class: Some(IntentClass::Entry),
         ttl_ms: None,

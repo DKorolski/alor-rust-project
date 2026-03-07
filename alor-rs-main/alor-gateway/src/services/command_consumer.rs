@@ -546,6 +546,7 @@ async fn execute_command(
                     price,
                     qty,
                     side_str(payload.side),
+                    payload.comment.as_deref(),
                 )
                 .await?;
             Ok(response)
@@ -559,6 +560,7 @@ async fn execute_command(
                     &command.symbol,
                     qty,
                     side_str(payload.side),
+                    payload.comment.as_deref(),
                 )
                 .await?;
             Ok(response)
@@ -830,6 +832,7 @@ mod tests {
             action: CommandAction::Market(alor_protocol::MarketOrder {
                 side: Side::Buy,
                 qty: 1.0,
+                comment: None,
             }),
             intent_class: None,
             ttl_ms,

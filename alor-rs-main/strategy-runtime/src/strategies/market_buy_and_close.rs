@@ -99,6 +99,7 @@ impl MarketBuyAndCloseStrategy {
                         qty: self.config.qty,
                         side: self.config.side,
                         fill_price: Some(bar.o),
+                        comment: None,
                     });
                 }
             }
@@ -114,6 +115,7 @@ impl MarketBuyAndCloseStrategy {
                         qty,
                         side: close_side,
                         fill_price: Some(bar.o),
+                        comment: None,
                     });
                     self.state = StrategyState::MarketCloseSent {
                         close_request_id: crate::deterministic_request_id(
@@ -161,6 +163,7 @@ impl MarketBuyAndCloseStrategy {
             qty: self.config.qty,
             side: self.config.side,
             fill_price: None,
+            comment: None,
         }]
     }
 
@@ -281,6 +284,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                                 qty: self.config.qty,
                                 side: close_side,
                                 fill_price: None,
+                                comment: None,
                             }]
                         } else {
                             Vec::new()
@@ -433,6 +437,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                         qty: self.config.qty,
                         side: close_side,
                         fill_price: None,
+                        comment: None,
                     }];
                 }
             }

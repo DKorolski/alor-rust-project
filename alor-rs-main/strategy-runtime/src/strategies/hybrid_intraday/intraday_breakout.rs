@@ -219,10 +219,12 @@ impl IntradayBreakoutEngine {
             _ => None,
         };
 
-        if let (Some(day_before_close), Some(yesterday_close)) = (self.day_before_close, self.yesterday_close)
+        if let (Some(day_before_close), Some(yesterday_close)) =
+            (self.day_before_close, self.yesterday_close)
         {
             if day_before_close != 0.0 {
-                self.yesterday_return = Some((yesterday_close - day_before_close) / day_before_close);
+                self.yesterday_return =
+                    Some((yesterday_close - day_before_close) / day_before_close);
             } else {
                 self.yesterday_return = None;
             }
@@ -297,6 +299,9 @@ mod tests {
         engine.on_bar(dt(2026, 1, 6, 9, 0), 101.0, 103.0, 100.0, 102.0);
         let exit = engine.evaluate_exit(dt(2026, 1, 6, 23, 30), 102.0, Side::Long);
         assert!(exit.is_some());
-        assert_eq!(exit.expect("exit expected").reason, ReasonCode::BreakoutEodExit);
+        assert_eq!(
+            exit.expect("exit expected").reason,
+            ReasonCode::BreakoutEodExit
+        );
     }
 }

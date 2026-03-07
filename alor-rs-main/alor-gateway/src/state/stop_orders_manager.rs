@@ -67,7 +67,9 @@ impl StopOrdersManager {
             let mut guard = store.write();
             let should_replace = match guard.get(&event.stop_order_id) {
                 None => true,
-                Some(existing) => existing.ts_utc <= 0 || (incoming_ts > 0 && incoming_ts >= existing.ts_utc),
+                Some(existing) => {
+                    existing.ts_utc <= 0 || (incoming_ts > 0 && incoming_ts >= existing.ts_utc)
+                }
             };
             if should_replace {
                 guard.insert(event.stop_order_id.clone(), event);

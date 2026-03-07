@@ -459,17 +459,19 @@ fn run_replay(
             continue;
         }
 
-        let actions = orchestrator.on_bar(strategy_runtime::strategies::hybrid_intraday::orchestrator::BarInput {
-            dt: bar.ts,
-            open: bar.open,
-            high: bar.high,
-            low: bar.low,
-            close: bar.close,
-            close_prev: bar.close_prev,
-            day_range_prev: bar.day_range_prev,
-            has_open_position: state.position.is_some(),
-            has_live_orders: state.has_live_orders(),
-        });
+        let actions = orchestrator.on_bar(
+            strategy_runtime::strategies::hybrid_intraday::orchestrator::BarInput {
+                dt: bar.ts,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                close_prev: bar.close_prev,
+                day_range_prev: bar.day_range_prev,
+                has_open_position: state.position.is_some(),
+                has_live_orders: state.has_live_orders(),
+            },
+        );
         if is_weekend && matches!(cli.weekend_policy, WeekendPolicy::NoTradeButUpdate) {
             state
                 .equity_curve
@@ -535,7 +537,11 @@ fn apply_action(
             if size <= 0 {
                 size = 1;
             }
-            let signed_size = if entry.side == Side::Long { size } else { -size };
+            let signed_size = if entry.side == Side::Long {
+                size
+            } else {
+                -size
+            };
             let valid_until = if entry.entry_style.as_str() == "bracket" {
                 Some(
                     bar.ts
@@ -627,13 +633,7 @@ fn process_pending_exit(
         state.pending_exit = None;
         return;
     };
-    close_trade(
-        bar.ts,
-        bar.open,
-        &position,
-        &exit.reason,
-        state,
-    );
+    close_trade(bar.ts, bar.open, &position, &exit.reason, state);
     state.pending_exit = None;
     state.position = None;
     state.bracket = None;
@@ -700,18 +700,20 @@ fn process_active_bracket(
     let Some((fill_price, role)) = hit else {
         return;
     };
-    let reason = if role == "take" {
-        "take"
-    } else {
-        "stop"
-    };
+    let reason = if role == "take" { "take" } else { "stop" };
     close_trade(bar.ts, fill_price, &position, reason, state);
     state.position = None;
     state.bracket = None;
     orchestrator.on_order_filled(role, bracket.owner, Some(position.side));
 }
 
-fn close_trade(ts: NaiveDateTime, exit_price: f64, position: &Position, reason: &str, state: &mut EngineState) {
+fn close_trade(
+    ts: NaiveDateTime,
+    exit_price: f64,
+    position: &Position,
+    reason: &str,
+    state: &mut EngineState,
+) {
     let size = position.size;
     let pnl = if size > 0 {
         (exit_price - position.entry_price) * size as f64
@@ -749,7 +751,12 @@ fn mark_to_market_equity(state: &EngineState, close_price: f64) -> f64 {
     }
 }
 
-fn build_summary(split: Split, initial_cash: f64, bars: &[PreparedBar], state: &EngineState) -> SummaryRow {
+fn build_summary(
+    split: Split,
+    initial_cash: f64,
+    bars: &[PreparedBar],
+    state: &EngineState,
+) -> SummaryRow {
     let mut all_days = BTreeSet::<NaiveDate>::new();
     for bar in bars {
         all_days.insert(bar.ts.date());
@@ -774,7 +781,11 @@ fn build_summary(split: Split, initial_cash: f64, bars: &[PreparedBar], state: &
     let mut prev = initial_cash;
     for day in all_days {
         let equity = by_day.get(&day).copied().unwrap_or(prev);
-        let ret = if prev != 0.0 { equity / prev - 1.0 } else { 0.0 };
+        let ret = if prev != 0.0 {
+            equity / prev - 1.0
+        } else {
+            0.0
+        };
         daily_returns.push(ret);
         prev = equity;
     }
@@ -817,20 +828,29 @@ fn build_summary(split: Split, initial_cash: f64, bars: &[PreparedBar], state: &
     }
 }
 
-fn write_outputs(cli: &Cli, actions: &[ActionRow], trades: &[TradeRow], summary: &SummaryRow) -> Result<()> {
+fn write_outputs(
+    cli: &Cli,
+    actions: &[ActionRow],
+    trades: &[TradeRow],
+    summary: &SummaryRow,
+) -> Result<()> {
     let split = cli.split.as_str();
     let actions_path = cli.out_dir.join(format!("actual_actions_{split}.csv"));
     let trades_path = cli.out_dir.join(format!("actual_trades_{split}.csv"));
     let summary_path = cli.out_dir.join(format!("actual_summary_{split}.json"));
 
-    let mut w_actions = WriterBuilder::new().has_headers(false).from_path(&actions_path)?;
+    let mut w_actions = WriterBuilder::new()
+        .has_headers(false)
+        .from_path(&actions_path)?;
     w_actions.write_record(["bar_ts", "action", "owner", "side", "reason"])?;
     for row in actions {
         w_actions.serialize(row)?;
     }
     w_actions.flush()?;
 
-    let mut w_trades = WriterBuilder::new().has_headers(false).from_path(&trades_path)?;
+    let mut w_trades = WriterBuilder::new()
+        .has_headers(false)
+        .from_path(&trades_path)?;
     w_trades.write_record([
         "owner",
         "side",
@@ -860,7 +880,9 @@ fn compare_with_expected(
     let split = cli.split.as_str();
     let expected_actions_path = cli.bundle_dir.join(format!("expected_actions_{split}.csv"));
     let expected_trades_path = cli.bundle_dir.join(format!("expected_trades_{split}.csv"));
-    let expected_summary_path = cli.bundle_dir.join(format!("expected_summary_{split}.json"));
+    let expected_summary_path = cli
+        .bundle_dir
+        .join(format!("expected_summary_{split}.json"));
     let expected_actions = read_actions(&expected_actions_path)?;
     let expected_trades = read_trades(&expected_trades_path)?;
     let expected_summary: SummaryRow = serde_json::from_str(
@@ -900,7 +922,11 @@ fn compare_with_expected(
     })
 }
 
-fn compare_actions(split: &str, expected: &[ActionRow], actual: &[ActionRow]) -> Option<FirstDivergence> {
+fn compare_actions(
+    split: &str,
+    expected: &[ActionRow],
+    actual: &[ActionRow],
+) -> Option<FirstDivergence> {
     if expected.len() != actual.len() {
         return Some(FirstDivergence {
             split: split.to_string(),
@@ -935,7 +961,11 @@ fn compare_actions(split: &str, expected: &[ActionRow], actual: &[ActionRow]) ->
     None
 }
 
-fn compare_trades(split: &str, expected: &[TradeRow], actual: &[TradeRow]) -> Option<FirstDivergence> {
+fn compare_trades(
+    split: &str,
+    expected: &[TradeRow],
+    actual: &[TradeRow],
+) -> Option<FirstDivergence> {
     if expected.len() != actual.len() {
         return Some(FirstDivergence {
             split: split.to_string(),
@@ -996,7 +1026,11 @@ fn compare_trades(split: &str, expected: &[TradeRow], actual: &[TradeRow]) -> Op
     None
 }
 
-fn compare_summary(split: &str, expected: &SummaryRow, actual: &SummaryRow) -> Option<FirstDivergence> {
+fn compare_summary(
+    split: &str,
+    expected: &SummaryRow,
+    actual: &SummaryRow,
+) -> Option<FirstDivergence> {
     if expected.split != actual.split {
         return Some(diff_summary(split, "split", &expected.split, &actual.split));
     }
@@ -1010,9 +1044,21 @@ fn compare_summary(split: &str, expected: &SummaryRow, actual: &SummaryRow) -> O
     }
     for (col, ev, av) in [
         ("final_value", expected.final_value, actual.final_value),
-        ("total_return_pct", expected.total_return_pct, actual.total_return_pct),
-        ("annualized_sharpe", expected.annualized_sharpe, actual.annualized_sharpe),
-        ("max_drawdown_pct", expected.max_drawdown_pct, actual.max_drawdown_pct),
+        (
+            "total_return_pct",
+            expected.total_return_pct,
+            actual.total_return_pct,
+        ),
+        (
+            "annualized_sharpe",
+            expected.annualized_sharpe,
+            actual.annualized_sharpe,
+        ),
+        (
+            "max_drawdown_pct",
+            expected.max_drawdown_pct,
+            actual.max_drawdown_pct,
+        ),
         ("win_rate_pct", expected.win_rate_pct, actual.win_rate_pct),
     ] {
         if (ev - av).abs() > SUMMARY_EPS {

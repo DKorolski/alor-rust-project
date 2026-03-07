@@ -306,14 +306,14 @@ fn parse_stop_order(value: &Value) -> Option<StopOrderEvent> {
     {
         return None;
     }
-    let stop_order_id = data
-        .get("id")
-        .or_else(|| data.get("orderId"))
-        .and_then(|value| match value {
-            Value::String(value) => Some(value.clone()),
-            Value::Number(value) => Some(value.to_string()),
-            _ => None,
-        })?;
+    let stop_order_id =
+        data.get("id")
+            .or_else(|| data.get("orderId"))
+            .and_then(|value| match value {
+                Value::String(value) => Some(value.clone()),
+                Value::Number(value) => Some(value.to_string()),
+                _ => None,
+            })?;
     let symbol = data
         .get("symbol")
         .or_else(|| data.get("code"))

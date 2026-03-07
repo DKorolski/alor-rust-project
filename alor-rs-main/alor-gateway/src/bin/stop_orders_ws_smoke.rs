@@ -48,8 +48,8 @@ async fn main() -> Result<()> {
     let ws_timeout_sec = parse_u64(&args, "--ws-timeout-sec", 20)?;
     let stop_end_after_sec = parse_i64(&args, "--stop-end-after-sec", 600)?;
     let stop_end_unix_time = now_unix_ts().saturating_add(stop_end_after_sec);
-    let comment_prefix = arg_value(&args, "--comment-prefix")
-        .unwrap_or_else(|| "smoke_stoporders_ws".to_string());
+    let comment_prefix =
+        arg_value(&args, "--comment-prefix").unwrap_or_else(|| "smoke_stoporders_ws".to_string());
     let comment = format!("{comment_prefix}_{}", now_unix_ts());
     let instrument_group =
         arg_value(&args, "--instrument-group").or_else(|| Some(cfg.instrument_group.clone()));
@@ -86,9 +86,13 @@ async fn main() -> Result<()> {
         .send(Message::Text(stop_subscribe_msg.into()))
         .await
         .context("failed to send StopOrdersGetAndSubscribeV2")?;
-    wait_for_subscription_ack(&mut ws_stream, &stop_guid, Duration::from_secs(ws_timeout_sec))
-        .await
-        .context("stop-orders subscribe ack timeout")?;
+    wait_for_subscription_ack(
+        &mut ws_stream,
+        &stop_guid,
+        Duration::from_secs(ws_timeout_sec),
+    )
+    .await
+    .context("stop-orders subscribe ack timeout")?;
     println!("stop-orders subscribe ack: PASS guid={stop_guid}");
 
     let health = Arc::new(parking_lot::RwLock::new(HealthState::default()));
@@ -149,7 +153,9 @@ async fn main() -> Result<()> {
         Duration::from_secs(ws_timeout_sec),
     )
     .await
-    .with_context(|| format!("no ws terminal status after delete for stop_order_id={stop_order_id}"))?;
+    .with_context(|| {
+        format!("no ws terminal status after delete for stop_order_id={stop_order_id}")
+    })?;
     println!(
         "ws event after delete: PASS stop_order_id={} status={}",
         stop_order_id, deleted_status
@@ -193,7 +199,10 @@ async fn wait_for_subscription_ack(
                 .or_else(|| value.get("guid"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let http_code = value.get("httpCode").and_then(Value::as_i64).unwrap_or_default();
+            let http_code = value
+                .get("httpCode")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
             if ack_guid == guid && http_code == 200 {
                 return Ok(());
             }

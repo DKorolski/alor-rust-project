@@ -142,7 +142,10 @@ impl HybridOrchestrator {
 
         if bar.has_open_position && self.current_owner == Some(Owner::IntradayBreakout) {
             if let Some(side) = self.current_side {
-                if let Some(exit_signal) = self.intraday_breakout.evaluate_exit(bar.dt, bar.close, side) {
+                if let Some(exit_signal) = self
+                    .intraday_breakout
+                    .evaluate_exit(bar.dt, bar.close, side)
+                {
                     if exit_signal.reason == ReasonCode::BreakoutEodExit
                         && matches!(self.config.breakout_eod_mode, BreakoutEodMode::Overnight)
                     {

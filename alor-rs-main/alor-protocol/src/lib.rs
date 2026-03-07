@@ -251,12 +251,16 @@ pub struct PlaceOrder {
     pub price: f64,
     pub qty: f64,
     pub side: Side,
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MarketOrder {
     pub qty: f64,
     pub side: Side,
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -391,6 +395,7 @@ mod tests {
         let action = CommandAction::Market(MarketOrder {
             qty: 1.0,
             side: Side::Sell,
+            comment: None,
         });
         assert_eq!(
             infer_intent_class(Some(IntentClass::Exit), &action),

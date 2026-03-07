@@ -361,12 +361,7 @@ async fn delayed_bars_ack(
     let mut stop_orders_ok = false;
     let mut trades_ok = false;
 
-    while second_guid.is_none()
-        || !positions_ok
-        || !orders_ok
-        || !stop_orders_ok
-        || !trades_ok
-    {
+    while second_guid.is_none() || !positions_ok || !orders_ok || !stop_orders_ok || !trades_ok {
         let Some(event) = events.recv().await else {
             continue;
         };

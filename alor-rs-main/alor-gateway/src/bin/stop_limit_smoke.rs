@@ -46,8 +46,8 @@ async fn main() -> Result<()> {
         arg_value(&args, "--comment-prefix").unwrap_or_else(|| "smoke_stoplimit".to_string());
     let comment = format!("{comment_prefix}_{}", now_unix_ts());
     let delete_without_side = has_flag(&args, "--delete-without-side");
-    let instrument_group = arg_value(&args, "--instrument-group")
-        .or_else(|| Some(cfg.instrument_group.clone()));
+    let instrument_group =
+        arg_value(&args, "--instrument-group").or_else(|| Some(cfg.instrument_group.clone()));
 
     println!(
         "stop-limit smoke config: mode={}, symbol={}, side={}, qty={}, trigger={}, limit={}, condition={}, stop_end_unix_time={}, instrument_group={:?}, comment={}",

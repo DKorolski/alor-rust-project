@@ -73,8 +73,8 @@ impl MeanReversionEngine {
         }
 
         let rel_day_range = day_range_prev / close;
-        let trigger1_long =
-            self.config.min_range_long < rel_day_range && rel_day_range < self.config.max_range_long;
+        let trigger1_long = self.config.min_range_long < rel_day_range
+            && rel_day_range < self.config.max_range_long;
         let trigger2_long = close < close_prev;
         let trigger3_long = close > (close_prev - self.config.k_long * day_range_prev);
         if trigger1_long && trigger2_long && trigger3_long {
@@ -90,8 +90,8 @@ impl MeanReversionEngine {
             });
         }
 
-        let trigger1_short =
-            self.config.min_range_short < rel_day_range && rel_day_range < self.config.max_range_short;
+        let trigger1_short = self.config.min_range_short < rel_day_range
+            && rel_day_range < self.config.max_range_short;
         let trigger2_short = close > close_prev;
         let trigger3_short = close < (close_prev + self.config.k_short * day_range_prev);
         if trigger1_short && trigger2_short && trigger3_short {

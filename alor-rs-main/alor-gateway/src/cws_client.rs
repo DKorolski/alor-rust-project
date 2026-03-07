@@ -81,21 +81,36 @@ impl CwsHandle {
         price: f64,
         qty: f64,
         side: &str,
+        comment: Option<&str>,
     ) -> anyhow::Result<Value> {
         let guid = new_guid();
         let qty = qty.round() as i64;
-        let payload = serde_json::json!({
-            "opcode": "create:limit",
-            "guid": guid,
-            "side": side,
-            "quantity": qty,
-            "price": price,
-            "instrument": {"symbol": symbol, "exchange": exchange},
-            "user": {"portfolio": portfolio},
-            "timeInForce": CWS_TIME_IN_FORCE,
-            "allowMargin": CWS_ALLOW_MARGIN,
-        });
-        self.send(payload).await
+        let mut payload = Map::new();
+        payload.insert(
+            "opcode".to_string(),
+            Value::String("create:limit".to_string()),
+        );
+        payload.insert("guid".to_string(), Value::String(guid));
+        payload.insert("side".to_string(), Value::String(side.to_string()));
+        payload.insert("quantity".to_string(), Value::from(qty));
+        payload.insert("price".to_string(), Value::from(price));
+        payload.insert(
+            "instrument".to_string(),
+            serde_json::json!({"symbol": symbol, "exchange": exchange}),
+        );
+        payload.insert(
+            "user".to_string(),
+            serde_json::json!({"portfolio": portfolio}),
+        );
+        payload.insert(
+            "timeInForce".to_string(),
+            Value::String(CWS_TIME_IN_FORCE.to_string()),
+        );
+        payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
+        if let Some(comment) = comment {
+            payload.insert("comment".to_string(), Value::String(comment.to_string()));
+        }
+        self.send(Value::Object(payload)).await
     }
 
     pub async fn create_market(
@@ -105,6 +120,7 @@ impl CwsHandle {
         symbol: &str,
         qty: f64,
         side: &str,
+        comment: Option<&str>,
     ) -> anyhow::Result<Value> {
         let qty = qty.round() as i64;
         let payload = build_create_market_payload(
@@ -114,6 +130,7 @@ impl CwsHandle {
             &self.instrument_group,
             qty,
             side,
+            comment,
         );
         self.send(payload).await
     }
@@ -284,23 +301,42 @@ fn build_create_market_payload(
     instrument_group: &str,
     qty: i64,
     side: &str,
+    comment: Option<&str>,
 ) -> Value {
     let guid = new_guid();
-    serde_json::json!({
-        "opcode": "create:market",
-        "guid": guid,
-        "side": side,
-        "quantity": qty,
-        "instrument": {
+    let mut payload = Map::new();
+    payload.insert(
+        "opcode".to_string(),
+        Value::String("create:market".to_string()),
+    );
+    payload.insert("guid".to_string(), Value::String(guid));
+    payload.insert("side".to_string(), Value::String(side.to_string()));
+    payload.insert("quantity".to_string(), Value::from(qty));
+    payload.insert(
+        "instrument".to_string(),
+        serde_json::json!({
             "symbol": symbol,
             "exchange": exchange,
             "instrumentGroup": instrument_group
-        },
-        "user": {"portfolio": portfolio},
-        "timeInForce": CWS_MARKET_TIME_IN_FORCE,
-        "allowMargin": CWS_MARKET_ALLOW_MARGIN,
-        "checkDuplicates": true,
-    })
+        }),
+    );
+    payload.insert(
+        "user".to_string(),
+        serde_json::json!({"portfolio": portfolio}),
+    );
+    payload.insert(
+        "timeInForce".to_string(),
+        Value::String(CWS_MARKET_TIME_IN_FORCE.to_string()),
+    );
+    payload.insert(
+        "allowMargin".to_string(),
+        Value::from(CWS_MARKET_ALLOW_MARGIN),
+    );
+    payload.insert("checkDuplicates".to_string(), Value::from(true));
+    if let Some(comment) = comment {
+        payload.insert("comment".to_string(), Value::String(comment.to_string()));
+    }
+    Value::Object(payload)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -605,7 +641,8 @@ mod tests {
 
     #[test]
     fn build_create_market_payload_includes_required_fields() {
-        let payload = build_create_market_payload("D39004", "MOEX", "SBER", "TQBR", 300, "buy");
+        let payload =
+            build_create_market_payload("D39004", "MOEX", "SBER", "TQBR", 300, "buy", None);
         let obj = payload.as_object().expect("payload object");
         assert_eq!(
             obj.get("opcode").and_then(Value::as_str),

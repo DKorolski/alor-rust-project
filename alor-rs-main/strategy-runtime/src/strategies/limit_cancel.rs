@@ -39,6 +39,7 @@ impl LimitCancelStrategy {
             price,
             qty: self.config.qty,
             side: self.config.side,
+            comment: None,
         }
     }
 
@@ -315,7 +316,9 @@ mod tests {
         let intents = strategy.on_bar(&ctx, &bar1);
         assert_eq!(intents.len(), 1);
         match &intents[0] {
-            Intent::Place { price, qty, side } => {
+            Intent::Place {
+                price, qty, side, ..
+            } => {
                 assert_eq!(*price, 99.99);
                 assert_eq!(*qty, 1.0);
                 assert_eq!(*side, Side::Buy);
