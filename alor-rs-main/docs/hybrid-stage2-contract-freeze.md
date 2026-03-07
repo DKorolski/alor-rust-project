@@ -15,6 +15,7 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
   - `strategy_now_ts_utc = max(last_now_ts_utc, event_ts_utc)`,
   - if `event_ts_utc <= 0`: set `event_ts_utc = last_now_ts_utc` (no time advance) and continue.
 - Timeout comparisons must use saturating arithmetic to avoid regressions on out-of-order events.
+- Bootstrap safety: while `strategy_now_ts_utc == 0`, timeout-driven transitions are disabled until the first valid event with `event_ts_utc > 0`.
 - Wall clock is allowed only for infrastructure watchdogs/telemetry, not for strategy transitions.
 
 ## 2. Position Cardinality & Ambiguous Snapshot (P0)
@@ -63,6 +64,9 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
   2. Verify gateway emits stop-order events/snapshots.
   3. Deploy runtime with `hybrid_intraday`.
 - Runtime hybrid must not be enabled against gateway versions without stop-order support.
+- Enforcement:
+  - `require_gateway_stop_orders = true` for hybrid runtime instances.
+  - If gateway does not confirm stop-orders capability, runtime must fail-fast (or keep readiness=false and block trading).
 
 ## 7. Entry-Only Gate Placement and Runtime Guard (P0)
 
@@ -89,10 +93,21 @@ This addendum fixes ambiguous parts of Stage-2 ToR before implementation.
 
 - Intent payload uses backward-compatible field:
   - `intent_class: Option<IntentClass>` with `#[serde(default)]`.
-- Legacy messages with `intent_class = None` are treated as `Entry` by default.
+- Legacy messages with `intent_class = None` use deterministic inference by intent variant:
+  - `Cancel/DeleteStopLimit/CancelAll` => `CancelCleanup`
+  - `MarketExit/PlaceExit` => `Exit`
+  - `PlaceTP/ReplaceTP/CreateStopLimitSL/ReplaceStopLimitSL` => `ProtectiveRepair`
+  - `MarketEntry/PlaceEntryLimit/MarketableLimit` => `Entry`
+  - fallback => `Entry` only if no mapping matched.
 - `hybrid_intraday` must always set explicit `intent_class`.
 
-## 9. Acceptance for Stage-2A
+## 9. Protective Quantity Safety Invariant (P0)
+
+- Any protective intent quantity (TP/SL placement or replace) must be clamped to `abs(current_position_qty)`.
+- Protective quantities must never exceed current open position size.
+- If position size becomes smaller than existing protective qty, adapter must repair with bounded retries/backoff policy.
+
+## 10. Acceptance for Stage-2A
 
 Stage-2A is complete when:
 
