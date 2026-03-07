@@ -87,6 +87,7 @@ timezone_offset_hours = 3
 - [Alor Gateway Runbook](docs/alor-gateway-runbook.md)
 - [Replay / Backtest Guide](docs/replay-backtest-guide.md)
 - [State and Restarts](docs/state-and-restarts.md)
+- [Hybrid Stage-2 Contract Freeze](docs/hybrid-stage2-contract-freeze.md)
 
 ## Итоги аудита
 
