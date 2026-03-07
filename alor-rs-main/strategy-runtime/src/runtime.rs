@@ -165,6 +165,7 @@ pub struct StrategyRuntime {
     pending_exec: HashMap<i64, PendingExecution>,
     sim_orders: Vec<SimOrder>,
     next_sim_order_id: i64,
+    strategy_now_ts_utc: i64,
     health_snapshot: RuntimeSharedState,
     health_server_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -337,6 +338,7 @@ impl StrategyRuntime {
             pending_exec: HashMap::new(),
             sim_orders: Vec::new(),
             next_sim_order_id: 1,
+            strategy_now_ts_utc: 0,
             health_snapshot,
             health_server_handle: None,
         })
@@ -1070,13 +1072,13 @@ impl StrategyRuntime {
                 );
             }
         }
+        let event_ts = self.normalize_event_ts(ack.processed_ts_utc);
         let ctx = self.strategy_ctx();
         let intents = self.strategy.on_ack(&ctx, &ack);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, ack.processed_ts_utc, intents)
-            .await?;
+        self.apply_intents(&ctx, event_ts, intents).await?;
         self.transport.xack(&stream, &message_id).await?;
-        self.health_snapshot.write().last_ack_ts_utc = Some(ack.processed_ts_utc);
+        self.health_snapshot.write().last_ack_ts_utc = Some(event_ts);
         Ok(())
     }
 
@@ -1094,11 +1096,11 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
+        let event_ts = self.normalize_event_ts(order.ts_utc);
         let ctx = self.strategy_ctx();
-        let created_ts = ctx.last_bar_ts().unwrap_or(0);
         let intents = self.strategy.on_order(&ctx, &order);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents).await?;
         self.update_ledger_from_order(&order)?;
         self.state.orders.insert(order.order_id, order);
         self.transport.xack(&stream, &message_id).await?;
@@ -1229,11 +1231,11 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
+        let event_ts = self.normalize_event_ts(position.ts_utc);
         let ctx = self.strategy_ctx();
-        let created_ts = ctx.last_bar_ts().unwrap_or(0);
         let intents = self.strategy.on_position(&ctx, &position);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents).await?;
         self.state
             .positions
             .insert(position.symbol.clone(), position);
@@ -1254,6 +1256,7 @@ impl StrategyRuntime {
         }
         self.state
             .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        let event_ts = self.normalize_event_ts(bar.close_time_utc);
         if bar.origin == DataOrigin::Live {
             self.bootstrap_state.seen_live_bar = true;
         }
@@ -1266,8 +1269,7 @@ impl StrategyRuntime {
             self.simulate_intents(&bar, intents).await?;
             self.persist_state(None).await?;
         } else {
-            self.apply_intents(&ctx, bar.close_time_utc, intents)
-                .await?;
+            self.apply_intents(&ctx, event_ts, intents).await?;
         }
         self.transport.xack(&stream, &message_id).await?;
         self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
@@ -1863,8 +1865,8 @@ impl StrategyRuntime {
             Some(snapshot) => snapshot.clone(),
             None => return Ok(()),
         };
+        let created_ts = self.normalize_event_ts(snapshot.snapshot_ts_utc.unwrap_or(0));
         let ctx = self.strategy_ctx();
-        let created_ts = snapshot.snapshot_ts_utc.unwrap_or(0);
         let intents = self.strategy.on_bootstrap_snapshot(&ctx, &snapshot);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, created_ts, intents).await?;
@@ -1877,7 +1879,7 @@ impl StrategyRuntime {
             known_order_ids: self.our_order_ids.iter().copied().collect(),
             pending_requests: self.our_request_ids.iter().copied().collect(),
         };
-        let created_ts = ctx.last_bar_ts().unwrap_or(0);
+        let created_ts = self.normalize_event_ts(ctx.last_bar_ts().unwrap_or(0));
         let intents = self.strategy.on_runtime_state_restored(&ctx, &restored);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, created_ts, intents).await?;
@@ -2113,15 +2115,38 @@ impl StrategyRuntime {
                 let decision = self.evaluate_guard_decision();
                 if !decision.allowed {
                     self.log_guard_decision_if_due(&decision)?;
+                    let has_open_position = ctx.position_qty.unwrap_or(0.0).abs() > 0.0;
+                    let mut passthrough = Vec::new();
                     for (intent, intent_class) in accepted {
-                        info!(
-                            action = self.intent_action_name(&intent),
-                            class = ?intent_class,
-                            reasons = ?decision.reasons,
-                            "intent_dropped_by_guard"
-                        );
+                        if self.guard_allows_intent_when_blocked(intent_class, has_open_position) {
+                            passthrough.push((intent, intent_class));
+                        } else {
+                            info!(
+                                action = self.intent_action_name(&intent),
+                                class = ?intent_class,
+                                reasons = ?decision.reasons,
+                                "intent_dropped_by_guard"
+                            );
+                        }
                     }
-                    self.persist_state(None).await?;
+                    if passthrough.is_empty() {
+                        self.persist_state(None).await?;
+                        return Ok(());
+                    }
+                    for (intent, intent_class) in passthrough {
+                        let action = self.intent_action_name(&intent);
+                        let command =
+                            self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+                        info!(
+                            action,
+                            class = ?intent_class,
+                            request_id = %command.request_id,
+                            reasons = ?decision.reasons,
+                            "intent_emitted_guard_close_only_path"
+                        );
+                        self.persist_state(Some(&command)).await?;
+                        self.our_request_ids.insert(command.request_id);
+                    }
                     return Ok(());
                 }
                 for (intent, intent_class) in accepted {
@@ -2287,6 +2312,32 @@ impl StrategyRuntime {
             }
             Intent::Classified { intent, .. } => self.resolve_intent_class(ctx, intent),
         }
+    }
+
+    fn guard_allows_intent_when_blocked(
+        &self,
+        intent_class: alor_protocol::IntentClass,
+        has_open_position: bool,
+    ) -> bool {
+        if !has_open_position {
+            return false;
+        }
+        matches!(
+            intent_class,
+            alor_protocol::IntentClass::Exit
+                | alor_protocol::IntentClass::CancelCleanup
+                | alor_protocol::IntentClass::ProtectiveRepair
+        )
+    }
+
+    fn normalize_event_ts(&mut self, event_ts_utc: i64) -> i64 {
+        let candidate = if event_ts_utc > 0 {
+            event_ts_utc
+        } else {
+            self.strategy_now_ts_utc
+        };
+        self.strategy_now_ts_utc = self.strategy_now_ts_utc.max(candidate);
+        self.strategy_now_ts_utc
     }
 
     async fn log_metrics_if_due(&mut self) -> Result<()> {
@@ -2758,6 +2809,41 @@ mod tests {
             runtime.resolve_intent_class(&ctx, &protective_replace),
             alor_protocol::IntentClass::ProtectiveRepair
         );
+    }
+
+    #[test]
+    fn guard_close_only_path_allows_exit_cancel_repair_only_with_open_position() {
+        let runtime = test_runtime(TradeMode::Live);
+        assert!(!runtime.guard_allows_intent_when_blocked(
+            alor_protocol::IntentClass::Exit,
+            false
+        ));
+        assert!(runtime.guard_allows_intent_when_blocked(
+            alor_protocol::IntentClass::Exit,
+            true
+        ));
+        assert!(runtime.guard_allows_intent_when_blocked(
+            alor_protocol::IntentClass::CancelCleanup,
+            true
+        ));
+        assert!(runtime.guard_allows_intent_when_blocked(
+            alor_protocol::IntentClass::ProtectiveRepair,
+            true
+        ));
+        assert!(!runtime.guard_allows_intent_when_blocked(
+            alor_protocol::IntentClass::Entry,
+            true
+        ));
+    }
+
+    #[test]
+    fn normalize_event_ts_is_monotonic_and_bootstrap_safe() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        assert_eq!(runtime.normalize_event_ts(0), 0);
+        assert_eq!(runtime.normalize_event_ts(-1), 0);
+        assert_eq!(runtime.normalize_event_ts(100), 100);
+        assert_eq!(runtime.normalize_event_ts(90), 100);
+        assert_eq!(runtime.normalize_event_ts(0), 100);
     }
     #[test]
     fn runtime_scheduler_snapshot_is_unconfigured_when_periods_missing() {

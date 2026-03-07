@@ -138,6 +138,27 @@ CI regression guard (mini-golden):
 cargo test -p strategy-runtime --test e2e_hybrid_golden
 ```
 
+StopLimit broker smoke (no strategy logic):
+
+```bash
+cargo run -p alor-gateway --bin stop_limit_smoke -- \
+  --config ./configs/gateway.live.toml \
+  --dry-run
+```
+
+Live (single create + single delete):
+
+```bash
+cargo run -p alor-gateway --bin stop_limit_smoke -- \
+  --config ./configs/gateway.live.toml \
+  --live-confirm \
+  --symbol IMOEXF \
+  --side buy \
+  --qty 1 \
+  --trigger-price 1000 \
+  --limit-price 999
+```
+
 Интеграционные тесты gateway (`alor-gateway/tests/redis_transport.rs`) используют `testcontainers` и требуют установленный Docker.
 
 ## Лицензия и дисклеймер
