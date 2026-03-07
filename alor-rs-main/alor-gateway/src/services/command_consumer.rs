@@ -800,6 +800,25 @@ mod tests {
         assert_eq!(info.order_id_str.as_deref(), Some("A-12345"));
     }
 
+    #[test]
+    fn build_cws_ack_carries_string_order_id() {
+        let ack = build_cws_ack(
+            uuid::Uuid::new_v4(),
+            alor_protocol::AckStatus::Accepted,
+            CwsResponseInfo {
+                http_code: Some(200),
+                message: Some("ok".to_string()),
+                request_guid: Some("guid-1".to_string()),
+                order_id: None,
+                order_id_str: Some("A-12345".to_string()),
+            },
+            None,
+            None,
+        );
+        assert_eq!(ack.broker_order_id, None);
+        assert_eq!(ack.broker_order_id_str.as_deref(), Some("A-12345"));
+    }
+
     fn sample_command(created_ts_utc: i64, ttl_ms: Option<u64>) -> OrderCommand {
         OrderCommand {
             request_id: uuid::Uuid::new_v4(),

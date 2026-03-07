@@ -152,46 +152,22 @@ impl CwsHandle {
         instrument_group: Option<&str>,
         check_duplicates: bool,
     ) -> anyhow::Result<Value> {
-        let guid = new_guid();
         let qty = qty.round() as i64;
-        let mut payload = Map::new();
-        payload.insert(
-            "opcode".to_string(),
-            Value::String("create:stopLimit".to_string()),
+        let payload = build_create_stop_limit_payload(
+            portfolio,
+            exchange,
+            symbol,
+            side,
+            qty,
+            trigger_price,
+            price,
+            condition,
+            stop_end_unix_time,
+            comment,
+            instrument_group,
+            check_duplicates,
         );
-        payload.insert("guid".to_string(), Value::String(guid));
-        payload.insert("side".to_string(), Value::String(side.to_string()));
-        payload.insert("quantity".to_string(), Value::from(qty));
-        payload.insert("triggerPrice".to_string(), Value::from(trigger_price));
-        payload.insert("price".to_string(), Value::from(price));
-        payload.insert(
-            "condition".to_string(),
-            Value::String(stop_limit_condition_str(condition).to_string()),
-        );
-        payload.insert(
-            "stopEndUnixTime".to_string(),
-            Value::from(stop_end_unix_time),
-        );
-        payload.insert(
-            "instrument".to_string(),
-            serde_json::json!({"symbol": symbol, "exchange": exchange}),
-        );
-        payload.insert(
-            "user".to_string(),
-            serde_json::json!({"portfolio": portfolio}),
-        );
-        payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
-        payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
-        if let Some(comment) = comment {
-            payload.insert("comment".to_string(), Value::String(comment.to_string()));
-        }
-        if let Some(group) = instrument_group {
-            payload.insert(
-                "instrumentGroup".to_string(),
-                Value::String(group.to_string()),
-            );
-        }
-        self.send(Value::Object(payload)).await
+        self.send(payload).await
     }
 
     pub async fn delete_stop_limit(
@@ -325,6 +301,63 @@ fn build_create_market_payload(
         "allowMargin": CWS_MARKET_ALLOW_MARGIN,
         "checkDuplicates": true,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_create_stop_limit_payload(
+    portfolio: &str,
+    exchange: &str,
+    symbol: &str,
+    side: &str,
+    qty: i64,
+    trigger_price: f64,
+    price: f64,
+    condition: StopLimitCondition,
+    stop_end_unix_time: i64,
+    comment: Option<&str>,
+    instrument_group: Option<&str>,
+    check_duplicates: bool,
+) -> Value {
+    let guid = new_guid();
+    let mut instrument = Map::new();
+    instrument.insert("symbol".to_string(), Value::String(symbol.to_string()));
+    instrument.insert("exchange".to_string(), Value::String(exchange.to_string()));
+    if let Some(group) = instrument_group {
+        instrument.insert(
+            "instrumentGroup".to_string(),
+            Value::String(group.to_string()),
+        );
+    }
+
+    let mut payload = Map::new();
+    payload.insert(
+        "opcode".to_string(),
+        Value::String("create:stopLimit".to_string()),
+    );
+    payload.insert("guid".to_string(), Value::String(guid));
+    payload.insert("side".to_string(), Value::String(side.to_string()));
+    payload.insert("quantity".to_string(), Value::from(qty));
+    payload.insert("triggerPrice".to_string(), Value::from(trigger_price));
+    payload.insert("price".to_string(), Value::from(price));
+    payload.insert(
+        "condition".to_string(),
+        Value::String(condition.as_canonical_str().to_string()),
+    );
+    payload.insert(
+        "stopEndUnixTime".to_string(),
+        Value::from(stop_end_unix_time),
+    );
+    payload.insert("instrument".to_string(), Value::Object(instrument));
+    payload.insert(
+        "user".to_string(),
+        serde_json::json!({"portfolio": portfolio}),
+    );
+    payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
+    payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
+    if let Some(comment) = comment {
+        payload.insert("comment".to_string(), Value::String(comment.to_string()));
+    }
+    Value::Object(payload)
 }
 
 async fn run_session(
@@ -551,15 +584,6 @@ fn redact_token(payload: &str) -> String {
     value.to_string()
 }
 
-fn stop_limit_condition_str(cond: StopLimitCondition) -> &'static str {
-    match cond {
-        StopLimitCondition::More => "more",
-        StopLimitCondition::Less => "less",
-        StopLimitCondition::MoreOrEqual => "moreorequal",
-        StopLimitCondition::LessOrEqual => "lessorequal",
-    }
-}
-
 fn next_backoff(current: Duration, cfg: &AlorGatewayConfig) -> Duration {
     (current * cfg.backoff_multiplier as u32).min(Duration::from_millis(cfg.backoff_max_ms))
 }
@@ -616,6 +640,41 @@ mod tests {
         assert_eq!(
             instrument.get("instrumentGroup").and_then(Value::as_str),
             Some("TQBR")
+        );
+    }
+
+    #[test]
+    fn build_create_stop_limit_payload_nests_instrument_group() {
+        let payload = build_create_stop_limit_payload(
+            "D39004",
+            "MOEX",
+            "IMOEXF",
+            "buy",
+            1,
+            100.0,
+            101.0,
+            StopLimitCondition::LessOrEqual,
+            1_700_000_000,
+            Some("smoke"),
+            Some("RFUD"),
+            true,
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert_eq!(
+            obj.get("condition").and_then(Value::as_str),
+            Some("lessorequal")
+        );
+        assert!(
+            !obj.contains_key("instrumentGroup"),
+            "instrumentGroup must be nested under instrument"
+        );
+        let instrument = obj
+            .get("instrument")
+            .and_then(Value::as_object)
+            .expect("instrument");
+        assert_eq!(
+            instrument.get("instrumentGroup").and_then(Value::as_str),
+            Some("RFUD")
         );
     }
 }

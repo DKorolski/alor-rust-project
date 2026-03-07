@@ -1,5 +1,6 @@
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::de::Error;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 pub const SCHEMA_VERSION: u16 = 1;
@@ -293,13 +294,59 @@ pub struct DeleteStopLimitOrder {
     pub check_duplicates: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopLimitCondition {
     More,
     Less,
     MoreOrEqual,
     LessOrEqual,
+}
+
+impl StopLimitCondition {
+    pub fn as_canonical_str(self) -> &'static str {
+        match self {
+            StopLimitCondition::More => "more",
+            StopLimitCondition::Less => "less",
+            StopLimitCondition::MoreOrEqual => "moreorequal",
+            StopLimitCondition::LessOrEqual => "lessorequal",
+        }
+    }
+
+    fn parse_tolerant(input: &str) -> Option<Self> {
+        let normalized = input
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        match normalized.as_str() {
+            "more" => Some(Self::More),
+            "less" => Some(Self::Less),
+            "moreorequal" | "moreequal" => Some(Self::MoreOrEqual),
+            "lessorequal" | "lessequal" => Some(Self::LessOrEqual),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for StopLimitCondition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_canonical_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StopLimitCondition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse_tolerant(&raw)
+            .ok_or_else(|| D::Error::custom(format!("invalid stop limit condition: {raw}")))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,5 +416,25 @@ mod tests {
         let cmd: OrderCommand = serde_json::from_value(payload).expect("deserialize order command");
         assert_eq!(cmd.intent_class, None);
         assert_eq!(cmd.effective_intent_class(), IntentClass::Entry);
+    }
+
+    #[test]
+    fn stop_limit_condition_serializes_to_canonical_form() {
+        let s = serde_json::to_string(&StopLimitCondition::LessOrEqual).expect("serialize");
+        assert_eq!(s, "\"lessorequal\"");
+    }
+
+    #[test]
+    fn stop_limit_condition_parses_aliases() {
+        let aliases = [
+            "\"lessorequal\"",
+            "\"LessOrEqual\"",
+            "\"less_or_equal\"",
+            "\"LESS_OR_EQUAL\"",
+        ];
+        for alias in aliases {
+            let parsed: StopLimitCondition = serde_json::from_str(alias).expect("parse alias");
+            assert_eq!(parsed, StopLimitCondition::LessOrEqual);
+        }
     }
 }
