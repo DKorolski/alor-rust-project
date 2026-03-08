@@ -605,8 +605,6 @@ impl HybridIntradayRuntimeStrategy {
                     prev_day_high = self.current_day_high,
                     prev_day_low = self.current_day_low,
                     prev_day_range = computed_prev_day_range,
-                    next_day_first_high = high,
-                    next_day_first_low = low,
                     "hybrid day rollover: recalculated day features"
                 );
                 self.last_day_local = Some(day);
@@ -902,7 +900,7 @@ impl HybridIntradayRuntimeStrategy {
                 .pending_entry_created_ts_utc
                 .or_else(|| self.pending_entry.and_then(|p| Self::cycle_ts_utc(p.cycle_id)))
                 .unwrap_or(now_ts);
-            if now_ts.saturating_sub(created) >= timeout {
+            if now_ts.saturating_sub(created) > timeout {
                 self.pending_entry = None;
                 self.pending_entry_request_id = None;
                 self.pending_entry_created_ts_utc = None;
@@ -919,7 +917,7 @@ impl HybridIntradayRuntimeStrategy {
 
         if let Some(req_id) = self.pending_exit_request_id {
             let created = self.pending_exit_created_ts_utc.unwrap_or(now_ts);
-            if now_ts.saturating_sub(created) >= timeout {
+            if now_ts.saturating_sub(created) > timeout {
                 self.pending_exit_request_id = None;
                 self.pending_exit_created_ts_utc = None;
                 tracing::info!(
@@ -932,7 +930,7 @@ impl HybridIntradayRuntimeStrategy {
 
         if let Some(req_id) = self.pending_tp_request_id {
             let created = self.pending_tp_created_ts_utc.unwrap_or(now_ts);
-            if now_ts.saturating_sub(created) >= timeout {
+            if now_ts.saturating_sub(created) > timeout {
                 self.pending_tp_request_id = None;
                 self.pending_tp_created_ts_utc = None;
                 tracing::info!(
@@ -945,7 +943,7 @@ impl HybridIntradayRuntimeStrategy {
 
         if let Some(req_id) = self.pending_sl_request_id {
             let created = self.pending_sl_created_ts_utc.unwrap_or(now_ts);
-            if now_ts.saturating_sub(created) >= timeout {
+            if now_ts.saturating_sub(created) > timeout {
                 self.pending_sl_request_id = None;
                 self.pending_sl_created_ts_utc = None;
                 tracing::info!(
@@ -1206,6 +1204,33 @@ mod tests {
         assert!(strategy.pending_entry.is_none());
         assert!(strategy.pending_entry_request_id.is_none());
         assert!(strategy.pending_entry_created_ts_utc.is_none());
+    }
+
+    #[test]
+    fn pending_entry_gc_keeps_edge_timeout_for_next_bar_fill() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+        strategy.entry_ready = true;
+        let created_ts = 10;
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            created_ts,
+            true,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        assert!(strategy.pending_entry.is_some());
+        assert!(strategy.pending_entry_request_id.is_some());
+        strategy.clear_stale_pending_tail(created_ts + test_config().pending_timeout_sec as i64, 0.0);
+        assert!(strategy.pending_entry.is_some());
+        assert!(strategy.pending_entry_request_id.is_some());
     }
 
     #[test]

@@ -83,3 +83,18 @@
 
 1. Stage-2F принят как сильный инкремент.
 2. Для финального `Stage-2 accepted` рекомендуется закрыть согласованные P0 hotfix/observability пункты и повторить soak с артефактами.
+
+## 7) Canary Window (expanded)
+
+1. Для детерминированного canary используем warmup+history начиная с `2026-03-05 09:00 MSK`:
+   - это зафиксировано в `configs/gateway.paper.canary.7502MIW.toml` через `from_ts = 1772690400`.
+2. Целевой canary-фрагмент для оценки сделок:
+   - `2026-03-06 14:10-14:55 MSK`.
+3. Запуск:
+   - gateway: `cargo run -p alor-gateway --bin alor_gateway_transport_runner -- --config ./configs/gateway.paper.canary.7502MIW.toml`
+   - runtime: `cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.hybrid.paper.canary.7502MIW.toml`
+4. Acceptance-check:
+   - `reports/paper_hybrid_canary_7502MIW.jsonl` создан,
+   - `reports/trades_hybrid_canary_7502MIW.csv` не пустой,
+   - `reports/summary_hybrid_canary_7502MIW.json` содержит `trades_total > 0`,
+   - в `cmd.orders.7502MIW` нет публикаций (для `trade_mode=paper`, `allow_live_orders=false`).

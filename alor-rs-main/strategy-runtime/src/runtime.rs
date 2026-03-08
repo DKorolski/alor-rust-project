@@ -1506,6 +1506,12 @@ impl StrategyRuntime {
         message_id: String,
         position: PositionEvent,
     ) -> Result<()> {
+        if self.config.trade_mode != TradeMode::Live {
+            // In paper/backtest, position lifecycle is driven by synthetic fills.
+            // Ignore broker positions stream to avoid external-state contamination.
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
         if position.symbol != self.config.strategy.symbol {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
@@ -1791,6 +1797,24 @@ impl StrategyRuntime {
                     fill_price,
                     ..
                 } => {
+                    let symbol = bar.symbol.clone();
+                    let current_pos_qty = self
+                        .state
+                        .positions
+                        .get(&symbol)
+                        .map(|p| p.qty)
+                        .unwrap_or(0.0);
+                    let mut effective_qty = qty;
+                    // Paper safety: market orders must not flip existing position.
+                    // If order side is opposite to position side, clamp qty to position abs.
+                    if side == alor_protocol::Side::Buy && current_pos_qty < 0.0 {
+                        effective_qty = effective_qty.min(current_pos_qty.abs());
+                    } else if side == alor_protocol::Side::Sell && current_pos_qty > 0.0 {
+                        effective_qty = effective_qty.min(current_pos_qty.abs());
+                    }
+                    if effective_qty <= 0.0 {
+                        continue;
+                    }
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
                     let side = format!("{side:?}").to_lowercase();
@@ -1799,19 +1823,19 @@ impl StrategyRuntime {
                         self.ledger.record_fill(TradeRecord {
                             ts_utc: bar.close_time_utc,
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol.clone(),
                             side: side.clone(),
-                            qty,
+                            qty: effective_qty,
                             price,
                             commission: 0.0,
                             owned: true,
                         });
                         self.ledger.record_order(OrderRecord {
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol.clone(),
                             side,
-                            qty,
-                            filled: qty,
+                            qty: effective_qty,
+                            filled: effective_qty,
                             price,
                             status: "filled".to_string(),
                             ts_utc: bar.close_time_utc,
@@ -1821,18 +1845,18 @@ impl StrategyRuntime {
                     } else {
                         self.sim_orders.push(SimOrder {
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol.clone(),
                             side: side.clone(),
                             order_type: SimOrderType::Market,
-                            qty,
+                            qty: effective_qty,
                             price: None,
                             created_bar_ts: bar.close_time_utc,
                         });
                         self.ledger.record_order(OrderRecord {
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol,
                             side,
-                            qty,
+                            qty: effective_qty,
                             filled: 0.0,
                             price: 0.0,
                             status: "working".to_string(),
@@ -3707,6 +3731,30 @@ mod tests {
         runtime.config.paper.execution_mode = PaperExecutionMode::HistorySim;
         assert!(runtime.can_advance_paper_execution(DataOrigin::History));
         assert!(runtime.can_advance_paper_execution(DataOrigin::Live));
+    }
+
+    #[test]
+    fn paper_ignores_external_position_stream_events() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let position = PositionEvent {
+            symbol: runtime.config.strategy.symbol.clone(),
+            qty: 3.0,
+            existing: true,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_000,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .handle_position(
+                    runtime.config.streams.positions.clone(),
+                    "1-0".to_string(),
+                    position,
+                )
+                .await
+                .unwrap();
+        });
+        assert!(runtime.state.positions.is_empty());
     }
 
     #[test]
