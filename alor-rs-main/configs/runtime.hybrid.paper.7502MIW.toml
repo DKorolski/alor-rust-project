@@ -112,7 +112,7 @@ stop_end_buffer_sec = 60
 [paper]
 enabled = true
 output = "file"
-execution_mode = "live_only"
+execution_mode = "history_sim"
 file_path = "./reports/paper_hybrid_7502MIW.jsonl"
 trades_csv = "./reports/trades_hybrid_7502MIW.csv"
 summary_json = "./reports/summary_hybrid_7502MIW.json"

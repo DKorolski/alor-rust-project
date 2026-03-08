@@ -289,6 +289,7 @@ mod tests {
             symbol: "SBER".to_string(),
             tick_size: 0.01,
             trade_mode: TradeMode::Live,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
             position_qty: None,

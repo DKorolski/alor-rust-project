@@ -199,6 +199,7 @@ mod tests {
             symbol: "IMOEXF".to_string(),
             tick_size: 0.5,
             trade_mode: TradeMode::Backtest,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: false,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty: None,

@@ -191,10 +191,18 @@ impl HybridIntradayRuntimeStrategy {
     }
 
     fn can_execute_now(&self, ctx: &StrategyCtx, is_live_bar: bool) -> bool {
-        ctx.trade_mode == crate::TradeMode::Live
-            && ctx.allow_live_orders
-            && ctx.gateway_phase == crate::live_guard::GatewayPhase::LiveReady
-            && is_live_bar
+        match ctx.trade_mode {
+            crate::TradeMode::Live => {
+                ctx.allow_live_orders
+                    && ctx.gateway_phase == crate::live_guard::GatewayPhase::LiveReady
+                    && is_live_bar
+            }
+            crate::TradeMode::Paper => match ctx.paper_execution_mode {
+                crate::PaperExecutionMode::HistorySim => true,
+                crate::PaperExecutionMode::LiveOnly => is_live_bar,
+            },
+            crate::TradeMode::Backtest => true,
+        }
     }
 
     fn can_emit_now(&self, ctx: &StrategyCtx, is_live_bar: bool) -> bool {
@@ -984,6 +992,7 @@ mod tests {
             symbol: "IMOEXF".to_string(),
             tick_size: 0.5,
             trade_mode: TradeMode::Live,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: true,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty,

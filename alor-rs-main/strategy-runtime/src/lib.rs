@@ -128,6 +128,7 @@ pub struct StrategyCtx {
     pub symbol: String,
     pub tick_size: f64,
     pub trade_mode: TradeMode,
+    pub paper_execution_mode: PaperExecutionMode,
     pub allow_live_orders: bool,
     pub gateway_phase: crate::live_guard::GatewayPhase,
     pub position_qty: Option<f64>,

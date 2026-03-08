@@ -1939,7 +1939,7 @@ impl StrategyRuntime {
                 self.ledger.record_order(OrderRecord {
                     order_id: order.order_id,
                     symbol: order.symbol.clone(),
-                    side: order.side,
+                    side: order.side.clone(),
                     qty: order.qty,
                     filled: order.qty,
                     price,
@@ -1947,6 +1947,41 @@ impl StrategyRuntime {
                     ts_utc: bar.close_time_utc,
                     owned: true,
                 });
+                // Synthetic paper feedback: propagate position delta back into strategy.
+                let delta_qty = if order.side.eq_ignore_ascii_case("buy") {
+                    order.qty
+                } else {
+                    -order.qty
+                };
+                let prev_qty = self
+                    .state
+                    .positions
+                    .get(&order.symbol)
+                    .map(|p| p.qty)
+                    .unwrap_or(0.0);
+                let next_qty = prev_qty + delta_qty;
+                let pos_event = PositionEvent {
+                    symbol: order.symbol.clone(),
+                    qty: next_qty,
+                    existing: false,
+                    avg_price: price,
+                    ts_utc: bar.close_time_utc,
+                };
+                self.state
+                    .positions
+                    .insert(order.symbol.clone(), pos_event.clone());
+                let ctx = self.strategy_ctx();
+                let intents = self.strategy.on_position(&ctx, &pos_event);
+                self.state.strategy_state = self.strategy.state().clone();
+                if !intents.is_empty() {
+                    self.record_non_live_intents(
+                        bar.close_time_utc,
+                        &intents,
+                        self.config.trade_mode,
+                    )
+                    .await?;
+                    self.simulate_intents(bar, intents).await?;
+                }
                 self.persist_ledger_reports().await?;
             }
         }
@@ -2143,6 +2178,7 @@ impl StrategyRuntime {
             symbol: self.config.strategy.symbol.clone(),
             tick_size: self.config.strategy.tick_size,
             trade_mode: self.config.trade_mode,
+            paper_execution_mode: self.config.paper.execution_mode,
             allow_live_orders: self.config.allow_live_orders,
             gateway_phase,
             position_qty,
