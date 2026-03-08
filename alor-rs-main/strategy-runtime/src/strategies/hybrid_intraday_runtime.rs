@@ -107,6 +107,31 @@ pub struct HybridIntradayRuntimeStrategy {
 }
 
 impl HybridIntradayRuntimeStrategy {
+    fn action_debug_label(action: &Action) -> String {
+        match action {
+            Action::SubmitEntry(entry) => format!(
+                "submit_entry owner={:?} side={:?} style={:?} reason={:?} stop={:?} take={:?}",
+                entry.owner,
+                entry.side,
+                entry.entry_style,
+                entry.reason,
+                entry.stop_price,
+                entry.take_price
+            ),
+            Action::SubmitExit { owner, reason } => {
+                format!("submit_exit owner={owner:?} reason={reason:?}")
+            }
+            Action::ArmOvernightExit {
+                owner,
+                reason,
+                armed_date,
+                exit_time,
+            } => format!(
+                "arm_overnight_exit owner={owner:?} reason={reason:?} armed_date={armed_date} exit_time={exit_time}"
+            ),
+        }
+    }
+
     pub fn new(config: HybridIntradayRuntimeConfig) -> Self {
         let mr = MeanReversionEngine::new(config.mr_config);
         let br = IntradayBreakoutEngine::new(config.breakout_config);
@@ -165,11 +190,18 @@ impl HybridIntradayRuntimeStrategy {
             || !self.working_stop_orders.is_empty()
     }
 
-    fn can_publish_now(&self, ctx: &StrategyCtx, is_live_bar: bool) -> bool {
+    fn can_execute_now(&self, ctx: &StrategyCtx, is_live_bar: bool) -> bool {
         ctx.trade_mode == crate::TradeMode::Live
             && ctx.allow_live_orders
             && ctx.gateway_phase == crate::live_guard::GatewayPhase::LiveReady
             && is_live_bar
+    }
+
+    fn can_emit_now(&self, ctx: &StrategyCtx, is_live_bar: bool) -> bool {
+        match ctx.trade_mode {
+            crate::TradeMode::Live => self.can_execute_now(ctx, is_live_bar),
+            crate::TradeMode::Paper | crate::TradeMode::Backtest => true,
+        }
     }
 
     fn cycle_ts_utc(cycle_id: [u8; 10]) -> Option<i64> {
@@ -581,34 +613,43 @@ impl HybridIntradayRuntimeStrategy {
         &mut self,
         ctx: &StrategyCtx,
         created_ts_utc: i64,
-        can_publish: bool,
+        can_emit: bool,
+        can_execute: bool,
         action: Action,
     ) -> Vec<Intent> {
         match action {
             Action::SubmitEntry(entry) => {
-                if !self.entry_ready || self.safe_mode_close_only || !can_publish {
+                if !self.entry_ready || self.safe_mode_close_only || !can_emit {
+                    // Entry action was dropped by wrapper-level guards; release orchestrator pending state.
+                    self.orchestrator.on_order_rejected("entry");
                     return Vec::new();
                 }
-                let cycle_id = self.next_cycle_id(created_ts_utc);
-                self.pending_entry = Some(PendingEntry {
-                    owner: entry.owner,
-                    side: entry.side,
-                    cycle_id,
-                    entry_style: entry.entry_style,
-                    stop_price: entry.stop_price,
-                    take_price: entry.take_price,
-                });
-                self.pending_entry_request_id = Some(crate::deterministic_market_request_id(
-                    &ctx.strategy_id,
-                    &ctx.portfolio,
-                    &ctx.symbol,
-                    created_ts_utc,
-                    Self::side_to_order_side(entry.side),
-                ));
-                self.pending_entry_created_ts_utc = Some(created_ts_utc);
-                self.active_cycle_id = Some(cycle_id);
+                let cycle_id = self
+                    .active_cycle_id
+                    .unwrap_or_else(|| self.next_cycle_id(created_ts_utc));
+                if can_execute {
+                    self.pending_entry = Some(PendingEntry {
+                        owner: entry.owner,
+                        side: entry.side,
+                        cycle_id,
+                        entry_style: entry.entry_style,
+                        stop_price: entry.stop_price,
+                        take_price: entry.take_price,
+                    });
+                    self.pending_entry_request_id = Some(crate::deterministic_market_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &ctx.symbol,
+                        created_ts_utc,
+                        Self::side_to_order_side(entry.side),
+                    ));
+                    self.pending_entry_created_ts_utc = Some(created_ts_utc);
+                    self.active_cycle_id = Some(cycle_id);
+                }
                 let comment = self.build_comment(ctx, &cycle_id, entry.owner, TagRole::Entry);
-                self.sync_state();
+                if can_execute {
+                    self.sync_state();
+                }
                 vec![Intent::Market {
                     qty: self.config.qty.max(1.0),
                     side: Self::side_to_order_side(entry.side),
@@ -618,7 +659,7 @@ impl HybridIntradayRuntimeStrategy {
                 .with_class(IntentClass::Entry)]
             }
             Action::SubmitExit { owner, .. } => {
-                if !can_publish {
+                if !can_emit {
                     return Vec::new();
                 }
                 let Some(pos_qty) = ctx.position_qty else {
@@ -636,18 +677,22 @@ impl HybridIntradayRuntimeStrategy {
                 let cycle_id = self
                     .active_cycle_id
                     .unwrap_or_else(|| self.next_cycle_id(created_ts_utc));
-                self.active_cycle_id = Some(cycle_id);
-                self.current_owner = Some(owner);
-                self.pending_exit_request_id = Some(crate::deterministic_market_request_id(
-                    &ctx.strategy_id,
-                    &ctx.portfolio,
-                    &ctx.symbol,
-                    created_ts_utc,
-                    side,
-                ));
-                self.pending_exit_created_ts_utc = Some(created_ts_utc);
+                if can_execute {
+                    self.active_cycle_id = Some(cycle_id);
+                    self.current_owner = Some(owner);
+                    self.pending_exit_request_id = Some(crate::deterministic_market_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &ctx.symbol,
+                        created_ts_utc,
+                        side,
+                    ));
+                    self.pending_exit_created_ts_utc = Some(created_ts_utc);
+                }
                 let comment = self.build_comment(ctx, &cycle_id, owner, TagRole::Exit);
-                self.sync_state();
+                if can_execute {
+                    self.sync_state();
+                }
                 vec![Intent::Market {
                     qty,
                     side,
@@ -750,7 +795,7 @@ impl HybridIntradayRuntimeStrategy {
         {
             return Vec::new();
         }
-        if !self.can_publish_now(ctx, true) {
+        if !self.can_execute_now(ctx, true) {
             self.schedule_next_repair(now_ts);
             return Vec::new();
         }
@@ -969,6 +1014,7 @@ mod tests {
             &ctx,
             1,
             true,
+            true,
             Action::SubmitExit {
                 owner: Owner::MeanReversion,
                 reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
@@ -1013,11 +1059,11 @@ mod tests {
             take_price: None,
         });
 
-        let intents_blocked = strategy.map_action_to_intents(&ctx, 1, false, entry_action.clone());
+        let intents_blocked = strategy.map_action_to_intents(&ctx, 1, false, false, entry_action.clone());
         assert!(intents_blocked.is_empty());
 
         strategy.entry_ready = true;
-        let intents_ready = strategy.map_action_to_intents(&ctx, 2, true, entry_action);
+        let intents_ready = strategy.map_action_to_intents(&ctx, 2, true, true, entry_action);
         assert_eq!(intents_ready.len(), 1);
         match &intents_ready[0] {
             Intent::Classified { intent, .. } => match intent.as_ref() {
@@ -1042,6 +1088,7 @@ mod tests {
             &ctx,
             100,
             false,
+            false,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
                 side: Side::Long,
@@ -1058,6 +1105,74 @@ mod tests {
     }
 
     #[test]
+    fn paper_mode_emits_entry_intent_without_pending_mutation() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.entry_ready = true;
+        let mut ctx = test_ctx(Some(0.0));
+        ctx.trade_mode = TradeMode::Paper;
+        ctx.gateway_phase = crate::live_guard::GatewayPhase::SyncingHistory;
+
+        let intents = strategy.map_action_to_intents(
+            &ctx,
+            200,
+            true,
+            false,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+
+        assert_eq!(intents.len(), 1);
+        assert!(strategy.pending_entry.is_none());
+        assert!(strategy.pending_entry_request_id.is_none());
+        assert!(strategy.pending_entry_created_ts_utc.is_none());
+    }
+
+    #[test]
+    fn dropped_entry_releases_orchestrator_pending_state() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy
+            .orchestrator
+            .restore(crate::strategies::hybrid_intraday::orchestrator::HybridSnapshot {
+                state: crate::strategies::hybrid_intraday::orchestrator::HybridState::Pending,
+                current_owner: Some(Owner::MeanReversion),
+                current_side: Some(Side::Long),
+                has_pending_entry: true,
+                overnight_exit_armed_date: None,
+            });
+        strategy.entry_ready = false;
+        let ctx = test_ctx(Some(0.0));
+
+        let intents = strategy.map_action_to_intents(
+            &ctx,
+            300,
+            true,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+
+        assert!(intents.is_empty());
+        let snapshot = strategy.orchestrator.snapshot();
+        assert_eq!(
+            snapshot.state,
+            crate::strategies::hybrid_intraday::orchestrator::HybridState::Flat
+        );
+        assert!(!snapshot.has_pending_entry);
+    }
+
+    #[test]
     fn pending_entry_gc_clears_stale_tail_when_flat_without_orders() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let ctx = test_ctx(Some(0.0));
@@ -1065,6 +1180,7 @@ mod tests {
         let _ = strategy.map_action_to_intents(
             &ctx,
             10,
+            true,
             true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
@@ -1244,6 +1360,7 @@ mod tests {
             &ctx,
             10,
             true,
+            true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
                 side: Side::Long,
@@ -1264,6 +1381,7 @@ mod tests {
         let _ = strategy.map_action_to_intents(
             &ctx,
             100,
+            true,
             true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
@@ -1295,6 +1413,7 @@ mod tests {
         let _ = strategy.map_action_to_intents(
             &ctx,
             1_700_000_000,
+            true,
             true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
@@ -1391,6 +1510,7 @@ mod tests {
         let intents = strategy.map_action_to_intents(
             &ctx,
             1_700_000_260,
+            true,
             true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
@@ -1757,13 +1877,43 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.last_bar_close = Some(bar.close);
         self.clear_stale_pending_tail(bar.close_time_utc, ctx.position_qty.unwrap_or(0.0));
-        let can_publish = self.can_publish_now(ctx, bar.origin == DataOrigin::Live);
+        let can_emit = self.can_emit_now(ctx, bar.origin == DataOrigin::Live);
+        let can_execute = self.can_execute_now(ctx, bar.origin == DataOrigin::Live);
+        if !actions.is_empty() {
+            let action_labels = actions
+                .iter()
+                .map(Self::action_debug_label)
+                .collect::<Vec<_>>();
+            info!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                ts_utc = bar.close_time_utc,
+                dt_local = %dt_local,
+                origin = ?bar.origin,
+                close = bar.close,
+                close_prev,
+                day_range_prev,
+                entry_ready = self.entry_ready,
+                has_open_position = has_open_position,
+                has_live_orders = self.has_live_orders(),
+                can_emit,
+                can_execute,
+                actions_count = action_labels.len(),
+                actions = ?action_labels,
+                "hybrid actions generated"
+            );
+        }
         let mut intents = self.maybe_emit_repair_intents(ctx, bar.close_time_utc);
         intents.extend(
             actions
                 .into_iter()
                 .flat_map(|action| {
-                    self.map_action_to_intents(ctx, bar.close_time_utc, can_publish, action)
+                    self.map_action_to_intents(
+                        ctx,
+                        bar.close_time_utc,
+                        can_emit,
+                        can_execute,
+                        action,
+                    )
                 }),
         );
         self.sync_state();

@@ -2,9 +2,9 @@ redis_url = "redis://127.0.0.1/"
 portfolio = "7502MIW"
 exchange = "MOEX"
 source = "strategy-runtime"
-consumer_group = "strategy-runtime"
+consumer_group = "strategy-runtime-paper"
 consumer_name = "auto"
-reset_state_on_start = false
+reset_state_on_start = true
 
 [runtime]
 trade_mode = "paper"
@@ -111,7 +111,7 @@ stop_end_buffer_sec = 60
 
 [paper]
 enabled = true
-output = "stdout"
+output = "file"
 file_path = "./reports/paper_hybrid_7502MIW.jsonl"
 trades_csv = "./reports/trades_hybrid_7502MIW.csv"
 summary_json = "./reports/summary_hybrid_7502MIW.json"
