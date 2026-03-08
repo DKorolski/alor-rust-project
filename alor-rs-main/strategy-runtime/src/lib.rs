@@ -530,10 +530,18 @@ pub enum PaperOutput {
     File,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperExecutionMode {
+    LiveOnly,
+    HistorySim,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PaperConfig {
     pub enabled: bool,
     pub output: PaperOutput,
+    pub execution_mode: PaperExecutionMode,
     pub file_path: String,
     pub trades_csv: String,
     pub summary_json: String,

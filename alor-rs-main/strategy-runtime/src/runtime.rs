@@ -28,8 +28,9 @@ use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PaperConfig,
-    PaperOutput, PositionEvent, RuntimeConfig, RuntimeHealthSnapshot, RuntimeStateRestored,
-    StopOrderEvent, Strategy, StrategyCtx, StrategyKind, TradeEvent, TradeMode,
+    PaperExecutionMode, PaperOutput, PositionEvent, RuntimeConfig, RuntimeHealthSnapshot,
+    RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, StrategyKind, TradeEvent,
+    TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -268,6 +269,40 @@ impl Default for RuntimeMetrics {
 }
 
 impl StrategyRuntime {
+    fn can_advance_paper_execution(&self, origin: DataOrigin) -> bool {
+        if self.config.trade_mode != TradeMode::Paper {
+            return true;
+        }
+        match self.config.paper.execution_mode {
+            PaperExecutionMode::HistorySim => true,
+            PaperExecutionMode::LiveOnly => origin == DataOrigin::Live,
+        }
+    }
+
+    async fn record_non_live_intents(
+        &mut self,
+        created_ts_utc: i64,
+        intents: &[Intent],
+        mode: TradeMode,
+    ) -> Result<()> {
+        if intents.is_empty() {
+            return Ok(());
+        }
+        self.health_snapshot.write().last_intent_ts_utc = Some(created_ts_utc);
+        let config = self.config.clone();
+        let paper = self.config.paper.clone();
+        let backtest = self.config.backtest.clone();
+        log_virtual_trades(
+            created_ts_utc,
+            &config,
+            &paper,
+            &backtest,
+            intents.to_vec(),
+            mode,
+        )
+        .await
+    }
+
     fn test_delay_before_publish_ms() -> u64 {
         let requested = std::env::var("RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS")
             .ok()
@@ -582,8 +617,12 @@ impl StrategyRuntime {
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
 
         if self.config.trade_mode != TradeMode::Live {
-            self.simulate_fills(&bar).await?;
-            self.simulate_intents(&bar, intents).await?;
+            self.record_non_live_intents(bar.close_time_utc, &intents, self.config.trade_mode)
+                .await?;
+            if self.can_advance_paper_execution(bar.origin.clone()) {
+                self.simulate_fills(&bar).await?;
+                self.simulate_intents(&bar, intents).await?;
+            }
         } else {
             self.apply_intents(&ctx, bar.close_time_utc, intents)
                 .await?;
@@ -1508,8 +1547,12 @@ impl StrategyRuntime {
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         if self.config.trade_mode != TradeMode::Live {
-            self.simulate_fills(&bar).await?;
-            self.simulate_intents(&bar, intents).await?;
+            self.record_non_live_intents(event_ts, &intents, self.config.trade_mode)
+                .await?;
+            if self.can_advance_paper_execution(bar.origin.clone()) {
+                self.simulate_fills(&bar).await?;
+                self.simulate_intents(&bar, intents).await?;
+            }
             self.persist_state(None).await?;
         } else {
             self.apply_intents(&ctx, event_ts, intents).await?;
@@ -3127,6 +3170,7 @@ mod tests {
             paper: PaperConfig {
                 enabled: false,
                 output: PaperOutput::Stdout,
+                execution_mode: PaperExecutionMode::LiveOnly,
                 file_path: "paper.jsonl".to_string(),
                 trades_csv: "trades.csv".to_string(),
                 summary_json: "summary.json".to_string(),
@@ -3615,6 +3659,18 @@ mod tests {
             assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
             assert_eq!(runtime.ledger.order(1).unwrap().price, 11.0);
         });
+    }
+
+    #[test]
+    fn paper_execution_mode_controls_history_advance() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.config.paper.execution_mode = PaperExecutionMode::LiveOnly;
+        assert!(!runtime.can_advance_paper_execution(DataOrigin::History));
+        assert!(runtime.can_advance_paper_execution(DataOrigin::Live));
+
+        runtime.config.paper.execution_mode = PaperExecutionMode::HistorySim;
+        assert!(runtime.can_advance_paper_execution(DataOrigin::History));
+        assert!(runtime.can_advance_paper_execution(DataOrigin::Live));
     }
 
     #[test]

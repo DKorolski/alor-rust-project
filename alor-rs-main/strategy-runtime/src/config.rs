@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::{
-    BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperOutput, ReadConfig,
-    ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind, StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperExecutionMode,
+    PaperOutput, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind,
+    StreamNames, TradeMode, TrimConfig,
     HybridIntradaySettings,
 };
 
@@ -72,6 +73,7 @@ const DEFAULT_RUNTIME_HEALTH_LISTEN_ADDR: &str = "127.0.0.1:8091";
 const DEFAULT_RUNTIME_HEALTH_EXPOSE_METRICS: bool = false;
 const DEFAULT_PAPER_ENABLED: bool = true;
 const DEFAULT_PAPER_OUTPUT: PaperOutput = PaperOutput::Stdout;
+const DEFAULT_PAPER_EXECUTION_MODE: PaperExecutionMode = PaperExecutionMode::LiveOnly;
 const DEFAULT_PAPER_FILE_PATH: &str = "./paper_trades.jsonl";
 const DEFAULT_PAPER_TRADES_CSV: &str = "./trades.csv";
 const DEFAULT_PAPER_SUMMARY_JSON: &str = "./summary.json";
@@ -236,6 +238,7 @@ pub struct RuntimeSources {
 pub struct PaperSources {
     pub enabled: ConfigSource,
     pub output: ConfigSource,
+    pub execution_mode: ConfigSource,
     pub file_path: ConfigSource,
     pub trades_csv: ConfigSource,
     pub summary_json: ConfigSource,
@@ -396,6 +399,7 @@ impl Default for PaperSources {
         Self {
             enabled: ConfigSource::Default,
             output: ConfigSource::Default,
+            execution_mode: ConfigSource::Default,
             file_path: ConfigSource::Default,
             trades_csv: ConfigSource::Default,
             summary_json: ConfigSource::Default,
@@ -597,6 +601,7 @@ struct SessionGapConfigFile {
 struct PaperConfigFile {
     enabled: Option<bool>,
     output: Option<String>,
+    execution_mode: Option<String>,
     file_path: Option<String>,
     trades_csv: Option<String>,
     summary_json: Option<String>,
@@ -703,6 +708,7 @@ pub fn load_runtime_config(
     let mut paper = PaperConfig {
         enabled: DEFAULT_PAPER_ENABLED,
         output: DEFAULT_PAPER_OUTPUT,
+        execution_mode: DEFAULT_PAPER_EXECUTION_MODE,
         file_path: DEFAULT_PAPER_FILE_PATH.to_string(),
         trades_csv: DEFAULT_PAPER_TRADES_CSV.to_string(),
         summary_json: DEFAULT_PAPER_SUMMARY_JSON.to_string(),
@@ -1129,6 +1135,10 @@ pub fn load_runtime_config(
                 paper.output = parse_paper_output(value);
                 sources.paper.output = ConfigSource::File;
             }
+            if let Some(value) = &paper_file.execution_mode {
+                paper.execution_mode = parse_paper_execution_mode(value);
+                sources.paper.execution_mode = ConfigSource::File;
+            }
             if let Some(value) = &paper_file.file_path {
                 paper.file_path = value.clone();
                 sources.paper.file_path = ConfigSource::File;
@@ -1404,6 +1414,10 @@ pub fn load_runtime_config(
         paper.output = parse_paper_output(&value);
         sources.paper.output = ConfigSource::Env;
     }
+    if let Ok(value) = env::var("PAPER_EXECUTION_MODE") {
+        paper.execution_mode = parse_paper_execution_mode(&value);
+        sources.paper.execution_mode = ConfigSource::Env;
+    }
     if let Ok(value) = env::var("PAPER_FILE_PATH") {
         paper.file_path = value;
         sources.paper.file_path = ConfigSource::Env;
@@ -1671,6 +1685,13 @@ fn parse_paper_output(value: &str) -> PaperOutput {
     }
 }
 
+fn parse_paper_execution_mode(value: &str) -> PaperExecutionMode {
+    match value.to_lowercase().as_str() {
+        "history_sim" | "historysim" => PaperExecutionMode::HistorySim,
+        _ => PaperExecutionMode::LiveOnly,
+    }
+}
+
 fn validate_trade_mode(config: &RuntimeConfig) -> Result<()> {
     let mut conflicts = Vec::new();
     match config.trade_mode {
@@ -1819,6 +1840,30 @@ side = "buy"
             resolved.config.strategy.strategy_kind,
             StrategyKind::HybridIntraday
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_parses_paper_execution_mode_history_sim() {
+        let path = write_temp_config(
+            "paper-execution-mode",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "demo"
+exchange = "MOEX"
+
+[paper]
+enabled = true
+execution_mode = "history_sim"
+"#,
+        );
+
+        let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        assert_eq!(
+            resolved.config.paper.execution_mode,
+            PaperExecutionMode::HistorySim
+        );
+        assert_eq!(resolved.sources.paper.execution_mode, ConfigSource::File);
         let _ = std::fs::remove_file(path);
     }
 }
