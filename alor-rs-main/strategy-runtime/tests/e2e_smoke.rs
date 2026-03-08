@@ -14,8 +14,8 @@ use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
     deterministic_request_id, BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig,
-    PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
-    StreamNames, TradeMode, TrimConfig,
+    PaperOutput, PositionEvent, HybridIntradaySettings, ReadConfig, ReplayConfig, RuntimeConfig,
+    StrategyConfig, StreamNames, TradeMode, TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -116,6 +116,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             session_gap_start_cash: 30_000.0,
             session_gap_cash_factor: 0.9,
             session_gap_max_entry_hour: 19,
+            hybrid_intraday: HybridIntradaySettings::default(),
         },
         paper: PaperConfig {
             enabled: true,

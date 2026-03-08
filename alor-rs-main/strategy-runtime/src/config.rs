@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::{
     BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperOutput, ReadConfig,
     ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind, StreamNames, TradeMode, TrimConfig,
+    HybridIntradaySettings,
 };
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
@@ -213,6 +214,7 @@ pub struct StrategySources {
     pub session_gap_min: ConfigSource,
     pub session_gap_exit_offset_min: ConfigSource,
     pub session_gap_work_weekends: ConfigSource,
+    pub hybrid_intraday: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,6 +368,7 @@ impl Default for StrategySources {
             session_gap_min: ConfigSource::Default,
             session_gap_exit_offset_min: ConfigSource::Default,
             session_gap_work_weekends: ConfigSource::Default,
+            hybrid_intraday: ConfigSource::Default,
         }
     }
 }
@@ -533,6 +536,40 @@ struct StrategyConfigFile {
     trading_periods: Option<TradingPeriods>,
     max_silence_bars_sec: Option<u64>,
     session_gap: Option<SessionGapConfigFile>,
+    hybrid_intraday: Option<HybridIntradayConfigFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct HybridIntradayConfigFile {
+    mr_min_range_long: Option<f64>,
+    mr_max_range_long: Option<f64>,
+    mr_k_long: Option<f64>,
+    mr_take_k_long: Option<f64>,
+    mr_stop_k_long: Option<f64>,
+    mr_min_range_short: Option<f64>,
+    mr_max_range_short: Option<f64>,
+    mr_k_short: Option<f64>,
+    mr_take_k_short: Option<f64>,
+    mr_stop_k_short: Option<f64>,
+    mr_session_end_time: Option<String>,
+    mr_exit_offset_min: Option<i64>,
+    bo_k: Option<f64>,
+    bo_stop1_range: Option<f64>,
+    bo_stop2_range: Option<f64>,
+    bo_big_move_threshold: Option<f64>,
+    bo_min_range: Option<f64>,
+    bo_min_range_mode: Option<String>,
+    bo_exclude_weekends: Option<bool>,
+    bo_wait_hours: Option<f64>,
+    orchestrator_breakout_eod_mode: Option<String>,
+    orchestrator_breakout_overnight_exit_time: Option<String>,
+    repair_deadline_sec: Option<u64>,
+    sl_escalate_timeout_sec: Option<u64>,
+    max_repair_retries: Option<u32>,
+    repair_backoff_base_sec: Option<u64>,
+    repair_backoff_max_sec: Option<u64>,
+    pending_timeout_sec: Option<u64>,
+    stop_end_buffer_sec: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -640,6 +677,7 @@ pub fn load_runtime_config(
         session_gap_min: DEFAULT_SESSION_GAP_MIN,
         session_gap_exit_offset_min: DEFAULT_SESSION_GAP_EXIT_OFFSET_MIN,
         session_gap_work_weekends: DEFAULT_SESSION_GAP_WORK_WEEKENDS,
+        hybrid_intraday: HybridIntradaySettings::default(),
     };
 
     let mut read = ReadConfig {
@@ -940,6 +978,97 @@ pub fn load_runtime_config(
                 if let Some(value) = session_gap_file.work_weekends {
                     strategy.session_gap_work_weekends = value;
                     sources.strategy.session_gap_work_weekends = ConfigSource::File;
+                }
+            }
+            if let Some(hybrid_file) = &strategy_file.hybrid_intraday {
+                sources.strategy.hybrid_intraday = ConfigSource::File;
+                if let Some(value) = hybrid_file.mr_min_range_long {
+                    strategy.hybrid_intraday.mr_min_range_long = value;
+                }
+                if let Some(value) = hybrid_file.mr_max_range_long {
+                    strategy.hybrid_intraday.mr_max_range_long = value;
+                }
+                if let Some(value) = hybrid_file.mr_k_long {
+                    strategy.hybrid_intraday.mr_k_long = value;
+                }
+                if let Some(value) = hybrid_file.mr_take_k_long {
+                    strategy.hybrid_intraday.mr_take_k_long = value;
+                }
+                if let Some(value) = hybrid_file.mr_stop_k_long {
+                    strategy.hybrid_intraday.mr_stop_k_long = value;
+                }
+                if let Some(value) = hybrid_file.mr_min_range_short {
+                    strategy.hybrid_intraday.mr_min_range_short = value;
+                }
+                if let Some(value) = hybrid_file.mr_max_range_short {
+                    strategy.hybrid_intraday.mr_max_range_short = value;
+                }
+                if let Some(value) = hybrid_file.mr_k_short {
+                    strategy.hybrid_intraday.mr_k_short = value;
+                }
+                if let Some(value) = hybrid_file.mr_take_k_short {
+                    strategy.hybrid_intraday.mr_take_k_short = value;
+                }
+                if let Some(value) = hybrid_file.mr_stop_k_short {
+                    strategy.hybrid_intraday.mr_stop_k_short = value;
+                }
+                if let Some(value) = &hybrid_file.mr_session_end_time {
+                    strategy.hybrid_intraday.mr_session_end_time = value.clone();
+                }
+                if let Some(value) = hybrid_file.mr_exit_offset_min {
+                    strategy.hybrid_intraday.mr_exit_offset_min = value;
+                }
+                if let Some(value) = hybrid_file.bo_k {
+                    strategy.hybrid_intraday.bo_k = value;
+                }
+                if let Some(value) = hybrid_file.bo_stop1_range {
+                    strategy.hybrid_intraday.bo_stop1_range = value;
+                }
+                if let Some(value) = hybrid_file.bo_stop2_range {
+                    strategy.hybrid_intraday.bo_stop2_range = value;
+                }
+                if let Some(value) = hybrid_file.bo_big_move_threshold {
+                    strategy.hybrid_intraday.bo_big_move_threshold = value;
+                }
+                if let Some(value) = hybrid_file.bo_min_range {
+                    strategy.hybrid_intraday.bo_min_range = value;
+                }
+                if let Some(value) = &hybrid_file.bo_min_range_mode {
+                    strategy.hybrid_intraday.bo_min_range_mode = value.clone();
+                }
+                if let Some(value) = hybrid_file.bo_exclude_weekends {
+                    strategy.hybrid_intraday.bo_exclude_weekends = value;
+                }
+                if let Some(value) = hybrid_file.bo_wait_hours {
+                    strategy.hybrid_intraday.bo_wait_hours = value;
+                }
+                if let Some(value) = &hybrid_file.orchestrator_breakout_eod_mode {
+                    strategy.hybrid_intraday.orchestrator_breakout_eod_mode = value.clone();
+                }
+                if let Some(value) = &hybrid_file.orchestrator_breakout_overnight_exit_time {
+                    strategy.hybrid_intraday.orchestrator_breakout_overnight_exit_time =
+                        value.clone();
+                }
+                if let Some(value) = hybrid_file.repair_deadline_sec {
+                    strategy.hybrid_intraday.repair_deadline_sec = value;
+                }
+                if let Some(value) = hybrid_file.sl_escalate_timeout_sec {
+                    strategy.hybrid_intraday.sl_escalate_timeout_sec = value;
+                }
+                if let Some(value) = hybrid_file.max_repair_retries {
+                    strategy.hybrid_intraday.max_repair_retries = value;
+                }
+                if let Some(value) = hybrid_file.repair_backoff_base_sec {
+                    strategy.hybrid_intraday.repair_backoff_base_sec = value;
+                }
+                if let Some(value) = hybrid_file.repair_backoff_max_sec {
+                    strategy.hybrid_intraday.repair_backoff_max_sec = value;
+                }
+                if let Some(value) = hybrid_file.pending_timeout_sec {
+                    strategy.hybrid_intraday.pending_timeout_sec = value;
+                }
+                if let Some(value) = hybrid_file.stop_end_buffer_sec {
+                    strategy.hybrid_intraday.stop_end_buffer_sec = value;
                 }
             }
         }

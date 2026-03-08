@@ -170,17 +170,27 @@ pub enum StrategyState {
         #[serde(default)]
         pending_entry_request_id: Option<Uuid>,
         #[serde(default)]
+        pending_entry_created_ts_utc: Option<i64>,
+        #[serde(default)]
         pending_exit_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_exit_created_ts_utc: Option<i64>,
         #[serde(default)]
         pending_tp_request_id: Option<Uuid>,
         #[serde(default)]
+        pending_tp_created_ts_utc: Option<i64>,
+        #[serde(default)]
         pending_sl_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_sl_created_ts_utc: Option<i64>,
         #[serde(default)]
         tp_order_id: Option<i64>,
         #[serde(default)]
         sl_stop_order_id: Option<String>,
         #[serde(default)]
         sl_exchange_order_id: Option<i64>,
+        #[serde(default)]
+        sl_triggered_ts: Option<i64>,
         #[serde(default)]
         mr_take_price: Option<f64>,
         #[serde(default)]
@@ -199,6 +209,16 @@ pub enum StrategyState {
         safe_mode_reason: Option<String>,
         #[serde(default)]
         entry_ready: bool,
+        #[serde(default)]
+        last_bar_close: Option<f64>,
+        #[serde(default)]
+        last_day_local: Option<String>,
+        #[serde(default)]
+        current_day_high: Option<f64>,
+        #[serde(default)]
+        current_day_low: Option<f64>,
+        #[serde(default)]
+        prev_day_range: Option<f64>,
     },
     CancelSent {
         cancel_request_id: Uuid,

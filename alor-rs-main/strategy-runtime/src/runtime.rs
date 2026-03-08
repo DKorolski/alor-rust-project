@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, NaiveTime, TimeZone, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::watch;
@@ -37,6 +38,7 @@ const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
 const TRADE_DEDUP_LIMIT: usize = 512;
+const STOP_END_BUFFER_SEC_DEFAULT: i64 = 60;
 const NON_WORKING_ORDER_STATUSES: [&str; 5] =
     ["filled", "canceled", "cancelled", "expired", "rejected"];
 const NON_WORKING_STOP_ORDER_STATUSES: [&str; 9] = [
@@ -569,9 +571,12 @@ impl StrategyRuntime {
             return Ok(());
         }
 
-        self.state
-            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
-        let ctx = self.strategy_ctx();
+        let prev_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&bar.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar(prev_bar_ts);
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
@@ -583,6 +588,8 @@ impl StrategyRuntime {
             self.apply_intents(&ctx, bar.close_time_utc, intents)
                 .await?;
         }
+        self.state
+            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
 
         self.metrics.bars_read_total = self.metrics.bars_read_total.saturating_add(1);
         self.metrics.bars_decoded_ok_total = self.metrics.bars_decoded_ok_total.saturating_add(1);
@@ -650,6 +657,7 @@ impl StrategyRuntime {
     }
 
     fn truncate_file(&self, path: &str) -> Result<()> {
+        ensure_parent_dir(path)?;
         let _ = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -1486,13 +1494,16 @@ impl StrategyRuntime {
             self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
             return Ok(());
         }
-        self.state
-            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        let prev_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&bar.symbol)
+            .copied();
         let event_ts = self.normalize_event_ts(bar.close_time_utc);
         if bar.origin == DataOrigin::Live {
             self.bootstrap_state.seen_live_bar = true;
         }
-        let ctx = self.strategy_ctx();
+        let ctx = self.strategy_ctx_with_last_bar(prev_bar_ts);
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
@@ -1503,6 +1514,8 @@ impl StrategyRuntime {
         } else {
             self.apply_intents(&ctx, event_ts, intents).await?;
         }
+        self.state
+            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
         self.transport.xack(&stream, &message_id).await?;
         self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
         Ok(())
@@ -2068,7 +2081,7 @@ impl StrategyRuntime {
         }
     }
 
-    fn strategy_ctx(&self) -> StrategyCtx {
+    fn strategy_ctx_with_last_bar(&self, last_bar_ts: Option<i64>) -> StrategyCtx {
         let gateway_phase = self
             .live_guard
             .health
@@ -2090,12 +2103,78 @@ impl StrategyRuntime {
             allow_live_orders: self.config.allow_live_orders,
             gateway_phase,
             position_qty,
-            last_bar_ts: self
-                .state
-                .last_processed_bar_ts
-                .get(&self.config.strategy.symbol)
-                .copied(),
+            last_bar_ts,
         }
+    }
+
+    fn strategy_ctx(&self) -> StrategyCtx {
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        self.strategy_ctx_with_last_bar(last_bar_ts)
+    }
+
+    fn compute_intraday_stop_end_utc(&self, created_ts_utc: i64) -> Option<i64> {
+        if created_ts_utc <= 0 {
+            return None;
+        }
+        let offset_hours = self
+            .config
+            .strategy
+            .trading_periods
+            .as_ref()
+            .map(|p| {
+                if p.timezone_offset_hours == 0 {
+                    self.config.strategy.timezone_offset_hours
+                } else {
+                    p.timezone_offset_hours
+                }
+            })
+            .unwrap_or(self.config.strategy.timezone_offset_hours);
+        let offset = FixedOffset::east_opt(offset_hours.saturating_mul(3600))?;
+        let local_dt = Utc
+            .timestamp_opt(created_ts_utc, 0)
+            .single()?
+            .with_timezone(&offset);
+        let session_end = self
+            .config
+            .strategy
+            .trading_periods
+            .as_ref()
+            .map(|p| p.session_end)
+            .unwrap_or_else(|| {
+                NaiveTime::from_hms_opt(
+                    self.config.strategy.session_close_hour.min(23),
+                    self.config.strategy.session_close_minute.min(59),
+                    0,
+                )
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(23, 50, 0).expect("valid time"))
+            });
+        let weekends_off = self
+            .config
+            .strategy
+            .trading_periods
+            .as_ref()
+            .map(|p| p.weekends_off)
+            .unwrap_or(false);
+        let mut day = local_dt.date_naive();
+        for _ in 0..8 {
+            if weekends_off && matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+                day += ChronoDuration::days(1);
+                continue;
+            }
+            let local_close = day.and_time(session_end);
+            if let Some(with_offset) = offset.from_local_datetime(&local_close).single() {
+                let stop_end = with_offset.timestamp().saturating_add(STOP_END_BUFFER_SEC_DEFAULT);
+                if stop_end > created_ts_utc {
+                    return Some(stop_end);
+                }
+            }
+            day += ChronoDuration::days(1);
+        }
+        None
     }
 
     async fn notify_bootstrap_snapshot(&mut self) -> Result<()> {
@@ -2530,7 +2609,11 @@ impl StrategyRuntime {
                 comment,
                 instrument_group,
                 check_duplicates,
-            } => (
+            } => {
+                let resolved_stop_end = self
+                    .compute_intraday_stop_end_utc(created_ts_utc)
+                    .unwrap_or(stop_end_unix_time);
+                (
                 alor_protocol::CommandAction::CreateStopLimit(
                     alor_protocol::CreateStopLimitOrder {
                         side,
@@ -2538,7 +2621,7 @@ impl StrategyRuntime {
                         trigger_price,
                         price,
                         condition,
-                        stop_end_unix_time,
+                        stop_end_unix_time: resolved_stop_end,
                         comment: Self::sanitize_comment(
                             comment.or_else(|| fallback_comment.clone()),
                         ),
@@ -2548,7 +2631,8 @@ impl StrategyRuntime {
                 ),
                 5,
                 "create_stop_limit",
-            ),
+            )
+            }
             Intent::DeleteStopLimit {
                 order_id,
                 side,
@@ -2943,7 +3027,10 @@ fn bars_tf_seconds(stream: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CloseTrigger, ReadConfig, ReplayConfig, StrategyConfig, StreamNames, TrimConfig};
+    use crate::{
+        CloseTrigger, HybridIntradaySettings, ReadConfig, ReplayConfig, StrategyConfig,
+        StreamNames, TrimConfig,
+    };
     use alor_types::TradingPeriods;
 
     fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {
@@ -3035,6 +3122,7 @@ mod tests {
                 session_gap_start_cash: 30_000.0,
                 session_gap_cash_factor: 0.9,
                 session_gap_max_entry_hour: 19,
+                hybrid_intraday: HybridIntradaySettings::default(),
             },
             paper: PaperConfig {
                 enabled: false,
@@ -3112,6 +3200,88 @@ mod tests {
         assert!(runtime.trading_window_allows_order(
             &ctx,
             created_ts_utc,
+            alor_protocol::IntentClass::Exit
+        ));
+    }
+
+    #[test]
+    fn create_stop_limit_uses_session_close_plus_buffer_for_stop_end() {
+        let runtime = test_runtime(TradeMode::Live);
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let expected = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(20, 50, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            + STOP_END_BUFFER_SEC_DEFAULT;
+        let ctx = runtime.strategy_ctx();
+        let cmd = runtime.intent_to_command(
+            &ctx,
+            created_ts_utc,
+            Intent::CreateStopLimit {
+                side: alor_protocol::Side::Sell,
+                qty: 1.0,
+                trigger_price: 100.0,
+                price: 99.5,
+                condition: alor_protocol::StopLimitCondition::LessOrEqual,
+                stop_end_unix_time: created_ts_utc.saturating_add(86_400),
+                comment: None,
+                instrument_group: None,
+                check_duplicates: Some(true),
+            },
+            alor_protocol::IntentClass::ProtectiveRepair,
+        );
+        match cmd.action {
+            alor_protocol::CommandAction::CreateStopLimit(payload) => {
+                assert_eq!(payload.stop_end_unix_time, expected);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn silence_gap_blocks_entry_on_first_gap_bar() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy.max_silence_bars_sec = 60;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+        let prev_bar = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let first_gap_bar = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 10, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+
+        let ctx_prev = runtime.strategy_ctx_with_last_bar(Some(prev_bar));
+        assert!(!runtime.trading_window_allows_order(
+            &ctx_prev,
+            first_gap_bar,
+            alor_protocol::IntentClass::Entry
+        ));
+        assert!(runtime.trading_window_allows_order(
+            &ctx_prev,
+            first_gap_bar,
             alor_protocol::IntentClass::Exit
         ));
     }
@@ -3628,6 +3798,7 @@ async fn log_virtual_trades(
 }
 
 async fn append_json_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+    ensure_parent_dir(path)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -3639,6 +3810,7 @@ async fn append_json_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
 }
 
 async fn append_log_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+    ensure_parent_dir(path)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -3658,6 +3830,16 @@ async fn append_log_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
     );
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn ensure_parent_dir(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     Ok(())
 }
 

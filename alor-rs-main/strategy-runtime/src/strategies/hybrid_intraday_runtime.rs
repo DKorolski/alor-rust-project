@@ -1,26 +1,40 @@
 use std::collections::HashSet;
 
 use alor_protocol::{AckStatus, CommandAck, IntentClass, Side as OrderSide, StopLimitCondition};
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
+use chrono::{
+    Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime,
+    TimeZone, Utc, Weekday,
+};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::state::StrategyState;
 use crate::strategies::hybrid_intraday::{
-    Action, BreakoutEodMode, EntryStyle, HybridOrchestrator, HybridOrchestratorConfig,
-    IntradayBreakoutConfig, IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine,
-    Owner, Side,
+    Action, EntryStyle, HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig,
+    IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine, Owner, Side,
 };
-use crate::{BarEvent, Intent, OrderEvent, PositionEvent, StopOrderEvent, Strategy, StrategyCtx};
+use crate::{
+    BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, StopOrderEvent, Strategy, StrategyCtx,
+};
 
 #[derive(Debug, Clone)]
 pub struct HybridIntradayRuntimeConfig {
     pub symbol: String,
     pub qty: f64,
     pub timezone_offset_hours: i32,
+    pub session_close_hour: u32,
+    pub session_close_minute: u32,
+    pub weekends_off: bool,
+    pub stop_end_buffer_sec: u64,
     pub repair_deadline_sec: u64,
+    pub sl_escalate_timeout_sec: u64,
     pub max_repair_retries: u32,
     pub repair_backoff_base_sec: u64,
     pub repair_backoff_max_sec: u64,
+    pub pending_timeout_sec: u64,
+    pub mr_config: MeanReversionConfig,
+    pub breakout_config: IntradayBreakoutConfig,
+    pub orchestrator_config: HybridOrchestratorConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,12 +75,17 @@ pub struct HybridIntradayRuntimeStrategy {
     current_side: Option<Side>,
     pending_entry: Option<PendingEntry>,
     pending_entry_request_id: Option<Uuid>,
+    pending_entry_created_ts_utc: Option<i64>,
     pending_exit_request_id: Option<Uuid>,
+    pending_exit_created_ts_utc: Option<i64>,
     pending_tp_request_id: Option<Uuid>,
+    pending_tp_created_ts_utc: Option<i64>,
     pending_sl_request_id: Option<Uuid>,
+    pending_sl_created_ts_utc: Option<i64>,
     tp_order_id: Option<i64>,
     sl_stop_order_id: Option<String>,
     sl_exchange_order_id: Option<i64>,
+    sl_triggered_ts: Option<i64>,
     mr_take_price: Option<f64>,
     mr_stop_price: Option<f64>,
     repair_deadline_ts: Option<i64>,
@@ -89,16 +108,9 @@ pub struct HybridIntradayRuntimeStrategy {
 
 impl HybridIntradayRuntimeStrategy {
     pub fn new(config: HybridIntradayRuntimeConfig) -> Self {
-        let mr = MeanReversionEngine::new(MeanReversionConfig::default());
-        let br = IntradayBreakoutEngine::new(IntradayBreakoutConfig::default());
-        let orchestrator = HybridOrchestrator::new(
-            mr,
-            br,
-            HybridOrchestratorConfig {
-                breakout_eod_mode: BreakoutEodMode::SameDay,
-                ..HybridOrchestratorConfig::default()
-            },
-        );
+        let mr = MeanReversionEngine::new(config.mr_config);
+        let br = IntradayBreakoutEngine::new(config.breakout_config);
+        let orchestrator = HybridOrchestrator::new(mr, br, config.orchestrator_config);
         Self {
             config,
             orchestrator,
@@ -109,12 +121,17 @@ impl HybridIntradayRuntimeStrategy {
             current_side: None,
             pending_entry: None,
             pending_entry_request_id: None,
+            pending_entry_created_ts_utc: None,
             pending_exit_request_id: None,
+            pending_exit_created_ts_utc: None,
             pending_tp_request_id: None,
+            pending_tp_created_ts_utc: None,
             pending_sl_request_id: None,
+            pending_sl_created_ts_utc: None,
             tp_order_id: None,
             sl_stop_order_id: None,
             sl_exchange_order_id: None,
+            sl_triggered_ts: None,
             mr_take_price: None,
             mr_stop_price: None,
             repair_deadline_ts: None,
@@ -146,6 +163,18 @@ impl HybridIntradayRuntimeStrategy {
         self.pending_entry.is_some()
             || !self.working_orders.is_empty()
             || !self.working_stop_orders.is_empty()
+    }
+
+    fn can_publish_now(&self, ctx: &StrategyCtx, is_live_bar: bool) -> bool {
+        ctx.trade_mode == crate::TradeMode::Live
+            && ctx.allow_live_orders
+            && ctx.gateway_phase == crate::live_guard::GatewayPhase::LiveReady
+            && is_live_bar
+    }
+
+    fn cycle_ts_utc(cycle_id: [u8; 10]) -> Option<i64> {
+        let raw = std::str::from_utf8(&cycle_id[..8]).ok()?;
+        i64::from_str_radix(raw, 16).ok()
     }
 
     fn owner_code(owner: Owner) -> &'static str {
@@ -185,6 +214,14 @@ impl HybridIntradayRuntimeStrategy {
             out[i] = *b;
         }
         Some(out)
+    }
+
+    fn format_local_day(day: NaiveDate) -> String {
+        day.format("%Y-%m-%d").to_string()
+    }
+
+    fn parse_local_day(raw: &str) -> Option<NaiveDate> {
+        NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()
     }
 
     fn next_cycle_id(&mut self, ts_utc: i64) -> [u8; 10] {
@@ -294,6 +331,51 @@ impl HybridIntradayRuntimeStrategy {
         }
     }
 
+    fn resolve_stop_end_unix_time(&self, created_ts_utc: i64) -> i64 {
+        if created_ts_utc <= 0 {
+            return self.stop_end_buffer_or_default(0);
+        }
+        let offset = match FixedOffset::east_opt(self.config.timezone_offset_hours.saturating_mul(3600))
+        {
+            Some(v) => v,
+            None => return self.stop_end_buffer_or_default(created_ts_utc),
+        };
+        let local_dt = match Utc.timestamp_opt(created_ts_utc, 0).single() {
+            Some(v) => v.with_timezone(&offset),
+            None => return self.stop_end_buffer_or_default(created_ts_utc),
+        };
+        let close_time = NaiveTime::from_hms_opt(
+            self.config.session_close_hour.min(23),
+            self.config.session_close_minute.min(59),
+            0,
+        )
+        .unwrap_or_else(|| NaiveTime::from_hms_opt(23, 49, 0).expect("valid close time"));
+        let mut day = local_dt.date_naive();
+        for _ in 0..8 {
+            if self.config.weekends_off && matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+                day += ChronoDuration::days(1);
+                continue;
+            }
+            let local_close = day.and_time(close_time);
+            if let Some(with_offset) = offset.from_local_datetime(&local_close).single() {
+                let stop_end = with_offset
+                    .timestamp()
+                    .saturating_add(self.config.stop_end_buffer_sec as i64);
+                if stop_end > created_ts_utc {
+                    return stop_end;
+                }
+            }
+            day += ChronoDuration::days(1);
+        }
+        self.stop_end_buffer_or_default(created_ts_utc)
+    }
+
+    fn stop_end_buffer_or_default(&self, created_ts_utc: i64) -> i64 {
+        created_ts_utc
+            .max(0)
+            .saturating_add(self.config.stop_end_buffer_sec as i64)
+    }
+
     fn emit_mr_bracket_intents(
         &mut self,
         ctx: &StrategyCtx,
@@ -333,7 +415,7 @@ impl HybridIntradayRuntimeStrategy {
                     trigger_price: stop_price,
                     price: limit_price,
                     condition,
-                    stop_end_unix_time: pos.ts_utc.saturating_add(86_400),
+                    stop_end_unix_time: self.resolve_stop_end_unix_time(pos.ts_utc),
                     comment: Some(comment),
                     instrument_group: None,
                     check_duplicates: Some(true),
@@ -390,12 +472,17 @@ impl HybridIntradayRuntimeStrategy {
                 .as_ref()
                 .map(|v| Self::format_cycle_id(&v.cycle_id)),
             pending_entry_request_id: self.pending_entry_request_id,
+            pending_entry_created_ts_utc: self.pending_entry_created_ts_utc,
             pending_exit_request_id: self.pending_exit_request_id,
+            pending_exit_created_ts_utc: self.pending_exit_created_ts_utc,
             pending_tp_request_id: self.pending_tp_request_id,
+            pending_tp_created_ts_utc: self.pending_tp_created_ts_utc,
             pending_sl_request_id: self.pending_sl_request_id,
+            pending_sl_created_ts_utc: self.pending_sl_created_ts_utc,
             tp_order_id: self.tp_order_id,
             sl_stop_order_id: self.sl_stop_order_id.clone(),
             sl_exchange_order_id: self.sl_exchange_order_id,
+            sl_triggered_ts: self.sl_triggered_ts,
             mr_take_price: self.mr_take_price,
             mr_stop_price: self.mr_stop_price,
             repair_deadline_ts: self.repair_deadline_ts,
@@ -405,6 +492,11 @@ impl HybridIntradayRuntimeStrategy {
             safe_mode_close_only: self.safe_mode_close_only,
             safe_mode_reason: self.safe_mode_reason.clone(),
             entry_ready: self.entry_ready,
+            last_bar_close: self.last_bar_close,
+            last_day_local: self.last_day_local.map(Self::format_local_day),
+            current_day_high: self.current_day_high,
+            current_day_low: self.current_day_low,
+            prev_day_range: self.prev_day_range,
         };
     }
 
@@ -415,10 +507,13 @@ impl HybridIntradayRuntimeStrategy {
 
     fn reset_repair_tracking(&mut self) {
         self.pending_tp_request_id = None;
+        self.pending_tp_created_ts_utc = None;
         self.pending_sl_request_id = None;
+        self.pending_sl_created_ts_utc = None;
         self.tp_order_id = None;
         self.sl_stop_order_id = None;
         self.sl_exchange_order_id = None;
+        self.sl_triggered_ts = None;
         self.mr_take_price = None;
         self.mr_stop_price = None;
         self.repair_deadline_ts = None;
@@ -457,10 +552,23 @@ impl HybridIntradayRuntimeStrategy {
                 self.current_day_high = Some(self.current_day_high.unwrap_or(high).max(high));
                 self.current_day_low = Some(self.current_day_low.unwrap_or(low).min(low));
             }
-            Some(_) => {
+            Some(prev_day) => {
+                let mut computed_prev_day_range = self.prev_day_range;
                 if let (Some(h), Some(l)) = (self.current_day_high, self.current_day_low) {
-                    self.prev_day_range = Some((h - l).max(0.0));
+                    computed_prev_day_range = Some((h - l).max(0.0));
+                    self.prev_day_range = computed_prev_day_range;
                 }
+                info!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    prev_day = %Self::format_local_day(prev_day),
+                    next_day = %Self::format_local_day(day),
+                    prev_day_high = self.current_day_high,
+                    prev_day_low = self.current_day_low,
+                    prev_day_range = computed_prev_day_range,
+                    next_day_first_high = high,
+                    next_day_first_low = low,
+                    "hybrid day rollover: recalculated day features"
+                );
                 self.last_day_local = Some(day);
                 self.current_day_high = Some(high);
                 self.current_day_low = Some(low);
@@ -473,11 +581,12 @@ impl HybridIntradayRuntimeStrategy {
         &mut self,
         ctx: &StrategyCtx,
         created_ts_utc: i64,
+        can_publish: bool,
         action: Action,
     ) -> Vec<Intent> {
         match action {
             Action::SubmitEntry(entry) => {
-                if !self.entry_ready || self.safe_mode_close_only {
+                if !self.entry_ready || self.safe_mode_close_only || !can_publish {
                     return Vec::new();
                 }
                 let cycle_id = self.next_cycle_id(created_ts_utc);
@@ -496,6 +605,7 @@ impl HybridIntradayRuntimeStrategy {
                     created_ts_utc,
                     Self::side_to_order_side(entry.side),
                 ));
+                self.pending_entry_created_ts_utc = Some(created_ts_utc);
                 self.active_cycle_id = Some(cycle_id);
                 let comment = self.build_comment(ctx, &cycle_id, entry.owner, TagRole::Entry);
                 self.sync_state();
@@ -508,6 +618,9 @@ impl HybridIntradayRuntimeStrategy {
                 .with_class(IntentClass::Entry)]
             }
             Action::SubmitExit { owner, .. } => {
+                if !can_publish {
+                    return Vec::new();
+                }
                 let Some(pos_qty) = ctx.position_qty else {
                     return Vec::new();
                 };
@@ -532,6 +645,7 @@ impl HybridIntradayRuntimeStrategy {
                     created_ts_utc,
                     side,
                 ));
+                self.pending_exit_created_ts_utc = Some(created_ts_utc);
                 let comment = self.build_comment(ctx, &cycle_id, owner, TagRole::Exit);
                 self.sync_state();
                 vec![Intent::Market {
@@ -549,7 +663,53 @@ impl HybridIntradayRuntimeStrategy {
     fn maybe_emit_repair_intents(&mut self, ctx: &StrategyCtx, now_ts: i64) -> Vec<Intent> {
         let pos_qty = ctx.position_qty.unwrap_or(0.0);
         if pos_qty.abs() <= f64::EPSILON || self.current_owner != Some(Owner::MeanReversion) {
+            self.sl_triggered_ts = None;
             return Vec::new();
+        }
+        if let Some(triggered_ts) = self.sl_triggered_ts {
+            let escalate_at = triggered_ts.saturating_add(self.config.sl_escalate_timeout_sec as i64);
+            if now_ts < escalate_at {
+                return Vec::new();
+            }
+            let side = if pos_qty >= 0.0 {
+                OrderSide::Sell
+            } else {
+                OrderSide::Buy
+            };
+            let owner = self.current_owner.unwrap_or(Owner::MeanReversion);
+            let cycle_id = self
+                .active_cycle_id
+                .unwrap_or_else(|| self.next_cycle_id(now_ts.max(0)));
+            let comment = self.build_comment(ctx, &cycle_id, owner, TagRole::Exit);
+            let mut intents = Vec::new();
+            if let Some(tp_order_id) = self.tp_order_id.take() {
+                intents.push(
+                    Intent::Cancel {
+                        order_id: tp_order_id,
+                    }
+                    .with_class(IntentClass::CancelCleanup),
+                );
+            }
+            if let Some(exchange_order_id) = self.sl_exchange_order_id.take() {
+                intents.push(
+                    Intent::Cancel {
+                        order_id: exchange_order_id,
+                    }
+                    .with_class(IntentClass::CancelCleanup),
+                );
+            }
+            intents.push(
+                Intent::Market {
+                    qty: pos_qty.abs(),
+                    side,
+                    fill_price: None,
+                    comment: Some(comment),
+                }
+                .with_class(IntentClass::Exit),
+            );
+            self.sl_triggered_ts = None;
+            self.enter_safe_mode("sl_triggered_escalation");
+            return intents;
         }
         let has_tp = self.tp_order_id.is_some() || self.pending_tp_request_id.is_some();
         let has_sl = self.sl_stop_order_id.is_some() || self.pending_sl_request_id.is_some();
@@ -590,6 +750,10 @@ impl HybridIntradayRuntimeStrategy {
         {
             return Vec::new();
         }
+        if !self.can_publish_now(ctx, true) {
+            self.schedule_next_repair(now_ts);
+            return Vec::new();
+        }
         if ctx.gateway_phase != crate::live_guard::GatewayPhase::LiveReady {
             self.schedule_next_repair(now_ts);
             return Vec::new();
@@ -618,6 +782,7 @@ impl HybridIntradayRuntimeStrategy {
                 0,
             );
             self.pending_tp_request_id = Some(request_id);
+            self.pending_tp_created_ts_utc = Some(now_ts);
             intents.push(
                 Intent::Place {
                     price: self.mr_take_price.unwrap_or_default(),
@@ -643,6 +808,7 @@ impl HybridIntradayRuntimeStrategy {
                 5,
             );
             self.pending_sl_request_id = Some(request_id);
+            self.pending_sl_created_ts_utc = Some(now_ts);
             intents.push(
                 Intent::CreateStopLimit {
                     side: stop_side,
@@ -650,7 +816,7 @@ impl HybridIntradayRuntimeStrategy {
                     trigger_price: stop_price,
                     price: limit_price,
                     condition,
-                    stop_end_unix_time: now_ts.saturating_add(86_400),
+                    stop_end_unix_time: self.resolve_stop_end_unix_time(now_ts),
                     comment: Some(comment),
                     instrument_group: None,
                     check_duplicates: Some(true),
@@ -664,6 +830,79 @@ impl HybridIntradayRuntimeStrategy {
         }
         intents
     }
+
+    fn pending_timeout_sec(&self) -> i64 {
+        self.config.pending_timeout_sec.max(1) as i64
+    }
+
+    fn clear_stale_pending_tail(&mut self, now_ts: i64, position_qty: f64) {
+        if position_qty.abs() > f64::EPSILON {
+            return;
+        }
+        if !self.working_orders.is_empty() || !self.working_stop_orders.is_empty() {
+            return;
+        }
+        let timeout = self.pending_timeout_sec();
+
+        if let Some(req_id) = self.pending_entry_request_id {
+            let created = self
+                .pending_entry_created_ts_utc
+                .or_else(|| self.pending_entry.and_then(|p| Self::cycle_ts_utc(p.cycle_id)))
+                .unwrap_or(now_ts);
+            if now_ts.saturating_sub(created) >= timeout {
+                self.pending_entry = None;
+                self.pending_entry_request_id = None;
+                self.pending_entry_created_ts_utc = None;
+                if self.last_position_qty.abs() <= f64::EPSILON {
+                    self.active_cycle_id = None;
+                }
+                tracing::info!(
+                    request_id = %req_id,
+                    age_sec = now_ts.saturating_sub(created),
+                    "hybrid_pending_gc_entry"
+                );
+            }
+        }
+
+        if let Some(req_id) = self.pending_exit_request_id {
+            let created = self.pending_exit_created_ts_utc.unwrap_or(now_ts);
+            if now_ts.saturating_sub(created) >= timeout {
+                self.pending_exit_request_id = None;
+                self.pending_exit_created_ts_utc = None;
+                tracing::info!(
+                    request_id = %req_id,
+                    age_sec = now_ts.saturating_sub(created),
+                    "hybrid_pending_gc_exit"
+                );
+            }
+        }
+
+        if let Some(req_id) = self.pending_tp_request_id {
+            let created = self.pending_tp_created_ts_utc.unwrap_or(now_ts);
+            if now_ts.saturating_sub(created) >= timeout {
+                self.pending_tp_request_id = None;
+                self.pending_tp_created_ts_utc = None;
+                tracing::info!(
+                    request_id = %req_id,
+                    age_sec = now_ts.saturating_sub(created),
+                    "hybrid_pending_gc_tp"
+                );
+            }
+        }
+
+        if let Some(req_id) = self.pending_sl_request_id {
+            let created = self.pending_sl_created_ts_utc.unwrap_or(now_ts);
+            if now_ts.saturating_sub(created) >= timeout {
+                self.pending_sl_request_id = None;
+                self.pending_sl_created_ts_utc = None;
+                tracing::info!(
+                    request_id = %req_id,
+                    age_sec = now_ts.saturating_sub(created),
+                    "hybrid_pending_gc_sl"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -676,10 +915,19 @@ mod tests {
             symbol: "IMOEXF".to_string(),
             qty: 1.0,
             timezone_offset_hours: 3,
+            session_close_hour: 23,
+            session_close_minute: 49,
+            weekends_off: true,
+            stop_end_buffer_sec: 60,
             repair_deadline_sec: 180,
+            sl_escalate_timeout_sec: 30,
             max_repair_retries: 3,
             repair_backoff_base_sec: 5,
             repair_backoff_max_sec: 60,
+            pending_timeout_sec: 30,
+            mr_config: MeanReversionConfig::default(),
+            breakout_config: IntradayBreakoutConfig::default(),
+            orchestrator_config: HybridOrchestratorConfig::default(),
         }
     }
 
@@ -720,6 +968,7 @@ mod tests {
         let intents = strategy.map_action_to_intents(
             &ctx,
             1,
+            true,
             Action::SubmitExit {
                 owner: Owner::MeanReversion,
                 reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
@@ -764,11 +1013,11 @@ mod tests {
             take_price: None,
         });
 
-        let intents_blocked = strategy.map_action_to_intents(&ctx, 1, entry_action.clone());
+        let intents_blocked = strategy.map_action_to_intents(&ctx, 1, false, entry_action.clone());
         assert!(intents_blocked.is_empty());
 
         strategy.entry_ready = true;
-        let intents_ready = strategy.map_action_to_intents(&ctx, 2, entry_action);
+        let intents_ready = strategy.map_action_to_intents(&ctx, 2, true, entry_action);
         assert_eq!(intents_ready.len(), 1);
         match &intents_ready[0] {
             Intent::Classified { intent, .. } => match intent.as_ref() {
@@ -782,6 +1031,184 @@ mod tests {
             },
             other => panic!("expected classified intent, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn publish_gate_blocks_pending_mutation_when_not_publishable() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx_with_phase(Some(0.0), crate::live_guard::GatewayPhase::SyncingHistory);
+        strategy.entry_ready = true;
+        let intents = strategy.map_action_to_intents(
+            &ctx,
+            100,
+            false,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
+        assert!(strategy.pending_entry_request_id.is_none());
+        assert!(strategy.pending_entry_created_ts_utc.is_none());
+    }
+
+    #[test]
+    fn pending_entry_gc_clears_stale_tail_when_flat_without_orders() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+        strategy.entry_ready = true;
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            10,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        assert!(strategy.pending_entry.is_some());
+        assert!(strategy.pending_entry_request_id.is_some());
+        strategy.clear_stale_pending_tail(10 + test_config().pending_timeout_sec as i64 + 1, 0.0);
+        assert!(strategy.pending_entry.is_none());
+        assert!(strategy.pending_entry_request_id.is_none());
+        assert!(strategy.pending_entry_created_ts_utc.is_none());
+    }
+
+    #[test]
+    fn restore_disables_entry_ready_when_prev_day_range_missing() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.entry_ready = true;
+        strategy.prev_day_range = None;
+        strategy.sync_state();
+        let mut restored = strategy.state().clone();
+        if let StrategyState::HybridIntradayRuntime {
+            entry_ready,
+            prev_day_range,
+            ..
+        } = &mut restored
+        {
+            *entry_ready = true;
+            *prev_day_range = None;
+        } else {
+            panic!("unexpected state variant");
+        }
+        strategy.set_state(restored);
+        assert!(!strategy.entry_ready);
+        match strategy.state() {
+            StrategyState::HybridIntradayRuntime { entry_ready, .. } => assert!(!entry_ready),
+            other => panic!("unexpected state: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_recovers_day_features_from_state() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let mut restored = StrategyState::HybridIntradayRuntime {
+            active_cycle_id: None,
+            next_cycle_seq: 0,
+            last_position_qty: 0.0,
+            current_owner: None,
+            current_side: None,
+            pending_entry_owner: None,
+            pending_entry_side: None,
+            pending_entry_cycle_id: None,
+            pending_entry_request_id: None,
+            pending_entry_created_ts_utc: None,
+            pending_exit_request_id: None,
+            pending_exit_created_ts_utc: None,
+            pending_tp_request_id: None,
+            pending_tp_created_ts_utc: None,
+            pending_sl_request_id: None,
+            pending_sl_created_ts_utc: None,
+            tp_order_id: None,
+            sl_stop_order_id: None,
+            sl_exchange_order_id: None,
+            sl_triggered_ts: None,
+            mr_take_price: None,
+            mr_stop_price: None,
+            repair_deadline_ts: None,
+            next_repair_at_ts: None,
+            repair_backoff_level: 0,
+            repair_attempts: 0,
+            safe_mode_close_only: false,
+            safe_mode_reason: None,
+            entry_ready: true,
+            last_bar_close: Some(101.5),
+            last_day_local: Some("2026-03-08".to_string()),
+            current_day_high: Some(102.0),
+            current_day_low: Some(100.5),
+            prev_day_range: Some(12.5),
+        };
+        strategy.set_state(restored.clone());
+        assert!(strategy.entry_ready);
+        assert_eq!(strategy.last_bar_close, Some(101.5));
+        assert_eq!(strategy.current_day_high, Some(102.0));
+        assert_eq!(strategy.current_day_low, Some(100.5));
+        assert_eq!(strategy.prev_day_range, Some(12.5));
+        assert_eq!(
+            strategy.last_day_local,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap())
+        );
+
+        if let StrategyState::HybridIntradayRuntime {
+            last_day_local,
+            prev_day_range,
+            ..
+        } = &mut restored
+        {
+            *last_day_local = Some("bad-date".to_string());
+            *prev_day_range = Some(11.0);
+        }
+        strategy.set_state(restored);
+        assert_eq!(strategy.last_day_local, None);
+        assert_eq!(strategy.prev_day_range, Some(11.0));
+    }
+
+    #[test]
+    fn stop_end_uses_same_day_session_close_plus_buffer() {
+        let strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let expected = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(20, 50, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        assert_eq!(strategy.resolve_stop_end_unix_time(created_ts_utc), expected);
+    }
+
+    #[test]
+    fn stop_end_weekend_rolls_to_next_trading_day_when_weekends_off() {
+        let strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        // 2025-01-05 10:00:00 UTC = Sunday 13:00:00 MSK
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 5)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        // Monday 2025-01-06 23:49 MSK => 20:49 UTC + 60 sec buffer
+        let expected = chrono::NaiveDate::from_ymd_opt(2025, 1, 6)
+            .unwrap()
+            .and_hms_opt(20, 50, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        assert_eq!(strategy.resolve_stop_end_unix_time(created_ts_utc), expected);
     }
 
     #[test]
@@ -816,6 +1243,7 @@ mod tests {
         let _ = strategy.map_action_to_intents(
             &ctx,
             10,
+            true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
                 side: Side::Long,
@@ -836,6 +1264,7 @@ mod tests {
         let _ = strategy.map_action_to_intents(
             &ctx,
             100,
+            true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
                 side: Side::Long,
@@ -866,6 +1295,7 @@ mod tests {
         let _ = strategy.map_action_to_intents(
             &ctx,
             1_700_000_000,
+            true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
                 side: Side::Long,
@@ -961,6 +1391,7 @@ mod tests {
         let intents = strategy.map_action_to_intents(
             &ctx,
             1_700_000_260,
+            true,
             Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
                 owner: Owner::MeanReversion,
                 side: Side::Long,
@@ -1073,6 +1504,113 @@ mod tests {
         assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-lag"));
         assert_eq!(strategy.sl_exchange_order_id, Some(333));
         assert!(strategy.working_stop_orders.contains("sl-lag"));
+    }
+
+    #[test]
+    fn stop_order_triggered_keeps_exchange_order_for_escalation() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.tp_order_id = Some(111);
+
+        let intents = strategy.on_stop_order(
+            &ctx,
+            &StopOrderEvent {
+                stop_order_id: "sl-2".to_string(),
+                exchange_order_id: Some(222),
+                symbol: "IMOEXF".to_string(),
+                status: "triggered".to_string(),
+                side: "sell".to_string(),
+                qty: 1.0,
+                filled: 0.0,
+                stop_price: 99.0,
+                price: 98.5,
+                existing: false,
+                comment: Some(tag("MR", "abc1230001", "SL")),
+                end_time: None,
+                ts_utc: 1_700_000_120,
+            },
+        );
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::CancelCleanup
+                } if matches!(intent.as_ref(), Intent::Cancel { order_id: 111 })
+            )
+        }));
+        assert!(strategy.sl_stop_order_id.is_none());
+        assert_eq!(strategy.sl_exchange_order_id, Some(222));
+        assert_eq!(strategy.sl_triggered_ts, Some(1_700_000_120));
+    }
+
+    #[test]
+    fn sl_triggered_escalation_waits_for_timeout() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.sl_triggered_ts = Some(1_700_000_100);
+        strategy.tp_order_id = Some(111);
+        strategy.sl_exchange_order_id = Some(222);
+
+        let intents = strategy.maybe_emit_repair_intents(&ctx, 1_700_000_120);
+        assert!(intents.is_empty());
+        assert_eq!(strategy.sl_triggered_ts, Some(1_700_000_100));
+        assert_eq!(strategy.tp_order_id, Some(111));
+        assert_eq!(strategy.sl_exchange_order_id, Some(222));
+    }
+
+    #[test]
+    fn sl_triggered_escalation_forces_market_exit_after_timeout() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.sl_triggered_ts = Some(1_700_000_100);
+        strategy.tp_order_id = Some(111);
+        strategy.sl_exchange_order_id = Some(222);
+
+        let intents = strategy.maybe_emit_repair_intents(&ctx, 1_700_000_131);
+        assert_eq!(intents.len(), 3);
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::CancelCleanup
+                } if matches!(intent.as_ref(), Intent::Cancel { order_id: 111 })
+            )
+        }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::CancelCleanup
+                } if matches!(intent.as_ref(), Intent::Cancel { order_id: 222 })
+            )
+        }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Classified {
+                    intent,
+                    intent_class: IntentClass::Exit
+                } if matches!(intent.as_ref(), Intent::Market { qty, side: OrderSide::Sell, .. } if (*qty - 1.0).abs() <= f64::EPSILON)
+            )
+        }));
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("sl_triggered_escalation")
+        );
+        assert!(strategy.sl_triggered_ts.is_none());
     }
 
     #[test]
@@ -1218,11 +1756,15 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 });
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.last_bar_close = Some(bar.close);
+        self.clear_stale_pending_tail(bar.close_time_utc, ctx.position_qty.unwrap_or(0.0));
+        let can_publish = self.can_publish_now(ctx, bar.origin == DataOrigin::Live);
         let mut intents = self.maybe_emit_repair_intents(ctx, bar.close_time_utc);
         intents.extend(
             actions
                 .into_iter()
-                .flat_map(|action| self.map_action_to_intents(ctx, bar.close_time_utc, action)),
+                .flat_map(|action| {
+                    self.map_action_to_intents(ctx, bar.close_time_utc, can_publish, action)
+                }),
         );
         self.sync_state();
         intents
@@ -1237,6 +1779,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.orchestrator.on_order_rejected("entry");
                 self.pending_entry = None;
                 self.pending_entry_request_id = None;
+                self.pending_entry_created_ts_utc = None;
                 self.active_cycle_id = None;
                 self.tp_order_id = None;
                 self.sl_stop_order_id = None;
@@ -1252,6 +1795,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             return Vec::new();
         }
         if Some(ack.request_id) == self.pending_exit_request_id {
+            self.pending_exit_created_ts_utc = None;
             if matches!(
                 ack.status,
                 AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
@@ -1267,6 +1811,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
             ) {
                 self.pending_tp_request_id = None;
+                self.pending_tp_created_ts_utc = None;
                 self.schedule_next_repair(ack.processed_ts_utc);
             }
             self.sync_state();
@@ -1278,6 +1823,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
             ) {
                 self.pending_sl_request_id = None;
+                self.pending_sl_created_ts_utc = None;
                 self.schedule_next_repair(ack.processed_ts_utc);
             }
             self.sync_state();
@@ -1301,6 +1847,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let tag = Self::parse_hybrid_tag(ord.comment.as_deref());
         if tag.as_ref().and_then(|v| v.role) == Some(TagRole::Tp) {
             self.pending_tp_request_id = None;
+            self.pending_tp_created_ts_utc = None;
             if ord.order_id > 0 {
                 self.tp_order_id = Some(ord.order_id);
             }
@@ -1350,6 +1897,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let tag = Self::parse_hybrid_tag(ord.comment.as_deref());
         if tag.as_ref().and_then(|v| v.role) == Some(TagRole::Sl) {
             self.pending_sl_request_id = None;
+            self.pending_sl_created_ts_utc = None;
             if !ord.stop_order_id.trim().is_empty() {
                 self.sl_stop_order_id = Some(ord.stop_order_id.clone());
             }
@@ -1360,6 +1908,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 status.as_str(),
                 "filled" | "executed" | "triggered" | "done" | "completed"
             ) {
+                self.sl_triggered_ts = Some(ord.ts_utc.max(0));
                 if let Some(tp_order_id) = self.tp_order_id.take() {
                     intents.push(
                         Intent::Cancel {
@@ -1382,6 +1931,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     | "completed"
             ) {
                 self.sl_stop_order_id = None;
+            }
+            if matches!(
+                status.as_str(),
+                "canceled" | "cancelled" | "expired" | "rejected"
+            ) {
                 self.sl_exchange_order_id = None;
             }
         }
@@ -1419,6 +1973,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.current_side = Some(entry.side);
                 self.active_cycle_id = Some(entry.cycle_id);
                 self.pending_entry_request_id = None;
+                self.pending_entry_created_ts_utc = None;
                 self.repair_attempts = 0;
                 self.repair_backoff_level = 0;
                 self.next_repair_at_ts = Some(pos.ts_utc);
@@ -1447,10 +2002,13 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.current_side = None;
             self.pending_entry = None;
             self.pending_entry_request_id = None;
+            self.pending_entry_created_ts_utc = None;
             self.pending_exit_request_id = None;
+            self.pending_exit_created_ts_utc = None;
             self.active_cycle_id = None;
             self.safe_mode_close_only = false;
             self.safe_mode_reason = None;
+            self.sl_triggered_ts = None;
             intents.extend(self.emit_cancel_all_protection(closing_side));
             self.reset_repair_tracking();
         }
@@ -1538,6 +2096,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
     }
 
     fn set_state(&mut self, state: StrategyState) {
+        let mut needs_resync = false;
         if let StrategyState::HybridIntradayRuntime {
             active_cycle_id,
             next_cycle_seq,
@@ -1548,12 +2107,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             pending_entry_side,
             pending_entry_cycle_id,
             pending_entry_request_id,
+            pending_entry_created_ts_utc,
             pending_exit_request_id,
+            pending_exit_created_ts_utc,
             pending_tp_request_id,
+            pending_tp_created_ts_utc,
             pending_sl_request_id,
+            pending_sl_created_ts_utc,
             tp_order_id,
             sl_stop_order_id,
             sl_exchange_order_id,
+            sl_triggered_ts,
             mr_take_price,
             mr_stop_price,
             repair_deadline_ts,
@@ -1563,6 +2127,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             safe_mode_close_only,
             safe_mode_reason,
             entry_ready,
+            last_bar_close,
+            last_day_local,
+            current_day_high,
+            current_day_low,
+            prev_day_range,
         } = &state
         {
             self.active_cycle_id = active_cycle_id.as_deref().and_then(Self::parse_cycle_id);
@@ -1588,12 +2157,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 _ => None,
             };
             self.pending_entry_request_id = *pending_entry_request_id;
+            self.pending_entry_created_ts_utc = *pending_entry_created_ts_utc;
             self.pending_exit_request_id = *pending_exit_request_id;
+            self.pending_exit_created_ts_utc = *pending_exit_created_ts_utc;
             self.pending_tp_request_id = *pending_tp_request_id;
+            self.pending_tp_created_ts_utc = *pending_tp_created_ts_utc;
             self.pending_sl_request_id = *pending_sl_request_id;
+            self.pending_sl_created_ts_utc = *pending_sl_created_ts_utc;
             self.tp_order_id = *tp_order_id;
             self.sl_stop_order_id = sl_stop_order_id.clone();
             self.sl_exchange_order_id = *sl_exchange_order_id;
+            self.sl_triggered_ts = *sl_triggered_ts;
             self.mr_take_price = *mr_take_price;
             self.mr_stop_price = *mr_stop_price;
             self.repair_deadline_ts = *repair_deadline_ts;
@@ -1602,8 +2176,21 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.repair_attempts = *repair_attempts;
             self.safe_mode_close_only = *safe_mode_close_only;
             self.safe_mode_reason = safe_mode_reason.clone();
-            self.entry_ready = *entry_ready;
+            self.last_bar_close = *last_bar_close;
+            self.last_day_local = last_day_local
+                .as_deref()
+                .and_then(Self::parse_local_day);
+            self.current_day_high = *current_day_high;
+            self.current_day_low = *current_day_low;
+            self.prev_day_range = *prev_day_range;
+            self.entry_ready = *entry_ready && self.prev_day_range.is_some();
+            if *entry_ready && self.prev_day_range.is_none() {
+                needs_resync = true;
+            }
         }
         self.state = state;
+        if needs_resync {
+            self.sync_state();
+        }
     }
 }

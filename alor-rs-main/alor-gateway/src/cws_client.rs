@@ -170,6 +170,8 @@ impl CwsHandle {
         check_duplicates: bool,
     ) -> anyhow::Result<Value> {
         let qty = qty.round() as i64;
+        let resolved_instrument_group =
+            resolve_stop_limit_instrument_group(instrument_group, &self.instrument_group);
         let payload = build_create_stop_limit_payload(
             portfolio,
             exchange,
@@ -181,7 +183,7 @@ impl CwsHandle {
             condition,
             stop_end_unix_time,
             comment,
-            instrument_group,
+            resolved_instrument_group,
             check_duplicates,
         );
         self.send(payload).await
@@ -276,6 +278,13 @@ impl CwsHandle {
         let response = response.map_err(|_| anyhow::anyhow!("cws response channel closed"))??;
         Ok(response)
     }
+}
+
+fn resolve_stop_limit_instrument_group<'a>(
+    requested: Option<&'a str>,
+    default_group: &'a str,
+) -> Option<&'a str> {
+    requested.or(Some(default_group))
 }
 
 #[cfg(test)]
@@ -712,6 +721,18 @@ mod tests {
         assert_eq!(
             instrument.get("instrumentGroup").and_then(Value::as_str),
             Some("RFUD")
+        );
+    }
+
+    #[test]
+    fn stop_limit_instrument_group_falls_back_to_default() {
+        assert_eq!(
+            resolve_stop_limit_instrument_group(None, "RFUD"),
+            Some("RFUD")
+        );
+        assert_eq!(
+            resolve_stop_limit_instrument_group(Some("SPBFUT"), "RFUD"),
+            Some("SPBFUT")
         );
     }
 }

@@ -12,10 +12,15 @@ use std::time::Instant;
 
 use alor_protocol::{CommandAction, IntentClass, OrderCommand, PlaceOrder, Side};
 use alor_types::TradingPeriods;
+use chrono::{Duration, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeConfig;
+use crate::strategies::hybrid_intraday::{
+    BreakoutEodMode, HybridOrchestratorConfig, IntradayBreakoutConfig, MinRangeMode,
+    MeanReversionConfig,
+};
 use crate::strategies::limit_cancel::LimitCancelConfig;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseConfig;
 use crate::strategies::mock_live_probe::{MockLiveProbeConfig, MockLiveProbeMode};
@@ -419,6 +424,77 @@ pub struct StrategyConfig {
     pub session_gap_min: f64,
     pub session_gap_exit_offset_min: i64,
     pub session_gap_work_weekends: bool,
+    #[serde(default)]
+    pub hybrid_intraday: HybridIntradaySettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HybridIntradaySettings {
+    pub mr_min_range_long: f64,
+    pub mr_max_range_long: f64,
+    pub mr_k_long: f64,
+    pub mr_take_k_long: f64,
+    pub mr_stop_k_long: f64,
+    pub mr_min_range_short: f64,
+    pub mr_max_range_short: f64,
+    pub mr_k_short: f64,
+    pub mr_take_k_short: f64,
+    pub mr_stop_k_short: f64,
+    pub mr_session_end_time: String,
+    pub mr_exit_offset_min: i64,
+    pub bo_k: f64,
+    pub bo_stop1_range: f64,
+    pub bo_stop2_range: f64,
+    pub bo_big_move_threshold: f64,
+    pub bo_min_range: f64,
+    pub bo_min_range_mode: String,
+    pub bo_exclude_weekends: bool,
+    pub bo_wait_hours: f64,
+    pub orchestrator_breakout_eod_mode: String,
+    pub orchestrator_breakout_overnight_exit_time: String,
+    pub repair_deadline_sec: u64,
+    pub sl_escalate_timeout_sec: u64,
+    pub max_repair_retries: u32,
+    pub repair_backoff_base_sec: u64,
+    pub repair_backoff_max_sec: u64,
+    pub pending_timeout_sec: u64,
+    pub stop_end_buffer_sec: u64,
+}
+
+impl Default for HybridIntradaySettings {
+    fn default() -> Self {
+        Self {
+            mr_min_range_long: 0.013,
+            mr_max_range_long: 0.035,
+            mr_k_long: 0.032,
+            mr_take_k_long: 0.11,
+            mr_stop_k_long: 0.44,
+            mr_min_range_short: 0.010,
+            mr_max_range_short: 0.045,
+            mr_k_short: 0.055,
+            mr_take_k_short: 0.16,
+            mr_stop_k_short: 0.43,
+            mr_session_end_time: "11:59:00".to_string(),
+            mr_exit_offset_min: 5,
+            bo_k: 0.65,
+            bo_stop1_range: 0.51,
+            bo_stop2_range: 0.35,
+            bo_big_move_threshold: 0.025,
+            bo_min_range: 1.01,
+            bo_min_range_mode: "absolute".to_string(),
+            bo_exclude_weekends: true,
+            bo_wait_hours: 3.0,
+            orchestrator_breakout_eod_mode: "same_day".to_string(),
+            orchestrator_breakout_overnight_exit_time: "09:30:00".to_string(),
+            repair_deadline_sec: 180,
+            sl_escalate_timeout_sec: 30,
+            max_repair_retries: 3,
+            repair_backoff_base_sec: 5,
+            repair_backoff_max_sec: 60,
+            pending_timeout_sec: 60,
+            stop_end_buffer_sec: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -564,14 +640,90 @@ impl StrategyConfig {
     }
 
     pub fn to_hybrid_intraday_runtime_config(&self) -> HybridIntradayRuntimeConfig {
+        let (session_close_hour, session_close_minute, weekends_off) = self
+            .trading_periods
+            .as_ref()
+            .map(|p| (p.session_end.hour(), p.session_end.minute(), p.weekends_off))
+            .unwrap_or((
+                self.session_close_hour,
+                self.session_close_minute,
+                false,
+            ));
+        let mr_session_end_time = NaiveTime::parse_from_str(
+            &self.hybrid_intraday.mr_session_end_time,
+            "%H:%M:%S",
+        )
+        .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 59, 0).unwrap_or(NaiveTime::MIN));
+        let bo_min_range_mode = match self
+            .hybrid_intraday
+            .bo_min_range_mode
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "disabled" => MinRangeMode::Disabled,
+            "relative_prev_close" | "relativeprevclose" => MinRangeMode::RelativePrevClose,
+            _ => MinRangeMode::Absolute,
+        };
+        let breakout_eod_mode = match self
+            .hybrid_intraday
+            .orchestrator_breakout_eod_mode
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "overnight" => BreakoutEodMode::Overnight,
+            _ => BreakoutEodMode::SameDay,
+        };
+        let breakout_overnight_exit_time = NaiveTime::parse_from_str(
+            &self.hybrid_intraday.orchestrator_breakout_overnight_exit_time,
+            "%H:%M:%S",
+        )
+        .unwrap_or_else(|_| NaiveTime::from_hms_opt(9, 30, 0).unwrap_or(NaiveTime::MIN));
         HybridIntradayRuntimeConfig {
             symbol: self.symbol.clone(),
             qty: self.qty.max(1.0),
             timezone_offset_hours: self.timezone_offset_hours,
-            repair_deadline_sec: 180,
-            max_repair_retries: 3,
-            repair_backoff_base_sec: 5,
-            repair_backoff_max_sec: 60,
+            session_close_hour,
+            session_close_minute,
+            weekends_off,
+            stop_end_buffer_sec: self.hybrid_intraday.stop_end_buffer_sec.max(1),
+            repair_deadline_sec: self.hybrid_intraday.repair_deadline_sec.max(1),
+            sl_escalate_timeout_sec: self.hybrid_intraday.sl_escalate_timeout_sec.max(1),
+            max_repair_retries: self.hybrid_intraday.max_repair_retries.max(1),
+            repair_backoff_base_sec: self.hybrid_intraday.repair_backoff_base_sec.max(1),
+            repair_backoff_max_sec: self
+                .hybrid_intraday
+                .repair_backoff_max_sec
+                .max(self.hybrid_intraday.repair_backoff_base_sec.max(1)),
+            pending_timeout_sec: self.hybrid_intraday.pending_timeout_sec.max(1),
+            mr_config: MeanReversionConfig {
+                min_range_long: self.hybrid_intraday.mr_min_range_long,
+                max_range_long: self.hybrid_intraday.mr_max_range_long,
+                k_long: self.hybrid_intraday.mr_k_long,
+                take_k_long: self.hybrid_intraday.mr_take_k_long,
+                stop_k_long: self.hybrid_intraday.mr_stop_k_long,
+                min_range_short: self.hybrid_intraday.mr_min_range_short,
+                max_range_short: self.hybrid_intraday.mr_max_range_short,
+                k_short: self.hybrid_intraday.mr_k_short,
+                take_k_short: self.hybrid_intraday.mr_take_k_short,
+                stop_k_short: self.hybrid_intraday.mr_stop_k_short,
+                tick_size: self.tick_size,
+                session_end_time: mr_session_end_time,
+                exit_offset: Duration::minutes(self.hybrid_intraday.mr_exit_offset_min.max(0)),
+            },
+            breakout_config: IntradayBreakoutConfig {
+                k: self.hybrid_intraday.bo_k,
+                stop1_range: self.hybrid_intraday.bo_stop1_range,
+                stop2_range: self.hybrid_intraday.bo_stop2_range,
+                big_move_threshold: self.hybrid_intraday.bo_big_move_threshold,
+                min_range: self.hybrid_intraday.bo_min_range,
+                min_range_mode: bo_min_range_mode,
+                exclude_weekends: self.hybrid_intraday.bo_exclude_weekends,
+                wait_hours: self.hybrid_intraday.bo_wait_hours,
+            },
+            orchestrator_config: HybridOrchestratorConfig {
+                breakout_eod_mode,
+                breakout_overnight_exit_time,
+            },
         }
     }
 }
