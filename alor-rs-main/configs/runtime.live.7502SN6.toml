@@ -88,11 +88,8 @@ long_ex_pct = 2.2
 short_ex_pct = 2.2
 k_tp_long = 0.28
 k_sl_long = 0.68
-# IMPORTANT: session_gap_standalone does NOT use strategy.qty for order size.
-# Size is computed from (cash_factor * cash / price) and then clamped to minimum 1.
-# Keep available_cash tiny to force exactly 1 contract for live micro-account testing.
-start_cash = 1
-cash_factor = 1.0
+start_cash = 30000
+cash_factor = 0.9
 max_entry_hour = 19
 close_hour = 23
 close_minute = 49

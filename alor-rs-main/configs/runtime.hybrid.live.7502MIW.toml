@@ -2,9 +2,9 @@ redis_url = "redis://127.0.0.1/"
 portfolio = "7502MIW"
 exchange = "MOEX"
 source = "strategy-runtime"
-consumer_group = "strategy-runtime"
+consumer_group = "strategy-runtime-live"
 consumer_name = "auto"
-reset_state_on_start = true
+reset_state_on_start = false
 
 [runtime]
 trade_mode = "live"
