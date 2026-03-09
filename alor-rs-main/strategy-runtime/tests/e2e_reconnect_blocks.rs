@@ -14,8 +14,8 @@ use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
     BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperOutput, PositionEvent,
-    HybridIntradaySettings, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StreamNames,
-    TradeMode, TrimConfig,
+    PaperExecutionMode, HybridIntradaySettings, ReadConfig, ReplayConfig, RuntimeConfig,
+    StrategyConfig, StreamNames, TradeMode, TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -121,6 +121,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
         paper: PaperConfig {
             enabled: false,
             output: PaperOutput::Stdout,
+            execution_mode: PaperExecutionMode::LiveOnly,
             file_path: format!("{prefix}-paper.jsonl"),
             trades_csv: format!("{prefix}-trades.csv"),
             summary_json: format!("{prefix}-summary.json"),

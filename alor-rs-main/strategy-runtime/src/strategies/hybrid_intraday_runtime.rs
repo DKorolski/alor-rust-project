@@ -433,6 +433,16 @@ impl HybridIntradayRuntimeStrategy {
         if let Some(take_price) = entry.take_price {
             let tp_side = Self::stop_side_for_entry_side(entry.side);
             let comment = self.build_comment(ctx, &entry.cycle_id, entry.owner, TagRole::Tp);
+            let request_id = crate::deterministic_request_id(
+                &ctx.strategy_id,
+                &ctx.portfolio,
+                &ctx.symbol,
+                "place",
+                pos.ts_utc,
+                0,
+            );
+            self.pending_tp_request_id = Some(request_id);
+            self.pending_tp_created_ts_utc = Some(pos.ts_utc);
             intents.push(
                 Intent::Place {
                     price: take_price,
@@ -448,6 +458,16 @@ impl HybridIntradayRuntimeStrategy {
             let condition = Self::stop_condition_for_entry_side(entry.side);
             let limit_price = Self::stop_limit_price(stop_side, stop_price, ctx.tick_size);
             let comment = self.build_comment(ctx, &entry.cycle_id, entry.owner, TagRole::Sl);
+            let request_id = crate::deterministic_request_id(
+                &ctx.strategy_id,
+                &ctx.portfolio,
+                &ctx.symbol,
+                "create_stop_limit",
+                pos.ts_utc,
+                5,
+            );
+            self.pending_sl_request_id = Some(request_id);
+            self.pending_sl_created_ts_utc = Some(pos.ts_utc);
             intents.push(
                 Intent::CreateStopLimit {
                     side: stop_side,
@@ -1485,6 +1505,10 @@ mod tests {
                 } if matches!(intent.as_ref(), Intent::CreateStopLimit { .. })
             )
         }));
+        assert!(strategy.pending_tp_request_id.is_some());
+        assert!(strategy.pending_tp_created_ts_utc.is_some());
+        assert!(strategy.pending_sl_request_id.is_some());
+        assert!(strategy.pending_sl_created_ts_utc.is_some());
     }
 
     #[test]
