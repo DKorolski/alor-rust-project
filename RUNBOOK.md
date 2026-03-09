@@ -10,6 +10,24 @@ It complements the detailed internal runbooks in `alor-rs-main/docs/`:
 
 ---
 
+### Dev stack (isolated from main)
+
+If `main` already runs in `/opt/trading`, start `dev` with an isolated override:
+
+```bash
+cd /opt/trading-dev
+docker compose \
+  --env-file .env.dev \
+  -f docker-compose.yml \
+  -f docker-compose.dev.yml \
+  -p trading-dev \
+  up -d
+```
+
+This uses separate container names (`trading_dev_*`) and `.env.dev` values.
+
+---
+
 ### 1. Preflight checklist (paper)
 
 From VPS (`deploy` user):
