@@ -15,7 +15,7 @@ use crate::config::AlorGatewayConfig;
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::HealthState;
 
-const CWS_TIME_IN_FORCE: &str = "BookOrCancel";
+const CWS_TIME_IN_FORCE: &str = "OneDay";
 const CWS_ALLOW_MARGIN: bool = true;
 const CWS_MARKET_TIME_IN_FORCE: &str = "oneday";
 const CWS_MARKET_ALLOW_MARGIN: bool = true;
