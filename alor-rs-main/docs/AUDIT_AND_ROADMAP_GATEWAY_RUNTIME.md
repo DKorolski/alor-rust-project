@@ -835,3 +835,109 @@
 - Для ускорения `FT-01..FT-03` добавлен test strategy path `mock_live_probe` (`strategy-runtime/src/strategies/mock_live_probe.rs`, config `configs/runtime.mock-live.toml`)
 - Для воспроизводимого `FT-03` добавлен тестовый pre-publish delay hook:
   `RUNTIME_ENABLE_TEST_HOOKS=true` + `RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS=<ms>` (использовать только в тестовых прогонах).
+
+---
+
+## Incident Note (Soak, 2026-03-10): повторные `submit_exit` и `market qty=2.0` в Hybrid Paper
+
+### Контекст
+
+- Окружение: `trading-dev` (`/opt/trading-dev`), `trade_mode=Paper`, `paper.execution_mode=LiveOnly`.
+- Образы:
+  - `ghcr.io/dkorolski/alor-rust-project/alor-gateway:dev-ee1b0f7`
+  - `ghcr.io/dkorolski/alor-rust-project/strategy-runtime:dev-ee1b0f7`
+- Конфиг runtime: `/configs/runtime.hybrid.paper.7502SN6.toml`
+  - `strategy_kind=hybrid_intraday`
+  - `symbol=IMOEXF`
+  - `portfolio=7502SN6`
+
+### Наблюдение (симптом)
+
+В `paper_hybrid_7502SN6.jsonl` за один цикл наблюдались повторные `market`-выходы, включая запись:
+
+- `{"ts_utc":1773133080, "action":"market", "qty":2.0, "side":"Sell", ...}`
+
+При этом в runtime-логах для того же окна шли многократные `submit_exit` по одной и той же причине (`MeanRevTimeCutoff`) почти на каждом баре.
+
+### Факты из логов/артефактов
+
+1. Входы (owners):
+- За период подтверждены только `owner=MeanReversion` (2 входа).
+- `owner=IntradayBreakout` в `submit_entry` логах не обнаружен.
+
+2. Повторные выходы в одном MR-цикле:
+- `ts_utc=1773132840` -> `submit_exit owner=MeanReversion reason=MeanRevTimeCutoff`
+- `ts_utc=1773132900` -> `submit_exit owner=MeanReversion reason=MeanRevTimeCutoff`
+- `ts_utc=1773133020` -> `submit_exit owner=MeanReversion reason=MeanRevTimeCutoff`
+- `ts_utc=1773133080` -> `submit_exit owner=MeanReversion reason=MeanRevTimeCutoff`
+- `ts_utc=1773133140` -> `submit_exit owner=MeanReversion reason=MeanRevTimeCutoff`
+
+3. Соответствующие paper actions:
+- последовательность `market`-действий с повторяющимися sell/buy, включая `qty=2.0`.
+
+4. Snapshot/state после инцидента:
+- `last_position_qty=-1.0`
+- `safe_mode_close_only=true`
+- `safe_mode_reason="recovered_position_owner_unknown"`
+
+### Интерпретация (рабочая гипотеза)
+
+Это не подтвержденный BO-сигнал и не отдельный BO-вход. По журналам это выглядит как повторная генерация `exit` в MR-цикле при отсутствии жесткого exit-latch/idempotency на уровне paper execution lifecycle.
+
+Предположительно:
+
+- `submit_exit` допускается повторно на каждом баре, пока позиция не распознана как flat;
+- в paper-пути exit не фиксируется как `pending`/`already sent` достаточно рано;
+- в результате появляются дубли market-exit, которые могут временно дать `qty > |expected position|` в журнале действий;
+- итоговое состояние может деградировать до `owner_unknown` и `safe_mode`.
+
+### Что это НЕ означает
+
+- По текущим данным это **не** подтверждение “2 MR + 1 BO”.
+- Это также не обязательно bug в core-сигналах; симптом находится в runtime/paper execution/lifecycle слое.
+
+### P0-план патча (для обсуждения и реализации)
+
+1. `exit`-idempotency latch на цикл:
+- добавить флаг `exit_sent`/эквивалент в runtime state machine;
+- пока не получен terminal outcome (flat / confirmed close), повторный `submit_exit` блокировать.
+
+2. Для paper учитывать pending exit как live-work-in-progress:
+- `has_live_orders()`/эквивалент должен возвращать true при `pending_exit_request_id != None`;
+- не допускать повторной эмиссии `market exit` на каждом баре.
+
+3. Жесткий clamp объема exit:
+- `exit_qty = abs(current_position_qty)`;
+- при `abs(qty)==0` exit не отправлять;
+- запрет на exit, который увеличивает абсолютную экспозицию/переворачивает позицию.
+
+4. Явный guard от дублирования в одном `cycle_id`:
+- если `pending_exit_request_id` активен, новые exit intents не публиковать;
+- для повторных/late событий — idempotent ignore.
+
+### Минимальные тесты для фикса
+
+1. Unit: repeated time-cutoff bars
+- precondition: open MR position;
+- on consecutive bars with same `MeanRevTimeCutoff`:
+  - только один `submit_exit`;
+  - до terminal confirm дополнительные exit не эмитятся.
+
+2. Unit: exit qty clamp
+- `position=1`, strategy qty/конфиг выше (`2`/`10`) -> emitted exit qty == `1`.
+
+3. Integration (paper):
+- сценарий с delayed/late synthetic close:
+  - не возникает серии duplicate market exits;
+  - не возникает `qty=2` при фактической позиции `1`.
+
+4. Regression:
+- existing MR/BO happy path (entry -> bracket -> exit -> flat) остается зеленым.
+
+### Операционная рекомендация до патча
+
+- Для текущего soak продолжать мониторинг, но пометить данные как “known issue in paper lifecycle”.
+- При повторении симптома:
+  - сохранять `paper_hybrid_*.jsonl`, `trades_*.csv`, `summary_*.json`,
+  - выгружать runtime log window ±10 минут вокруг `qty!=1`,
+  - фиксировать последний runtime snapshot (`runtime.state...`).
