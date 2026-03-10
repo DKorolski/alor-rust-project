@@ -459,6 +459,8 @@ impl StrategyConfig {
         SessionGapStandaloneConfig {
             symbol: self.symbol.clone(),
             timezone_offset_hours: self.timezone_offset_hours,
+            place_offset_ticks: self.place_offset_ticks,
+            tick_size: self.tick_size,
             close_hour: self.session_gap_close_hour,
             close_minute: self.session_gap_close_minute,
             entry_ack_timeout_ms: self.entry_ack_timeout_ms,

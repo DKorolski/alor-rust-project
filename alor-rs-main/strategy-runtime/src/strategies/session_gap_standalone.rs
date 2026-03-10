@@ -32,6 +32,8 @@ pub struct SessionGapStandaloneConfig {
     pub entry_fill_timeout_ms: u64,
     pub exit_ack_timeout_ms: u64,
     pub exit_fill_timeout_ms: u64,
+    pub place_offset_ticks: i64,
+    pub tick_size: f64,
 }
 
 impl Default for SessionGapStandaloneConfig {
@@ -60,6 +62,8 @@ impl Default for SessionGapStandaloneConfig {
             entry_fill_timeout_ms: 60_000,
             exit_ack_timeout_ms: 15_000,
             exit_fill_timeout_ms: 60_000,
+            place_offset_ticks: 0,
+            tick_size: 0.01,
         }
     }
 }
@@ -276,6 +280,20 @@ impl SessionGapStandaloneStrategy {
             side: Self::entry_side(pending.direction),
             fill_price: Some(bar.o),
         })
+    }
+
+    fn live_marketable_price(&self, side: Side, bar: &BarEvent) -> f64 {
+        if self.config.tick_size <= 0.0 {
+            return bar.close;
+        }
+        // Keep at least one extra tick of aggressiveness, because gateway normalization
+        // (buy=floor, sell=ceil) can otherwise de-aggress price to passive limit.
+        let aggressive_ticks = self.config.place_offset_ticks.max(0) + 1;
+        let shift = aggressive_ticks as f64 * self.config.tick_size;
+        match side {
+            Side::Buy => bar.close + shift,
+            Side::Sell => bar.close - shift,
+        }
     }
 
     fn maybe_close_position(
@@ -695,18 +713,19 @@ impl Strategy for SessionGapStandaloneStrategy {
                     let side = Self::entry_side(pending.direction);
                     let (tp, sl) = self.compute_tp_sl(pending.direction, bar.o);
                     let qty = pending.size as f64;
-                    intents.push(Intent::Market {
+                    intents.push(Intent::Place {
+                        price: self.live_marketable_price(side, bar),
                         qty,
                         side,
-                        fill_price: None,
                     });
                     SessionGapLivePhase::PendingEntry {
-                        request_id: crate::deterministic_market_request_id(
+                        request_id: crate::deterministic_request_id(
                             &ctx.strategy_id,
                             &ctx.portfolio,
                             &bar.symbol,
+                            "place",
                             bar.close_time_utc,
-                            side,
+                            0,
                         ),
                         side,
                         qty,
@@ -782,18 +801,19 @@ impl Strategy for SessionGapStandaloneStrategy {
                         Side::Buy => Side::Sell,
                         Side::Sell => Side::Buy,
                     };
-                    intents.push(Intent::Market {
+                    intents.push(Intent::Place {
+                        price: self.live_marketable_price(exit_side, bar),
                         qty,
                         side: exit_side,
-                        fill_price: None,
                     });
                     SessionGapLivePhase::PendingExit {
-                        request_id: crate::deterministic_market_request_id(
+                        request_id: crate::deterministic_request_id(
                             &ctx.strategy_id,
                             &ctx.portfolio,
                             &bar.symbol,
+                            "place",
                             bar.close_time_utc,
-                            exit_side,
+                            0,
                         ),
                         side: exit_side,
                         qty,
@@ -1360,7 +1380,7 @@ mod tests {
         assert_eq!(intents.len(), 1);
         assert!(matches!(
             intents[0],
-            Intent::Market {
+            Intent::Place {
                 side: Side::Sell,
                 qty: 1.0,
                 ..
@@ -1543,7 +1563,7 @@ mod tests {
         assert_eq!(intents.len(), 1);
         assert!(matches!(
             intents[0],
-            Intent::Market {
+            Intent::Place {
                 side: Side::Sell,
                 qty: 1.0,
                 ..
@@ -2223,7 +2243,7 @@ mod tests {
         assert_eq!(intents.len(), 1);
         assert!(matches!(
             intents[0],
-            Intent::Market {
+            Intent::Place {
                 side: Side::Sell,
                 qty: 1.0,
                 ..
