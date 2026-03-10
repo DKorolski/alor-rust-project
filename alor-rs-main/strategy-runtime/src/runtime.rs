@@ -2026,6 +2026,17 @@ impl StrategyRuntime {
                             fill_drop_reason = "flat_position",
                             "paper_exit_fill_dropped"
                         );
+                        self.ledger.record_order(OrderRecord {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.clone(),
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: order.price.unwrap_or(price),
+                            status: "dropped".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
                         continue;
                     }
                     let is_sell = order.side.eq_ignore_ascii_case("sell");
@@ -2043,6 +2054,17 @@ impl StrategyRuntime {
                             fill_drop_reason = "wrong_side_for_exit",
                             "paper_exit_fill_dropped"
                         );
+                        self.ledger.record_order(OrderRecord {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.clone(),
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: order.price.unwrap_or(price),
+                            status: "dropped".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
                         continue;
                     }
                     effective_qty = effective_qty.min(pos_abs);
@@ -2058,6 +2080,17 @@ impl StrategyRuntime {
                             fill_drop_reason = "effective_qty_zero",
                             "paper_exit_fill_dropped"
                         );
+                        self.ledger.record_order(OrderRecord {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.clone(),
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: order.price.unwrap_or(price),
+                            status: "dropped".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
                         continue;
                     }
                 }
@@ -4006,6 +4039,9 @@ mod tests {
         let pos_qty = runtime.state.positions.get("SBER").map(|p| p.qty).unwrap_or(0.0);
         assert!(pos_qty >= 0.0, "position must not flip short");
         assert!(pos_qty.abs() <= f64::EPSILON, "position must close to flat");
+        assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
+        assert_eq!(runtime.ledger.order(2).unwrap().status, "dropped");
+        assert!((runtime.ledger.order(2).unwrap().filled - 0.0).abs() <= f64::EPSILON);
     }
 
     #[test]
