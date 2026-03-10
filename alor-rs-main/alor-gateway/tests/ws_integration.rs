@@ -52,6 +52,8 @@ async fn reconnect_resubscribe_no_duplicates() {
                 .await
                 .unwrap();
         }
+        let first_times = collect_close_times(&mut emitted, 3, Duration::from_secs(2)).await;
+        assert_eq!(first_times, vec![60, 120, 180]);
 
         let reconnect_target = handle.state_snapshot().ws_reconnects_total + 1;
         ws_server
@@ -72,9 +74,8 @@ async fn reconnect_resubscribe_no_duplicates() {
                 .unwrap();
         }
 
-        let times = collect_close_times(&mut emitted, 3, Duration::from_secs(2)).await;
-        assert!(times.windows(2).all(|pair| pair[1] > pair[0]));
-        assert!(times.contains(&240));
+        let times = collect_close_times(&mut emitted, 2, Duration::from_secs(2)).await;
+        assert_eq!(times, vec![240, 300]);
 
         sleep(Duration::from_millis(200)).await;
         handle.stop().await.unwrap();
