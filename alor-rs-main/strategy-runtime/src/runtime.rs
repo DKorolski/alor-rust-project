@@ -232,6 +232,7 @@ struct SimOrder {
     order_id: i64,
     symbol: String,
     side: String,
+    intent_class: Option<alor_protocol::IntentClass>,
     order_type: SimOrderType,
     qty: f64,
     price: Option<f64>,
@@ -1760,7 +1761,13 @@ impl StrategyRuntime {
     async fn simulate_intents(&mut self, bar: &BarEvent, intents: Vec<Intent>) -> Result<()> {
         for intent in intents {
             let mut intent = intent;
-            while let Intent::Classified { intent: inner, .. } = intent {
+            let mut intent_class = intent.explicit_class();
+            while let Intent::Classified {
+                intent: inner,
+                intent_class: class,
+            } = intent
+            {
+                intent_class = Some(class);
                 intent = *inner;
             }
             match intent {
@@ -1774,6 +1781,7 @@ impl StrategyRuntime {
                         order_id,
                         symbol: bar.symbol.clone(),
                         side: side.clone(),
+                        intent_class,
                         order_type: SimOrderType::Limit,
                         qty,
                         price: Some(price),
@@ -1805,9 +1813,56 @@ impl StrategyRuntime {
                         .map(|p| p.qty)
                         .unwrap_or(0.0);
                     let mut effective_qty = qty;
-                    // Paper safety: market orders must not flip existing position.
-                    // If order side is opposite to position side, clamp qty to position abs.
-                    if side == alor_protocol::Side::Buy && current_pos_qty < 0.0 {
+                    let is_exit = matches!(intent_class, Some(alor_protocol::IntentClass::Exit));
+                    if is_exit {
+                        let pos_abs = current_pos_qty.abs();
+                        if pos_abs <= f64::EPSILON {
+                            info!(
+                                target: "strategy_runtime::runtime",
+                                strategy_id = %self.config.strategy.strategy_id,
+                                symbol = %symbol,
+                                intent_class = "EXIT",
+                                side = ?side,
+                                intent_qty = qty,
+                                current_position_qty = current_pos_qty,
+                                drop_reason = "flat_position",
+                                "paper_exit_dropped"
+                            );
+                            continue;
+                        }
+                        let wrong_side = (side == alor_protocol::Side::Sell && current_pos_qty < 0.0)
+                            || (side == alor_protocol::Side::Buy && current_pos_qty > 0.0);
+                        if wrong_side {
+                            info!(
+                                target: "strategy_runtime::runtime",
+                                strategy_id = %self.config.strategy.strategy_id,
+                                symbol = %symbol,
+                                intent_class = "EXIT",
+                                side = ?side,
+                                intent_qty = qty,
+                                current_position_qty = current_pos_qty,
+                                drop_reason = "wrong_side_for_exit",
+                                "paper_exit_dropped"
+                            );
+                            continue;
+                        }
+                        effective_qty = effective_qty.min(pos_abs);
+                        if effective_qty <= f64::EPSILON {
+                            info!(
+                                target: "strategy_runtime::runtime",
+                                strategy_id = %self.config.strategy.strategy_id,
+                                symbol = %symbol,
+                                intent_class = "EXIT",
+                                side = ?side,
+                                intent_qty = qty,
+                                current_position_qty = current_pos_qty,
+                                drop_reason = "effective_qty_zero",
+                                "paper_exit_dropped"
+                            );
+                            continue;
+                        }
+                    } else if side == alor_protocol::Side::Buy && current_pos_qty < 0.0 {
+                        // Non-exit market intents are still prevented from flipping an opposite position in paper mode.
                         effective_qty = effective_qty.min(current_pos_qty.abs());
                     } else if side == alor_protocol::Side::Sell && current_pos_qty > 0.0 {
                         effective_qty = effective_qty.min(current_pos_qty.abs());
@@ -1847,6 +1902,7 @@ impl StrategyRuntime {
                             order_id,
                             symbol: symbol.clone(),
                             side: side.clone(),
+                            intent_class,
                             order_type: SimOrderType::Market,
                             qty: effective_qty,
                             price: None,
@@ -1949,12 +2005,68 @@ impl StrategyRuntime {
                 .position(|order| order.order_id == order_id)
             {
                 let order = self.sim_orders.remove(index);
+                let mut effective_qty = order.qty;
+                if matches!(order.intent_class, Some(alor_protocol::IntentClass::Exit)) {
+                    let current_pos_qty = self
+                        .state
+                        .positions
+                        .get(&order.symbol)
+                        .map(|p| p.qty)
+                        .unwrap_or(0.0);
+                    let pos_abs = current_pos_qty.abs();
+                    if pos_abs <= f64::EPSILON {
+                        info!(
+                            target: "strategy_runtime::runtime",
+                            strategy_id = %self.config.strategy.strategy_id,
+                            symbol = %order.symbol,
+                            intent_class = "EXIT",
+                            requested_qty = order.qty,
+                            current_position_qty_before_fill = current_pos_qty,
+                            effective_qty_after_recalc = 0.0,
+                            fill_drop_reason = "flat_position",
+                            "paper_exit_fill_dropped"
+                        );
+                        continue;
+                    }
+                    let is_sell = order.side.eq_ignore_ascii_case("sell");
+                    let wrong_side = (is_sell && current_pos_qty < 0.0)
+                        || (!is_sell && current_pos_qty > 0.0);
+                    if wrong_side {
+                        info!(
+                            target: "strategy_runtime::runtime",
+                            strategy_id = %self.config.strategy.strategy_id,
+                            symbol = %order.symbol,
+                            intent_class = "EXIT",
+                            requested_qty = order.qty,
+                            current_position_qty_before_fill = current_pos_qty,
+                            effective_qty_after_recalc = 0.0,
+                            fill_drop_reason = "wrong_side_for_exit",
+                            "paper_exit_fill_dropped"
+                        );
+                        continue;
+                    }
+                    effective_qty = effective_qty.min(pos_abs);
+                    if effective_qty <= f64::EPSILON {
+                        info!(
+                            target: "strategy_runtime::runtime",
+                            strategy_id = %self.config.strategy.strategy_id,
+                            symbol = %order.symbol,
+                            intent_class = "EXIT",
+                            requested_qty = order.qty,
+                            current_position_qty_before_fill = current_pos_qty,
+                            effective_qty_after_recalc = effective_qty,
+                            fill_drop_reason = "effective_qty_zero",
+                            "paper_exit_fill_dropped"
+                        );
+                        continue;
+                    }
+                }
                 let trade = TradeRecord {
                     ts_utc: bar.close_time_utc,
                     order_id: order.order_id,
                     symbol: order.symbol.clone(),
                     side: order.side.clone(),
-                    qty: order.qty,
+                    qty: effective_qty,
                     price,
                     commission: 0.0,
                     owned: true,
@@ -1964,8 +2076,8 @@ impl StrategyRuntime {
                     order_id: order.order_id,
                     symbol: order.symbol.clone(),
                     side: order.side.clone(),
-                    qty: order.qty,
-                    filled: order.qty,
+                    qty: effective_qty,
+                    filled: effective_qty,
                     price,
                     status: "filled".to_string(),
                     ts_utc: bar.close_time_utc,
@@ -1973,9 +2085,9 @@ impl StrategyRuntime {
                 });
                 // Synthetic paper feedback: propagate position delta back into strategy.
                 let delta_qty = if order.side.eq_ignore_ascii_case("buy") {
-                    order.qty
+                    effective_qty
                 } else {
-                    -order.qty
+                    -effective_qty
                 };
                 let prev_qty = self
                     .state
@@ -3719,6 +3831,235 @@ mod tests {
             assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
             assert_eq!(runtime.ledger.order(1).unwrap().price, 11.0);
         });
+    }
+
+    #[test]
+    fn paper_exit_from_flat_is_dropped() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.0,
+            o: 10.0,
+            h: 10.0,
+            l: 10.0,
+            v: 0.0,
+            origin: DataOrigin::Live,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Sell,
+                        fill_price: None,
+                        comment: None,
+                    }
+                    .with_class(alor_protocol::IntentClass::Exit)],
+                )
+                .await
+                .unwrap();
+        });
+        assert!(runtime.sim_orders.is_empty());
+    }
+
+    #[test]
+    fn paper_exit_wrong_side_is_dropped() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.0,
+            o: 10.0,
+            h: 10.0,
+            l: 10.0,
+            v: 0.0,
+            origin: DataOrigin::Live,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Sell,
+                        fill_price: None,
+                        comment: None,
+                    }
+                    .with_class(alor_protocol::IntentClass::Exit)],
+                )
+                .await
+                .unwrap();
+        });
+        assert!(runtime.sim_orders.is_empty());
+    }
+
+    #[test]
+    fn paper_exit_qty_is_clamped_to_position_abs_on_create() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: 1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.0,
+            o: 10.0,
+            h: 10.0,
+            l: 10.0,
+            v: 0.0,
+            origin: DataOrigin::Live,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 5.0,
+                        side: alor_protocol::Side::Sell,
+                        fill_price: None,
+                        comment: None,
+                    }
+                    .with_class(alor_protocol::IntentClass::Exit)],
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(runtime.sim_orders.len(), 1);
+        assert!((runtime.sim_orders[0].qty - 1.0).abs() <= f64::EPSILON);
+        assert_eq!(
+            runtime.sim_orders[0].intent_class,
+            Some(alor_protocol::IntentClass::Exit)
+        );
+    }
+
+    #[test]
+    fn queued_duplicate_exit_sells_cannot_flip_long_position() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: 1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        runtime.sim_orders.push(SimOrder {
+            order_id: 1,
+            symbol: "SBER".to_string(),
+            side: "sell".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        runtime.sim_orders.push(SimOrder {
+            order_id: 2,
+            symbol: "SBER".to_string(),
+            side: "sell".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 160,
+            close: 11.2,
+            o: 11.0,
+            h: 11.3,
+            l: 10.8,
+            v: 0.0,
+            origin: DataOrigin::Replay,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime.simulate_fills(&bar).await.unwrap();
+        });
+
+        let pos_qty = runtime.state.positions.get("SBER").map(|p| p.qty).unwrap_or(0.0);
+        assert!(pos_qty >= 0.0, "position must not flip short");
+        assert!(pos_qty.abs() <= f64::EPSILON, "position must close to flat");
+    }
+
+    #[test]
+    fn queued_duplicate_exit_buys_cannot_flip_short_position() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        runtime.sim_orders.push(SimOrder {
+            order_id: 1,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        runtime.sim_orders.push(SimOrder {
+            order_id: 2,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 160,
+            close: 11.2,
+            o: 11.0,
+            h: 11.3,
+            l: 10.8,
+            v: 0.0,
+            origin: DataOrigin::Replay,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime.simulate_fills(&bar).await.unwrap();
+        });
+
+        let pos_qty = runtime.state.positions.get("SBER").map(|p| p.qty).unwrap_or(0.0);
+        assert!(pos_qty <= 0.0, "position must not flip long");
+        assert!(pos_qty.abs() <= f64::EPSILON, "position must close to flat");
     }
 
     #[test]
