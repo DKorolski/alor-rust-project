@@ -113,9 +113,9 @@ stop_end_buffer_sec = 60
 enabled = true
 output = "file"
 execution_mode = "live_only"
-file_path = "./reports/paper_hybrid_7502SN6.jsonl"
-trades_csv = "./reports/trades_hybrid_7502SN6.csv"
-summary_json = "./reports/summary_hybrid_7502SN6.json"
+file_path = "/reports/paper_hybrid_7502SN6.jsonl"
+trades_csv = "/reports/trades_hybrid_7502SN6.csv"
+summary_json = "/reports/summary_hybrid_7502SN6.json"
 append = true
 
 [backtest]
