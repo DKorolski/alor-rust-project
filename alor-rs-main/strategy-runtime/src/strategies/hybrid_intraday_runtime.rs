@@ -186,6 +186,10 @@ impl HybridIntradayRuntimeStrategy {
 
     fn has_live_orders(&self) -> bool {
         self.pending_entry.is_some()
+            || self.pending_entry_request_id.is_some()
+            || self.pending_exit_request_id.is_some()
+            || self.pending_tp_request_id.is_some()
+            || self.pending_sl_request_id.is_some()
             || !self.working_orders.is_empty()
             || !self.working_stop_orders.is_empty()
     }
@@ -686,6 +690,17 @@ impl HybridIntradayRuntimeStrategy {
             }
             Action::SubmitExit { owner, .. } => {
                 if !can_emit {
+                    return Vec::new();
+                }
+                if let Some(pending_req_id) = self.pending_exit_request_id {
+                    info!(
+                        target: "strategy_runtime::hybrid_intraday_runtime",
+                        action = "exit_suppressed",
+                        reason = "pending_exit_active",
+                        owner = ?owner,
+                        cycle_id = self.active_cycle_id.map(|v| Self::format_cycle_id(&v)),
+                        pending_exit_request_id = %pending_req_id,
+                    );
                     return Vec::new();
                 }
                 let Some(pos_qty) = ctx.position_qty else {
@@ -1428,6 +1443,96 @@ mod tests {
     }
 
     #[test]
+    fn pending_exit_is_counted_as_live_order() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            10,
+            true,
+            true,
+            Action::SubmitExit {
+                owner: Owner::MeanReversion,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+            },
+        );
+        assert!(strategy.pending_exit_request_id.is_some());
+        assert!(strategy.has_live_orders());
+    }
+
+    #[test]
+    fn submit_exit_is_suppressed_while_pending_exit_is_active() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        let first = strategy.map_action_to_intents(
+            &ctx,
+            10,
+            true,
+            true,
+            Action::SubmitExit {
+                owner: Owner::MeanReversion,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+            },
+        );
+        assert_eq!(first.len(), 1);
+        let pending = strategy.pending_exit_request_id.expect("pending exit request");
+
+        let second = strategy.map_action_to_intents(
+            &ctx,
+            11,
+            true,
+            true,
+            Action::SubmitExit {
+                owner: Owner::MeanReversion,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+            },
+        );
+        assert!(second.is_empty());
+        assert_eq!(strategy.pending_exit_request_id, Some(pending));
+    }
+
+    #[test]
+    fn ack_negative_clears_pending_exit_lifecycle() {
+        let mk_strategy = || {
+            let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+            let ctx = test_ctx(Some(1.0));
+            let _ = strategy.map_action_to_intents(
+                &ctx,
+                10,
+                true,
+                true,
+                Action::SubmitExit {
+                    owner: Owner::MeanReversion,
+                    reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+                },
+            );
+            (strategy, ctx)
+        };
+
+        {
+            let (mut strategy, ctx) = mk_strategy();
+            let req = strategy.pending_exit_request_id.expect("pending req");
+            let _ = strategy.on_ack(&ctx, &CommandAck::rejected(req, "x", "y"));
+            assert!(strategy.pending_exit_request_id.is_none());
+            assert!(strategy.pending_exit_created_ts_utc.is_none());
+        }
+        {
+            let (mut strategy, ctx) = mk_strategy();
+            let req = strategy.pending_exit_request_id.expect("pending req");
+            let _ = strategy.on_ack(&ctx, &CommandAck::expired(req, "x"));
+            assert!(strategy.pending_exit_request_id.is_none());
+            assert!(strategy.pending_exit_created_ts_utc.is_none());
+        }
+        {
+            let (mut strategy, ctx) = mk_strategy();
+            let req = strategy.pending_exit_request_id.expect("pending req");
+            let _ = strategy.on_ack(&ctx, &CommandAck::error(req, "x", "y"));
+            assert!(strategy.pending_exit_request_id.is_none());
+            assert!(strategy.pending_exit_created_ts_utc.is_none());
+        }
+    }
+
+    #[test]
     fn ack_reject_clears_only_matching_pending_entry() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let ctx = test_ctx(Some(0.0));
@@ -2003,12 +2108,13 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             return Vec::new();
         }
         if Some(ack.request_id) == self.pending_exit_request_id {
-            self.pending_exit_created_ts_utc = None;
             if matches!(
                 ack.status,
                 AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
             ) {
                 self.orchestrator.on_order_rejected("exit");
+                self.pending_exit_request_id = None;
+                self.pending_exit_created_ts_utc = None;
             }
             self.sync_state();
             return Vec::new();
