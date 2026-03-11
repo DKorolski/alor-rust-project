@@ -199,6 +199,7 @@ impl MockLiveProbeStrategy {
                     qty: self.config.qty,
                     side: self.config.side,
                     fill_price: None,
+                    comment: None,
                 }]
             }
             MockLiveProbeMode::CancelAfterTerminal => {
@@ -218,6 +219,7 @@ impl MockLiveProbeStrategy {
                     qty: self.config.qty,
                     side: self.config.side,
                     fill_price: None,
+                    comment: None,
                 }]
             }
             MockLiveProbeMode::PlaceLimitBadPrice
@@ -238,6 +240,7 @@ impl MockLiveProbeStrategy {
                     price,
                     qty: self.config.qty,
                     side: self.config.side,
+                    comment: None,
                 }]
             }
         }
@@ -426,6 +429,7 @@ mod tests {
             symbol: "IMOEXF".to_string(),
             tick_size: 0.01,
             trade_mode: TradeMode::Live,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
             position_qty: None,

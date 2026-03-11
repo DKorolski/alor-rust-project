@@ -102,6 +102,7 @@ impl Strategy for ToySessionTimingStrategy {
                     qty: self.config.qty,
                     side: self.close_side(),
                     fill_price: self.fill_price_for_mode(bar, ctx.trade_mode),
+                    comment: None,
                 });
                 self.position_open = false;
                 self.state = StrategyState::Idle;
@@ -114,6 +115,7 @@ impl Strategy for ToySessionTimingStrategy {
                 qty: self.config.qty,
                 side: self.config.entry_side,
                 fill_price: self.fill_price_for_mode(bar, ctx.trade_mode),
+                comment: None,
             });
             self.position_open = true;
             self.traded_day_key = Some(day_key);
@@ -197,6 +199,7 @@ mod tests {
             symbol: "IMOEXF".to_string(),
             tick_size: 0.5,
             trade_mode: TradeMode::Backtest,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: false,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty: None,

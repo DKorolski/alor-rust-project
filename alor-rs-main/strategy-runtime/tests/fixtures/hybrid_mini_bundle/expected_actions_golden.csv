@@ -1,0 +1,8 @@
+bar_ts,action,owner,side,reason
+2026-01-06 09:20:00,submit_entry,mean_reversion,short,morning_mean_reversion_short
+2026-01-06 17:10:00,submit_entry,intraday_breakout,short,breakout_short
+2026-01-06 17:50:00,submit_exit,intraday_breakout,,breakout_stop1_short
+2026-01-08 12:00:00,submit_entry,intraday_breakout,short,breakout_short
+2026-01-08 23:30:00,submit_exit,intraday_breakout,,breakout_eod_exit
+2026-01-12 14:10:00,submit_entry,intraday_breakout,short,breakout_short
+2026-01-12 23:30:00,submit_exit,intraday_breakout,,breakout_eod_exit

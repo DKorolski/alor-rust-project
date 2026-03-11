@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, NaiveTime, TimeZone, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::watch;
@@ -18,6 +19,7 @@ use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
+use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeStrategy;
 use crate::strategies::limit_cancel::LimitCancelStrategy;
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
 use crate::strategies::mock_live_probe::MockLiveProbeStrategy;
@@ -26,8 +28,9 @@ use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PaperConfig,
-    PaperOutput, PositionEvent, RuntimeConfig, RuntimeHealthSnapshot, RuntimeStateRestored,
-    Strategy, StrategyCtx, StrategyKind, TradeEvent, TradeMode,
+    PaperExecutionMode, PaperOutput, PositionEvent, RuntimeConfig, RuntimeHealthSnapshot,
+    RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, StrategyKind, TradeEvent,
+    TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -36,8 +39,20 @@ const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
 const TRADE_DEDUP_LIMIT: usize = 512;
+const STOP_END_BUFFER_SEC_DEFAULT: i64 = 60;
 const NON_WORKING_ORDER_STATUSES: [&str; 5] =
     ["filled", "canceled", "cancelled", "expired", "rejected"];
+const NON_WORKING_STOP_ORDER_STATUSES: [&str; 9] = [
+    "canceled",
+    "cancelled",
+    "rejected",
+    "expired",
+    "filled",
+    "executed",
+    "triggered",
+    "done",
+    "completed",
+];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeStateSnapshot {
@@ -55,6 +70,11 @@ struct RuntimeStateSnapshot {
 #[derive(Debug, Deserialize)]
 struct OrdersSnapshot {
     pub orders: HashMap<i64, OrderEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StopOrdersSnapshot {
+    pub stop_orders: HashMap<String, StopOrderEvent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +185,7 @@ pub struct StrategyRuntime {
     pending_exec: HashMap<i64, PendingExecution>,
     sim_orders: Vec<SimOrder>,
     next_sim_order_id: i64,
+    strategy_now_ts_utc: i64,
     health_snapshot: RuntimeSharedState,
     health_server_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -211,6 +232,7 @@ struct SimOrder {
     order_id: i64,
     symbol: String,
     side: String,
+    intent_class: Option<alor_protocol::IntentClass>,
     order_type: SimOrderType,
     qty: f64,
     price: Option<f64>,
@@ -248,6 +270,40 @@ impl Default for RuntimeMetrics {
 }
 
 impl StrategyRuntime {
+    fn can_advance_paper_execution(&self, origin: DataOrigin) -> bool {
+        if self.config.trade_mode != TradeMode::Paper {
+            return true;
+        }
+        match self.config.paper.execution_mode {
+            PaperExecutionMode::HistorySim => true,
+            PaperExecutionMode::LiveOnly => origin == DataOrigin::Live,
+        }
+    }
+
+    async fn record_non_live_intents(
+        &mut self,
+        created_ts_utc: i64,
+        intents: &[Intent],
+        mode: TradeMode,
+    ) -> Result<()> {
+        if intents.is_empty() {
+            return Ok(());
+        }
+        self.health_snapshot.write().last_intent_ts_utc = Some(created_ts_utc);
+        let config = self.config.clone();
+        let paper = self.config.paper.clone();
+        let backtest = self.config.backtest.clone();
+        log_virtual_trades(
+            created_ts_utc,
+            &config,
+            &paper,
+            &backtest,
+            intents.to_vec(),
+            mode,
+        )
+        .await
+    }
+
     fn test_delay_before_publish_ms() -> u64 {
         let requested = std::env::var("RUNTIME_TEST_DELAY_BEFORE_PUBLISH_MS")
             .ok()
@@ -293,6 +349,9 @@ impl StrategyRuntime {
             StrategyKind::MockLiveProbe => Box::new(MockLiveProbeStrategy::new(
                 config.strategy.to_mock_live_probe_config(),
             )),
+            StrategyKind::HybridIntraday => Box::new(HybridIntradayRuntimeStrategy::new(
+                config.strategy.to_hybrid_intraday_runtime_config(),
+            )),
         };
         let now = chrono::Utc::now().timestamp();
         let health_snapshot = Arc::new(parking_lot::RwLock::new(RuntimeHealthSnapshot {
@@ -337,6 +396,7 @@ impl StrategyRuntime {
             pending_exec: HashMap::new(),
             sim_orders: Vec::new(),
             next_sim_order_id: 1,
+            strategy_now_ts_utc: 0,
             health_snapshot,
             health_server_handle: None,
         })
@@ -547,20 +607,29 @@ impl StrategyRuntime {
             return Ok(());
         }
 
-        self.state
-            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
-        let ctx = self.strategy_ctx();
+        let prev_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&bar.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar(prev_bar_ts);
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
 
         if self.config.trade_mode != TradeMode::Live {
-            self.simulate_fills(&bar).await?;
-            self.simulate_intents(&bar, intents).await?;
+            self.record_non_live_intents(bar.close_time_utc, &intents, self.config.trade_mode)
+                .await?;
+            if self.can_advance_paper_execution(bar.origin.clone()) {
+                self.simulate_fills(&bar).await?;
+                self.simulate_intents(&bar, intents).await?;
+            }
         } else {
             self.apply_intents(&ctx, bar.close_time_utc, intents)
                 .await?;
         }
+        self.state
+            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
 
         self.metrics.bars_read_total = self.metrics.bars_read_total.saturating_add(1);
         self.metrics.bars_decoded_ok_total = self.metrics.bars_decoded_ok_total.saturating_add(1);
@@ -595,7 +664,7 @@ impl StrategyRuntime {
 
         self.recover_pending(&streams.acks, MessageType::CommandAck, trim_acks)
             .await?;
-        self.recover_pending(&streams.orders, MessageType::Order, trim_orders)
+        self.recover_pending_orders_stream(&streams.orders, trim_orders)
             .await?;
         self.recover_pending(&streams.trades, MessageType::Trade, trim_trades)
             .await?;
@@ -628,6 +697,7 @@ impl StrategyRuntime {
     }
 
     fn truncate_file(&self, path: &str) -> Result<()> {
+        ensure_parent_dir(path)?;
         let _ = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -654,6 +724,7 @@ impl StrategyRuntime {
             .xrevrange_last_n(stream, SNAPSHOT_SCAN_COUNT)
             .await?;
         let mut orders_snapshot: Option<OrdersSnapshot> = None;
+        let mut stop_orders_snapshot: Option<StopOrdersSnapshot> = None;
         let mut positions_snapshot: Option<PositionsSnapshot> = None;
         for payload in payloads {
             let envelope = match serde_json::from_str::<Envelope<serde_json::Value>>(&payload) {
@@ -684,9 +755,22 @@ impl StrategyRuntime {
                         }
                     }
                 }
+                MessageType::SnapshotStopOrders if stop_orders_snapshot.is_none() => {
+                    match serde_json::from_str::<Envelope<StopOrdersSnapshot>>(&payload) {
+                        Ok(envelope) => {
+                            stop_orders_snapshot = Some(envelope.payload);
+                        }
+                        Err(error) => {
+                            warn!(?error, "failed to parse stop-orders snapshot");
+                        }
+                    }
+                }
                 _ => {}
             }
-            if orders_snapshot.is_some() && positions_snapshot.is_some() {
+            if orders_snapshot.is_some()
+                && positions_snapshot.is_some()
+                && stop_orders_snapshot.is_some()
+            {
                 break;
             }
         }
@@ -694,6 +778,7 @@ impl StrategyRuntime {
         let strategy_symbol = self.config.strategy.symbol.clone();
         let mut positions_strategy = HashMap::new();
         let mut working_orders_strategy = HashMap::new();
+        let mut working_stop_orders_strategy = HashMap::new();
         let mut snapshot_ts_utc = None;
         let mut positions_total_all = 0usize;
         let mut positions_open_all = 0usize;
@@ -703,6 +788,10 @@ impl StrategyRuntime {
         let mut orders_open_all = 0usize;
         let mut orders_total_strategy = 0usize;
         let mut orders_open_strategy = 0usize;
+        let mut stop_orders_total_all = 0usize;
+        let mut stop_orders_open_all = 0usize;
+        let mut stop_orders_total_strategy = 0usize;
+        let mut stop_orders_open_strategy = 0usize;
 
         if let Some(snapshot) = orders_snapshot {
             let mut strategy_orders = HashMap::new();
@@ -728,6 +817,31 @@ impl StrategyRuntime {
             }
             self.state.orders = strategy_orders;
             self.bootstrap_state.orders_snapshot_loaded = true;
+        }
+        if let Some(snapshot) = stop_orders_snapshot {
+            let mut strategy_stop_orders = HashMap::new();
+            for (stop_order_id, stop_order) in snapshot.stop_orders {
+                stop_orders_total_all += 1;
+                if self.is_working_stop_order(&stop_order) {
+                    stop_orders_open_all += 1;
+                }
+                if stop_order.symbol == strategy_symbol {
+                    if self.is_working_stop_order(&stop_order) {
+                        stop_orders_open_strategy += 1;
+                        working_stop_orders_strategy
+                            .insert(stop_order_id.clone(), stop_order.clone());
+                    }
+                    stop_orders_total_strategy += 1;
+                    if stop_order.ts_utc > 0 {
+                        snapshot_ts_utc = Some(
+                            snapshot_ts_utc
+                                .map_or(stop_order.ts_utc, |ts: i64| ts.max(stop_order.ts_utc)),
+                        );
+                    }
+                    strategy_stop_orders.insert(stop_order_id, stop_order);
+                }
+            }
+            self.state.stop_orders = strategy_stop_orders;
         }
         if let Some(snapshot) = positions_snapshot {
             let mut strategy_positions = HashMap::new();
@@ -766,6 +880,10 @@ impl StrategyRuntime {
                 orders_open_all,
                 orders_total_strategy,
                 orders_open_strategy,
+                stop_orders_total_all,
+                stop_orders_open_all,
+                stop_orders_total_strategy,
+                stop_orders_open_strategy,
                 "bootstrap: snapshots filtered"
             );
             self.log_bootstrap_dump(
@@ -778,6 +896,7 @@ impl StrategyRuntime {
             self.bootstrap_snapshot = Some(BootstrapSnapshot {
                 positions_strategy,
                 working_orders_strategy,
+                working_stop_orders_strategy,
                 snapshot_ts_utc,
             });
         }
@@ -869,7 +988,8 @@ impl StrategyRuntime {
             StrategyState::Idle
             | StrategyState::Done { .. }
             | StrategyState::MarketLiveInPosition { .. }
-            | StrategyState::Blocked { .. } => Vec::new(),
+            | StrategyState::Blocked { .. }
+            | StrategyState::HybridIntradayRuntime { .. } => Vec::new(),
         }
     }
 
@@ -910,6 +1030,37 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    async fn recover_pending_orders_stream(
+        &mut self,
+        stream: &str,
+        trim_maxlen: usize,
+    ) -> Result<()> {
+        let mut start = "0-0".to_string();
+        for _ in 0..MAX_PENDING_LOOPS {
+            let reply = match self
+                .transport
+                .claim_idle(stream, &start, self.config.read.claim_batch)
+                .await
+            {
+                Ok(reply) => reply,
+                Err(error) => {
+                    warn!(?error, stream, "orders pending autoclaim failed");
+                    break;
+                }
+            };
+            let (next_start, entries) = self.transport.parse_autoclaim_entries(stream, reply);
+            if entries.is_empty() {
+                break;
+            }
+            start = next_start;
+            for entry in entries {
+                self.decode_and_dispatch_orders_entry(stream, trim_maxlen, entry)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn poll_once(&mut self) -> Result<()> {
         let streams = self.config.streams.clone();
         let trim_acks = self.config.trim.acks;
@@ -920,7 +1071,7 @@ impl StrategyRuntime {
 
         self.drain_stream(&streams.acks, MessageType::CommandAck, trim_acks, 10)
             .await?;
-        self.drain_stream(&streams.orders, MessageType::Order, trim_orders, 10)
+        self.drain_orders_stream(&streams.orders, trim_orders, 10)
             .await?;
         self.drain_stream(&streams.trades, MessageType::Trade, trim_trades, 10)
             .await?;
@@ -983,6 +1134,111 @@ impl StrategyRuntime {
                     self.metrics.bars_decode_failed_total.saturating_add(1);
             }
         }
+        Ok(())
+    }
+
+    async fn drain_orders_stream(
+        &mut self,
+        stream: &str,
+        trim_maxlen: usize,
+        count: usize,
+    ) -> Result<()> {
+        let reply = match self.transport.read_group(stream, count).await {
+            Ok(reply) => reply,
+            Err(error) => {
+                warn!(?error, stream, "orders xreadgroup failed");
+                self.metrics.redis_read_errors_total =
+                    self.metrics.redis_read_errors_total.saturating_add(1);
+                return Ok(());
+            }
+        };
+        let entries = self.transport.parse_read_group_entries(stream, reply);
+        if entries.is_empty() {
+            self.metrics.redis_empty_polls_total =
+                self.metrics.redis_empty_polls_total.saturating_add(1);
+            return Ok(());
+        }
+        for entry in entries {
+            self.decode_and_dispatch_orders_entry(stream, trim_maxlen, entry)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn decode_and_dispatch_orders_entry(
+        &mut self,
+        stream: &str,
+        trim_maxlen: usize,
+        entry: crate::redis_transport::RedisStreamMessage,
+    ) -> Result<()> {
+        let message_id = entry.id;
+        let payload = entry.payload;
+        if payload.is_empty() {
+            self.transport
+                .write_dlq(
+                    stream,
+                    &message_id,
+                    &payload,
+                    "missing_payload",
+                    trim_maxlen,
+                )
+                .await?;
+            self.transport.xack(stream, &message_id).await?;
+            return Ok(());
+        }
+
+        let envelope: Envelope<serde_json::Value> = match serde_json::from_str(&payload) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                let reason = format!("parse_error: {error}");
+                self.transport
+                    .write_dlq(stream, &message_id, &payload, &reason, trim_maxlen)
+                    .await?;
+                self.transport.xack(stream, &message_id).await?;
+                return Ok(());
+            }
+        };
+        if envelope.schema_version > alor_protocol::SCHEMA_VERSION {
+            self.transport
+                .write_dlq(
+                    stream,
+                    &message_id,
+                    &payload,
+                    "unsupported_schema",
+                    trim_maxlen,
+                )
+                .await?;
+            self.transport.xack(stream, &message_id).await?;
+            return Ok(());
+        }
+
+        let message = RuntimeMessage {
+            stream: stream.to_string(),
+            message_id,
+            payload: envelope.payload,
+        };
+
+        match envelope.msg_type {
+            MessageType::Order => self.dispatch_message(message).await?,
+            MessageType::StopOrder => {
+                let stop_order: StopOrderEvent = serde_json::from_value(message.payload)?;
+                self.handle_stop_order(message.stream, message.message_id, stop_order)
+                    .await?;
+            }
+            _ => {
+                self.transport
+                    .write_dlq(
+                        stream,
+                        &message.message_id,
+                        &payload,
+                        "unexpected_msg_type",
+                        trim_maxlen,
+                    )
+                    .await?;
+                self.transport.xack(stream, &message.message_id).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1070,13 +1326,13 @@ impl StrategyRuntime {
                 );
             }
         }
+        let event_ts = self.normalize_event_ts(ack.processed_ts_utc);
         let ctx = self.strategy_ctx();
         let intents = self.strategy.on_ack(&ctx, &ack);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, ack.processed_ts_utc, intents)
-            .await?;
+        self.apply_intents(&ctx, event_ts, intents).await?;
         self.transport.xack(&stream, &message_id).await?;
-        self.health_snapshot.write().last_ack_ts_utc = Some(ack.processed_ts_utc);
+        self.health_snapshot.write().last_ack_ts_utc = Some(event_ts);
         Ok(())
     }
 
@@ -1094,13 +1350,39 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
+        let event_ts = self.normalize_event_ts(order.ts_utc);
         let ctx = self.strategy_ctx();
-        let created_ts = ctx.last_bar_ts().unwrap_or(0);
         let intents = self.strategy.on_order(&ctx, &order);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents).await?;
         self.update_ledger_from_order(&order)?;
         self.state.orders.insert(order.order_id, order);
+        self.transport.xack(&stream, &message_id).await?;
+        Ok(())
+    }
+
+    async fn handle_stop_order(
+        &mut self,
+        stream: String,
+        message_id: String,
+        stop_order: StopOrderEvent,
+    ) -> Result<()> {
+        if self.config.trade_mode != TradeMode::Live {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        if stop_order.symbol != self.config.strategy.symbol {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        let event_ts = self.normalize_event_ts(stop_order.ts_utc);
+        let ctx = self.strategy_ctx();
+        let intents = self.strategy.on_stop_order(&ctx, &stop_order);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.apply_intents(&ctx, event_ts, intents).await?;
+        self.state
+            .stop_orders
+            .insert(stop_order.stop_order_id.clone(), stop_order);
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
     }
@@ -1225,15 +1507,21 @@ impl StrategyRuntime {
         message_id: String,
         position: PositionEvent,
     ) -> Result<()> {
+        if self.config.trade_mode != TradeMode::Live {
+            // In paper/backtest, position lifecycle is driven by synthetic fills.
+            // Ignore broker positions stream to avoid external-state contamination.
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
         if position.symbol != self.config.strategy.symbol {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
+        let event_ts = self.normalize_event_ts(position.ts_utc);
         let ctx = self.strategy_ctx();
-        let created_ts = ctx.last_bar_ts().unwrap_or(0);
         let intents = self.strategy.on_position(&ctx, &position);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents).await?;
         self.state
             .positions
             .insert(position.symbol.clone(), position);
@@ -1252,23 +1540,32 @@ impl StrategyRuntime {
             self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
             return Ok(());
         }
-        self.state
-            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+        let prev_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&bar.symbol)
+            .copied();
+        let event_ts = self.normalize_event_ts(bar.close_time_utc);
         if bar.origin == DataOrigin::Live {
             self.bootstrap_state.seen_live_bar = true;
         }
-        let ctx = self.strategy_ctx();
+        let ctx = self.strategy_ctx_with_last_bar(prev_bar_ts);
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         if self.config.trade_mode != TradeMode::Live {
-            self.simulate_fills(&bar).await?;
-            self.simulate_intents(&bar, intents).await?;
+            self.record_non_live_intents(event_ts, &intents, self.config.trade_mode)
+                .await?;
+            if self.can_advance_paper_execution(bar.origin.clone()) {
+                self.simulate_fills(&bar).await?;
+                self.simulate_intents(&bar, intents).await?;
+            }
             self.persist_state(None).await?;
         } else {
-            self.apply_intents(&ctx, bar.close_time_utc, intents)
-                .await?;
+            self.apply_intents(&ctx, event_ts, intents).await?;
         }
+        self.state
+            .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
         self.transport.xack(&stream, &message_id).await?;
         self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
         Ok(())
@@ -1463,8 +1760,20 @@ impl StrategyRuntime {
 
     async fn simulate_intents(&mut self, bar: &BarEvent, intents: Vec<Intent>) -> Result<()> {
         for intent in intents {
+            let mut intent = intent;
+            let mut intent_class = intent.explicit_class();
+            while let Intent::Classified {
+                intent: inner,
+                intent_class: class,
+            } = intent
+            {
+                intent_class = Some(class);
+                intent = *inner;
+            }
             match intent {
-                Intent::Place { price, qty, side } => {
+                Intent::Place {
+                    price, qty, side, ..
+                } => {
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
                     let side = format!("{side:?}").to_lowercase();
@@ -1472,6 +1781,7 @@ impl StrategyRuntime {
                         order_id,
                         symbol: bar.symbol.clone(),
                         side: side.clone(),
+                        intent_class,
                         order_type: SimOrderType::Limit,
                         qty,
                         price: Some(price),
@@ -1493,7 +1803,73 @@ impl StrategyRuntime {
                     qty,
                     side,
                     fill_price,
+                    ..
                 } => {
+                    let symbol = bar.symbol.clone();
+                    let current_pos_qty = self
+                        .state
+                        .positions
+                        .get(&symbol)
+                        .map(|p| p.qty)
+                        .unwrap_or(0.0);
+                    let mut effective_qty = qty;
+                    let is_exit = matches!(intent_class, Some(alor_protocol::IntentClass::Exit));
+                    if is_exit {
+                        let pos_abs = current_pos_qty.abs();
+                        if pos_abs <= f64::EPSILON {
+                            info!(
+                                target: "strategy_runtime::runtime",
+                                strategy_id = %self.config.strategy.strategy_id,
+                                symbol = %symbol,
+                                intent_class = "EXIT",
+                                side = ?side,
+                                intent_qty = qty,
+                                current_position_qty = current_pos_qty,
+                                drop_reason = "flat_position",
+                                "paper_exit_dropped"
+                            );
+                            continue;
+                        }
+                        let wrong_side = (side == alor_protocol::Side::Sell && current_pos_qty < 0.0)
+                            || (side == alor_protocol::Side::Buy && current_pos_qty > 0.0);
+                        if wrong_side {
+                            info!(
+                                target: "strategy_runtime::runtime",
+                                strategy_id = %self.config.strategy.strategy_id,
+                                symbol = %symbol,
+                                intent_class = "EXIT",
+                                side = ?side,
+                                intent_qty = qty,
+                                current_position_qty = current_pos_qty,
+                                drop_reason = "wrong_side_for_exit",
+                                "paper_exit_dropped"
+                            );
+                            continue;
+                        }
+                        effective_qty = effective_qty.min(pos_abs);
+                        if effective_qty <= f64::EPSILON {
+                            info!(
+                                target: "strategy_runtime::runtime",
+                                strategy_id = %self.config.strategy.strategy_id,
+                                symbol = %symbol,
+                                intent_class = "EXIT",
+                                side = ?side,
+                                intent_qty = qty,
+                                current_position_qty = current_pos_qty,
+                                drop_reason = "effective_qty_zero",
+                                "paper_exit_dropped"
+                            );
+                            continue;
+                        }
+                    } else if side == alor_protocol::Side::Buy && current_pos_qty < 0.0 {
+                        // Non-exit market intents are still prevented from flipping an opposite position in paper mode.
+                        effective_qty = effective_qty.min(current_pos_qty.abs());
+                    } else if side == alor_protocol::Side::Sell && current_pos_qty > 0.0 {
+                        effective_qty = effective_qty.min(current_pos_qty.abs());
+                    }
+                    if effective_qty <= 0.0 {
+                        continue;
+                    }
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
                     let side = format!("{side:?}").to_lowercase();
@@ -1502,19 +1878,19 @@ impl StrategyRuntime {
                         self.ledger.record_fill(TradeRecord {
                             ts_utc: bar.close_time_utc,
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol.clone(),
                             side: side.clone(),
-                            qty,
+                            qty: effective_qty,
                             price,
                             commission: 0.0,
                             owned: true,
                         });
                         self.ledger.record_order(OrderRecord {
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol.clone(),
                             side,
-                            qty,
-                            filled: qty,
+                            qty: effective_qty,
+                            filled: effective_qty,
                             price,
                             status: "filled".to_string(),
                             ts_utc: bar.close_time_utc,
@@ -1524,18 +1900,19 @@ impl StrategyRuntime {
                     } else {
                         self.sim_orders.push(SimOrder {
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol.clone(),
                             side: side.clone(),
+                            intent_class,
                             order_type: SimOrderType::Market,
-                            qty,
+                            qty: effective_qty,
                             price: None,
                             created_bar_ts: bar.close_time_utc,
                         });
                         self.ledger.record_order(OrderRecord {
                             order_id,
-                            symbol: bar.symbol.clone(),
+                            symbol: symbol,
                             side,
-                            qty,
+                            qty: effective_qty,
                             filled: 0.0,
                             price: 0.0,
                             status: "working".to_string(),
@@ -1589,6 +1966,10 @@ impl StrategyRuntime {
                         });
                     }
                 }
+                Intent::CreateStopLimit { .. } | Intent::DeleteStopLimit { .. } => {
+                    // Backtest/paper simulator does not emulate broker-side stop-order lifecycle.
+                }
+                Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
             }
         }
         Ok(())
@@ -1624,12 +2005,101 @@ impl StrategyRuntime {
                 .position(|order| order.order_id == order_id)
             {
                 let order = self.sim_orders.remove(index);
+                let mut effective_qty = order.qty;
+                if matches!(order.intent_class, Some(alor_protocol::IntentClass::Exit)) {
+                    let current_pos_qty = self
+                        .state
+                        .positions
+                        .get(&order.symbol)
+                        .map(|p| p.qty)
+                        .unwrap_or(0.0);
+                    let pos_abs = current_pos_qty.abs();
+                    if pos_abs <= f64::EPSILON {
+                        info!(
+                            target: "strategy_runtime::runtime",
+                            strategy_id = %self.config.strategy.strategy_id,
+                            symbol = %order.symbol,
+                            intent_class = "EXIT",
+                            requested_qty = order.qty,
+                            current_position_qty_before_fill = current_pos_qty,
+                            effective_qty_after_recalc = 0.0,
+                            fill_drop_reason = "flat_position",
+                            "paper_exit_fill_dropped"
+                        );
+                        self.ledger.record_order(OrderRecord {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.clone(),
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: order.price.unwrap_or(price),
+                            status: "dropped".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
+                        continue;
+                    }
+                    let is_sell = order.side.eq_ignore_ascii_case("sell");
+                    let wrong_side = (is_sell && current_pos_qty < 0.0)
+                        || (!is_sell && current_pos_qty > 0.0);
+                    if wrong_side {
+                        info!(
+                            target: "strategy_runtime::runtime",
+                            strategy_id = %self.config.strategy.strategy_id,
+                            symbol = %order.symbol,
+                            intent_class = "EXIT",
+                            requested_qty = order.qty,
+                            current_position_qty_before_fill = current_pos_qty,
+                            effective_qty_after_recalc = 0.0,
+                            fill_drop_reason = "wrong_side_for_exit",
+                            "paper_exit_fill_dropped"
+                        );
+                        self.ledger.record_order(OrderRecord {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.clone(),
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: order.price.unwrap_or(price),
+                            status: "dropped".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
+                        continue;
+                    }
+                    effective_qty = effective_qty.min(pos_abs);
+                    if effective_qty <= f64::EPSILON {
+                        info!(
+                            target: "strategy_runtime::runtime",
+                            strategy_id = %self.config.strategy.strategy_id,
+                            symbol = %order.symbol,
+                            intent_class = "EXIT",
+                            requested_qty = order.qty,
+                            current_position_qty_before_fill = current_pos_qty,
+                            effective_qty_after_recalc = effective_qty,
+                            fill_drop_reason = "effective_qty_zero",
+                            "paper_exit_fill_dropped"
+                        );
+                        self.ledger.record_order(OrderRecord {
+                            order_id: order.order_id,
+                            symbol: order.symbol.clone(),
+                            side: order.side.clone(),
+                            qty: order.qty,
+                            filled: 0.0,
+                            price: order.price.unwrap_or(price),
+                            status: "dropped".to_string(),
+                            ts_utc: bar.close_time_utc,
+                            owned: true,
+                        });
+                        continue;
+                    }
+                }
                 let trade = TradeRecord {
                     ts_utc: bar.close_time_utc,
                     order_id: order.order_id,
                     symbol: order.symbol.clone(),
                     side: order.side.clone(),
-                    qty: order.qty,
+                    qty: effective_qty,
                     price,
                     commission: 0.0,
                     owned: true,
@@ -1638,14 +2108,49 @@ impl StrategyRuntime {
                 self.ledger.record_order(OrderRecord {
                     order_id: order.order_id,
                     symbol: order.symbol.clone(),
-                    side: order.side,
-                    qty: order.qty,
-                    filled: order.qty,
+                    side: order.side.clone(),
+                    qty: effective_qty,
+                    filled: effective_qty,
                     price,
                     status: "filled".to_string(),
                     ts_utc: bar.close_time_utc,
                     owned: true,
                 });
+                // Synthetic paper feedback: propagate position delta back into strategy.
+                let delta_qty = if order.side.eq_ignore_ascii_case("buy") {
+                    effective_qty
+                } else {
+                    -effective_qty
+                };
+                let prev_qty = self
+                    .state
+                    .positions
+                    .get(&order.symbol)
+                    .map(|p| p.qty)
+                    .unwrap_or(0.0);
+                let next_qty = prev_qty + delta_qty;
+                let pos_event = PositionEvent {
+                    symbol: order.symbol.clone(),
+                    qty: next_qty,
+                    existing: false,
+                    avg_price: price,
+                    ts_utc: bar.close_time_utc,
+                };
+                self.state
+                    .positions
+                    .insert(order.symbol.clone(), pos_event.clone());
+                let ctx = self.strategy_ctx();
+                let intents = self.strategy.on_position(&ctx, &pos_event);
+                self.state.strategy_state = self.strategy.state().clone();
+                if !intents.is_empty() {
+                    self.record_non_live_intents(
+                        bar.close_time_utc,
+                        &intents,
+                        self.config.trade_mode,
+                    )
+                    .await?;
+                    self.simulate_intents(bar, intents).await?;
+                }
                 self.persist_ledger_reports().await?;
             }
         }
@@ -1823,7 +2328,7 @@ impl StrategyRuntime {
         }
     }
 
-    fn strategy_ctx(&self) -> StrategyCtx {
+    fn strategy_ctx_with_last_bar(&self, last_bar_ts: Option<i64>) -> StrategyCtx {
         let gateway_phase = self
             .live_guard
             .health
@@ -1842,15 +2347,82 @@ impl StrategyRuntime {
             symbol: self.config.strategy.symbol.clone(),
             tick_size: self.config.strategy.tick_size,
             trade_mode: self.config.trade_mode,
+            paper_execution_mode: self.config.paper.execution_mode,
             allow_live_orders: self.config.allow_live_orders,
             gateway_phase,
             position_qty,
-            last_bar_ts: self
-                .state
-                .last_processed_bar_ts
-                .get(&self.config.strategy.symbol)
-                .copied(),
+            last_bar_ts,
         }
+    }
+
+    fn strategy_ctx(&self) -> StrategyCtx {
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        self.strategy_ctx_with_last_bar(last_bar_ts)
+    }
+
+    fn compute_intraday_stop_end_utc(&self, created_ts_utc: i64) -> Option<i64> {
+        if created_ts_utc <= 0 {
+            return None;
+        }
+        let offset_hours = self
+            .config
+            .strategy
+            .trading_periods
+            .as_ref()
+            .map(|p| {
+                if p.timezone_offset_hours == 0 {
+                    self.config.strategy.timezone_offset_hours
+                } else {
+                    p.timezone_offset_hours
+                }
+            })
+            .unwrap_or(self.config.strategy.timezone_offset_hours);
+        let offset = FixedOffset::east_opt(offset_hours.saturating_mul(3600))?;
+        let local_dt = Utc
+            .timestamp_opt(created_ts_utc, 0)
+            .single()?
+            .with_timezone(&offset);
+        let session_end = self
+            .config
+            .strategy
+            .trading_periods
+            .as_ref()
+            .map(|p| p.session_end)
+            .unwrap_or_else(|| {
+                NaiveTime::from_hms_opt(
+                    self.config.strategy.session_close_hour.min(23),
+                    self.config.strategy.session_close_minute.min(59),
+                    0,
+                )
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(23, 50, 0).expect("valid time"))
+            });
+        let weekends_off = self
+            .config
+            .strategy
+            .trading_periods
+            .as_ref()
+            .map(|p| p.weekends_off)
+            .unwrap_or(false);
+        let mut day = local_dt.date_naive();
+        for _ in 0..8 {
+            if weekends_off && matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+                day += ChronoDuration::days(1);
+                continue;
+            }
+            let local_close = day.and_time(session_end);
+            if let Some(with_offset) = offset.from_local_datetime(&local_close).single() {
+                let stop_end = with_offset.timestamp().saturating_add(STOP_END_BUFFER_SEC_DEFAULT);
+                if stop_end > created_ts_utc {
+                    return Some(stop_end);
+                }
+            }
+            day += ChronoDuration::days(1);
+        }
+        None
     }
 
     async fn notify_bootstrap_snapshot(&mut self) -> Result<()> {
@@ -1858,8 +2430,8 @@ impl StrategyRuntime {
             Some(snapshot) => snapshot.clone(),
             None => return Ok(()),
         };
+        let created_ts = self.normalize_event_ts(snapshot.snapshot_ts_utc.unwrap_or(0));
         let ctx = self.strategy_ctx();
-        let created_ts = snapshot.snapshot_ts_utc.unwrap_or(0);
         let intents = self.strategy.on_bootstrap_snapshot(&ctx, &snapshot);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, created_ts, intents).await?;
@@ -1872,7 +2444,7 @@ impl StrategyRuntime {
             known_order_ids: self.our_order_ids.iter().copied().collect(),
             pending_requests: self.our_request_ids.iter().copied().collect(),
         };
-        let created_ts = ctx.last_bar_ts().unwrap_or(0);
+        let created_ts = self.normalize_event_ts(ctx.last_bar_ts().unwrap_or(0));
         let intents = self.strategy.on_runtime_state_restored(&ctx, &restored);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, created_ts, intents).await?;
@@ -1903,6 +2475,14 @@ impl StrategyRuntime {
         }
         let status = order.status.to_lowercase();
         !NON_WORKING_ORDER_STATUSES.contains(&status.as_str())
+    }
+
+    fn is_working_stop_order(&self, order: &StopOrderEvent) -> bool {
+        if order.stop_order_id.trim().is_empty() {
+            return false;
+        }
+        let status = order.status.to_lowercase();
+        !NON_WORKING_STOP_ORDER_STATUSES.contains(&status.as_str())
     }
 
     fn log_bootstrap_dump(
@@ -1951,6 +2531,7 @@ impl StrategyRuntime {
             positions_open_strategy,
             orders_open_strategy,
             open_order_excluded_statuses = ?NON_WORKING_ORDER_STATUSES,
+            open_stop_order_excluded_statuses = ?NON_WORKING_STOP_ORDER_STATUSES,
             "bootstrap_dump"
         );
     }
@@ -2008,7 +2589,15 @@ impl StrategyRuntime {
         order_ids
     }
 
-    fn trading_window_allows_order(&self, ctx: &StrategyCtx, created_ts_utc: i64) -> bool {
+    fn trading_window_allows_order(
+        &self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent_class: alor_protocol::IntentClass,
+    ) -> bool {
+        if !matches!(intent_class, alor_protocol::IntentClass::Entry) {
+            return true;
+        }
         let Some(periods) = &self.config.strategy.trading_periods else {
             return true;
         };
@@ -2080,26 +2669,63 @@ impl StrategyRuntime {
         self.health_snapshot.write().last_intent_ts_utc = Some(created_ts_utc);
         match self.config.trade_mode {
             TradeMode::Live => {
-                if !self.trading_window_allows_order(ctx, created_ts_utc) {
+                let mut accepted = Vec::new();
+                for intent in intents {
+                    let intent_class = self.resolve_intent_class(ctx, &intent);
+                    if !self.trading_window_allows_order(ctx, created_ts_utc, intent_class) {
+                        info!(
+                            action = self.intent_action_name(&intent),
+                            class = ?intent_class,
+                            "intent_dropped_by_trading_window"
+                        );
+                        continue;
+                    }
+                    accepted.push((intent, intent_class));
+                }
+                if accepted.is_empty() {
                     self.persist_state(None).await?;
                     return Ok(());
                 }
                 let decision = self.evaluate_guard_decision();
                 if !decision.allowed {
                     self.log_guard_decision_if_due(&decision)?;
-                    for intent in intents {
-                        info!(
-                            action = self.intent_action_name(&intent),
-                            reasons = ?decision.reasons,
-                            "intent_dropped_by_guard"
-                        );
+                    let has_open_position = ctx.position_qty.unwrap_or(0.0).abs() > 0.0;
+                    let mut passthrough = Vec::new();
+                    for (intent, intent_class) in accepted {
+                        if self.guard_allows_intent_when_blocked(intent_class, has_open_position) {
+                            passthrough.push((intent, intent_class));
+                        } else {
+                            info!(
+                                action = self.intent_action_name(&intent),
+                                class = ?intent_class,
+                                reasons = ?decision.reasons,
+                                "intent_dropped_by_guard"
+                            );
+                        }
                     }
-                    self.persist_state(None).await?;
+                    if passthrough.is_empty() {
+                        self.persist_state(None).await?;
+                        return Ok(());
+                    }
+                    for (intent, intent_class) in passthrough {
+                        let action = self.intent_action_name(&intent);
+                        let command =
+                            self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+                        info!(
+                            action,
+                            class = ?intent_class,
+                            request_id = %command.request_id,
+                            reasons = ?decision.reasons,
+                            "intent_emitted_guard_close_only_path"
+                        );
+                        self.persist_state(Some(&command)).await?;
+                        self.our_request_ids.insert(command.request_id);
+                    }
                     return Ok(());
                 }
-                for intent in intents {
+                for (intent, intent_class) in accepted {
                     let action = self.intent_action_name(&intent);
-                    let command = self.intent_to_command(ctx, created_ts_utc, intent);
+                    let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
                     info!(
                         action,
                         request_id = %command.request_id,
@@ -2157,26 +2783,52 @@ impl StrategyRuntime {
         ctx: &StrategyCtx,
         created_ts_utc: i64,
         intent: Intent,
+        intent_class: alor_protocol::IntentClass,
     ) -> alor_protocol::OrderCommand {
+        let fallback_comment = self.intent_comment_tag(ctx, created_ts_utc, intent_class);
         let (action, seq, action_name) = match intent {
-            Intent::Place { price, qty, side } => (
-                alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder { price, qty, side }),
-                0,
-                "place",
-            ),
+            Intent::Classified { intent, .. } => {
+                return self.intent_to_command(ctx, created_ts_utc, *intent, intent_class);
+            }
+            Intent::Place {
+                price,
+                qty,
+                side,
+                comment,
+            } => {
+                let comment = Self::sanitize_comment(comment.or_else(|| fallback_comment.clone()));
+                (
+                    alor_protocol::CommandAction::Place(alor_protocol::PlaceOrder {
+                        price,
+                        qty,
+                        side,
+                        comment,
+                    }),
+                    0,
+                    "place",
+                )
+            }
             Intent::Market {
                 qty,
                 side,
                 fill_price: _,
-            } => (
-                alor_protocol::CommandAction::Market(alor_protocol::MarketOrder { qty, side }),
-                if side == alor_protocol::Side::Buy {
-                    3
-                } else {
-                    4
-                },
-                "market",
-            ),
+                comment,
+            } => {
+                let comment = Self::sanitize_comment(comment.or_else(|| fallback_comment.clone()));
+                (
+                    alor_protocol::CommandAction::Market(alor_protocol::MarketOrder {
+                        qty,
+                        side,
+                        comment,
+                    }),
+                    if side == alor_protocol::Side::Buy {
+                        3
+                    } else {
+                        4
+                    },
+                    "market",
+                )
+            }
             Intent::Cancel { order_id } => (
                 alor_protocol::CommandAction::Cancel(alor_protocol::CancelOrder { order_id }),
                 1,
@@ -2194,6 +2846,55 @@ impl StrategyRuntime {
                 }),
                 2,
                 "replace",
+            ),
+            Intent::CreateStopLimit {
+                side,
+                qty,
+                trigger_price,
+                price,
+                condition,
+                stop_end_unix_time,
+                comment,
+                instrument_group,
+                check_duplicates,
+            } => {
+                let resolved_stop_end = self
+                    .compute_intraday_stop_end_utc(created_ts_utc)
+                    .unwrap_or(stop_end_unix_time);
+                (
+                alor_protocol::CommandAction::CreateStopLimit(
+                    alor_protocol::CreateStopLimitOrder {
+                        side,
+                        qty,
+                        trigger_price,
+                        price,
+                        condition,
+                        stop_end_unix_time: resolved_stop_end,
+                        comment: Self::sanitize_comment(
+                            comment.or_else(|| fallback_comment.clone()),
+                        ),
+                        instrument_group,
+                        check_duplicates,
+                    },
+                ),
+                5,
+                "create_stop_limit",
+            )
+            }
+            Intent::DeleteStopLimit {
+                order_id,
+                side,
+                check_duplicates,
+            } => (
+                alor_protocol::CommandAction::DeleteStopLimit(
+                    alor_protocol::DeleteStopLimitOrder {
+                        order_id,
+                        side,
+                        check_duplicates,
+                    },
+                ),
+                6,
+                "delete_stop_limit",
             ),
         };
         let request_id = if action_name == "market" {
@@ -2226,8 +2927,99 @@ impl StrategyRuntime {
             exchange: ctx.exchange.clone(),
             symbol: ctx.symbol.clone(),
             action,
+            intent_class: Some(intent_class),
             ttl_ms: None,
         }
+    }
+
+    fn sanitize_comment(raw: Option<String>) -> Option<String> {
+        let comment = raw?
+            .chars()
+            .filter(|c| c.is_ascii() && *c != '\n' && *c != '\r')
+            .take(100)
+            .collect::<String>();
+        if comment.trim().is_empty() {
+            return None;
+        }
+        Some(comment)
+    }
+
+    fn intent_comment_tag(
+        &self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent_class: alor_protocol::IntentClass,
+    ) -> Option<String> {
+        if !matches!(
+            self.config.strategy.strategy_kind,
+            StrategyKind::HybridIntraday
+        ) {
+            return None;
+        }
+        let sid = ctx.strategy_id.as_str();
+        let cycle = format!("{:08x}", created_ts_utc.max(0));
+        let role = match intent_class {
+            alor_protocol::IntentClass::Entry => "ENTRY",
+            alor_protocol::IntentClass::Exit => "EXIT",
+            alor_protocol::IntentClass::CancelCleanup => "CANCEL",
+            alor_protocol::IntentClass::ProtectiveRepair => "REPAIR",
+        };
+        let comment = format!("HYB|sid={sid}|c={cycle}|r={role}");
+        Some(comment.chars().filter(|c| c.is_ascii()).take(100).collect())
+    }
+
+    fn resolve_intent_class(
+        &self,
+        ctx: &StrategyCtx,
+        intent: &Intent,
+    ) -> alor_protocol::IntentClass {
+        if let Some(explicit) = intent.explicit_class() {
+            return explicit;
+        }
+        match intent.base_intent() {
+            Intent::Cancel { .. } => alor_protocol::IntentClass::CancelCleanup,
+            Intent::Replace { .. } => alor_protocol::IntentClass::Entry,
+            Intent::Place { .. } => alor_protocol::IntentClass::Entry,
+            Intent::CreateStopLimit { .. } => alor_protocol::IntentClass::ProtectiveRepair,
+            Intent::DeleteStopLimit { .. } => alor_protocol::IntentClass::CancelCleanup,
+            Intent::Market { side, .. } => {
+                let qty = ctx.position_qty.unwrap_or(0.0);
+                if (qty > 0.0 && *side == alor_protocol::Side::Sell)
+                    || (qty < 0.0 && *side == alor_protocol::Side::Buy)
+                {
+                    alor_protocol::IntentClass::Exit
+                } else {
+                    alor_protocol::IntentClass::Entry
+                }
+            }
+            Intent::Classified { intent, .. } => self.resolve_intent_class(ctx, intent),
+        }
+    }
+
+    fn guard_allows_intent_when_blocked(
+        &self,
+        intent_class: alor_protocol::IntentClass,
+        has_open_position: bool,
+    ) -> bool {
+        if !has_open_position {
+            return false;
+        }
+        matches!(
+            intent_class,
+            alor_protocol::IntentClass::Exit
+                | alor_protocol::IntentClass::CancelCleanup
+                | alor_protocol::IntentClass::ProtectiveRepair
+        )
+    }
+
+    fn normalize_event_ts(&mut self, event_ts_utc: i64) -> i64 {
+        let candidate = if event_ts_utc > 0 {
+            event_ts_utc
+        } else {
+            self.strategy_now_ts_utc
+        };
+        self.strategy_now_ts_utc = self.strategy_now_ts_utc.max(candidate);
+        self.strategy_now_ts_utc
     }
 
     async fn log_metrics_if_due(&mut self) -> Result<()> {
@@ -2434,11 +3226,14 @@ impl StrategyRuntime {
     }
 
     fn intent_action_name(&self, intent: &Intent) -> &'static str {
-        match intent {
+        match intent.base_intent() {
             Intent::Place { .. } => "place",
             Intent::Market { .. } => "market",
             Intent::Cancel { .. } => "cancel",
             Intent::Replace { .. } => "replace",
+            Intent::CreateStopLimit { .. } => "create_stop_limit",
+            Intent::DeleteStopLimit { .. } => "delete_stop_limit",
+            Intent::Classified { .. } => unreachable!("base_intent flattens classified variant"),
         }
     }
 }
@@ -2480,7 +3275,10 @@ fn bars_tf_seconds(stream: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CloseTrigger, ReadConfig, ReplayConfig, StrategyConfig, StreamNames, TrimConfig};
+    use crate::{
+        CloseTrigger, HybridIntradaySettings, ReadConfig, ReplayConfig, StrategyConfig,
+        StreamNames, TrimConfig,
+    };
     use alor_types::TradingPeriods;
 
     fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {
@@ -2572,10 +3370,12 @@ mod tests {
                 session_gap_start_cash: 30_000.0,
                 session_gap_cash_factor: 0.9,
                 session_gap_max_entry_hour: 19,
+                hybrid_intraday: HybridIntradaySettings::default(),
             },
             paper: PaperConfig {
                 enabled: false,
                 output: PaperOutput::Stdout,
+                execution_mode: PaperExecutionMode::LiveOnly,
                 file_path: "paper.jsonl".to_string(),
                 trades_csv: "trades.csv".to_string(),
                 summary_json: "summary.json".to_string(),
@@ -2641,7 +3441,169 @@ mod tests {
             .timestamp();
 
         let ctx = runtime.strategy_ctx();
-        assert!(!runtime.trading_window_allows_order(&ctx, created_ts_utc));
+        assert!(!runtime.trading_window_allows_order(
+            &ctx,
+            created_ts_utc,
+            alor_protocol::IntentClass::Entry
+        ));
+        assert!(runtime.trading_window_allows_order(
+            &ctx,
+            created_ts_utc,
+            alor_protocol::IntentClass::Exit
+        ));
+    }
+
+    #[test]
+    fn create_stop_limit_uses_session_close_plus_buffer_for_stop_end() {
+        let runtime = test_runtime(TradeMode::Live);
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let expected = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(20, 50, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            + STOP_END_BUFFER_SEC_DEFAULT;
+        let ctx = runtime.strategy_ctx();
+        let cmd = runtime.intent_to_command(
+            &ctx,
+            created_ts_utc,
+            Intent::CreateStopLimit {
+                side: alor_protocol::Side::Sell,
+                qty: 1.0,
+                trigger_price: 100.0,
+                price: 99.5,
+                condition: alor_protocol::StopLimitCondition::LessOrEqual,
+                stop_end_unix_time: created_ts_utc.saturating_add(86_400),
+                comment: None,
+                instrument_group: None,
+                check_duplicates: Some(true),
+            },
+            alor_protocol::IntentClass::ProtectiveRepair,
+        );
+        match cmd.action {
+            alor_protocol::CommandAction::CreateStopLimit(payload) => {
+                assert_eq!(payload.stop_end_unix_time, expected);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn silence_gap_blocks_entry_on_first_gap_bar() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy.max_silence_bars_sec = 60;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+        let prev_bar = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let first_gap_bar = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 10, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+
+        let ctx_prev = runtime.strategy_ctx_with_last_bar(Some(prev_bar));
+        assert!(!runtime.trading_window_allows_order(
+            &ctx_prev,
+            first_gap_bar,
+            alor_protocol::IntentClass::Entry
+        ));
+        assert!(runtime.trading_window_allows_order(
+            &ctx_prev,
+            first_gap_bar,
+            alor_protocol::IntentClass::Exit
+        ));
+    }
+
+    #[test]
+    fn market_intent_classified_as_exit_against_open_position() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.state.positions.insert(
+            runtime.config.strategy.symbol.clone(),
+            PositionEvent {
+                symbol: runtime.config.strategy.symbol.clone(),
+                qty: 1.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        let ctx = runtime.strategy_ctx();
+        let intent = Intent::Market {
+            qty: 1.0,
+            side: alor_protocol::Side::Sell,
+            fill_price: None,
+            comment: None,
+        };
+        assert_eq!(
+            runtime.resolve_intent_class(&ctx, &intent),
+            alor_protocol::IntentClass::Exit
+        );
+    }
+
+    #[test]
+    fn replace_requires_explicit_class_for_protective_repair() {
+        let runtime = test_runtime(TradeMode::Live);
+        let ctx = runtime.strategy_ctx();
+
+        let legacy_replace = Intent::Replace {
+            order_id: 1,
+            new_price: 100.0,
+            new_qty: 1.0,
+        };
+        assert_eq!(
+            runtime.resolve_intent_class(&ctx, &legacy_replace),
+            alor_protocol::IntentClass::Entry
+        );
+
+        let protective_replace =
+            legacy_replace.with_class(alor_protocol::IntentClass::ProtectiveRepair);
+        assert_eq!(
+            runtime.resolve_intent_class(&ctx, &protective_replace),
+            alor_protocol::IntentClass::ProtectiveRepair
+        );
+    }
+
+    #[test]
+    fn guard_close_only_path_allows_exit_cancel_repair_only_with_open_position() {
+        let runtime = test_runtime(TradeMode::Live);
+        assert!(!runtime.guard_allows_intent_when_blocked(alor_protocol::IntentClass::Exit, false));
+        assert!(runtime.guard_allows_intent_when_blocked(alor_protocol::IntentClass::Exit, true));
+        assert!(runtime
+            .guard_allows_intent_when_blocked(alor_protocol::IntentClass::CancelCleanup, true));
+        assert!(runtime
+            .guard_allows_intent_when_blocked(alor_protocol::IntentClass::ProtectiveRepair, true));
+        assert!(!runtime.guard_allows_intent_when_blocked(alor_protocol::IntentClass::Entry, true));
+    }
+
+    #[test]
+    fn normalize_event_ts_is_monotonic_and_bootstrap_safe() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        assert_eq!(runtime.normalize_event_ts(0), 0);
+        assert_eq!(runtime.normalize_event_ts(-1), 0);
+        assert_eq!(runtime.normalize_event_ts(100), 100);
+        assert_eq!(runtime.normalize_event_ts(90), 100);
+        assert_eq!(runtime.normalize_event_ts(0), 100);
     }
     #[test]
     fn runtime_scheduler_snapshot_is_unconfigured_when_periods_missing() {
@@ -2832,6 +3794,7 @@ mod tests {
                         qty: 1.0,
                         side: alor_protocol::Side::Buy,
                         fill_price: Some(123.45),
+                        comment: None,
                     }],
                 )
                 .await
@@ -2880,6 +3843,7 @@ mod tests {
                         qty: 1.0,
                         side: alor_protocol::Side::Buy,
                         fill_price: None,
+                        comment: None,
                     }],
                 )
                 .await
@@ -2901,6 +3865,303 @@ mod tests {
             assert_eq!(runtime.ledger.order(1).unwrap().price, 11.0);
         });
     }
+
+    #[test]
+    fn paper_exit_from_flat_is_dropped() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.0,
+            o: 10.0,
+            h: 10.0,
+            l: 10.0,
+            v: 0.0,
+            origin: DataOrigin::Live,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Sell,
+                        fill_price: None,
+                        comment: None,
+                    }
+                    .with_class(alor_protocol::IntentClass::Exit)],
+                )
+                .await
+                .unwrap();
+        });
+        assert!(runtime.sim_orders.is_empty());
+    }
+
+    #[test]
+    fn paper_exit_wrong_side_is_dropped() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.0,
+            o: 10.0,
+            h: 10.0,
+            l: 10.0,
+            v: 0.0,
+            origin: DataOrigin::Live,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Sell,
+                        fill_price: None,
+                        comment: None,
+                    }
+                    .with_class(alor_protocol::IntentClass::Exit)],
+                )
+                .await
+                .unwrap();
+        });
+        assert!(runtime.sim_orders.is_empty());
+    }
+
+    #[test]
+    fn paper_exit_qty_is_clamped_to_position_abs_on_create() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: 1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.0,
+            o: 10.0,
+            h: 10.0,
+            l: 10.0,
+            v: 0.0,
+            origin: DataOrigin::Live,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 5.0,
+                        side: alor_protocol::Side::Sell,
+                        fill_price: None,
+                        comment: None,
+                    }
+                    .with_class(alor_protocol::IntentClass::Exit)],
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(runtime.sim_orders.len(), 1);
+        assert!((runtime.sim_orders[0].qty - 1.0).abs() <= f64::EPSILON);
+        assert_eq!(
+            runtime.sim_orders[0].intent_class,
+            Some(alor_protocol::IntentClass::Exit)
+        );
+    }
+
+    #[test]
+    fn queued_duplicate_exit_sells_cannot_flip_long_position() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: 1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        runtime.sim_orders.push(SimOrder {
+            order_id: 1,
+            symbol: "SBER".to_string(),
+            side: "sell".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        runtime.sim_orders.push(SimOrder {
+            order_id: 2,
+            symbol: "SBER".to_string(),
+            side: "sell".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 160,
+            close: 11.2,
+            o: 11.0,
+            h: 11.3,
+            l: 10.8,
+            v: 0.0,
+            origin: DataOrigin::Replay,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime.simulate_fills(&bar).await.unwrap();
+        });
+
+        let pos_qty = runtime.state.positions.get("SBER").map(|p| p.qty).unwrap_or(0.0);
+        assert!(pos_qty >= 0.0, "position must not flip short");
+        assert!(pos_qty.abs() <= f64::EPSILON, "position must close to flat");
+        assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
+        assert_eq!(runtime.ledger.order(2).unwrap().status, "dropped");
+        assert!((runtime.ledger.order(2).unwrap().filled - 0.0).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn queued_duplicate_exit_buys_cannot_flip_short_position() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.state.positions.insert(
+            "SBER".to_string(),
+            PositionEvent {
+                symbol: "SBER".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1,
+            },
+        );
+        runtime.sim_orders.push(SimOrder {
+            order_id: 1,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        runtime.sim_orders.push(SimOrder {
+            order_id: 2,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Exit),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            created_bar_ts: 100,
+        });
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 160,
+            close: 11.2,
+            o: 11.0,
+            h: 11.3,
+            l: 10.8,
+            v: 0.0,
+            origin: DataOrigin::Replay,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime.simulate_fills(&bar).await.unwrap();
+        });
+
+        let pos_qty = runtime.state.positions.get("SBER").map(|p| p.qty).unwrap_or(0.0);
+        assert!(pos_qty <= 0.0, "position must not flip long");
+        assert!(pos_qty.abs() <= f64::EPSILON, "position must close to flat");
+    }
+
+    #[test]
+    fn paper_execution_mode_controls_history_advance() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.config.paper.execution_mode = PaperExecutionMode::LiveOnly;
+        assert!(!runtime.can_advance_paper_execution(DataOrigin::History));
+        assert!(runtime.can_advance_paper_execution(DataOrigin::Live));
+
+        runtime.config.paper.execution_mode = PaperExecutionMode::HistorySim;
+        assert!(runtime.can_advance_paper_execution(DataOrigin::History));
+        assert!(runtime.can_advance_paper_execution(DataOrigin::Live));
+    }
+
+    #[test]
+    fn paper_ignores_external_position_stream_events() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let position = PositionEvent {
+            symbol: runtime.config.strategy.symbol.clone(),
+            qty: 3.0,
+            existing: true,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_000,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .handle_position(
+                    runtime.config.streams.positions.clone(),
+                    "1-0".to_string(),
+                    position,
+                )
+                .await
+                .unwrap();
+        });
+        assert!(runtime.state.positions.is_empty());
+    }
+
+    #[test]
+    fn stop_order_working_status_table() {
+        let runtime = test_runtime(TradeMode::Live);
+        let mk = |status: &str| StopOrderEvent {
+            stop_order_id: "s1".to_string(),
+            exchange_order_id: None,
+            symbol: "SBER".to_string(),
+            status: status.to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            filled: 0.0,
+            stop_price: 100.0,
+            price: 101.0,
+            existing: false,
+            comment: None,
+            end_time: None,
+            ts_utc: 1,
+        };
+
+        assert!(runtime.is_working_stop_order(&mk("working")));
+        assert!(runtime.is_working_stop_order(&mk("new")));
+        assert!(!runtime.is_working_stop_order(&mk("canceled")));
+        assert!(!runtime.is_working_stop_order(&mk("rejected")));
+        assert!(!runtime.is_working_stop_order(&mk("expired")));
+        assert!(!runtime.is_working_stop_order(&mk("executed")));
+        assert!(!runtime.is_working_stop_order(&mk("triggered")));
+        assert!(!runtime.is_working_stop_order(&mk("done")));
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2920,8 +4181,14 @@ struct VirtualTradeLog {
 
 impl VirtualTradeLog {
     fn from_intent(created_ts_utc: i64, config: &RuntimeConfig, intent: Intent) -> Self {
+        let intent = match intent {
+            Intent::Classified { intent, .. } => *intent,
+            other => other,
+        };
         match intent {
-            Intent::Place { price, qty, side } => Self {
+            Intent::Place {
+                price, qty, side, ..
+            } => Self {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
@@ -2938,6 +4205,7 @@ impl VirtualTradeLog {
                 qty,
                 side,
                 fill_price,
+                ..
             } => Self {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
@@ -2981,6 +4249,33 @@ impl VirtualTradeLog {
                 new_price: Some(new_price),
                 new_qty: Some(new_qty),
             },
+            Intent::CreateStopLimit { .. } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "create_stop_limit".to_string(),
+                qty: None,
+                price: None,
+                side: None,
+                order_id: None,
+                new_price: None,
+                new_qty: None,
+            },
+            Intent::DeleteStopLimit { .. } => Self {
+                ts_utc: created_ts_utc,
+                strategy_id: config.strategy.strategy_id.clone(),
+                portfolio: config.portfolio.clone(),
+                symbol: config.strategy.symbol.clone(),
+                action: "delete_stop_limit".to_string(),
+                qty: None,
+                price: None,
+                side: None,
+                order_id: None,
+                new_price: None,
+                new_qty: None,
+            },
+            Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
         }
     }
 }
@@ -3020,6 +4315,7 @@ async fn log_virtual_trades(
 }
 
 async fn append_json_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+    ensure_parent_dir(path)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -3031,6 +4327,7 @@ async fn append_json_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
 }
 
 async fn append_log_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+    ensure_parent_dir(path)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -3050,6 +4347,16 @@ async fn append_log_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
     );
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn ensure_parent_dir(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     Ok(())
 }
 

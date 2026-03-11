@@ -28,6 +28,7 @@ use crate::services::event_publisher::{
 use crate::services::health_reporter::run_health_reporter;
 use crate::state::orders_manager::OrdersManager;
 use crate::state::positions_manager::PositionsManager;
+use crate::state::stop_orders_manager::StopOrdersManager;
 use crate::strategy_adapter::StrategyRunner;
 use crate::transport::{CommandSink, CommandSource, EventMessage, EventSink};
 use crate::ws_hub::{BackfillPlan, ConnEvent, WsEvent, WsHub, WsHubHandle};
@@ -254,6 +255,7 @@ impl Supervisor {
 
         let (positions_tx, positions_rx) = mpsc::channel(1024);
         let (orders_tx, orders_rx) = mpsc::channel(1024);
+        let (stop_orders_tx, stop_orders_rx) = mpsc::channel(1024);
         let (trades_tx, _trades_rx) = mpsc::channel(1024);
         let positions_manager = PositionsManager::start(
             positions_rx,
@@ -262,12 +264,14 @@ impl Supervisor {
             cfg.cash_symbols.clone(),
         );
         let orders_manager = OrdersManager::start(orders_rx, cfg.log_existing_snapshot_orders);
+        let stop_orders_manager = StopOrdersManager::start(stop_orders_rx);
 
         tokio::spawn({
             let health = self.health.clone();
             let router_cmd_tx = router_cmd_tx.clone();
             let positions_manager = positions_manager.clone();
             let orders_manager = orders_manager.clone();
+            let stop_orders_manager = stop_orders_manager.clone();
             let last_emitted_bar_ts = last_emitted_bar_ts.clone();
             let hub_handle = hub_handle.clone();
             let symbols = cfg.symbols.clone();
@@ -402,6 +406,7 @@ impl Supervisor {
                             match subscription_type.as_str() {
                                 "positions" => positions_manager.mark_synced(),
                                 "orders" => orders_manager.mark_synced(),
+                                "stop_orders" => stop_orders_manager.mark_synced(),
                                 _ => {}
                             }
                         }
@@ -550,6 +555,34 @@ impl Supervisor {
             let health = self.health.clone();
             let publisher = publisher.clone();
             async move {
+                let mut stop_orders_rx = streams.stop_orders_rx;
+                while let Some(stop_order) = stop_orders_rx.recv().await {
+                    {
+                        let mut guard = health.write();
+                        guard.last_orders_ts = guard.last_orders_ts.max(stop_order.ts_utc);
+                    }
+                    info!(
+                        stop_order_id = stop_order.stop_order_id,
+                        exchange_order_id = ?stop_order.exchange_order_id,
+                        symbol = stop_order.symbol,
+                        status = stop_order.status,
+                        existing = stop_order.existing,
+                        "stop order event received"
+                    );
+                    if let Some(publisher) = publisher.as_ref() {
+                        publisher
+                            .publish_critical(EventMessage::StopOrder(stop_order.clone()))
+                            .await;
+                    }
+                    let _ = stop_orders_tx.send(stop_order).await;
+                }
+            }
+        });
+
+        tokio::spawn({
+            let health = self.health.clone();
+            let publisher = publisher.clone();
+            async move {
                 let mut trades_rx = streams.trades_rx;
                 while let Some(trade) = trades_rx.recv().await {
                     {
@@ -580,6 +613,7 @@ impl Supervisor {
         if let Some(publisher) = publisher.clone() {
             let health = self.health.clone();
             let orders_manager = orders_manager.clone();
+            let stop_orders_manager = stop_orders_manager.clone();
             let positions_manager = positions_manager.clone();
             let shutdown_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
@@ -587,6 +621,7 @@ impl Supervisor {
                     publisher,
                     health,
                     orders_manager,
+                    stop_orders_manager,
                     positions_manager,
                     shutdown_rx,
                     Duration::from_secs(5),
@@ -621,6 +656,7 @@ impl Supervisor {
             let phase_tx = phase_tx.clone();
             let positions_manager = positions_manager.clone();
             let orders_manager = orders_manager.clone();
+            let stop_orders_manager = stop_orders_manager.clone();
             let symbols_len = cfg.symbols.len();
             let hub_handle = hub_handle.clone();
             let resync_in_progress = resync_in_progress.clone();
@@ -663,6 +699,7 @@ impl Supervisor {
                     let bars_live_seen = live_symbols.read().len() >= symbols_len;
                     let positions_synced = positions_manager.synced();
                     let orders_synced = orders_manager.synced();
+                    let stop_orders_synced = stop_orders_manager.synced();
                     let subscriptions_ready = {
                         let guard = health.read();
                         guard.active_subscriptions_count >= guard.desired_subscriptions_count
@@ -671,6 +708,7 @@ impl Supervisor {
                     let live_ready = bars_live_seen
                         && positions_synced
                         && orders_synced
+                        && stop_orders_synced
                         && subscriptions_ready
                         && cws_authorized;
                     if !buffered_live {
@@ -775,8 +813,9 @@ impl Supervisor {
                                 bars_live_seen,
                                 positions_synced,
                                 orders_synced,
+                                stop_orders_synced,
                                 cws_authorization = cws_authorized,
-                                "bars live_seen=true, positions_synced=true, orders_synced=true, cws_authorization=true"
+                                "bars live_seen=true, positions_synced=true, orders_synced=true, stop_orders_synced=true, cws_authorization=true"
                             );
                             flush_pending_live(
                                 &bars_tx,
@@ -808,8 +847,9 @@ impl Supervisor {
                                 bars_live_seen,
                                 positions_synced,
                                 orders_synced,
+                                stop_orders_synced,
                                 cws_authorization = cws_authorized,
-                                "bars live_seen=true, positions_synced=true, orders_synced=true, cws_authorization=true"
+                                "bars live_seen=true, positions_synced=true, orders_synced=true, stop_orders_synced=true, cws_authorization=true"
                             );
                             transition_phase(&phase_tx, GatewayPhase::LiveReady, None, None, None);
                             resync_in_progress.store(false, Ordering::SeqCst);

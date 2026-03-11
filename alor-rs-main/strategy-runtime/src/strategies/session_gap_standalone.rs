@@ -275,6 +275,7 @@ impl SessionGapStandaloneStrategy {
             qty: pending.size as f64,
             side: Self::entry_side(pending.direction),
             fill_price: Some(bar.o),
+            comment: None,
         })
     }
 
@@ -325,6 +326,7 @@ impl SessionGapStandaloneStrategy {
             qty: position.size as f64,
             side: Self::exit_side(position.direction),
             fill_price: Some(exit_price),
+            comment: None,
         })
     }
 
@@ -699,6 +701,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         qty,
                         side,
                         fill_price: None,
+                        comment: None,
                     });
                     SessionGapLivePhase::PendingEntry {
                         request_id: crate::deterministic_market_request_id(
@@ -786,6 +789,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         qty,
                         side: exit_side,
                         fill_price: None,
+                        comment: None,
                     });
                     SessionGapLivePhase::PendingExit {
                         request_id: crate::deterministic_market_request_id(
@@ -1098,6 +1102,7 @@ mod tests {
             symbol: "USDRUBF".into(),
             tick_size: 0.01,
             trade_mode: crate::TradeMode::Live,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders,
             gateway_phase,
             position_qty: Some(0.0),
@@ -1113,6 +1118,7 @@ mod tests {
             symbol: "USDRUBF".into(),
             tick_size: 0.01,
             trade_mode: crate::TradeMode::Backtest,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: false,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty: None,
@@ -1438,6 +1444,7 @@ mod tests {
                 },
             )]),
             working_orders_strategy: std::collections::HashMap::new(),
+            working_stop_orders_strategy: std::collections::HashMap::new(),
             snapshot_ts_utc: Some(ts_snapshot),
         };
 
@@ -1519,6 +1526,7 @@ mod tests {
                 },
             )]),
             working_orders_strategy: std::collections::HashMap::new(),
+            working_stop_orders_strategy: std::collections::HashMap::new(),
             snapshot_ts_utc: Some(ts_snapshot),
         };
         let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);

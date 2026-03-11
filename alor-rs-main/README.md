@@ -87,6 +87,7 @@ timezone_offset_hours = 3
 - [Alor Gateway Runbook](docs/alor-gateway-runbook.md)
 - [Replay / Backtest Guide](docs/replay-backtest-guide.md)
 - [State and Restarts](docs/state-and-restarts.md)
+- [Hybrid Stage-2 Contract Freeze](docs/hybrid-stage2-contract-freeze.md)
 
 ## Итоги аудита
 
@@ -106,6 +107,76 @@ timezone_offset_hours = 3
 cargo test -p strategy-runtime --lib
 cargo test -p alor-gateway --lib
 ```
+
+Hybrid parity (one command):
+
+```bash
+cargo run -p strategy-runtime --bin hybrid_replay -- \
+  --bundle-dir ../../pre_rust_handoff/replay_data/imoexf_2023_2026 \
+  --split golden \
+  --out-dir /tmp/hybrid_out \
+  --check \
+  --strict
+```
+
+Exit codes:
+
+- `0` PASS
+- `2` DIFF (parity mismatch against expected artifacts)
+- `1` ERROR (validation/runtime/parsing failure)
+
+Artifacts written to `--out-dir`:
+
+- `actual_actions_<split>.csv`
+- `actual_trades_<split>.csv`
+- `actual_summary_<split>.json`
+- `parity_report_<split>.json`
+
+CI regression guard (mini-golden):
+
+```bash
+cargo test -p strategy-runtime --test e2e_hybrid_golden
+```
+
+StopLimit broker smoke (no strategy logic):
+
+```bash
+cargo run -p alor-gateway --bin stop_limit_smoke -- \
+  --config ./configs/gateway.live.toml \
+  --dry-run
+```
+
+Live (single create + single delete):
+
+```bash
+cargo run -p alor-gateway --bin stop_limit_smoke -- \
+  --config ./configs/gateway.live.toml \
+  --live-confirm \
+  --symbol IMOEXF \
+  --side buy \
+  --qty 1 \
+  --trigger-price 1000 \
+  --limit-price 999
+```
+
+StopOrders WS smoke (subscribe + verify status lifecycle for created stop order):
+
+```bash
+cargo run -p alor-gateway --bin stop_orders_ws_smoke -- \
+  --config ./configs/gateway.live.toml \
+  --live-confirm \
+  --symbol IMOEXF \
+  --side buy \
+  --qty 1 \
+  --trigger-price 1000 \
+  --limit-price 999
+```
+
+Runtime/Event bus contract note:
+
+- `streams.orders` now carries both `Order` and `StopOrder` envelopes.
+- Consumers must route by `message_type` (`order` vs `stop_order`).
+- Unknown `message_type` must be ignored (or sent to DLQ), not treated as hard failure.
 
 Интеграционные тесты gateway (`alor-gateway/tests/redis_transport.rs`) используют `testcontainers` и требуют установленный Docker.
 

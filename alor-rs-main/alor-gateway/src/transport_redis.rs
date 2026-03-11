@@ -10,7 +10,8 @@ use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, SCHEMA_VERS
 
 use crate::health::HealthState;
 use crate::models::{
-    BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot, TradeEvent,
+    BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot, StopOrderEvent,
+    StopOrdersSnapshot, TradeEvent,
 };
 use crate::transport::{CommandEnvelope, CommandSink, CommandSource, EventSink, TransportConfig};
 
@@ -64,6 +65,11 @@ impl EventSink for RedisEventSink {
             .await
     }
 
+    async fn publish_stop_order(&self, event: StopOrderEvent) -> Result<()> {
+        self.publish_event(&self.config.streams.orders, MessageType::StopOrder, &event)
+            .await
+    }
+
     async fn publish_trade(&self, event: TradeEvent) -> Result<()> {
         self.publish_event(&self.config.streams.trades, MessageType::Trade, &event)
             .await
@@ -87,6 +93,15 @@ impl EventSink for RedisEventSink {
         self.publish_event(
             &self.config.streams.snapshots,
             MessageType::SnapshotOrders,
+            &snapshot,
+        )
+        .await
+    }
+
+    async fn publish_snapshot_stop_orders(&self, snapshot: StopOrdersSnapshot) -> Result<()> {
+        self.publish_event(
+            &self.config.streams.snapshots,
+            MessageType::SnapshotStopOrders,
             &snapshot,
         )
         .await

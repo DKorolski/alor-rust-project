@@ -39,6 +39,7 @@ impl LimitCancelStrategy {
             price,
             qty: self.config.qty,
             side: self.config.side,
+            comment: None,
         }
     }
 
@@ -139,6 +140,7 @@ impl Strategy for LimitCancelStrategy {
                 *last_bar_ts = Some(bar.close_time_utc);
                 None
             }
+            StrategyState::HybridIntradayRuntime { .. } => None,
             StrategyState::Done { last_bar_ts } => {
                 *last_bar_ts = bar.close_time_utc;
                 None
@@ -287,6 +289,7 @@ mod tests {
             symbol: "SBER".to_string(),
             tick_size: 0.01,
             trade_mode: TradeMode::Live,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
             position_qty: None,
@@ -315,7 +318,9 @@ mod tests {
         let intents = strategy.on_bar(&ctx, &bar1);
         assert_eq!(intents.len(), 1);
         match &intents[0] {
-            Intent::Place { price, qty, side } => {
+            Intent::Place {
+                price, qty, side, ..
+            } => {
                 assert_eq!(*price, 99.99);
                 assert_eq!(*qty, 1.0);
                 assert_eq!(*side, Side::Buy);

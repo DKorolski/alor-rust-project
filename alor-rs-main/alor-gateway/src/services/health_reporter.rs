@@ -7,12 +7,14 @@ use crate::health::HealthState;
 use crate::services::event_publisher::EventPublisherHandle;
 use crate::state::orders_manager::OrdersManagerHandle;
 use crate::state::positions_manager::PositionsManagerHandle;
+use crate::state::stop_orders_manager::StopOrdersManagerHandle;
 use crate::transport::EventMessage;
 
 pub async fn run_health_reporter(
     publisher: EventPublisherHandle,
     health: Arc<parking_lot::RwLock<HealthState>>,
     orders: OrdersManagerHandle,
+    stop_orders: StopOrdersManagerHandle,
     positions: PositionsManagerHandle,
     mut shutdown_rx: watch::Receiver<bool>,
     health_interval: Duration,
@@ -34,6 +36,9 @@ pub async fn run_health_reporter(
             _ = snapshot_tick.tick() => {
                 publisher
                     .publish_critical(EventMessage::SnapshotOrders(orders.snapshot()))
+                    .await;
+                publisher
+                    .publish_critical(EventMessage::SnapshotStopOrders(stop_orders.snapshot()))
                     .await;
                 publisher
                     .publish_critical(EventMessage::SnapshotPositions(positions.snapshot()))

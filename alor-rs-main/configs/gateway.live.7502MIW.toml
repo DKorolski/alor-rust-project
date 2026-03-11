@@ -1,8 +1,6 @@
-# Example configuration for alor-gateway
-# Optional env overrides:
-#   DATA_REPORT_PATH=./report.json
-BAR_DUMP_PATH="./bars.csv"
-portfolio = "7502SN6"
+# Hybrid gateway config for portfolio 7502MIW
+BAR_DUMP_PATH="./bars.7502MIW.csv"
+portfolio = "7502MIW"
 exchange = "MOEX"
 instrument_group = "RFUD"
 # used for market order routing in CWS (create:market)
@@ -15,13 +13,12 @@ ws_url = "wss://api.alor.ru/ws"
 cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
 
-
 log_positions_filter = ["IMOEXF"]
 log_cash_positions = false
 cash_symbols = ["RUB", "SUR"]
 log_existing_snapshot_orders = false
 
-skip_history_bars = false # true => disable history backfill entirely
+skip_history_bars = false
 skip_history_positions = false
 skip_history_orders = false
 split_adjust = true
@@ -46,9 +43,8 @@ break_start_1 = "14:00:00"
 break_end_1 = "14:04:59"
 break_start_2 = "18:50:00"
 break_end_2 = "19:04:59"
-weekends_off = false
+weekends_off = true
 timezone_offset_hours = 3
-
 
 [ws]
 ws_idle_timeout_sec = 70
@@ -60,7 +56,7 @@ subscribe_ack_retries = 3
 [reconnect]
 warm_reconnect_max_gap_sec = 21600
 gap_backfill_padding_bars = 2
-cold_start_history_days_back = 4 # set to 0 + history_sessions/history_days_back 0 => NoHistory
+cold_start_history_days_back = 4
 bar_silence_resync_min_sec = 1200
 
 [general]

@@ -4,7 +4,7 @@ use alor_protocol::Side;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{OrderEvent, PositionEvent};
+use crate::{OrderEvent, PositionEvent, StopOrderEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionGapLivePhase {
@@ -150,6 +150,76 @@ pub enum StrategyState {
         #[serde(default)]
         last_bar_ts: Option<i64>,
     },
+    HybridIntradayRuntime {
+        #[serde(default)]
+        active_cycle_id: Option<String>,
+        #[serde(default)]
+        next_cycle_seq: u32,
+        #[serde(default)]
+        last_position_qty: f64,
+        #[serde(default)]
+        current_owner: Option<crate::strategies::hybrid_intraday::Owner>,
+        #[serde(default)]
+        current_side: Option<crate::strategies::hybrid_intraday::Side>,
+        #[serde(default)]
+        pending_entry_owner: Option<crate::strategies::hybrid_intraday::Owner>,
+        #[serde(default)]
+        pending_entry_side: Option<crate::strategies::hybrid_intraday::Side>,
+        #[serde(default)]
+        pending_entry_cycle_id: Option<String>,
+        #[serde(default)]
+        pending_entry_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_entry_created_ts_utc: Option<i64>,
+        #[serde(default)]
+        pending_exit_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_exit_created_ts_utc: Option<i64>,
+        #[serde(default)]
+        pending_tp_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_tp_created_ts_utc: Option<i64>,
+        #[serde(default)]
+        pending_sl_request_id: Option<Uuid>,
+        #[serde(default)]
+        pending_sl_created_ts_utc: Option<i64>,
+        #[serde(default)]
+        tp_order_id: Option<i64>,
+        #[serde(default)]
+        sl_stop_order_id: Option<String>,
+        #[serde(default)]
+        sl_exchange_order_id: Option<i64>,
+        #[serde(default)]
+        sl_triggered_ts: Option<i64>,
+        #[serde(default)]
+        mr_take_price: Option<f64>,
+        #[serde(default)]
+        mr_stop_price: Option<f64>,
+        #[serde(default)]
+        repair_deadline_ts: Option<i64>,
+        #[serde(default)]
+        next_repair_at_ts: Option<i64>,
+        #[serde(default)]
+        repair_backoff_level: u32,
+        #[serde(default)]
+        repair_attempts: u32,
+        #[serde(default)]
+        safe_mode_close_only: bool,
+        #[serde(default)]
+        safe_mode_reason: Option<String>,
+        #[serde(default)]
+        entry_ready: bool,
+        #[serde(default)]
+        last_bar_close: Option<f64>,
+        #[serde(default)]
+        last_day_local: Option<String>,
+        #[serde(default)]
+        current_day_high: Option<f64>,
+        #[serde(default)]
+        current_day_low: Option<f64>,
+        #[serde(default)]
+        prev_day_range: Option<f64>,
+    },
     CancelSent {
         cancel_request_id: Uuid,
         order_id: i64,
@@ -165,6 +235,8 @@ pub struct RuntimeState {
     pub last_processed_bar_ts: HashMap<String, i64>,
     pub strategy_state: StrategyState,
     pub orders: HashMap<i64, OrderEvent>,
+    #[serde(default)]
+    pub stop_orders: HashMap<String, StopOrderEvent>,
     pub positions: HashMap<String, PositionEvent>,
     pub last_trade_ts: Option<i64>,
     pub last_trade_id: Option<String>,

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -171,6 +172,7 @@ impl TradeLedger {
     }
 
     fn write_trades_csv(&self, path: &str) -> Result<()> {
+        ensure_parent_dir(path)?;
         let mut file = File::create(path)?;
         writeln!(
             file,
@@ -196,6 +198,7 @@ impl TradeLedger {
     }
 
     fn write_summary_json(&self, strategy_id: &str, symbol: &str, path: &str) -> Result<()> {
+        ensure_parent_dir(path)?;
         let summary = self.summary(strategy_id, symbol);
         let payload = serde_json::to_string_pretty(&summary)?;
         let mut file = OpenOptions::new()
@@ -344,9 +347,20 @@ impl TradeLedger {
     }
 }
 
+fn ensure_parent_dir(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn ledger_records_round_trip() {
@@ -373,5 +387,43 @@ mod tests {
         });
         assert_eq!(ledger.closed_trades().len(), 1);
         assert!(ledger.closed_trades()[0].pnl_gross > 0.0);
+    }
+
+    #[test]
+    fn persist_reports_creates_parent_directories() {
+        let mut ledger = TradeLedger::default();
+        ledger.record_fill(TradeRecord {
+            ts_utc: 1,
+            order_id: 1,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            price: 100.0,
+            commission: 0.0,
+            owned: true,
+        });
+        ledger.record_fill(TradeRecord {
+            ts_utc: 2,
+            order_id: 2,
+            symbol: "SBER".to_string(),
+            side: "sell".to_string(),
+            qty: 1.0,
+            price: 101.0,
+            commission: 0.0,
+            owned: true,
+        });
+        let dir = tempdir().expect("tempdir");
+        let trades = dir.path().join("nested/reports/trades.csv");
+        let summary = dir.path().join("nested/reports/summary.json");
+        ledger
+            .persist_reports(
+                "hybrid_intraday",
+                "SBER",
+                trades.to_str().expect("trades path utf8"),
+                summary.to_str().expect("summary path utf8"),
+            )
+            .expect("persist reports");
+        assert!(trades.exists());
+        assert!(summary.exists());
     }
 }

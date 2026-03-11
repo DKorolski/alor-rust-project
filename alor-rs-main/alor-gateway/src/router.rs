@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
-use crate::models::{BarEvent, DataOrigin, OrderEvent, PositionEvent, TradeEvent};
+use crate::models::{BarEvent, DataOrigin, OrderEvent, PositionEvent, StopOrderEvent, TradeEvent};
 
 pub struct Router;
 
@@ -26,6 +26,7 @@ pub struct RouterStreams {
     pub bars_rx: mpsc::Receiver<BarEvent>,
     pub positions_rx: mpsc::Receiver<PositionEvent>,
     pub orders_rx: mpsc::Receiver<OrderEvent>,
+    pub stop_orders_rx: mpsc::Receiver<StopOrderEvent>,
     pub trades_rx: mpsc::Receiver<TradeEvent>,
     pub control_rx: mpsc::Receiver<RouterControl>,
 }
@@ -38,6 +39,7 @@ impl Router {
         let (bars_tx, bars_rx) = mpsc::channel(1024);
         let (positions_tx, positions_rx) = mpsc::channel(1024);
         let (orders_tx, orders_rx) = mpsc::channel(1024);
+        let (stop_orders_tx, stop_orders_rx) = mpsc::channel(1024);
         let (trades_tx, trades_rx) = mpsc::channel(1024);
         let (control_tx, control_rx) = mpsc::channel(32);
         let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
@@ -119,6 +121,11 @@ impl Router {
                             continue;
                         }
 
+                        if let Some(stop_order) = parse_stop_order(&value) {
+                            let _ = stop_orders_tx.send(stop_order).await;
+                            continue;
+                        }
+
                         if let Some(order) = parse_order(&value) {
                             let _ = orders_tx.send(order).await;
                         }
@@ -133,6 +140,7 @@ impl Router {
                 bars_rx,
                 positions_rx,
                 orders_rx,
+                stop_orders_rx,
                 trades_rx,
                 control_rx,
             },
@@ -229,6 +237,9 @@ fn parse_position(value: &Value) -> Option<PositionEvent> {
 
 fn parse_order(value: &Value) -> Option<OrderEvent> {
     let data = value.get("data")?;
+    if data.get("stopPrice").is_some() || data.get("triggerPrice").is_some() {
+        return None;
+    }
     let order_id = data
         .get("orderId")
         .or_else(|| data.get("id"))
@@ -278,6 +289,92 @@ fn parse_order(value: &Value) -> Option<OrderEvent> {
             .get("existing")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        comment: data
+            .get("comment")
+            .or_else(|| data.get("user"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        ts_utc: data
+            .get("updateTime")
+            .or_else(|| data.get("transTime"))
+            .or_else(|| data.get("timestamp"))
+            .and_then(to_i64)
+            .unwrap_or_else(|| Utc::now().timestamp()),
+    })
+}
+
+fn parse_stop_order(value: &Value) -> Option<StopOrderEvent> {
+    let data = value.get("data")?;
+    if data.get("stopPrice").is_none()
+        && data.get("triggerPrice").is_none()
+        && data.get("stopEndUnixTime").is_none()
+    {
+        return None;
+    }
+    let stop_order_id =
+        data.get("id")
+            .or_else(|| data.get("orderId"))
+            .and_then(|value| match value {
+                Value::String(value) => Some(value.clone()),
+                Value::Number(value) => Some(value.to_string()),
+                _ => None,
+            })?;
+    let symbol = data
+        .get("symbol")
+        .or_else(|| data.get("code"))
+        .and_then(Value::as_str)?
+        .to_string();
+    Some(StopOrderEvent {
+        stop_order_id,
+        exchange_order_id: data
+            .get("exchangeOrderId")
+            .or_else(|| data.get("orderNo"))
+            .and_then(to_i64),
+        symbol,
+        status: data
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_lowercase(),
+        side: data
+            .get("side")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        qty: data
+            .get("qty")
+            .or_else(|| data.get("qtyUnits"))
+            .or_else(|| data.get("qtyBatch"))
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        filled: data
+            .get("filled")
+            .or_else(|| data.get("filledQty"))
+            .or_else(|| data.get("filledQtyUnits"))
+            .or_else(|| data.get("filledQtyBatch"))
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        stop_price: data
+            .get("stopPrice")
+            .or_else(|| data.get("triggerPrice"))
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        price: data
+            .get("price")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        existing: data
+            .get("existing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        comment: data
+            .get("comment")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        end_time: data
+            .get("endTime")
+            .or_else(|| data.get("stopEndUnixTime"))
+            .and_then(to_i64),
         ts_utc: data
             .get("updateTime")
             .or_else(|| data.get("transTime"))
@@ -468,6 +565,7 @@ mod tests {
                 "filled": 1.0,
                 "price": 99.5,
                 "existing": true,
+                "comment": "HYB|sid=hyb|c=abcd|o=MR|r=ENTRY",
                 "timestamp": 1700000001
             }
         });
@@ -481,6 +579,10 @@ mod tests {
         assert_eq!(order.filled, 1.0);
         assert_eq!(order.price, 99.5);
         assert!(order.existing);
+        assert_eq!(
+            order.comment.as_deref(),
+            Some("HYB|sid=hyb|c=abcd|o=MR|r=ENTRY")
+        );
         assert_eq!(order.ts_utc, 1700000001);
     }
 

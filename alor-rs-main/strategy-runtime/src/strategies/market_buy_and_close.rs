@@ -99,6 +99,7 @@ impl MarketBuyAndCloseStrategy {
                         qty: self.config.qty,
                         side: self.config.side,
                         fill_price: Some(bar.o),
+                        comment: None,
                     });
                 }
             }
@@ -114,6 +115,7 @@ impl MarketBuyAndCloseStrategy {
                         qty,
                         side: close_side,
                         fill_price: Some(bar.o),
+                        comment: None,
                     });
                     self.state = StrategyState::MarketCloseSent {
                         close_request_id: crate::deterministic_request_id(
@@ -161,6 +163,7 @@ impl MarketBuyAndCloseStrategy {
             qty: self.config.qty,
             side: self.config.side,
             fill_price: None,
+            comment: None,
         }]
     }
 
@@ -281,6 +284,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                                 qty: self.config.qty,
                                 side: close_side,
                                 fill_price: None,
+                                comment: None,
                             }]
                         } else {
                             Vec::new()
@@ -433,6 +437,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                         qty: self.config.qty,
                         side: close_side,
                         fill_price: None,
+                        comment: None,
                     }];
                 }
             }
@@ -510,6 +515,7 @@ mod tests {
             symbol: "SBER".to_string(),
             tick_size: 0.01,
             trade_mode,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
             position_qty: Some(0.0),
@@ -743,6 +749,7 @@ mod tests {
             cws_http_code: None,
             cws_request_guid: None,
             broker_order_id: None,
+            broker_order_id_str: None,
             processed_ts_utc: 2_001,
         };
         let _ = strategy.on_ack(&ctx, &ack);

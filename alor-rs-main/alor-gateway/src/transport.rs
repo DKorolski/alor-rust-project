@@ -7,7 +7,8 @@ use alor_protocol::OrderCommand;
 
 use crate::health::HealthState;
 use crate::models::{
-    BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot, TradeEvent,
+    BarEvent, OrderEvent, OrdersSnapshot, PositionEvent, PositionsSnapshot, StopOrderEvent,
+    StopOrdersSnapshot, TradeEvent,
 };
 
 #[allow(clippy::large_enum_variant)]
@@ -15,10 +16,12 @@ use crate::models::{
 pub enum EventMessage {
     Bar(BarEvent),
     Order(OrderEvent),
+    StopOrder(StopOrderEvent),
     Trade(TradeEvent),
     Position(PositionEvent),
     Health(HealthState),
     SnapshotOrders(OrdersSnapshot),
+    SnapshotStopOrders(StopOrdersSnapshot),
     SnapshotPositions(PositionsSnapshot),
 }
 
@@ -51,10 +54,12 @@ pub struct StreamNames {
 pub trait EventSink: Send + Sync {
     async fn publish_bar(&self, event: BarEvent) -> Result<()>;
     async fn publish_order(&self, event: OrderEvent) -> Result<()>;
+    async fn publish_stop_order(&self, event: StopOrderEvent) -> Result<()>;
     async fn publish_trade(&self, event: TradeEvent) -> Result<()>;
     async fn publish_position(&self, event: PositionEvent) -> Result<()>;
     async fn publish_health(&self, health: HealthState) -> Result<()>;
     async fn publish_snapshot_orders(&self, snapshot: OrdersSnapshot) -> Result<()>;
+    async fn publish_snapshot_stop_orders(&self, snapshot: StopOrdersSnapshot) -> Result<()>;
     async fn publish_snapshot_positions(&self, snapshot: PositionsSnapshot) -> Result<()>;
 }
 
@@ -187,6 +192,13 @@ impl EventSink for InprocEventSink {
             .map_err(|_| anyhow::anyhow!("inproc event channel closed"))
     }
 
+    async fn publish_stop_order(&self, event: StopOrderEvent) -> Result<()> {
+        self.tx
+            .send(EventMessage::StopOrder(event))
+            .await
+            .map_err(|_| anyhow::anyhow!("inproc event channel closed"))
+    }
+
     async fn publish_trade(&self, event: TradeEvent) -> Result<()> {
         self.tx
             .send(EventMessage::Trade(event))
@@ -211,6 +223,13 @@ impl EventSink for InprocEventSink {
     async fn publish_snapshot_orders(&self, snapshot: OrdersSnapshot) -> Result<()> {
         self.tx
             .send(EventMessage::SnapshotOrders(snapshot))
+            .await
+            .map_err(|_| anyhow::anyhow!("inproc event channel closed"))
+    }
+
+    async fn publish_snapshot_stop_orders(&self, snapshot: StopOrdersSnapshot) -> Result<()> {
+        self.tx
+            .send(EventMessage::SnapshotStopOrders(snapshot))
             .await
             .map_err(|_| anyhow::anyhow!("inproc event channel closed"))
     }

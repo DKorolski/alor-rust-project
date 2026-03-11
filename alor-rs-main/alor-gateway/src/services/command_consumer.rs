@@ -409,6 +409,8 @@ fn command_action_label(action: &CommandAction) -> &'static str {
         CommandAction::Market(_) => "market",
         CommandAction::Cancel(_) => "cancel",
         CommandAction::Replace(_) => "replace",
+        CommandAction::CreateStopLimit(_) => "create_stop_limit",
+        CommandAction::DeleteStopLimit(_) => "delete_stop_limit",
     }
 }
 
@@ -448,8 +450,10 @@ fn validate_command(
     }
     let scheduler_state = guard.scheduler_state;
     drop(guard);
-    if !matches!(&command.action, CommandAction::Cancel(_))
-        && !matches!(scheduler_state, Some(MarketState::Open))
+    if !matches!(
+        &command.action,
+        CommandAction::Cancel(_) | CommandAction::DeleteStopLimit(_)
+    ) && !matches!(scheduler_state, Some(MarketState::Open))
     {
         return Some("trading_window_closed");
     }
@@ -488,6 +492,26 @@ fn validate_command(
                 return Some("validation_failed");
             }
         }
+        CommandAction::CreateStopLimit(payload) => {
+            if payload.qty <= 0.0
+                || payload.price <= 0.0
+                || payload.trigger_price <= 0.0
+                || payload.stop_end_unix_time <= 0
+            {
+                return Some("validation_failed");
+            }
+            let price = normalize_step_round(payload.price, price_step);
+            let trigger = normalize_step_round(payload.trigger_price, price_step);
+            let qty = normalize_qty(payload.qty, volume_step);
+            if price <= 0.0 || trigger <= 0.0 || qty <= 0.0 {
+                return Some("validation_failed");
+            }
+        }
+        CommandAction::DeleteStopLimit(payload) => {
+            if payload.order_id.trim().is_empty() {
+                return Some("validation_failed");
+            }
+        }
     }
     None
 }
@@ -522,6 +546,7 @@ async fn execute_command(
                     price,
                     qty,
                     side_str(payload.side),
+                    payload.comment.as_deref(),
                 )
                 .await?;
             Ok(response)
@@ -535,6 +560,7 @@ async fn execute_command(
                     &command.symbol,
                     qty,
                     side_str(payload.side),
+                    payload.comment.as_deref(),
                 )
                 .await?;
             Ok(response)
@@ -561,6 +587,40 @@ async fn execute_command(
                 .await?;
             Ok(response)
         }
+        CommandAction::CreateStopLimit(payload) => {
+            let qty = normalize_qty(payload.qty, volume_step);
+            let trigger_price = normalize_step_round(payload.trigger_price, price_step);
+            let price = normalize_step_round(payload.price, price_step);
+            let response = cws
+                .create_stop_limit(
+                    &command.portfolio,
+                    &command.exchange,
+                    &command.symbol,
+                    side_str(payload.side),
+                    qty,
+                    trigger_price,
+                    price,
+                    payload.condition,
+                    payload.stop_end_unix_time,
+                    payload.comment.as_deref(),
+                    payload.instrument_group.as_deref(),
+                    payload.check_duplicates.unwrap_or(true),
+                )
+                .await?;
+            Ok(response)
+        }
+        CommandAction::DeleteStopLimit(payload) => {
+            let response = cws
+                .delete_stop_limit(
+                    &command.portfolio,
+                    &command.exchange,
+                    &payload.order_id,
+                    payload.side.map(side_str),
+                    payload.check_duplicates.unwrap_or(true),
+                )
+                .await?;
+            Ok(response)
+        }
     }
 }
 
@@ -570,6 +630,7 @@ struct CwsResponseInfo {
     message: Option<String>,
     request_guid: Option<String>,
     order_id: Option<i64>,
+    order_id_str: Option<String>,
 }
 
 fn parse_cws_response(value: &serde_json::Value) -> CwsResponseInfo {
@@ -584,11 +645,13 @@ fn parse_cws_response(value: &serde_json::Value) -> CwsResponseInfo {
         .and_then(serde_json::Value::as_str)
         .map(|value| value.to_string());
     let order_id = extract_order_id(value);
+    let order_id_str = extract_order_id_str(value);
     CwsResponseInfo {
         http_code,
         message,
         request_guid,
         order_id,
+        order_id_str,
     }
 }
 
@@ -602,6 +665,22 @@ fn extract_order_id(value: &serde_json::Value) -> Option<i64> {
                 data.get("orderNumber")
                     .or_else(|| data.get("orderId"))
                     .and_then(to_i64)
+            })
+        })
+}
+
+fn extract_order_id_str(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("orderNumber")
+        .or_else(|| value.get("orderId"))
+        .and_then(serde_json::Value::as_str)
+        .map(|v| v.to_string())
+        .or_else(|| {
+            value.get("data").and_then(|data| {
+                data.get("orderNumber")
+                    .or_else(|| data.get("orderId"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|v| v.to_string())
             })
         })
 }
@@ -627,6 +706,9 @@ fn build_cws_ack(
         request_id,
         status,
         broker_order_id: info.order_id,
+        broker_order_id_str: info
+            .order_id_str
+            .or_else(|| info.order_id.map(|v| v.to_string())),
         error_code,
         error_msg,
         cws_http_code: info.http_code,
@@ -706,6 +788,39 @@ mod tests {
         assert_eq!(info.order_id, Some(987));
     }
 
+    #[test]
+    fn parse_cws_response_handles_string_order_number() {
+        let value = json!({
+            "httpCode": 200,
+            "message": "ok",
+            "requestGuid": "guid-789",
+            "orderNumber": "A-12345"
+        });
+        let info = parse_cws_response(&value);
+        assert_eq!(info.http_code, Some(200));
+        assert_eq!(info.order_id, None);
+        assert_eq!(info.order_id_str.as_deref(), Some("A-12345"));
+    }
+
+    #[test]
+    fn build_cws_ack_carries_string_order_id() {
+        let ack = build_cws_ack(
+            uuid::Uuid::new_v4(),
+            alor_protocol::AckStatus::Accepted,
+            CwsResponseInfo {
+                http_code: Some(200),
+                message: Some("ok".to_string()),
+                request_guid: Some("guid-1".to_string()),
+                order_id: None,
+                order_id_str: Some("A-12345".to_string()),
+            },
+            None,
+            None,
+        );
+        assert_eq!(ack.broker_order_id, None);
+        assert_eq!(ack.broker_order_id_str.as_deref(), Some("A-12345"));
+    }
+
     fn sample_command(created_ts_utc: i64, ttl_ms: Option<u64>) -> OrderCommand {
         OrderCommand {
             request_id: uuid::Uuid::new_v4(),
@@ -717,7 +832,9 @@ mod tests {
             action: CommandAction::Market(alor_protocol::MarketOrder {
                 side: Side::Buy,
                 qty: 1.0,
+                comment: None,
             }),
+            intent_class: None,
             ttl_ms,
         }
     }
@@ -766,6 +883,24 @@ mod tests {
     fn validate_command_allows_cancel_when_market_not_open() {
         let mut command = sample_command(chrono::Utc::now().timestamp(), None);
         command.action = CommandAction::Cancel(alor_protocol::CancelOrder { order_id: 42 });
+        let health = Arc::new(parking_lot::RwLock::new(HealthState {
+            gateway_phase: GatewayPhase::LiveReady,
+            scheduler_state: Some(MarketState::Break2),
+            ..HealthState::default()
+        }));
+
+        let error = validate_command(&command, 0.01, 1.0, &health, true);
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn validate_command_allows_delete_stop_limit_when_market_not_open() {
+        let mut command = sample_command(chrono::Utc::now().timestamp(), None);
+        command.action = CommandAction::DeleteStopLimit(alor_protocol::DeleteStopLimitOrder {
+            order_id: "12345".to_string(),
+            side: None,
+            check_duplicates: None,
+        });
         let health = Arc::new(parking_lot::RwLock::new(HealthState {
             gateway_phase: GatewayPhase::LiveReady,
             scheduler_state: Some(MarketState::Break2),

@@ -50,6 +50,24 @@ pub struct OrderEvent {
     pub filled: f64,
     pub price: f64,
     pub existing: bool,
+    pub comment: Option<String>,
+    pub ts_utc: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopOrderEvent {
+    pub stop_order_id: String,
+    pub exchange_order_id: Option<i64>,
+    pub symbol: String,
+    pub status: String,
+    pub side: String,
+    pub qty: f64,
+    pub filled: f64,
+    pub stop_price: f64,
+    pub price: f64,
+    pub existing: bool,
+    pub comment: Option<String>,
+    pub end_time: Option<i64>,
     pub ts_utc: i64,
 }
 
@@ -58,4 +76,9 @@ pub type PositionsSnapshot = alor_types::PositionsSnapshot;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrdersSnapshot {
     pub orders: HashMap<i64, OrderEvent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StopOrdersSnapshot {
+    pub stop_orders: HashMap<String, StopOrderEvent>,
 }
