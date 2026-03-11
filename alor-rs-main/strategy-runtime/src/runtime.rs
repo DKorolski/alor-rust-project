@@ -35,6 +35,7 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
+const WARMUP_BAR_SCAN_COUNT: usize = 5000;
 const TRADE_DEDUP_LIMIT: usize = 512;
 const NON_WORKING_ORDER_STATUSES: [&str; 5] =
     ["filled", "canceled", "cancelled", "expired", "rejected"];
@@ -585,6 +586,7 @@ impl StrategyRuntime {
         self.load_runtime_state().await?;
         self.notify_bootstrap_snapshot().await?;
         self.notify_runtime_state_restored().await?;
+        self.warmup_strategy_indicators_from_history().await?;
 
         let streams = self.config.streams.clone();
         let trim_acks = self.config.trim.acks;
@@ -607,6 +609,77 @@ impl StrategyRuntime {
         self.refresh_health_if_due().await?;
         self.log_live_guard_status_if_due().await?;
 
+        Ok(())
+    }
+
+    async fn warmup_strategy_indicators_from_history(&mut self) -> Result<()> {
+        if self.config.strategy.strategy_kind != StrategyKind::SessionGapStandalone {
+            return Ok(());
+        }
+        if self.config.reset_state_on_start {
+            info!(
+                stream = self.config.streams.bars,
+                scan = WARMUP_BAR_SCAN_COUNT,
+                "bootstrap: warmup from history bars (reset_state_on_start=true)"
+            );
+        }
+        let payloads = self
+            .transport
+            .xrevrange_last_n(&self.config.streams.bars, WARMUP_BAR_SCAN_COUNT)
+            .await?;
+        if payloads.is_empty() {
+            return Ok(());
+        }
+
+        let mut bars = Vec::new();
+        for payload in payloads {
+            let envelope = match serde_json::from_str::<Envelope<serde_json::Value>>(&payload) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    warn!(?error, "warmup: failed to parse bar envelope");
+                    continue;
+                }
+            };
+            if envelope.msg_type != MessageType::Bar {
+                continue;
+            }
+            match serde_json::from_value::<BarEvent>(envelope.payload) {
+                Ok(bar) if bar.symbol == self.config.strategy.symbol => bars.push(bar),
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(?error, "warmup: failed to decode bar payload");
+                }
+            }
+        }
+
+        if bars.is_empty() {
+            return Ok(());
+        }
+        bars.sort_by_key(|bar| bar.close_time_utc);
+        bars.dedup_by_key(|bar| bar.close_time_utc);
+
+        let mut ctx = self.strategy_ctx();
+        ctx.allow_live_orders = false;
+        let mut processed = 0usize;
+        for bar in bars {
+            if self.state.is_duplicate_bar(&bar.symbol, bar.close_time_utc) {
+                continue;
+            }
+            self.state
+                .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
+            let _ = self.strategy.on_bar(&ctx, &bar);
+            self.state.strategy_state = self.strategy.state().clone();
+            processed += 1;
+        }
+        if processed > 0 {
+            info!(
+                strategy = self.config.strategy.strategy_id,
+                symbol = self.config.strategy.symbol,
+                bars_processed = processed,
+                scan = WARMUP_BAR_SCAN_COUNT,
+                "bootstrap: strategy warmup from history bars completed"
+            );
+        }
         Ok(())
     }
 
