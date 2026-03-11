@@ -5,7 +5,7 @@ use chrono::{
     Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime,
     TimeZone, Utc, Weekday,
 };
-use tracing::info;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::state::StrategyState;
@@ -2047,23 +2047,45 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 .iter()
                 .map(Self::action_debug_label)
                 .collect::<Vec<_>>();
-            info!(
-                target: "strategy_runtime::hybrid_intraday_runtime",
-                ts_utc = bar.close_time_utc,
-                dt_local = %dt_local,
-                origin = ?bar.origin,
-                close = bar.close,
-                close_prev,
-                day_range_prev,
-                entry_ready = self.entry_ready,
-                has_open_position = has_open_position,
-                has_live_orders = self.has_live_orders(),
-                can_emit,
-                can_execute,
-                actions_count = action_labels.len(),
-                actions = ?action_labels,
-                "hybrid actions generated"
-            );
+            let should_log_info =
+                bar.origin == DataOrigin::Live || can_emit || can_execute;
+            if should_log_info {
+                info!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    ts_utc = bar.close_time_utc,
+                    dt_local = %dt_local,
+                    origin = ?bar.origin,
+                    close = bar.close,
+                    close_prev,
+                    day_range_prev,
+                    entry_ready = self.entry_ready,
+                    has_open_position = has_open_position,
+                    has_live_orders = self.has_live_orders(),
+                    can_emit,
+                    can_execute,
+                    actions_count = action_labels.len(),
+                    actions = ?action_labels,
+                    "hybrid actions generated"
+                );
+            } else {
+                debug!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    ts_utc = bar.close_time_utc,
+                    dt_local = %dt_local,
+                    origin = ?bar.origin,
+                    close = bar.close,
+                    close_prev,
+                    day_range_prev,
+                    entry_ready = self.entry_ready,
+                    has_open_position = has_open_position,
+                    has_live_orders = self.has_live_orders(),
+                    can_emit,
+                    can_execute,
+                    actions_count = action_labels.len(),
+                    actions = ?action_labels,
+                    "hybrid actions generated"
+                );
+            }
         }
         let mut intents = self.maybe_emit_repair_intents(ctx, bar.close_time_utc);
         intents.extend(
