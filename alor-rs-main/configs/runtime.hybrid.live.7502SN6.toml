@@ -1,8 +1,8 @@
 redis_url = "redis://127.0.0.1/"
-portfolio = "7502MIW"
+portfolio = "7502SN6"
 exchange = "MOEX"
 source = "strategy-runtime"
-consumer_group = "strategy-runtime-live"
+consumer_group = "strategy-runtime-hybrid-local"
 consumer_name = "auto"
 reset_state_on_start = false
 
@@ -22,16 +22,16 @@ listen_addr = "127.0.0.1:8091"
 expose_metrics = false
 
 [streams]
-bars = "md.bars.7502MIW.1m"
-orders = "broker.orders.7502MIW"
-trades = "broker.trades.7502MIW"
-positions = "broker.positions.7502MIW"
-commands = "cmd.orders.7502MIW"
-acks = "cmd.acks.7502MIW"
-snapshots = "broker.snapshots.7502MIW"
+bars = "md.bars.7502SN6.1m"
+orders = "broker.orders.7502SN6"
+trades = "broker.trades.7502SN6"
+positions = "broker.positions.7502SN6"
+commands = "cmd.orders.7502SN6"
+acks = "cmd.acks.7502SN6"
+snapshots = "broker.snapshots.7502SN6"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.hybrid_intraday.live.imoexf.7502MIW"
+runtime_state = "runtime.state.hybrid_intraday.live.imoexf.7502SN6"
 
 [read]
 block_ms = 500
@@ -112,9 +112,9 @@ stop_end_buffer_sec = 60
 [paper]
 enabled = false
 output = "stdout"
-file_path = "./reports/paper_hybrid_7502MIW_live.jsonl"
-trades_csv = "./reports/trades_hybrid_7502MIW_live.csv"
-summary_json = "./reports/summary_hybrid_7502MIW_live.json"
+file_path = "./reports/paper_hybrid_7502SN6_live.jsonl"
+trades_csv = "./reports/trades_hybrid_7502SN6_live.csv"
+summary_json = "./reports/summary_hybrid_7502SN6_live.json"
 append = false
 
 [backtest]

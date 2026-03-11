@@ -2,14 +2,14 @@ redis_url = "redis://127.0.0.1/"
 portfolio = "7502MIW"
 exchange = "MOEX"
 source = "strategy-runtime"
-consumer_group = "strategy-runtime-paper"
+consumer_group = "strategy-runtime-sessiongap-local"
 consumer_name = "auto"
 reset_state_on_start = false
 
 [runtime]
-trade_mode = "paper"
-allow_live_orders = false
-allow_paper_orders = true
+trade_mode = "live"
+allow_live_orders = true # LIVE MODE: sends real orders
+allow_paper_orders = false
 guard_log_interval_ms = 5000
 bootstrap_dump = false
 still_blocked_log_period_sec = 60
@@ -31,7 +31,7 @@ acks = "cmd.acks.7502MIW"
 snapshots = "broker.snapshots.7502MIW"
 health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.hybrid_intraday.paper.imoexf.7502MIW"
+runtime_state = "runtime.state.session_gap_standalone.live.7502MIW"
 
 [read]
 block_ms = 500
@@ -50,21 +50,21 @@ health = 10000
 runtime_state = 2000
 
 [strategy]
-strategy_id = "hybrid_intraday"
-strategy_kind = "hybrid_intraday"
-symbol = "IMOEXF"
+strategy_id = "session_gap_standalone"
+strategy_kind = "session_gap_standalone"
+symbol = "USDRUBF"
 qty = 1.0
 side = "buy"
 place_offset_ticks = 0
-tick_size = 0.5
-max_wait_bars_for_ack = 1
-close_trigger = "next_bar"
-session_open_hour = 0
-session_open_minute = 0
+tick_size = 0.01
+max_wait_bars_for_ack = 1 # required by shared schema, unused by session_gap_standalone
+close_trigger = "next_bar" # required by shared schema, unused by session_gap_standalone
+session_open_hour = 0 # required by shared schema, unused by session_gap_standalone
+session_open_minute = 0 # required by shared schema, unused by session_gap_standalone
 session_close_hour = 23
 session_close_minute = 49
-entry_after_open_min = 0
-exit_before_close_min = 0
+entry_after_open_min = 0 # required by shared schema, unused by session_gap_standalone
+exit_before_close_min = 0 # required by shared schema, unused by session_gap_standalone
 timezone_offset_hours = 3
 max_silence_bars_sec = 1200
 
@@ -78,45 +78,35 @@ break_end_2 = "19:04:59"
 weekends_off = true
 timezone_offset_hours = 3
 
-[strategy.hybrid_intraday]
-mr_min_range_long = 0.013
-mr_max_range_long = 0.035
-mr_k_long = 0.032
-mr_take_k_long = 0.11
-mr_stop_k_long = 0.44
-mr_min_range_short = 0.010
-mr_max_range_short = 0.045
-mr_k_short = 0.055
-mr_take_k_short = 0.16
-mr_stop_k_short = 0.43
-mr_session_end_time = "11:59:00"
-mr_exit_offset_min = 5
-bo_k = 0.65
-bo_stop1_range = 0.51
-bo_stop2_range = 0.35
-bo_big_move_threshold = 0.025
-bo_min_range = 1.01
-bo_min_range_mode = "absolute"
-bo_exclude_weekends = true
-bo_wait_hours = 3.0
-orchestrator_breakout_eod_mode = "same_day"
-orchestrator_breakout_overnight_exit_time = "09:30:00"
-repair_deadline_sec = 180
-sl_escalate_timeout_sec = 30
-max_repair_retries = 3
-repair_backoff_base_sec = 5
-repair_backoff_max_sec = 60
-pending_timeout_sec = 60
-stop_end_buffer_sec = 60
+[strategy.session_gap]
+k_long = 0.5
+k_short = 0.46
+wait_hours = 3
+k_tp_short = 0.28
+k_sl_short = 0.65
+long_ex_pct = 2.2
+short_ex_pct = 2.2
+k_tp_long = 0.28
+k_sl_long = 0.68
+# IMPORTANT: session_gap_standalone does NOT use strategy.qty for order size.
+# Size is computed from (cash_factor * cash / price) and then clamped to minimum 1.
+# Keep available_cash tiny to force exactly 1 contract for live micro-account testing.
+start_cash = 1
+cash_factor = 1.0
+max_entry_hour = 19
+close_hour = 23
+close_minute = 49
+session_gap_min = 60.0
+exit_offset_min = 20
+work_weekends = false
 
 [paper]
-enabled = true
-output = "file"
-execution_mode = "live_only"
-file_path = "./reports/paper_hybrid_7502MIW.jsonl"
-trades_csv = "./reports/trades_hybrid_7502MIW.csv"
-summary_json = "./reports/summary_hybrid_7502MIW.json"
-append = true
+enabled = false
+output = "stdout"
+file_path = "./strategy-runtime/paper_trades.jsonl"
+trades_csv = "./strategy-runtime/trades.csv"
+summary_json = "./strategy-runtime/summary.json"
+append = false
 
 [backtest]
 enabled = false

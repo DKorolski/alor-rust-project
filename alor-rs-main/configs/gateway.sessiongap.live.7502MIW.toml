@@ -1,10 +1,10 @@
-# Hybrid gateway config for portfolio 7502MIW
+# Session-gap gateway config for portfolio 7502MIW
 BAR_DUMP_PATH="./bars.7502MIW.csv"
 portfolio = "7502MIW"
 exchange = "MOEX"
 instrument_group = "RFUD"
 # used for market order routing in CWS (create:market)
-symbols = ["IMOEXF"]
+symbols = ["USDRUBF"]
 
 tf_sec = 60
 from_ts = 0
@@ -13,7 +13,7 @@ ws_url = "wss://api.alor.ru/ws"
 cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
 
-log_positions_filter = ["IMOEXF"]
+log_positions_filter = ["USDRUBF"]
 log_cash_positions = false
 cash_symbols = ["RUB", "SUR"]
 log_existing_snapshot_orders = false
@@ -60,5 +60,5 @@ cold_start_history_days_back = 4
 bar_silence_resync_min_sec = 1200
 
 [general]
-price_step = 0.5
+price_step = 0.01
 volume_step = 1

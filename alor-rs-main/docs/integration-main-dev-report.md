@@ -26,16 +26,20 @@ Branch: `integration/unify-main-dev`
 |---|---|---|---|
 | `18e9121` | session_gap warmup indicators + false-ready guard | Transferred | cherry-pick successful |
 | `65df9fc` | session_gap market -> marketable execution | Transferred | cherry-pick with manual conflict resolution in `session_gap_standalone.rs` |
-| `0444494` | MIW live rollout + OneDay TIF | Transferred (partial) | `runtime.live.7502MIW.toml` added; conflict in `gateway.live.7502MIW.toml` resolved in favor of dev/hybrid profile |
+| `0444494` | MIW live rollout + OneDay TIF | Transferred (partial) | logic transferred; profile split clarified via explicit strategy-specific config names |
 | `b661310` | ws reconnect test stabilization | Transferred | cherry-pick successful |
 | `6da7747` | merge wrapper commit | Not cherry-picked directly | merge commit wrapper, relevant functional change already present via `18e9121` |
 
 ## 3. Conflict zones and decisions
 
-### `configs/gateway.live.7502MIW.toml` (add/add)
-- Conflict source: both branches introduced file with different intent.
-- Decision: keep `dev` version to preserve current hybrid MIW routing/profile.
-- Rationale: avoid silent replacement of hybrid profile by session-gap-oriented variant.
+### `configs/gateway.*.7502*.toml` naming split (former add/add conflict zone)
+- Conflict source: both branches had different intent for similarly named live configs.
+- Decision: adopt explicit strategy-specific names:
+  - `configs/gateway.sessiongap.live.7502MIW.toml`
+  - `configs/runtime.sessiongap.live.7502MIW.toml`
+  - `configs/gateway.hybrid.live.7502SN6.toml`
+  - `configs/runtime.hybrid.live.7502SN6.toml`
+- Rationale: remove ambiguity and prevent accidental profile reuse across strategies.
 
 ### `strategy-runtime/src/strategies/session_gap_standalone.rs`
 - Conflict source: marketable `Place` migration vs newer `Intent::Place` shape in dev line.
@@ -82,9 +86,9 @@ Executed on integration branch:
 
 ## 8. Remaining follow-up before merge to `main`
 
-1. Final config policy decision for MIW gateway profile naming:
-- current integration keeps dev `gateway.live.7502MIW.toml`.
-- if both session_gap and hybrid need separate MIW live profiles, introduce explicit split config names before trunk merge.
+1. Final config policy decision for live profile naming:
+- strategy-specific names are now used for session_gap/hybrid live configs.
+- if additional portfolios/instruments are added, keep the same naming scheme `<gateway|runtime>.<strategy>.live.<portfolio>.toml`.
 
 2. Run environment smoke checks on target deployment profile(s):
 - session_gap live smoke,
