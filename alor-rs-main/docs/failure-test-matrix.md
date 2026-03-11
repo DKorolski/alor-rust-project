@@ -17,8 +17,8 @@
 
 Подтвержденный основной запуск:
 
-- gateway: `cargo run -p alor-gateway --bin alor_gateway_transport_runner -- --config ./configs/gateway.live.toml --redis-url redis://127.0.0.1/`
-- runtime: `cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.live.toml`
+- gateway: `cargo run -p alor-gateway --bin alor_gateway_transport_runner -- --config ./configs/gateway.sessiongap.live.7502MIW.toml --redis-url redis://127.0.0.1/`
+- runtime: `cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.sessiongap.live.7502MIW.toml`
 - strategy: `strategy_id = "session_gap_standalone"`
 
 Дополнительный ускоренный path для отказных сценариев (`FT-01..FT-03`):
@@ -38,7 +38,7 @@
 
 - дата/время
 - commit SHA
-- конфиги (`gateway.live.toml`, `runtime.live.toml`)
+- конфиги (например `gateway.sessiongap.live.7502MIW.toml`, `runtime.sessiongap.live.7502MIW.toml`)
 - trade mode (`paper` / `live` / `replay`)
 - результат (`PASS` / `FAIL` / `PARTIAL`)
 - ссылки на артефакты (логи, readiness snapshots, Redis excerpts)

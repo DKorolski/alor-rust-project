@@ -60,7 +60,8 @@ cp env.example .env
 - Adjust `CONFIG_DIR`, `REDIS_DATA_DIR`, `REPORTS_DIR` if needed.
 - Set `GATEWAY_CONFIG` and `RUNTIME_CONFIG`:
   - Paper mode: `RUNTIME_CONFIG=/configs/runtime.paper.toml`
-  - Live mode: `RUNTIME_CONFIG=/configs/runtime.live.toml`
+  - Live mode (session_gap): `RUNTIME_CONFIG=/configs/runtime.sessiongap.live.7502MIW.toml`
+  - Live mode (hybrid): `RUNTIME_CONFIG=/configs/runtime.hybrid.live.7502SN6.toml`
 - Fill `ALOR_REFRESH_TOKEN` and any other secrets.
 
 Tag policy:
@@ -156,7 +157,9 @@ Interpretation:
 
 - **Live**:
   - Use a fixed, tested `IMAGE_TAG` (git SHA or `vX.Y.Z`).
-  - `RUNTIME_CONFIG=/configs/runtime.live.toml`
+  - `RUNTIME_CONFIG` points to an existing strategy profile, e.g.:
+    - `/configs/runtime.sessiongap.live.7502MIW.toml`
+    - `/configs/runtime.hybrid.live.7502SN6.toml`
   - Ensure `RUNTIME_ENABLE_TEST_HOOKS=false` (enforced in compose).
 
 After changing `.env`, reload:

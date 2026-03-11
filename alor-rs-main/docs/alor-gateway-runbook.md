@@ -3,14 +3,15 @@
 **Правило №1:** все актуальные TOML-конфиги лежат в `./configs/`. Другие `.toml` в репозитории считаются legacy.
 
 ## Config file path
-- `./configs/gateway.live.toml` — основной gateway конфиг (live/paper runtime uses same gateway feed).
+- `./configs/gateway.sessiongap.live.7502MIW.toml` — gateway профиль для `session_gap`.
+- `./configs/gateway.hybrid.live.7502SN6.toml` — gateway профиль для `hybrid`.
 - `./configs/gateway.example.toml` — минимальный шаблон для первичной настройки.
 
 ## Run command
 ```bash
 RUST_LOG=info,alor_gateway::services::command_consumer=debug,alor_gateway::transport_redis=debug \
 cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
-  --config ./configs/gateway.live.toml \
+  --config ./configs/gateway.sessiongap.live.7502MIW.toml \
   --redis-url redis://127.0.0.1/
 ```
 
@@ -103,7 +104,7 @@ readinessProbe:
 Рекомендуемый запуск:
 ```bash
 RUST_LOG=info,alor_gateway=debug \
-cargo run -p alor-gateway --bin alor_gateway_runner -- --config ./configs/gateway.live.toml
+cargo run -p alor-gateway --bin alor_gateway_runner -- --config ./configs/gateway.sessiongap.live.7502MIW.toml
 ```
 
 ---

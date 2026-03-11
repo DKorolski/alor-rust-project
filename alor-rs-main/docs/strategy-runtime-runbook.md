@@ -4,7 +4,8 @@
 
 ## Config file path
 - `./configs/runtime.paper.toml` — paper режим (без live ордеров).
-- `./configs/runtime.live.toml` — live режим (реальные ордера, включать осознанно).
+- `./configs/runtime.sessiongap.live.7502MIW.toml` — live профиль `session_gap`.
+- `./configs/runtime.hybrid.live.7502SN6.toml` — live профиль `hybrid`.
 - `./configs/runtime.replay.toml` — replay через `strategy_runtime_runner`.
 
 ## Run command

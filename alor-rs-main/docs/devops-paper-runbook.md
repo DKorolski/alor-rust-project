@@ -44,7 +44,7 @@ redis-cli PING
 ```bash
 RUST_LOG=info,alor_gateway::supervisor=info,alor_gateway::ws_hub=info \
 cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
-  --config ./configs/gateway.live.toml \
+  --config ./configs/gateway.sessiongap.live.7502MIW.toml \
   --redis-url redis://127.0.0.1/
 ```
 

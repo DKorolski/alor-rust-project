@@ -23,8 +23,9 @@ Rust workspace для запуска связки:
 
 | Сценарий | Gateway | Runtime |
 |---|---|---|
-| Paper | `configs/gateway.live.toml` | `configs/runtime.paper.toml` |
-| Live | `configs/gateway.live.toml` | `configs/runtime.live.toml` |
+| SessionGap Live | `configs/gateway.sessiongap.live.7502MIW.toml` | `configs/runtime.sessiongap.live.7502MIW.toml` |
+| Hybrid Live | `configs/gateway.hybrid.live.7502SN6.toml` | `configs/runtime.hybrid.live.7502SN6.toml` |
+| Hybrid Paper | `configs/gateway.hybrid.live.7502SN6.toml` | `configs/runtime.hybrid.paper.7502SN6.toml` |
 | Replay | — | `configs/runtime.replay.toml` |
 
 ### 1) Запуск Gateway
@@ -32,7 +33,7 @@ Rust workspace для запуска связки:
 ```bash
 RUST_LOG=info,alor_gateway::services::command_consumer=debug,alor_gateway::transport_redis=debug \
 cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
-  --config ./configs/gateway.live.toml \
+  --config ./configs/gateway.sessiongap.live.7502MIW.toml \
   --redis-url redis://127.0.0.1/
 ```
 
@@ -41,7 +42,7 @@ cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
 ```bash
 RUST_LOG=info,strategy_runtime=info \
 cargo run -p strategy-runtime --bin strategy_runtime_runner -- \
-  --config ./configs/runtime.paper.toml
+  --config ./configs/runtime.hybrid.paper.7502SN6.toml
 ```
 
 ### 3) Health-check Runtime
@@ -142,7 +143,7 @@ StopLimit broker smoke (no strategy logic):
 
 ```bash
 cargo run -p alor-gateway --bin stop_limit_smoke -- \
-  --config ./configs/gateway.live.toml \
+  --config ./configs/gateway.sessiongap.live.7502MIW.toml \
   --dry-run
 ```
 
@@ -150,9 +151,9 @@ Live (single create + single delete):
 
 ```bash
 cargo run -p alor-gateway --bin stop_limit_smoke -- \
-  --config ./configs/gateway.live.toml \
+  --config ./configs/gateway.sessiongap.live.7502MIW.toml \
   --live-confirm \
-  --symbol IMOEXF \
+  --symbol USDRUBF \
   --side buy \
   --qty 1 \
   --trigger-price 1000 \
@@ -163,9 +164,9 @@ StopOrders WS smoke (subscribe + verify status lifecycle for created stop order)
 
 ```bash
 cargo run -p alor-gateway --bin stop_orders_ws_smoke -- \
-  --config ./configs/gateway.live.toml \
+  --config ./configs/gateway.sessiongap.live.7502MIW.toml \
   --live-confirm \
-  --symbol IMOEXF \
+  --symbol USDRUBF \
   --side buy \
   --qty 1 \
   --trigger-price 1000 \

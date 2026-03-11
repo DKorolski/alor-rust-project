@@ -69,7 +69,9 @@ Before enabling live trading:
 
 1. Confirm that `.env` on VPS has:
    - `IMAGE_TAG` set to a fixed, tested tag.
-   - `RUNTIME_CONFIG=/configs/runtime.live.toml`.
+   - `RUNTIME_CONFIG` set to an existing strategy profile, for example:
+     - `/configs/runtime.sessiongap.live.7502MIW.toml`, or
+     - `/configs/runtime.hybrid.live.7502SN6.toml`.
    - `RUNTIME_ENABLE_TEST_HOOKS` is **not** set to `true` anywhere.
 
 2. Restart stack after any env/config change:
@@ -105,20 +107,23 @@ Paper baseline used before live cutover (March 6, 2026):
 
 If you want to test or run on another instrument, change configs first, then recreate containers.
 
-Files to update:
+Files to update (strategy-specific profiles):
 
-- `alor-rs-main/configs/gateway.live.toml`
-- `alor-rs-main/configs/runtime.paper.toml`
-- `alor-rs-main/configs/runtime.live.toml`
+- session_gap:
+  - `alor-rs-main/configs/gateway.sessiongap.live.7502MIW.toml`
+  - `alor-rs-main/configs/runtime.sessiongap.live.7502MIW.toml`
+- hybrid:
+  - `alor-rs-main/configs/gateway.hybrid.live.7502SN6.toml`
+  - `alor-rs-main/configs/runtime.hybrid.live.7502SN6.toml`
 
 Minimum changes:
 
-1. In `gateway.live.toml`:
+1. In the target gateway profile:
 
 - `symbols = ["IMOEXF"]`
 - `log_positions_filter = ["IMOEXF"]`
 
-2. In `runtime.paper.toml` and `runtime.live.toml`:
+2. In the target runtime profile(s):
 
 - `[strategy].symbol = "IMOEXF"`
 

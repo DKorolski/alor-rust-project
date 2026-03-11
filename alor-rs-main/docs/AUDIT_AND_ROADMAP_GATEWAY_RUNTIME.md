@@ -449,7 +449,7 @@
 
 Аудит этого раздела основан на том, что ты запускаешь runtime с:
 
-- `cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.live.toml`
+- `cargo run -p strategy-runtime --bin strategy_runtime_runner -- --config ./configs/runtime.sessiongap.live.7502MIW.toml`
 - `strategy_id = "session_gap_standalone"`
 
 То есть именно эта стратегия является **главным production path** для текущего контура.
