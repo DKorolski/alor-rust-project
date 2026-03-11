@@ -1,7 +1,6 @@
 services:
   redis:
     image: redis:7-alpine
-    container_name: trading_redis
     command: ["redis-server", "--appendonly", "yes"]
     restart: unless-stopped
     networks:
@@ -23,7 +22,6 @@ services:
 
   alor-gateway:
     image: ghcr.io/dkorolski/alor-rust-project/alor-gateway:${IMAGE_TAG}
-    container_name: trading_alor_gateway
     restart: unless-stopped
     depends_on:
       redis:
@@ -66,7 +64,6 @@ services:
 
   strategy-runtime:
     image: ghcr.io/dkorolski/alor-rust-project/strategy-runtime:${IMAGE_TAG}
-    container_name: trading_strategy_runtime
     restart: unless-stopped
     depends_on:
       redis:

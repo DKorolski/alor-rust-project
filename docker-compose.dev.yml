@@ -1,13 +1,9 @@
 services:
   redis:
-    container_name: trading_dev_redis
-
   alor-gateway:
-    container_name: trading_dev_alor_gateway
     env_file:
       - .env.dev
 
   strategy-runtime:
-    container_name: trading_dev_strategy_runtime
     env_file:
       - .env.dev
