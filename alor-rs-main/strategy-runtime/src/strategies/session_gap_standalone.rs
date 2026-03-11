@@ -110,6 +110,7 @@ pub struct SessionGapStandaloneStrategy {
     traded_session: bool,
     pending_entry: Option<PendingEntry>,
     position: Option<Position>,
+    last_warmup_log: Option<bool>,
 }
 
 impl SessionGapStandaloneStrategy {
@@ -135,6 +136,47 @@ impl SessionGapStandaloneStrategy {
             traded_session: false,
             pending_entry: None,
             position: None,
+            last_warmup_log: None,
+        }
+    }
+
+    fn signals_warmed(&self) -> bool {
+        self.yesterday_close.is_some()
+            && self.yesterday_range.is_some()
+            && self.pre_prev_close.is_some()
+    }
+
+    fn log_signal_warmup_status_if_changed(&mut self, session_date: &str, last_bar_ts: i64) {
+        let warmed = self.signals_warmed();
+        if self.last_warmup_log == Some(warmed) {
+            return;
+        }
+        self.last_warmup_log = Some(warmed);
+        if warmed {
+            info!(
+                strategy = "session_gap_standalone",
+                symbol = self.config.symbol,
+                session_date,
+                prev_close = self.yesterday_close,
+                pre_prev_close = self.pre_prev_close,
+                yesterday_range = self.yesterday_range,
+                signals_warmed = true,
+                "signal warmup complete"
+            );
+        } else {
+            warn!(
+                strategy = "session_gap_standalone",
+                symbol = self.config.symbol,
+                session_date,
+                last_bar_ts,
+                prev_close = self.yesterday_close,
+                pre_prev_close = self.pre_prev_close,
+                yesterday_range = self.yesterday_range,
+                signals_warmed = false,
+                action = "signal_warmup_incomplete",
+                reason = "indicators_not_warmed",
+                "signal warmup incomplete"
+            );
         }
     }
 
@@ -374,7 +416,24 @@ impl SessionGapStandaloneStrategy {
             self.pre_prev_close,
         ) {
             (Some(close), Some(range), Some(prev_close)) => (close, range, prev_close),
-            _ => return,
+            _ => {
+                if bar_dt.minute() == 59
+                    && (bar_dt - session_start_dt).num_seconds() >= self.config.wait_hours * 3600
+                {
+                    warn!(
+                        strategy = "session_gap_standalone",
+                        symbol = self.config.symbol,
+                        ts_utc = bar.close_time_utc,
+                        action = "entry_blocked",
+                        reason = "indicators_not_warmed",
+                        prev_close = self.yesterday_close,
+                        pre_prev_close = self.pre_prev_close,
+                        yesterday_range = self.yesterday_range,
+                        "entry blocked: indicators not warmed"
+                    );
+                }
+                return;
+            }
         };
 
         if bar_dt.minute() == 59
@@ -681,6 +740,7 @@ impl Strategy for SessionGapStandaloneStrategy {
         }
 
         self.update_session(bar_dt, bar);
+        self.log_signal_warmup_status_if_changed(&current_session_date, bar.close_time_utc);
 
         if ctx.trade_mode != TradeMode::Live {
             let phase = self.persisted_phase_or_flat();
@@ -711,7 +771,12 @@ impl Strategy for SessionGapStandaloneStrategy {
         let previous_phase = phase.clone();
         let next_phase = match phase {
             SessionGapLivePhase::Flat => {
-                if let Some(pending) = self.pending_entry.take() {
+                if !self.signals_warmed() {
+                    SessionGapLivePhase::Blocked {
+                        reason: "indicators_not_warmed".to_string(),
+                        ts_utc: bar.close_time_utc,
+                    }
+                } else if let Some(pending) = self.pending_entry.take() {
                     let side = Self::entry_side(pending.direction);
                     let (tp, sl) = self.compute_tp_sl(pending.direction, bar.o);
                     let qty = pending.size as f64;
@@ -742,6 +807,12 @@ impl Strategy for SessionGapStandaloneStrategy {
                     SessionGapLivePhase::Flat
                 }
             }
+            SessionGapLivePhase::Blocked { reason, .. }
+                if reason == "indicators_not_warmed" && self.signals_warmed() =>
+            {
+                SessionGapLivePhase::Flat
+            }
+            SessionGapLivePhase::Blocked { .. } => phase,
             SessionGapLivePhase::PendingEntry { sent_ts, acked, .. } => {
                 let elapsed = (bar.close_time_utc - sent_ts).saturating_mul(1000) as u64;
                 if !acked && elapsed > self.config.entry_ack_timeout_ms {
@@ -846,7 +917,6 @@ impl Strategy for SessionGapStandaloneStrategy {
                     phase
                 }
             }
-            SessionGapLivePhase::Blocked { .. } => phase,
         };
 
         Self::log_phase_transition(&previous_phase, &next_phase, bar.close_time_utc);
@@ -1041,6 +1111,7 @@ impl Strategy for SessionGapStandaloneStrategy {
             self.yesterday_close = *prev_close;
             self.yesterday_range = *yesterday_range;
             self.pre_prev_close = *pre_prev_close;
+            self.last_warmup_log = Some(self.signals_warmed());
             self.first_min_high = *first_min_high;
             self.first_min_low = *first_min_low;
             self.first_hour_price = *first_hour_price;
@@ -1756,6 +1827,103 @@ mod tests {
         assert_eq!(strategy.session_low, Some(94.0));
         assert_eq!(strategy.session_close, Some(101.0));
         assert_eq!(strategy.last_processed_bar_ts, Some(next_ts));
+    }
+
+    #[test]
+    fn live_false_ready_without_indicators_is_blocked() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let mut b = bar(1_773_140_340, 79.0, 79.1, 78.9, 79.05);
+        b.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &b);
+        assert!(intents.is_empty());
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::Blocked { ref reason, .. },
+                ..
+            } if reason == "indicators_not_warmed"
+        ));
+    }
+
+    #[test]
+    fn live_warmup_with_history_bars_reconstructs_signal_indicators() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+
+        let day1_start = offset
+            .with_ymd_and_hms(2026, 3, 9, 10, 0, 0)
+            .single()
+            .unwrap();
+        let day2_start = day1_start + Duration::days(1);
+        let day3_start = day2_start + Duration::days(1);
+
+        let mut history = vec![
+            bar(
+                day1_start.with_timezone(&Utc).timestamp(),
+                78.0,
+                78.4,
+                77.8,
+                78.2,
+            ),
+            bar(
+                (day1_start + Duration::minutes(10))
+                    .with_timezone(&Utc)
+                    .timestamp(),
+                78.2,
+                78.6,
+                77.9,
+                78.5,
+            ),
+            bar(
+                day2_start.with_timezone(&Utc).timestamp(),
+                78.6,
+                79.0,
+                78.5,
+                78.9,
+            ),
+            bar(
+                (day2_start + Duration::minutes(10))
+                    .with_timezone(&Utc)
+                    .timestamp(),
+                78.9,
+                79.2,
+                78.7,
+                79.1,
+            ),
+            bar(
+                day3_start.with_timezone(&Utc).timestamp(),
+                79.0,
+                79.3,
+                78.8,
+                79.2,
+            ),
+        ];
+        for event in &mut history {
+            event.origin = DataOrigin::History;
+        }
+
+        for event in history {
+            let _ = strategy.on_bar(&ctx, &event);
+        }
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                prev_close,
+                pre_prev_close,
+                yesterday_range,
+                phase,
+                ..
+            } => {
+                assert!(prev_close.is_some());
+                assert!(pre_prev_close.is_some());
+                assert!(yesterday_range.is_some());
+                assert!(matches!(phase, SessionGapLivePhase::Flat));
+            }
+            other => panic!("unexpected state after history warmup: {other:?}"),
+        }
     }
 
     #[test]

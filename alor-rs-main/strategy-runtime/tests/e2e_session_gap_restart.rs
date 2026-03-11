@@ -417,6 +417,40 @@ async fn wait_xlen_at_least(
     }
 }
 
+async fn read_latest_runtime_state_payload(
+    redis_url: &str,
+    stream: &str,
+) -> Result<serde_json::Value> {
+    let client = redis::Client::open(redis_url)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let reply: redis::Value = redis::cmd("XREVRANGE")
+        .arg(stream)
+        .arg("+")
+        .arg("-")
+        .arg("COUNT")
+        .arg(1)
+        .query_async(&mut conn)
+        .await?;
+
+    let entries = match reply {
+        redis::Value::Bulk(values) => values,
+        _ => anyhow::bail!("invalid xrevrange reply"),
+    };
+    let entry = entries
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("runtime state stream is empty"))?;
+    let fields = match entry {
+        redis::Value::Bulk(values) => values,
+        _ => anyhow::bail!("invalid stream entry"),
+    };
+    if fields.len() < 2 {
+        anyhow::bail!("stream entry missing payload");
+    }
+    let payload = extract_payload(&fields[1]).ok_or_else(|| anyhow::anyhow!("missing payload"))?;
+    let value = serde_json::from_str::<serde_json::Value>(&payload)?;
+    Ok(value)
+}
+
 async fn publish_entry_bars(redis_url: &str, config: &RuntimeConfig) -> Result<()> {
     let stream = &config.streams.bars;
     let symbol = &config.strategy.symbol;
@@ -663,4 +697,194 @@ async fn restart_mid_cycle_works_with_updated_snapshot() -> Result<()> {
 #[tokio::test]
 async fn restart_mid_cycle_snapshot_only_works() -> Result<()> {
     run_restart_mid_cycle_case(false, true).await
+}
+
+#[tokio::test]
+async fn warmup_from_history_without_runtime_state_restores_indicators() -> Result<()> {
+    let redis_url = match redis_url() {
+        Some(url) => url,
+        None => {
+            eprintln!("REDIS_URL not set; skipping e2e test");
+            return Ok(());
+        }
+    };
+    redis_flushdb(&redis_url).await?;
+
+    let prefix = format!("e2e-session-gap-warmup-{}", Uuid::new_v4());
+    let config = build_config(redis_url.clone(), &prefix, "runtime-session-gap-warmup");
+    publish_snapshots(
+        &redis_url,
+        config.streams.snapshots.as_ref().expect("snapshots"),
+    )
+    .await?;
+
+    let symbol = &config.strategy.symbol;
+    let bars = &config.streams.bars;
+    publish_bar_ohlc(
+        &redis_url,
+        bars,
+        symbol,
+        ts_utc_from_msk(2025, 1, 8, 10, 0),
+        100.0,
+        101.0,
+        99.0,
+        100.5,
+        DataOrigin::History,
+    )
+    .await?;
+    publish_bar_ohlc(
+        &redis_url,
+        bars,
+        symbol,
+        ts_utc_from_msk(2025, 1, 8, 10, 30),
+        100.5,
+        102.0,
+        99.5,
+        101.5,
+        DataOrigin::History,
+    )
+    .await?;
+    publish_bar_ohlc(
+        &redis_url,
+        bars,
+        symbol,
+        ts_utc_from_msk(2025, 1, 9, 10, 0),
+        101.0,
+        103.0,
+        100.0,
+        102.0,
+        DataOrigin::History,
+    )
+    .await?;
+    publish_bar_ohlc(
+        &redis_url,
+        bars,
+        symbol,
+        ts_utc_from_msk(2025, 1, 9, 10, 30),
+        102.0,
+        104.0,
+        101.0,
+        103.0,
+        DataOrigin::History,
+    )
+    .await?;
+
+    let handle = spawn_runtime(config.clone()).await;
+    wait_for_consumer_group(&redis_url, &config.streams.bars, &config.consumer_group).await?;
+    if let Some(health_stream) = &config.streams.health {
+        publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
+    }
+    sleep(STARTUP_SETTLE).await;
+
+    publish_bar_ohlc(
+        &redis_url,
+        bars,
+        symbol,
+        ts_utc_from_msk(2025, 1, 10, 10, 0),
+        103.0,
+        104.0,
+        102.5,
+        103.5,
+        DataOrigin::Live,
+    )
+    .await?;
+
+    wait_xlen_at_least(
+        &redis_url,
+        &config.streams.runtime_state,
+        1,
+        Duration::from_secs(5),
+    )
+    .await?;
+
+    let payload =
+        read_latest_runtime_state_payload(&redis_url, &config.streams.runtime_state).await?;
+    let state = &payload["strategy_state"]["SessionGapStandalone"];
+    assert!(state["prev_close"].is_number());
+    assert!(state["pre_prev_close"].is_number());
+    assert!(state["yesterday_range"].is_number());
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn insufficient_history_keeps_strategy_blocked_with_indicator_reason() -> Result<()> {
+    let redis_url = match redis_url() {
+        Some(url) => url,
+        None => {
+            eprintln!("REDIS_URL not set; skipping e2e test");
+            return Ok(());
+        }
+    };
+    redis_flushdb(&redis_url).await?;
+
+    let prefix = format!("e2e-session-gap-warmup-incomplete-{}", Uuid::new_v4());
+    let config = build_config(
+        redis_url.clone(),
+        &prefix,
+        "runtime-session-gap-warmup-incomplete",
+    );
+    publish_snapshots(
+        &redis_url,
+        config.streams.snapshots.as_ref().expect("snapshots"),
+    )
+    .await?;
+
+    let symbol = &config.strategy.symbol;
+    let bars = &config.streams.bars;
+    publish_bar_ohlc(
+        &redis_url,
+        bars,
+        symbol,
+        ts_utc_from_msk(2025, 1, 10, 10, 0),
+        103.0,
+        104.0,
+        102.5,
+        103.5,
+        DataOrigin::History,
+    )
+    .await?;
+
+    let handle = spawn_runtime(config.clone()).await;
+    wait_for_consumer_group(&redis_url, &config.streams.bars, &config.consumer_group).await?;
+    if let Some(health_stream) = &config.streams.health {
+        publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
+    }
+    sleep(STARTUP_SETTLE).await;
+
+    publish_bar_ohlc(
+        &redis_url,
+        bars,
+        symbol,
+        ts_utc_from_msk(2025, 1, 10, 10, 1),
+        103.2,
+        104.1,
+        103.0,
+        103.8,
+        DataOrigin::Live,
+    )
+    .await?;
+
+    wait_xlen_at_least(
+        &redis_url,
+        &config.streams.runtime_state,
+        1,
+        Duration::from_secs(5),
+    )
+    .await?;
+
+    let payload =
+        read_latest_runtime_state_payload(&redis_url, &config.streams.runtime_state).await?;
+    let state = &payload["strategy_state"]["SessionGapStandalone"];
+    assert!(state["prev_close"].is_null());
+    assert!(state["pre_prev_close"].is_null());
+    assert!(state["yesterday_range"].is_null());
+    assert_eq!(
+        state["phase"]["Blocked"]["reason"].as_str(),
+        Some("indicators_not_warmed")
+    );
+
+    handle.abort();
+    Ok(())
 }
