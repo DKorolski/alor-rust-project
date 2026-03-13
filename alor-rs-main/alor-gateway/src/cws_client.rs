@@ -82,35 +82,43 @@ impl CwsHandle {
         qty: f64,
         side: &str,
         comment: Option<&str>,
+        request_id: Option<&str>,
     ) -> anyhow::Result<Value> {
-        let guid = new_guid();
         let qty = qty.round() as i64;
-        let mut payload = Map::new();
-        payload.insert(
-            "opcode".to_string(),
-            Value::String("create:limit".to_string()),
+        let check_duplicates = true;
+        let payload = build_create_limit_payload(
+            portfolio,
+            exchange,
+            symbol,
+            &self.instrument_group,
+            price,
+            qty,
+            side,
+            comment,
+            check_duplicates,
+            request_id,
         );
-        payload.insert("guid".to_string(), Value::String(guid));
-        payload.insert("side".to_string(), Value::String(side.to_string()));
-        payload.insert("quantity".to_string(), Value::from(qty));
-        payload.insert("price".to_string(), Value::from(price));
-        payload.insert(
-            "instrument".to_string(),
-            serde_json::json!({"symbol": symbol, "exchange": exchange}),
+        let cws_guid = payload
+            .get("guid")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        info!(
+            action = "cws_limit_send",
+            opcode = "create:limit",
+            request_id = ?request_id,
+            cws_guid,
+            symbol,
+            exchange,
+            instrument_group = %self.instrument_group,
+            side,
+            qty,
+            price,
+            time_in_force = CWS_TIME_IN_FORCE,
+            allow_margin = CWS_ALLOW_MARGIN,
+            check_duplicates,
+            "cws limit request prepared"
         );
-        payload.insert(
-            "user".to_string(),
-            serde_json::json!({"portfolio": portfolio}),
-        );
-        payload.insert(
-            "timeInForce".to_string(),
-            Value::String(CWS_TIME_IN_FORCE.to_string()),
-        );
-        payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
-        if let Some(comment) = comment {
-            payload.insert("comment".to_string(), Value::String(comment.to_string()));
-        }
-        self.send(Value::Object(payload)).await
+        self.send(payload).await
     }
 
     pub async fn create_market(
@@ -342,6 +350,53 @@ fn build_create_market_payload(
         Value::from(CWS_MARKET_ALLOW_MARGIN),
     );
     payload.insert("checkDuplicates".to_string(), Value::from(true));
+    if let Some(comment) = comment {
+        payload.insert("comment".to_string(), Value::String(comment.to_string()));
+    }
+    Value::Object(payload)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_create_limit_payload(
+    portfolio: &str,
+    exchange: &str,
+    symbol: &str,
+    instrument_group: &str,
+    price: f64,
+    qty: i64,
+    side: &str,
+    comment: Option<&str>,
+    check_duplicates: bool,
+    request_id: Option<&str>,
+) -> Value {
+    let guid = request_id.map(ToString::to_string).unwrap_or_else(new_guid);
+    let mut payload = Map::new();
+    payload.insert(
+        "opcode".to_string(),
+        Value::String("create:limit".to_string()),
+    );
+    payload.insert("guid".to_string(), Value::String(guid));
+    payload.insert("side".to_string(), Value::String(side.to_string()));
+    payload.insert("quantity".to_string(), Value::from(qty));
+    payload.insert("price".to_string(), Value::from(price));
+    payload.insert(
+        "instrument".to_string(),
+        serde_json::json!({
+            "symbol": symbol,
+            "exchange": exchange,
+            "instrumentGroup": instrument_group
+        }),
+    );
+    payload.insert(
+        "user".to_string(),
+        serde_json::json!({"portfolio": portfolio}),
+    );
+    payload.insert(
+        "timeInForce".to_string(),
+        Value::String(CWS_TIME_IN_FORCE.to_string()),
+    );
+    payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
+    payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
     if let Some(comment) = comment {
         payload.insert("comment".to_string(), Value::String(comment.to_string()));
     }
@@ -647,6 +702,153 @@ fn jittered(duration: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_create_limit_payload_includes_required_fields() {
+        let payload = build_create_limit_payload(
+            "D39004",
+            "MOEX",
+            "SBER",
+            "TQBR",
+            123.45,
+            7,
+            "buy",
+            None,
+            true,
+            Some("req-1"),
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert_eq!(
+            obj.get("opcode").and_then(Value::as_str),
+            Some("create:limit")
+        );
+        assert_eq!(obj.get("guid").and_then(Value::as_str), Some("req-1"));
+        assert_eq!(obj.get("side").and_then(Value::as_str), Some("buy"));
+        assert_eq!(obj.get("quantity").and_then(Value::as_i64), Some(7));
+        assert_eq!(obj.get("price").and_then(Value::as_f64), Some(123.45));
+        assert_eq!(
+            obj.get("timeInForce").and_then(Value::as_str),
+            Some(CWS_TIME_IN_FORCE)
+        );
+        assert_eq!(
+            obj.get("allowMargin").and_then(Value::as_bool),
+            Some(CWS_ALLOW_MARGIN)
+        );
+        assert_eq!(
+            obj.get("checkDuplicates").and_then(Value::as_bool),
+            Some(true)
+        );
+        let instrument = obj
+            .get("instrument")
+            .and_then(Value::as_object)
+            .expect("instrument");
+        assert_eq!(
+            instrument.get("symbol").and_then(Value::as_str),
+            Some("SBER")
+        );
+        assert_eq!(
+            instrument.get("exchange").and_then(Value::as_str),
+            Some("MOEX")
+        );
+        assert_eq!(
+            instrument.get("instrumentGroup").and_then(Value::as_str),
+            Some("TQBR")
+        );
+    }
+
+    #[test]
+    fn build_create_limit_payload_nests_instrument_group() {
+        let payload = build_create_limit_payload(
+            "D39004", "MOEX", "SBER", "TQBR", 123.45, 7, "buy", None, true, None,
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert!(
+            !obj.contains_key("instrumentGroup"),
+            "instrumentGroup must be nested under instrument"
+        );
+        let instrument = obj
+            .get("instrument")
+            .and_then(Value::as_object)
+            .expect("instrument");
+        assert_eq!(
+            instrument.get("instrumentGroup").and_then(Value::as_str),
+            Some("TQBR")
+        );
+    }
+
+    #[test]
+    fn build_create_limit_payload_preserves_optional_comment() {
+        let payload = build_create_limit_payload(
+            "D39004",
+            "MOEX",
+            "SBER",
+            "TQBR",
+            123.45,
+            7,
+            "buy",
+            Some("hello"),
+            true,
+            None,
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert_eq!(obj.get("comment").and_then(Value::as_str), Some("hello"));
+        assert_eq!(
+            obj.get("timeInForce").and_then(Value::as_str),
+            Some(CWS_TIME_IN_FORCE)
+        );
+        assert_eq!(
+            obj.get("checkDuplicates").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn build_create_limit_payload_always_sets_check_duplicates() {
+        let payload = build_create_limit_payload(
+            "D39004", "MOEX", "SBER", "TQBR", 123.45, 7, "buy", None, true, None,
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert_eq!(
+            obj.get("checkDuplicates").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn build_create_limit_payload_time_in_force_is_oneday() {
+        let payload = build_create_limit_payload(
+            "D39004", "MOEX", "SBER", "TQBR", 123.45, 7, "buy", None, true, None,
+        );
+        let obj = payload.as_object().expect("payload object");
+        assert_eq!(
+            obj.get("timeInForce").and_then(Value::as_str),
+            Some("OneDay")
+        );
+    }
+
+    #[test]
+    fn limit_market_payload_parity_for_common_transport_fields() {
+        let market = build_create_market_payload("D39004", "MOEX", "SBER", "TQBR", 7, "buy", None);
+        let limit = build_create_limit_payload(
+            "D39004", "MOEX", "SBER", "TQBR", 123.45, 7, "buy", None, true, None,
+        );
+        let market_obj = market.as_object().expect("market object");
+        let limit_obj = limit.as_object().expect("limit object");
+        for field in [
+            "opcode",
+            "guid",
+            "side",
+            "quantity",
+            "instrument",
+            "user",
+            "timeInForce",
+            "allowMargin",
+            "checkDuplicates",
+        ] {
+            assert!(market_obj.contains_key(field), "market missing {field}");
+            assert!(limit_obj.contains_key(field), "limit missing {field}");
+        }
+    }
 
     #[test]
     fn build_create_market_payload_includes_required_fields() {

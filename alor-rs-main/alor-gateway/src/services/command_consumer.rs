@@ -313,10 +313,11 @@ pub async fn run_command_consumer(
                     request_map.write().insert(payload.order_id, request_id);
                 }
 
-                match execute_command(&cws, &command, price_step, volume_step).await {
+                match execute_command(&cws, &command, request_id, price_step, volume_step).await {
                     Ok(response) => {
                         let info = parse_cws_response(&response);
                         let http_code = info.http_code.unwrap_or(0);
+                        let cws_request_guid = info.request_guid.clone();
                         info!(
                             request_id = %request_id,
                             action = %command_action_label(&command.action),
@@ -326,6 +327,35 @@ pub async fn run_command_consumer(
                             broker_order_id = info.order_id,
                             "cws response"
                         );
+                        if matches!(command.action, CommandAction::Place(_)) {
+                            let (status, error_code, error_msg): (&str, Option<String>, Option<String>) =
+                                if http_code == 200 {
+                                    ("accepted", None, None)
+                                } else if http_code > 0 {
+                                    (
+                                        "rejected",
+                                        Some(format!("cws_http_{http_code}")),
+                                        info.message.clone(),
+                                    )
+                                } else {
+                                    (
+                                        "error",
+                                        Some("cws_error".to_string()),
+                                        Some("missing httpCode".to_string()),
+                                    )
+                                };
+                            info!(
+                                action = "cws_limit_ack",
+                                opcode = "create:limit",
+                                request_id = %request_id,
+                                cws_guid = ?cws_request_guid,
+                                status,
+                                broker_order_id = info.order_id,
+                                error_code = ?error_code,
+                                error_msg = ?error_msg,
+                                "cws limit ack received"
+                            );
+                        }
                         let (status, error_code, error_msg) = if http_code == 200 {
                             (alor_protocol::AckStatus::Accepted, None, None)
                         } else if http_code > 0 {
@@ -374,6 +404,19 @@ pub async fn run_command_consumer(
                     }
                     Err(error) => {
                         increment_counter(&health, |h| h.cws_errors_total = h.cws_errors_total.saturating_add(1));
+                        if matches!(command.action, CommandAction::Place(_)) {
+                            info!(
+                                action = "cws_limit_ack",
+                                opcode = "create:limit",
+                                request_id = %request_id,
+                                cws_guid = ?None::<String>,
+                                status = "error",
+                                broker_order_id = Option::<i64>::None,
+                                error_code = "cws_error",
+                                error_msg = %error,
+                                "cws limit ack received"
+                            );
+                        }
                         let ack = CommandAck::error(request_id, "cws_error", format!("{error}"));
                         sink.publish_ack(ack.clone()).await?;
                         info!(
@@ -531,11 +574,13 @@ fn is_command_expired(command: &OrderCommand) -> bool {
 async fn execute_command(
     cws: &crate::cws_client::CwsHandle,
     command: &OrderCommand,
+    request_id: uuid::Uuid,
     price_step: f64,
     volume_step: f64,
 ) -> anyhow::Result<serde_json::Value> {
     match &command.action {
         CommandAction::Place(payload) => {
+            let request_id_str = request_id.to_string();
             let price = normalize_price(payload.price, price_step, payload.side);
             let qty = normalize_qty(payload.qty, volume_step);
             let response = cws
@@ -547,6 +592,7 @@ async fn execute_command(
                     qty,
                     side_str(payload.side),
                     payload.comment.as_deref(),
+                    Some(request_id_str.as_str()),
                 )
                 .await?;
             Ok(response)
