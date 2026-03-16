@@ -404,25 +404,34 @@ pub async fn run_command_consumer(
                     }
                     Err(error) => {
                         increment_counter(&health, |h| h.cws_errors_total = h.cws_errors_total.saturating_add(1));
+                        let transport_failure = error.downcast_ref::<crate::cws_client::CwsRequestFailure>();
+                        let cws_guid = transport_failure.map(|failure| failure.cws_guid().to_string());
+                        let disconnect_kind = transport_failure
+                            .map(|failure| failure.transport().disconnect_kind_str().to_string());
                         if matches!(command.action, CommandAction::Place(_)) {
                             info!(
                                 action = "cws_limit_ack",
                                 opcode = "create:limit",
                                 request_id = %request_id,
-                                cws_guid = ?None::<String>,
+                                cws_guid = ?cws_guid,
                                 status = "error",
                                 broker_order_id = Option::<i64>::None,
                                 error_code = "cws_error",
-                                error_msg = %error,
+                                error_msg = %format_transport_error_message(&error),
+                                disconnect_kind = ?disconnect_kind,
                                 "cws limit ack received"
                             );
                         }
-                        let ack = CommandAck::error(request_id, "cws_error", format!("{error}"));
+                        let ack = build_transport_error_ack(request_id, &error);
                         sink.publish_ack(ack.clone()).await?;
                         info!(
                             request_id = %ack.request_id,
                             status = ?ack.status,
                             processed_ts_utc = ack.processed_ts_utc,
+                            broker_order_id = ack.broker_order_id,
+                            error_code = ?ack.error_code,
+                            cws_http_code = ?ack.cws_http_code,
+                            cws_request_guid = ?ack.cws_request_guid,
                             "command ack published"
                         );
                         if let Some(message_id) = message_id.as_deref() {
@@ -598,6 +607,7 @@ async fn execute_command(
             Ok(response)
         }
         CommandAction::Market(payload) => {
+            let request_id_str = request_id.to_string();
             let qty = normalize_qty(payload.qty, volume_step);
             let response = cws
                 .create_market(
@@ -607,17 +617,25 @@ async fn execute_command(
                     qty,
                     side_str(payload.side),
                     payload.comment.as_deref(),
+                    Some(request_id_str.as_str()),
                 )
                 .await?;
             Ok(response)
         }
         CommandAction::Cancel(payload) => {
+            let request_id_str = request_id.to_string();
             let response = cws
-                .cancel(&command.portfolio, &command.exchange, payload.order_id)
+                .cancel(
+                    &command.portfolio,
+                    &command.exchange,
+                    payload.order_id,
+                    Some(request_id_str.as_str()),
+                )
                 .await?;
             Ok(response)
         }
         CommandAction::Replace(payload) => {
+            let request_id_str = request_id.to_string();
             let new_price = normalize_step_round(payload.new_price, price_step);
             let new_qty = normalize_qty(payload.new_qty, volume_step);
             let response = cws
@@ -629,11 +647,13 @@ async fn execute_command(
                     payload.order_id,
                     new_price,
                     new_qty,
+                    Some(request_id_str.as_str()),
                 )
                 .await?;
             Ok(response)
         }
         CommandAction::CreateStopLimit(payload) => {
+            let request_id_str = request_id.to_string();
             let qty = normalize_qty(payload.qty, volume_step);
             let trigger_price = normalize_step_round(payload.trigger_price, price_step);
             let price = normalize_step_round(payload.price, price_step);
@@ -651,11 +671,13 @@ async fn execute_command(
                     payload.comment.as_deref(),
                     payload.instrument_group.as_deref(),
                     payload.check_duplicates.unwrap_or(true),
+                    Some(request_id_str.as_str()),
                 )
                 .await?;
             Ok(response)
         }
         CommandAction::DeleteStopLimit(payload) => {
+            let request_id_str = request_id.to_string();
             let response = cws
                 .delete_stop_limit(
                     &command.portfolio,
@@ -663,6 +685,7 @@ async fn execute_command(
                     &payload.order_id,
                     payload.side.map(side_str),
                     payload.check_duplicates.unwrap_or(true),
+                    Some(request_id_str.as_str()),
                 )
                 .await?;
             Ok(response)
@@ -762,6 +785,31 @@ fn build_cws_ack(
         cws_request_guid: info.request_guid,
         processed_ts_utc: chrono::Utc::now().timestamp(),
     }
+}
+
+fn format_transport_error_message(error: &anyhow::Error) -> String {
+    error
+        .downcast_ref::<crate::cws_client::CwsRequestFailure>()
+        .map(|failure| failure.summary())
+        .unwrap_or_else(|| error.to_string())
+}
+
+fn build_transport_error_ack(request_id: uuid::Uuid, error: &anyhow::Error) -> CommandAck {
+    if let Some(failure) = error.downcast_ref::<crate::cws_client::CwsRequestFailure>() {
+        return CommandAck {
+            request_id,
+            status: alor_protocol::AckStatus::Error,
+            broker_order_id: None,
+            broker_order_id_str: None,
+            error_code: Some("cws_error".to_string()),
+            error_msg: Some(failure.summary()),
+            cws_http_code: None,
+            cws_message: None,
+            cws_request_guid: Some(failure.cws_guid().to_string()),
+            processed_ts_utc: chrono::Utc::now().timestamp(),
+        };
+    }
+    CommandAck::error(request_id, "cws_error", error.to_string())
 }
 
 fn side_str(side: Side) -> &'static str {
@@ -865,6 +913,38 @@ mod tests {
         );
         assert_eq!(ack.broker_order_id, None);
         assert_eq!(ack.broker_order_id_str.as_deref(), Some("A-12345"));
+    }
+
+    #[test]
+    fn build_transport_error_ack_preserves_cws_guid() {
+        let request_id = uuid::Uuid::new_v4();
+        let error = anyhow::Error::new(crate::cws_client::CwsRequestFailure::new(
+            Some(request_id.to_string()),
+            "guid-1".to_string(),
+            "create:limit".to_string(),
+            Some("USDRUBF".to_string()),
+            crate::cws_client::CwsTransportFailure::new(
+                crate::cws_client::CwsDisconnectKind::ProtocolResetWithoutCloseHandshake,
+                "Connection reset without closing handshake",
+                None,
+                None,
+            ),
+        ));
+
+        let ack = build_transport_error_ack(request_id, &error);
+        assert_eq!(ack.status, alor_protocol::AckStatus::Error);
+        assert_eq!(ack.error_code.as_deref(), Some("cws_error"));
+        assert_eq!(
+            ack.error_msg.as_deref(),
+            Some("cws disconnected: protocol_reset_without_close_handshake")
+        );
+        assert_eq!(ack.cws_request_guid.as_deref(), Some("guid-1"));
+    }
+
+    #[test]
+    fn format_transport_error_message_falls_back_to_plain_error() {
+        let error = anyhow::anyhow!("plain error");
+        assert_eq!(format_transport_error_message(&error), "plain error");
     }
 
     fn sample_command(created_ts_utc: i64, ttl_ms: Option<u64>) -> OrderCommand {

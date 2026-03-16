@@ -112,6 +112,7 @@ async fn main() -> Result<()> {
             Some(&comment),
             instrument_group.as_deref(),
             true,
+            None,
         )
         .await
         .context("create:stopLimit failed")?;
@@ -141,6 +142,7 @@ async fn main() -> Result<()> {
             &stop_order_id,
             Some(side.as_str()),
             true,
+            None,
         )
         .await
         .context("delete:stopLimit failed")?;

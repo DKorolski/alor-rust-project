@@ -92,6 +92,43 @@ readinessProbe:
 3. Проверить публикацию в Redis stream `bars`.
 4. Убедиться, что downstream не блокирует event publisher (backpressure flags).
 
+### 4.4 CWS transport failure after send
+Симптомы:
+- `cmd.acks.*` содержит `status=error`, `error_code=cws_error`,
+- `error_msg` выглядит как `cws disconnected: <disconnect_kind>`,
+- в gateway логах есть `action=cws_transport_failure`,
+- следом есть `action=cws_fail_pending`.
+
+Что смотреть:
+1. `request_id` из `cmd.orders.*` и `cmd.acks.*`.
+2. `cws_guid` из:
+   - `cws_limit_send`,
+   - `cws_limit_ack`,
+   - published `command_ack`.
+3. `disconnect_kind` и `raw_error` в `cws_transport_failure`.
+4. `affected` список в `cws_fail_pending`:
+   - `request_id`,
+   - `cws_guid`,
+   - `opcode`,
+   - `symbol`.
+5. `events.health` рядом с инцидентом:
+   - `ws_connected`,
+   - `cws_authorized`,
+   - `gateway_phase`,
+   - reconnect counters.
+
+Интерпретация:
+- `protocol_reset_without_close_handshake` обычно указывает на transport/session reset без нормального broker ack.
+- `close_frame` означает, что сервер/peer прислал close frame; дополнительно смотреть `close_code` и `close_reason`.
+- `eof` означает, что поток закончился без broker response.
+- `send_error` полезен, когда ошибка произошла на отправке уже подготовленного запроса.
+
+Действия:
+1. Убедиться, что pending request действительно был fail’нут с сохранённым `cws_guid`.
+2. Проверить, что gateway ушёл в reconnect и вернулся в `LiveReady`.
+3. Сверить `broker.orders.*` / `broker.positions.*` перед ручным recovery.
+4. Если это `session_gap`, проверить `runtime.state.session_gap_standalone.live.<portfolio>` на хвост `Blocked`.
+
 ---
 
 ## 5) Логи/метрики
