@@ -6,6 +6,10 @@ This runbook verifies the full `session_gap` lifecycle after the residual CWS tr
 - controlled flatten,
 - return to `Flat` without orphan state.
 
+Two execution modes are supported:
+- command-path B2: manual command injection into `cmd.orders`;
+- runtime-native B2: one-shot forced `session_gap` lifecycle driven by `strategy-runtime` itself.
+
 ## Preconditions
 - Deployment contains the transport observability fix for `cws_guid` preservation and `cws_transport_failure` logging.
 - `alor-gateway` and `strategy-runtime` are both healthy.
@@ -42,6 +46,36 @@ Expected:
 - runtime `readiness=true`,
 - `live_guard=ALLOWED`,
 - runtime state `phase="Flat"`.
+
+## Step 1A: Optional runtime-native mode
+If you need a deterministic `runtime-native B2` without waiting for a natural signal, enable the one-shot test hook for one local trading date only.
+
+Required environment variables on the `strategy-runtime` container:
+
+```bash
+RUNTIME_ENABLE_TEST_HOOKS=true
+SESSION_GAP_TEST_FORCE_SESSION_DATE=2026-03-18
+SESSION_GAP_TEST_FORCE_SIDE=buy
+SESSION_GAP_TEST_AUTO_FLATTEN=true
+```
+
+Semantics:
+- the hook is disabled by default;
+- it only activates when `RUNTIME_ENABLE_TEST_HOOKS=true`;
+- it only triggers on the configured local session date;
+- it emits one forced marketable `Intent::Place` from `session_gap_standalone`;
+- after the resulting position opens, it emits one forced marketable flatten on the next live bar;
+- it does not repeat within the same session.
+
+Expected runtime logs in runtime-native mode:
+- `action = "test_hook_force_entry"`
+- normal `intent_emitted`
+- normal ack/order/position lifecycle
+- pending exit with `reason = "test_hook_exit"`
+
+Important:
+- remove these environment variables after the B2 window;
+- do not leave the hook enabled across future sessions.
 
 ## Step 2: Send marketable limit entry
 Use the production command path with the smallest safe size.
@@ -107,6 +141,14 @@ echo "EXIT_REQ_ID=$EXIT_REQ_ID"
 ```
 
 If flatten in your environment uses another command type, substitute the approved exit command but keep the same evidence collection.
+
+## Runtime-native execution note
+If Step 1A is enabled, do not inject manual commands in Steps 2 and 4.
+Instead:
+- restart `strategy-runtime` with the hook environment variables;
+- wait for the next eligible live bar on `SESSION_GAP_TEST_FORCE_SESSION_DATE`;
+- capture the same artifacts as below;
+- verify that entry and flatten were both emitted by runtime, not by manual Redis injection.
 
 ## Step 5: Verify flat / no orphan state
 

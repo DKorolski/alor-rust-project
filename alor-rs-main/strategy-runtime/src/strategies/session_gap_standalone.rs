@@ -88,6 +88,96 @@ struct Position {
     sl: f64,
 }
 
+#[derive(Debug, Clone)]
+struct SessionGapTestHookConfig {
+    session_date: String,
+    direction: Direction,
+    auto_flatten_next_bar: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionGapTestHookState {
+    config: Option<SessionGapTestHookConfig>,
+    entry_dispatched: bool,
+    exit_dispatched: bool,
+}
+
+impl SessionGapTestHookState {
+    fn from_env() -> Self {
+        if !runtime_test_hooks_enabled() {
+            return Self::default();
+        }
+        let Some(session_date) = std::env::var("SESSION_GAP_TEST_FORCE_SESSION_DATE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            return Self::default();
+        };
+        let direction = match std::env::var("SESSION_GAP_TEST_FORCE_SIDE")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("sell") | Some("short") => Direction::Short,
+            _ => Direction::Long,
+        };
+        let auto_flatten_next_bar = parse_bool_env("SESSION_GAP_TEST_AUTO_FLATTEN", true);
+        Self {
+            config: Some(SessionGapTestHookConfig {
+                session_date,
+                direction,
+                auto_flatten_next_bar,
+            }),
+            entry_dispatched: false,
+            exit_dispatched: false,
+        }
+    }
+
+    fn should_force_entry(&self, session_date: &str) -> Option<Direction> {
+        let config = self.config.as_ref()?;
+        if self.entry_dispatched || config.session_date != session_date {
+            return None;
+        }
+        Some(config.direction)
+    }
+
+    fn should_force_exit(&self, session_date: &str, opened_ts: i64, bar_ts: i64) -> bool {
+        let Some(config) = &self.config else {
+            return false;
+        };
+        config.auto_flatten_next_bar
+            && self.entry_dispatched
+            && !self.exit_dispatched
+            && config.session_date == session_date
+            && bar_ts > opened_ts
+    }
+
+    fn mark_entry_dispatched(&mut self) {
+        self.entry_dispatched = true;
+    }
+
+    fn mark_exit_dispatched(&mut self) {
+        self.exit_dispatched = true;
+    }
+}
+
+fn parse_bool_env(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn runtime_test_hooks_enabled() -> bool {
+    parse_bool_env("RUNTIME_ENABLE_TEST_HOOKS", false)
+}
+
 #[derive(Debug)]
 pub struct SessionGapStandaloneStrategy {
     pub config: SessionGapStandaloneConfig,
@@ -111,10 +201,12 @@ pub struct SessionGapStandaloneStrategy {
     pending_entry: Option<PendingEntry>,
     position: Option<Position>,
     last_warmup_log: Option<bool>,
+    test_hook: SessionGapTestHookState,
 }
 
 impl SessionGapStandaloneStrategy {
     pub fn new(config: SessionGapStandaloneConfig) -> Self {
+        let test_hook = SessionGapTestHookState::from_env();
         Self {
             cash: config.start_cash,
             config,
@@ -137,6 +229,7 @@ impl SessionGapStandaloneStrategy {
             pending_entry: None,
             position: None,
             last_warmup_log: None,
+            test_hook,
         }
     }
 
@@ -715,6 +808,44 @@ impl SessionGapStandaloneStrategy {
             };
         }
     }
+
+    fn maybe_force_test_hook_entry(
+        &mut self,
+        phase: &SessionGapLivePhase,
+        ctx: &StrategyCtx,
+        session_date: &str,
+        bar: &BarEvent,
+    ) -> bool {
+        let Some(direction) = self.test_hook.should_force_entry(session_date) else {
+            return false;
+        };
+        let phase_allows_entry = matches!(phase, SessionGapLivePhase::Flat)
+            || matches!(
+                phase,
+                SessionGapLivePhase::Blocked { reason, .. } if reason == "indicators_not_warmed"
+            );
+        if !phase_allows_entry
+            || self.pending_entry.is_some()
+            || ctx.position_qty.unwrap_or(0.0).abs() > f64::EPSILON
+        {
+            return false;
+        }
+        self.pending_entry = Some(PendingEntry { direction, size: 1 });
+        self.traded_session = true;
+        self.test_hook.mark_entry_dispatched();
+        info!(
+            strategy = "session_gap_standalone",
+            action = "test_hook_force_entry",
+            session_date,
+            side = match direction {
+                Direction::Long => "buy",
+                Direction::Short => "sell",
+            },
+            ts_utc = bar.close_time_utc,
+            "session_gap test hook armed forced entry"
+        );
+        true
+    }
 }
 
 impl Strategy for SessionGapStandaloneStrategy {
@@ -764,14 +895,27 @@ impl Strategy for SessionGapStandaloneStrategy {
             return Vec::new();
         }
 
-        let phase = self.persisted_phase_or_flat();
-        self.maybe_generate_signal(bar_dt, bar, true);
+        let actual_phase = self.persisted_phase_or_flat();
+        let forced_entry_armed =
+            self.maybe_force_test_hook_entry(&actual_phase, ctx, &current_session_date, bar);
+        if !forced_entry_armed {
+            self.maybe_generate_signal(bar_dt, bar, true);
+        }
+        let phase = if forced_entry_armed
+            && matches!(
+                &actual_phase,
+                SessionGapLivePhase::Blocked { reason, .. } if reason == "indicators_not_warmed"
+            ) {
+            SessionGapLivePhase::Flat
+        } else {
+            actual_phase.clone()
+        };
 
         let mut intents = Vec::new();
-        let previous_phase = phase.clone();
+        let previous_phase = actual_phase.clone();
         let next_phase = match phase {
             SessionGapLivePhase::Flat => {
-                if !self.signals_warmed() {
+                if !self.signals_warmed() && !forced_entry_armed {
                     SessionGapLivePhase::Blocked {
                         reason: "indicators_not_warmed".to_string(),
                         ts_utc: bar.close_time_utc,
@@ -840,7 +984,14 @@ impl Strategy for SessionGapStandaloneStrategy {
             } => {
                 let mut should_exit = false;
                 let mut reason = "";
-                if let Some(session_end_dt) = self.session_end_dt {
+                if self.test_hook.should_force_exit(
+                    &current_session_date,
+                    opened_ts,
+                    bar.close_time_utc,
+                ) {
+                    should_exit = true;
+                    reason = "test_hook_exit";
+                } else if let Some(session_end_dt) = self.session_end_dt {
                     let exit_threshold =
                         session_end_dt - Duration::minutes(self.config.exit_offset_min);
                     if bar_dt >= exit_threshold {
@@ -875,6 +1026,9 @@ impl Strategy for SessionGapStandaloneStrategy {
                         Side::Buy => Side::Sell,
                         Side::Sell => Side::Buy,
                     };
+                    if reason == "test_hook_exit" {
+                        self.test_hook.mark_exit_dispatched();
+                    }
                     intents.push(Intent::Place {
                         price: self.live_marketable_price(exit_side, bar),
                         qty,
@@ -1181,6 +1335,40 @@ mod tests {
     use crate::{BarEvent, DataOrigin};
     use serde::Deserialize;
     use std::collections::BTreeMap;
+    use std::sync::{Mutex, MutexGuard};
+
+    static TEST_HOOK_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestHookEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl TestHookEnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = TEST_HOOK_ENV_LOCK.lock().expect("env test lock");
+            let mut saved = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                saved.push((*key, std::env::var(key).ok()));
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for TestHookEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn ctx_live(
         allow_live_orders: bool,
@@ -1227,6 +1415,109 @@ mod tests {
             l,
             v: 0.0,
             origin: DataOrigin::Replay,
+        }
+    }
+
+    #[test]
+    fn live_test_hook_forces_entry_without_warmed_indicators() {
+        let _env = TestHookEnvGuard::set(&[
+            ("RUNTIME_ENABLE_TEST_HOOKS", Some("true")),
+            ("SESSION_GAP_TEST_FORCE_SESSION_DATE", Some("2025-12-05")),
+            ("SESSION_GAP_TEST_FORCE_SIDE", Some("buy")),
+            ("SESSION_GAP_TEST_AUTO_FLATTEN", Some("true")),
+        ]);
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        let bar_ts = offset
+            .with_ymd_and_hms(2025, 12, 5, 12, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+        let mut live_bar = bar(bar_ts, 81.0, 81.1, 80.9, 81.05);
+        live_bar.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &live_bar);
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            intents[0],
+            Intent::Place {
+                side: Side::Buy,
+                qty: 1.0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::PendingEntry {
+                    side: Side::Buy,
+                    qty: 1.0,
+                    ..
+                },
+                traded_session: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn live_test_hook_forces_flatten_on_next_bar_after_fill() {
+        let _env = TestHookEnvGuard::set(&[
+            ("RUNTIME_ENABLE_TEST_HOOKS", Some("true")),
+            ("SESSION_GAP_TEST_FORCE_SESSION_DATE", Some("2025-12-05")),
+            ("SESSION_GAP_TEST_FORCE_SIDE", Some("buy")),
+            ("SESSION_GAP_TEST_AUTO_FLATTEN", Some("true")),
+        ]);
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        let entry_bar_ts = offset
+            .with_ymd_and_hms(2025, 12, 5, 12, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+        let next_bar_ts = offset
+            .with_ymd_and_hms(2025, 12, 5, 12, 1, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+        let mut entry_bar = bar(entry_bar_ts, 81.0, 81.1, 80.9, 81.05);
+        entry_bar.origin = DataOrigin::Live;
+        let _ = strategy.on_bar(&ctx, &entry_bar);
+
+        let opened = PositionEvent {
+            symbol: "USDRUBF".into(),
+            qty: 1.0,
+            existing: false,
+            avg_price: 81.07,
+            ts_utc: entry_bar_ts,
+        };
+        let _ = strategy.on_position(&ctx, &opened);
+
+        let mut next_bar = bar(next_bar_ts, 81.1, 81.2, 81.0, 81.15);
+        next_bar.origin = DataOrigin::Live;
+        let intents = strategy.on_bar(&ctx, &next_bar);
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            intents[0],
+            Intent::Place {
+                side: Side::Sell,
+                qty: 1.0,
+                ..
+            }
+        ));
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::PendingExit { reason, .. },
+                ..
+            } => assert_eq!(reason, "test_hook_exit"),
+            other => panic!("unexpected state after test-hook exit: {other:?}"),
         }
     }
 
