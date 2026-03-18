@@ -231,6 +231,14 @@ impl MarketBuyAndCloseStrategy {
     }
 
     fn maybe_send_live_entry(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
+        if ctx.last_bar_ts().is_none() {
+            info!(
+                strategy = "market_buy_and_close",
+                ts_utc = bar.close_time_utc,
+                "market_buy_and_close live entry deferred until second bar"
+            );
+            return Vec::new();
+        }
         let baseline_qty = ctx.position_qty.unwrap_or(0.0);
         let request_guid = crate::deterministic_market_request_id(
             &ctx.strategy_id,
@@ -674,8 +682,9 @@ mod tests {
             ..bar1.clone()
         };
 
-        assert_eq!(strategy.on_bar(&ctx, &bar1).len(), 1);
-        assert!(strategy.on_bar(&ctx, &bar2).is_empty());
+        assert!(strategy.on_bar(&ctx, &bar1).is_empty());
+        ctx.last_bar_ts = Some(10);
+        assert_eq!(strategy.on_bar(&ctx, &bar2).len(), 1);
 
         ctx.last_bar_ts = Some(20);
         let pos = PositionEvent {
@@ -699,7 +708,7 @@ mod tests {
     #[test]
     fn live_market_mode_entry_still_uses_market_intent() {
         let mut strategy = MarketBuyAndCloseStrategy::new(config());
-        let ctx = ctx(TradeMode::Live);
+        let mut ctx = ctx(TradeMode::Live);
         let bar = BarEvent {
             symbol: "SBER".to_string(),
             close_time_utc: 10,
@@ -711,6 +720,7 @@ mod tests {
             origin: DataOrigin::Live,
         };
 
+        ctx.last_bar_ts = Some(5);
         let intents = strategy.on_bar(&ctx, &bar);
         assert!(matches!(
             intents.as_slice(),
@@ -727,7 +737,7 @@ mod tests {
         let mut cfg = config();
         cfg.live_order_style = MarketBuyAndCloseLiveOrderStyle::MarketableLimit;
         let mut strategy = MarketBuyAndCloseStrategy::new(cfg);
-        let ctx = ctx(TradeMode::Live);
+        let mut ctx = ctx(TradeMode::Live);
         let bar = BarEvent {
             symbol: "SBER".to_string(),
             close_time_utc: 10,
@@ -739,6 +749,7 @@ mod tests {
             origin: DataOrigin::Live,
         };
 
+        ctx.last_bar_ts = Some(5);
         let intents = strategy.on_bar(&ctx, &bar);
         assert!(matches!(
             intents.as_slice(),
@@ -755,7 +766,7 @@ mod tests {
         let mut cfg = config();
         cfg.entry_ack_timeout_ms = 1_000;
         let mut strategy = MarketBuyAndCloseStrategy::new(cfg);
-        let ctx = ctx(TradeMode::Live);
+        let mut ctx = ctx(TradeMode::Live);
         let bar1 = BarEvent {
             symbol: "SBER".to_string(),
             close_time_utc: 10,
@@ -770,9 +781,35 @@ mod tests {
             close_time_utc: 12,
             ..bar1.clone()
         };
-        assert_eq!(strategy.on_bar(&ctx, &bar1).len(), 1);
-        assert!(strategy.on_bar(&ctx, &bar2).is_empty());
+        let bar3 = BarEvent {
+            close_time_utc: 14,
+            ..bar1.clone()
+        };
+        assert!(strategy.on_bar(&ctx, &bar1).is_empty());
+        ctx.last_bar_ts = Some(10);
+        assert_eq!(strategy.on_bar(&ctx, &bar2).len(), 1);
+        assert!(strategy.on_bar(&ctx, &bar3).is_empty());
         assert!(matches!(strategy.state(), StrategyState::Blocked { .. }));
+    }
+
+    #[test]
+    fn live_waits_for_second_bar_before_entry() {
+        let mut strategy = MarketBuyAndCloseStrategy::new(config());
+        let ctx = ctx(TradeMode::Live);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 10,
+            close: 10.0,
+            o: 9.5,
+            h: 10.0,
+            l: 9.5,
+            v: 1.0,
+            origin: DataOrigin::Live,
+        };
+
+        let intents = strategy.on_bar(&ctx, &bar);
+        assert!(intents.is_empty());
+        assert!(matches!(strategy.state(), StrategyState::Idle));
     }
 
     #[test]
