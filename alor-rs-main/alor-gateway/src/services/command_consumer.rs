@@ -377,8 +377,14 @@ pub async fn run_command_consumer(
                         } else if status == alor_protocol::AckStatus::Rejected {
                             increment_counter(&health, |h| h.commands_rejected_total = h.commands_rejected_total.saturating_add(1));
                             increment_http_code(&health, http_code);
+                            if matches!(command.action, CommandAction::Place(_)) {
+                                increment_counter(&health, |h| h.cws_limit_error_total = h.cws_limit_error_total.saturating_add(1));
+                            }
                         } else if status == alor_protocol::AckStatus::Error {
                             increment_counter(&health, |h| h.cws_errors_total = h.cws_errors_total.saturating_add(1));
+                            if matches!(command.action, CommandAction::Place(_)) {
+                                increment_counter(&health, |h| h.cws_limit_error_total = h.cws_limit_error_total.saturating_add(1));
+                            }
                         }
                         let ack = build_cws_ack(
                             request_id,
@@ -404,6 +410,9 @@ pub async fn run_command_consumer(
                     }
                     Err(error) => {
                         increment_counter(&health, |h| h.cws_errors_total = h.cws_errors_total.saturating_add(1));
+                        if matches!(command.action, CommandAction::Place(_)) {
+                            increment_counter(&health, |h| h.cws_limit_error_total = h.cws_limit_error_total.saturating_add(1));
+                        }
                         let transport_failure = error.downcast_ref::<crate::cws_client::CwsRequestFailure>();
                         let cws_guid = transport_failure.map(|failure| failure.cws_guid().to_string());
                         let disconnect_kind = transport_failure

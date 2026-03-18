@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde_json::{Map, Value};
@@ -29,6 +30,7 @@ const CWS_MARKET_ALLOW_MARGIN: bool = true;
 pub struct CwsHandle {
     cmd_tx: mpsc::Sender<CwsCommand>,
     instrument_group: String,
+    health: Arc<RwLock<HealthState>>,
 }
 
 #[derive(Debug)]
@@ -196,16 +198,33 @@ impl CwsClient {
     ) -> CwsHandle {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
         let instrument_group = cfg.instrument_group.clone();
+        let session_health = Arc::clone(&health);
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_millis(cfg.backoff_initial_ms);
+            let mut connect_seq = 0_u64;
+            let mut reconnect_seq = 0_u64;
             loop {
-                match run_session(&cfg, &token_provider, &mut cmd_rx, &health).await {
+                connect_seq = connect_seq.saturating_add(1);
+                match run_session(
+                    &cfg,
+                    &token_provider,
+                    &mut cmd_rx,
+                    &session_health,
+                    connect_seq,
+                    reconnect_seq,
+                )
+                .await
+                {
                     Ok(()) => break,
                     Err(error) => {
                         {
-                            let mut guard = health.write();
+                            let mut guard = session_health.write();
                             guard.cws_authorized = false;
+                            reconnect_seq = reconnect_seq.saturating_add(1);
+                            guard.cws_reconnect_seq = reconnect_seq;
+                            guard.cws_reconnect_total =
+                                guard.cws_reconnect_total.saturating_add(1);
                             guard.cws_reconnects_total =
                                 guard.cws_reconnects_total.saturating_add(1);
                         }
@@ -220,6 +239,7 @@ impl CwsClient {
         CwsHandle {
             cmd_tx,
             instrument_group,
+            health,
         }
     }
 }
@@ -254,11 +274,30 @@ impl CwsHandle {
             .get("guid")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        let (
+            cws_connection_instance_id,
+            connect_seq,
+            reconnect_seq,
+            connected_ts_utc,
+        ) = {
+            let mut guard = self.health.write();
+            guard.cws_limit_send_total = guard.cws_limit_send_total.saturating_add(1);
+            (
+                guard.cws_connection_instance_id.clone(),
+                guard.cws_connect_seq,
+                guard.cws_reconnect_seq,
+                guard.cws_connected_ts_utc,
+            )
+        };
         info!(
             action = "cws_limit_send",
             opcode = "create:limit",
             request_id = ?request_id,
             cws_guid,
+            cws_connection_instance_id = ?cws_connection_instance_id,
+            connect_seq,
+            reconnect_seq,
+            connected_ts_utc = ?connected_ts_utc,
             symbol,
             exchange,
             instrument_group = %self.instrument_group,
@@ -475,6 +514,7 @@ impl CwsHandle {
         CwsHandle {
             cmd_tx,
             instrument_group: "TEST".to_string(),
+            health: Arc::new(RwLock::new(HealthState::default())),
         }
     }
 }
@@ -633,14 +673,23 @@ async fn run_session(
     token_provider: &TokenProvider,
     cmd_rx: &mut mpsc::Receiver<CwsCommand>,
     health: &Arc<RwLock<HealthState>>,
+    connect_seq: u64,
+    reconnect_seq: u64,
 ) -> anyhow::Result<()> {
     let token = token_provider.access_token().await?;
     let (ws_stream, _) = tokio_tungstenite::connect_async(&cfg.cws_url).await?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
+    let connection_instance_id = new_guid();
+    let connected_ts_utc = Utc::now().timestamp();
 
     {
         let mut guard = health.write();
         guard.cws_authorized = false;
+        guard.cws_connection_instance_id = Some(connection_instance_id.clone());
+        guard.cws_connect_seq = connect_seq;
+        guard.cws_reconnect_seq = reconnect_seq;
+        guard.cws_connected_ts_utc = Some(connected_ts_utc);
+        guard.cws_connect_total = guard.cws_connect_total.saturating_add(1);
     }
     authorize(&mut ws_sink, &mut ws_stream, &token, health).await?;
 
@@ -689,7 +738,7 @@ async fn run_session(
                                 guard.cws_authorized = false;
                             }
                             let failure = transport_failure_from_send_error(&error);
-                            let session_error = handle_transport_failure(&mut pending, failure);
+                            let session_error = handle_transport_failure(&mut pending, failure, health);
                             return Err(session_error);
                         }
                     }
@@ -722,7 +771,7 @@ async fn run_session(
                             guard.cws_authorized = false;
                         }
                         let failure = transport_failure_from_close_frame(frame);
-                        let session_error = handle_transport_failure(&mut pending, failure);
+                        let session_error = handle_transport_failure(&mut pending, failure, health);
                         return Err(session_error);
                     }
                     Some(Ok(_)) => {}
@@ -732,7 +781,7 @@ async fn run_session(
                             guard.cws_authorized = false;
                         }
                         let failure = transport_failure_from_receive_error(&error);
-                        let session_error = handle_transport_failure(&mut pending, failure);
+                        let session_error = handle_transport_failure(&mut pending, failure, health);
                         return Err(session_error);
                     }
                     None => {
@@ -741,7 +790,7 @@ async fn run_session(
                             guard.cws_authorized = false;
                         }
                         let failure = transport_failure_from_eof();
-                        let session_error = handle_transport_failure(&mut pending, failure);
+                        let session_error = handle_transport_failure(&mut pending, failure, health);
                         return Err(session_error);
                     }
                 }
@@ -848,23 +897,47 @@ async fn read_until_guid(
 fn handle_transport_failure(
     pending: &mut HashMap<String, PendingRequest>,
     failure: CwsTransportFailure,
+    health: &Arc<RwLock<HealthState>>,
 ) -> anyhow::Error {
-    log_transport_failure(&failure, pending);
-    fail_pending_with_transport(pending, failure.clone());
+    log_transport_failure(&failure, pending, health);
+    fail_pending_with_transport(pending, failure.clone(), health);
     anyhow::Error::new(failure)
 }
 
-fn log_transport_failure(failure: &CwsTransportFailure, pending: &HashMap<String, PendingRequest>) {
+fn log_transport_failure(
+    failure: &CwsTransportFailure,
+    pending: &HashMap<String, PendingRequest>,
+    health: &Arc<RwLock<HealthState>>,
+) {
     let first = pending.values().next();
     let request_id = first.and_then(|request| request.request_id.as_deref());
     let cws_guid = first.map(|request| request.cws_guid.as_str());
     let opcode_in_flight = first.map(|request| request.opcode.as_str());
+    let (cws_connection_instance_id, connect_seq, reconnect_seq, connected_ts_utc) = {
+        let mut guard = health.write();
+        if matches!(
+            failure.disconnect_kind(),
+            CwsDisconnectKind::ProtocolResetWithoutCloseHandshake
+        ) {
+            guard.cws_protocol_reset_total = guard.cws_protocol_reset_total.saturating_add(1);
+        }
+        (
+            guard.cws_connection_instance_id.clone(),
+            guard.cws_connect_seq,
+            guard.cws_reconnect_seq,
+            guard.cws_connected_ts_utc,
+        )
+    };
     warn!(
         action = "cws_transport_failure",
         disconnect_kind = failure.disconnect_kind_str(),
         opcode_in_flight = ?opcode_in_flight,
         request_id = ?request_id,
         cws_guid = ?cws_guid,
+        cws_connection_instance_id = ?cws_connection_instance_id,
+        connect_seq,
+        reconnect_seq,
+        connected_ts_utc = ?connected_ts_utc,
         pending_count = pending.len(),
         close_code = ?failure.close_code(),
         close_reason = ?failure.close_reason(),
@@ -876,7 +949,9 @@ fn log_transport_failure(failure: &CwsTransportFailure, pending: &HashMap<String
 fn fail_pending_with_transport(
     pending: &mut HashMap<String, PendingRequest>,
     failure: CwsTransportFailure,
+    health: &Arc<RwLock<HealthState>>,
 ) {
+    let affected_count = pending.len() as u64;
     let affected = pending
         .values()
         .map(|request| {
@@ -890,9 +965,25 @@ fn fail_pending_with_transport(
         .collect::<Vec<_>>();
     if !affected.is_empty() {
         let affected_json = serde_json::Value::Array(affected);
+        let (cws_connection_instance_id, connect_seq, reconnect_seq, connected_ts_utc) = {
+            let mut guard = health.write();
+            guard.cws_pending_failed_total = guard
+                .cws_pending_failed_total
+                .saturating_add(affected_count);
+            (
+                guard.cws_connection_instance_id.clone(),
+                guard.cws_connect_seq,
+                guard.cws_reconnect_seq,
+                guard.cws_connected_ts_utc,
+            )
+        };
         warn!(
             action = "cws_fail_pending",
             disconnect_kind = failure.disconnect_kind_str(),
+            cws_connection_instance_id = ?cws_connection_instance_id,
+            connect_seq,
+            reconnect_seq,
+            connected_ts_utc = ?connected_ts_utc,
             pending_count = affected_json.as_array().map_or(0, Vec::len),
             affected = %affected_json,
             "failing pending cws requests after transport failure"
@@ -1291,6 +1382,7 @@ mod tests {
         let (tx_one, rx_one) = oneshot::channel();
         let (tx_two, rx_two) = oneshot::channel();
         let mut pending = HashMap::new();
+        let health = Arc::new(RwLock::new(HealthState::default()));
         pending.insert(
             "guid-1".to_string(),
             PendingRequest {
@@ -1320,6 +1412,7 @@ mod tests {
                 None,
                 None,
             ),
+            &health,
         );
 
         let session_failure = reconnect_error
