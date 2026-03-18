@@ -612,6 +612,7 @@ impl StrategyRuntime {
 
         let prev_bar_ts = self.state.last_processed_bar_ts.get(&bar.symbol).copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, bar.close_time_utc);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
@@ -624,7 +625,7 @@ impl StrategyRuntime {
                 self.simulate_intents(&bar, intents).await?;
             }
         } else {
-            self.apply_intents(&ctx, bar.close_time_utc, intents)
+            self.apply_intents(&ctx, bar.close_time_utc, intents, previous_strategy_state)
                 .await?;
         }
         self.state
@@ -1407,9 +1408,11 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, ack.processed_ts_utc);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_ack(&ctx, &ack);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+            .await?;
         self.transport.xack(&stream, &message_id).await?;
         self.health_snapshot.write().last_ack_ts_utc = Some(event_ts);
         Ok(())
@@ -1436,9 +1439,11 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, order.ts_utc);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_order(&ctx, &order);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+            .await?;
         self.update_ledger_from_order(&order)?;
         self.state.orders.insert(order.order_id, order);
         self.transport.xack(&stream, &message_id).await?;
@@ -1466,9 +1471,11 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, stop_order.ts_utc);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_stop_order(&ctx, &stop_order);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+            .await?;
         self.state
             .stop_orders
             .insert(stop_order.stop_order_id.clone(), stop_order);
@@ -1613,9 +1620,11 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, position.ts_utc);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_position(&ctx, &position);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents).await?;
+        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+            .await?;
         self.state
             .positions
             .insert(position.symbol.clone(), position);
@@ -1640,6 +1649,7 @@ impl StrategyRuntime {
             self.bootstrap_state.seen_live_bar = true;
         }
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, event_ts);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
@@ -1652,7 +1662,8 @@ impl StrategyRuntime {
             }
             self.persist_state(None).await?;
         } else {
-            self.apply_intents(&ctx, event_ts, intents).await?;
+            self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+                .await?;
         }
         self.state
             .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
@@ -2540,9 +2551,11 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_bootstrap_snapshot(&ctx, &snapshot);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents).await?;
+        self.apply_intents(&ctx, created_ts, intents, previous_strategy_state)
+            .await?;
         Ok(())
     }
 
@@ -2558,9 +2571,11 @@ impl StrategyRuntime {
         };
         let created_ts = self.normalize_event_ts(last_bar_ts.unwrap_or(0));
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts);
+        let previous_strategy_state = self.state.strategy_state.clone();
         let intents = self.strategy.on_runtime_state_restored(&ctx, &restored);
         self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents).await?;
+        self.apply_intents(&ctx, created_ts, intents, previous_strategy_state)
+            .await?;
         Ok(())
     }
 
@@ -2769,11 +2784,28 @@ impl StrategyRuntime {
         true
     }
 
+    fn restore_strategy_state_after_dropped_intents(
+        &mut self,
+        previous_state: StrategyState,
+        reason: &'static str,
+    ) {
+        let current_state = self.state.strategy_state.clone();
+        info!(
+            from = ?current_state,
+            to = ?previous_state,
+            reason,
+            "strategy_state_transition_reverted"
+        );
+        self.strategy.set_state(previous_state.clone());
+        self.state.strategy_state = previous_state;
+    }
+
     async fn apply_intents(
         &mut self,
         ctx: &StrategyCtx,
         created_ts_utc: i64,
         intents: Vec<Intent>,
+        previous_strategy_state: StrategyState,
     ) -> Result<()> {
         if intents.is_empty() {
             self.persist_state(None).await?;
@@ -2796,6 +2828,10 @@ impl StrategyRuntime {
                     accepted.push((intent, intent_class));
                 }
                 if accepted.is_empty() {
+                    self.restore_strategy_state_after_dropped_intents(
+                        previous_strategy_state,
+                        "intent_dropped_before_emit",
+                    );
                     self.persist_state(None).await?;
                     return Ok(());
                 }
@@ -2817,6 +2853,10 @@ impl StrategyRuntime {
                         }
                     }
                     if passthrough.is_empty() {
+                        self.restore_strategy_state_after_dropped_intents(
+                            previous_strategy_state,
+                            "intent_dropped_by_guard",
+                        );
                         self.persist_state(None).await?;
                         return Ok(());
                     }

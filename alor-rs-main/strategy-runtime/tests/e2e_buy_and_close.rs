@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use alor_types::TradingPeriods;
 use chrono::Utc;
 use serde::Serialize;
 use tokio::time::timeout;
@@ -315,6 +316,34 @@ async fn read_next_command(
     Ok((message_id, envelope.payload))
 }
 
+async fn read_last_payload(redis_url: &str, stream: &str) -> Result<String> {
+    let client = redis::Client::open(redis_url)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let reply: redis::Value = redis::cmd("XREVRANGE")
+        .arg(stream)
+        .arg("+")
+        .arg("-")
+        .arg("COUNT")
+        .arg(1)
+        .query_async(&mut conn)
+        .await?;
+    let entries = match reply {
+        redis::Value::Bulk(values) => values,
+        _ => return Err(anyhow::anyhow!("empty xrevrange reply")),
+    };
+    let entry = entries
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("missing runtime state entry"))?;
+    let entry = match entry {
+        redis::Value::Bulk(values) => values,
+        _ => return Err(anyhow::anyhow!("invalid runtime state entry")),
+    };
+    if entry.len() < 2 {
+        return Err(anyhow::anyhow!("missing runtime state payload"));
+    }
+    extract_payload(&entry[1]).ok_or_else(|| anyhow::anyhow!("missing payload"))
+}
+
 async fn publish_position(
     redis_url: &str,
     stream: &str,
@@ -575,4 +604,75 @@ async fn restart_mid_cycle_uses_runtime_state_without_snapshot_update() -> Resul
 #[tokio::test]
 async fn restart_mid_cycle_works_with_updated_snapshot() -> Result<()> {
     run_restart_mid_cycle_case(true).await
+}
+
+#[tokio::test]
+async fn marketable_limit_dropped_entry_restores_previous_state() -> Result<()> {
+    let redis_url = match redis_url() {
+        Some(url) => url,
+        None => {
+            eprintln!("REDIS_URL not set; skipping e2e test");
+            return Ok(());
+        }
+    };
+    redis_flushdb(&redis_url).await?;
+
+    let prefix = format!("e2e-buy-close-guard-{}", Uuid::new_v4());
+    let mut config = build_config(redis_url.clone(), &prefix, "runtime-buy-close-guard");
+    config.strategy.live_order_style =
+        strategy_runtime::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle::MarketableLimit;
+    config.strategy.trading_periods = Some(TradingPeriods {
+        session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        session_end: chrono::NaiveTime::from_hms_opt(9, 5, 0).unwrap(),
+        break_start_1: chrono::NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+        break_end_1: chrono::NaiveTime::from_hms_opt(12, 5, 0).unwrap(),
+        break_start_2: chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+        break_end_2: chrono::NaiveTime::from_hms_opt(15, 5, 0).unwrap(),
+        weekends_off: true,
+        timezone_offset_hours: 0,
+    });
+
+    if let Some(stream) = &config.streams.snapshots {
+        publish_snapshots(&redis_url, stream).await?;
+    }
+    if let Some(health_stream) = &config.streams.health {
+        publish_health(&redis_url, health_stream, GatewayPhase::LiveReady, true).await?;
+    }
+
+    let runtime_handle = spawn_runtime(config.clone()).await;
+
+    publish_bar(
+        &redis_url,
+        &config.streams.bars,
+        &config.strategy.symbol,
+        20_000,
+        100.0,
+        DataOrigin::Live,
+    )
+    .await?;
+    publish_bar(
+        &redis_url,
+        &config.streams.bars,
+        &config.strategy.symbol,
+        21_000,
+        101.0,
+        DataOrigin::Live,
+    )
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let total_commands = xlen(&redis_url, &config.streams.commands).await?;
+    assert_eq!(total_commands, 0, "entry must not be emitted outside trading window");
+
+    let last_state_payload = read_last_payload(&redis_url, &config.streams.runtime_state).await?;
+    let last_state: serde_json::Value = serde_json::from_str(&last_state_payload)?;
+    assert_eq!(
+        last_state.get("strategy_state").and_then(|state| state.as_str()),
+        Some("Idle"),
+        "runtime must restore pre-intent state when entry is dropped before publish"
+    );
+
+    runtime_handle.abort();
+    Ok(())
 }
