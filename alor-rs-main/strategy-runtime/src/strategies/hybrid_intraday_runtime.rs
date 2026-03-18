@@ -1029,6 +1029,7 @@ mod tests {
             allow_live_orders: true,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty,
+            now_ts_utc: 0,
             last_bar_ts: Some(1),
         }
     }

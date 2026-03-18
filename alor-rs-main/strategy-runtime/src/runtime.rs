@@ -2419,6 +2419,7 @@ impl StrategyRuntime {
             allow_live_orders: self.config.allow_live_orders,
             gateway_phase,
             position_qty,
+            now_ts_utc: Utc::now().timestamp(),
             last_bar_ts,
         }
     }

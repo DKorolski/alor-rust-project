@@ -76,10 +76,6 @@ impl MarketBuyAndCloseStrategy {
                 || ctx.gateway_phase != GatewayPhase::LiveReady)
     }
 
-    fn ts_to_ms(ts: i64) -> i64 {
-        ts.saturating_mul(1_000)
-    }
-
     fn blocked(&mut self, reason: impl Into<String>, ts: i64) {
         self.state = StrategyState::Blocked {
             reason: reason.into(),
@@ -253,7 +249,7 @@ impl MarketBuyAndCloseStrategy {
             qty: self.config.qty,
             baseline_qty,
             close_trigger: self.config.close_trigger,
-            sent_ts: bar.close_time_utc,
+            sent_ts: ctx.now_ts_utc(),
             acked: false,
             entry_confirmed_ts: None,
             last_bar_ts: bar.close_time_utc,
@@ -267,8 +263,8 @@ impl MarketBuyAndCloseStrategy {
         )]
     }
 
-    fn check_live_timeouts(&mut self, bar_ts: i64) {
-        let now_ms = Self::ts_to_ms(bar_ts);
+    fn check_live_timeouts(&mut self, now_ts_utc: i64, bar_ts: i64) {
+        let now_ms = now_ts_utc.saturating_mul(1_000);
         match &self.state {
             StrategyState::MarketLivePendingEntry {
                 sent_ts,
@@ -276,7 +272,7 @@ impl MarketBuyAndCloseStrategy {
                 entry_confirmed_ts,
                 ..
             } => {
-                let elapsed = now_ms.saturating_sub(Self::ts_to_ms(*sent_ts)) as u64;
+                let elapsed = now_ms.saturating_sub(sent_ts.saturating_mul(1_000)) as u64;
                 if !acked && elapsed > self.config.entry_ack_timeout_ms {
                     self.blocked(
                         format!(
@@ -298,7 +294,7 @@ impl MarketBuyAndCloseStrategy {
                 }
             }
             StrategyState::MarketLivePendingExit { sent_ts, acked, .. } => {
-                let elapsed = now_ms.saturating_sub(Self::ts_to_ms(*sent_ts)) as u64;
+                let elapsed = now_ms.saturating_sub(sent_ts.saturating_mul(1_000)) as u64;
                 if !acked && elapsed > self.config.exit_ack_timeout_ms {
                     self.blocked(
                         format!(
@@ -343,7 +339,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
         let intents = match ctx.trade_mode {
             TradeMode::Paper | TradeMode::Backtest => self.maybe_open_for_paper_backtest(ctx, bar),
             TradeMode::Live => {
-                self.check_live_timeouts(bar.close_time_utc);
+                self.check_live_timeouts(ctx.now_ts_utc(), bar.close_time_utc);
                 let close_side = self.close_side();
                 match &mut self.state {
                     StrategyState::Idle => self.maybe_send_live_entry(ctx, bar),
@@ -377,7 +373,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                                 side: close_side,
                                 qty: self.config.qty,
                                 baseline_qty: baseline,
-                                sent_ts: bar.close_time_utc,
+                                sent_ts: ctx.now_ts_utc(),
                                 acked: false,
                                 last_bar_ts: bar.close_time_utc,
                             };
@@ -469,6 +465,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
         }
 
         let now_ts = ctx.last_bar_ts().unwrap_or(pos.ts_utc);
+        let dispatch_ts = ctx.now_ts_utc();
         let close_side = self.close_side();
         match &mut self.state {
             StrategyState::MarketLivePendingEntry {
@@ -537,7 +534,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                         side: close_side,
                         qty: self.config.qty,
                         baseline_qty: *baseline_qty,
-                        sent_ts: now_ts,
+                        sent_ts: dispatch_ts,
                         acked: false,
                         last_bar_ts: now_ts,
                     };
@@ -638,6 +635,7 @@ mod tests {
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
             position_qty: Some(0.0),
+            now_ts_utc: 0,
             last_bar_ts: None,
         }
     }
@@ -787,7 +785,9 @@ mod tests {
         };
         assert!(strategy.on_bar(&ctx, &bar1).is_empty());
         ctx.last_bar_ts = Some(10);
+        ctx.now_ts_utc = 12;
         assert_eq!(strategy.on_bar(&ctx, &bar2).len(), 1);
+        ctx.now_ts_utc = 14;
         assert!(strategy.on_bar(&ctx, &bar3).is_empty());
         assert!(matches!(strategy.state(), StrategyState::Blocked { .. }));
     }
@@ -893,7 +893,7 @@ mod tests {
     #[test]
     fn live_next_bar_trigger_transitions_to_pending_exit() {
         let mut strategy = MarketBuyAndCloseStrategy::new(config());
-        let ctx = ctx(TradeMode::Live);
+        let mut ctx = ctx(TradeMode::Live);
         let bar = BarEvent {
             symbol: "SBER".to_string(),
             close_time_utc: 120,
@@ -915,6 +915,7 @@ mod tests {
             last_bar_ts: 100,
         };
 
+        ctx.now_ts_utc = 120;
         let intents = strategy.on_bar(&ctx, &bar);
         assert_eq!(intents.len(), 1);
         assert!(matches!(

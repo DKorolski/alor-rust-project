@@ -944,7 +944,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         baseline_qty: ctx.position_qty.unwrap_or(0.0),
                         tp,
                         sl,
-                        sent_ts: bar.close_time_utc,
+                        sent_ts: ctx.now_ts_utc(),
                         acked: false,
                     }
                 } else {
@@ -958,16 +958,19 @@ impl Strategy for SessionGapStandaloneStrategy {
             }
             SessionGapLivePhase::Blocked { .. } => phase,
             SessionGapLivePhase::PendingEntry { sent_ts, acked, .. } => {
-                let elapsed = (bar.close_time_utc - sent_ts).saturating_mul(1000) as u64;
+                let elapsed = ctx
+                    .now_ts_utc()
+                    .saturating_sub(sent_ts)
+                    .saturating_mul(1000) as u64;
                 if !acked && elapsed > self.config.entry_ack_timeout_ms {
                     SessionGapLivePhase::Blocked {
                         reason: "entry_ack_timeout".to_string(),
-                        ts_utc: bar.close_time_utc,
+                        ts_utc: ctx.now_ts_utc(),
                     }
                 } else if acked && elapsed > self.config.entry_fill_timeout_ms {
                     SessionGapLivePhase::Blocked {
                         reason: "entry_fill_timeout".to_string(),
-                        ts_utc: bar.close_time_utc,
+                        ts_utc: ctx.now_ts_utc(),
                     }
                 } else {
                     phase
@@ -1048,7 +1051,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         qty,
                         baseline_qty,
                         reason: reason.to_string(),
-                        sent_ts: bar.close_time_utc,
+                        sent_ts: ctx.now_ts_utc(),
                         acked: false,
                     }
                 } else {
@@ -1056,16 +1059,19 @@ impl Strategy for SessionGapStandaloneStrategy {
                 }
             }
             SessionGapLivePhase::PendingExit { sent_ts, acked, .. } => {
-                let elapsed = (bar.close_time_utc - sent_ts).saturating_mul(1000) as u64;
+                let elapsed = ctx
+                    .now_ts_utc()
+                    .saturating_sub(sent_ts)
+                    .saturating_mul(1000) as u64;
                 if !acked && elapsed > self.config.exit_ack_timeout_ms {
                     SessionGapLivePhase::Blocked {
                         reason: "exit_ack_timeout".to_string(),
-                        ts_utc: bar.close_time_utc,
+                        ts_utc: ctx.now_ts_utc(),
                     }
                 } else if acked && elapsed > self.config.exit_fill_timeout_ms {
                     SessionGapLivePhase::Blocked {
                         reason: "exit_fill_timeout".to_string(),
-                        ts_utc: bar.close_time_utc,
+                        ts_utc: ctx.now_ts_utc(),
                     }
                 } else {
                     phase
@@ -1385,6 +1391,7 @@ mod tests {
             allow_live_orders,
             gateway_phase,
             position_qty: Some(0.0),
+            now_ts_utc: 0,
             last_bar_ts: None,
         }
     }
@@ -1401,6 +1408,7 @@ mod tests {
             allow_live_orders: false,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty: None,
+            now_ts_utc: 0,
             last_bar_ts: None,
         }
     }
@@ -1652,15 +1660,62 @@ mod tests {
         };
         let mut b = bar(12, 101.0, 102.0, 100.0, 101.0);
         b.origin = DataOrigin::Live;
+        let mut ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        ctx.now_ts_utc = 12;
 
-        let _ = strategy.on_bar(
-            &ctx_live(true, crate::live_guard::GatewayPhase::LiveReady),
-            &b,
-        );
+        let _ = strategy.on_bar(&ctx, &b);
         assert!(matches!(
             strategy.state,
             StrategyState::SessionGapStandalone {
                 phase: SessionGapLivePhase::Blocked { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn live_pending_entry_does_not_timeout_from_bar_clock_alone() {
+        let mut cfg = SessionGapStandaloneConfig::default();
+        cfg.entry_ack_timeout_ms = 1000;
+        let mut strategy = SessionGapStandaloneStrategy::new(cfg);
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id: uuid::Uuid::nil(),
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: None,
+                sl: None,
+                sent_ts: 10,
+                acked: false,
+            },
+            phase_last_change_ts_utc: None,
+            last_bar_ts: Some(10),
+        };
+        let mut b = bar(70, 101.0, 102.0, 100.0, 101.0);
+        b.origin = DataOrigin::Live;
+        let mut ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        ctx.now_ts_utc = 10;
+
+        let _ = strategy.on_bar(&ctx, &b);
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::PendingEntry { .. },
                 ..
             }
         ));
