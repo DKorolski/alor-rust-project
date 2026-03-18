@@ -379,11 +379,11 @@ impl HybridIntradayRuntimeStrategy {
         if created_ts_utc <= 0 {
             return self.stop_end_buffer_or_default(0);
         }
-        let offset = match FixedOffset::east_opt(self.config.timezone_offset_hours.saturating_mul(3600))
-        {
-            Some(v) => v,
-            None => return self.stop_end_buffer_or_default(created_ts_utc),
-        };
+        let offset =
+            match FixedOffset::east_opt(self.config.timezone_offset_hours.saturating_mul(3600)) {
+                Some(v) => v,
+                None => return self.stop_end_buffer_or_default(created_ts_utc),
+            };
         let local_dt = match Utc.timestamp_opt(created_ts_utc, 0).single() {
             Some(v) => v.with_timezone(&offset),
             None => return self.stop_end_buffer_or_default(created_ts_utc),
@@ -753,7 +753,8 @@ impl HybridIntradayRuntimeStrategy {
             return Vec::new();
         }
         if let Some(triggered_ts) = self.sl_triggered_ts {
-            let escalate_at = triggered_ts.saturating_add(self.config.sl_escalate_timeout_sec as i64);
+            let escalate_at =
+                triggered_ts.saturating_add(self.config.sl_escalate_timeout_sec as i64);
             if now_ts < escalate_at {
                 return Vec::new();
             }
@@ -933,7 +934,10 @@ impl HybridIntradayRuntimeStrategy {
         if let Some(req_id) = self.pending_entry_request_id {
             let created = self
                 .pending_entry_created_ts_utc
-                .or_else(|| self.pending_entry.and_then(|p| Self::cycle_ts_utc(p.cycle_id)))
+                .or_else(|| {
+                    self.pending_entry
+                        .and_then(|p| Self::cycle_ts_utc(p.cycle_id))
+                })
                 .unwrap_or(now_ts);
             if now_ts.saturating_sub(created) > timeout {
                 self.pending_entry = None;
@@ -1029,6 +1033,7 @@ mod tests {
             allow_live_orders: true,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty,
+            event_ts_utc: 0,
             now_ts_utc: 0,
             last_bar_ts: Some(1),
         }
@@ -1102,7 +1107,8 @@ mod tests {
             take_price: None,
         });
 
-        let intents_blocked = strategy.map_action_to_intents(&ctx, 1, false, false, entry_action.clone());
+        let intents_blocked =
+            strategy.map_action_to_intents(&ctx, 1, false, false, entry_action.clone());
         assert!(intents_blocked.is_empty());
 
         strategy.entry_ready = true;
@@ -1179,15 +1185,15 @@ mod tests {
     #[test]
     fn dropped_entry_releases_orchestrator_pending_state() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
-        strategy
-            .orchestrator
-            .restore(crate::strategies::hybrid_intraday::orchestrator::HybridSnapshot {
+        strategy.orchestrator.restore(
+            crate::strategies::hybrid_intraday::orchestrator::HybridSnapshot {
                 state: crate::strategies::hybrid_intraday::orchestrator::HybridState::Pending,
                 current_owner: Some(Owner::MeanReversion),
                 current_side: Some(Side::Long),
                 has_pending_entry: true,
                 overnight_exit_armed_date: None,
-            });
+            },
+        );
         strategy.entry_ready = false;
         let ctx = test_ctx(Some(0.0));
 
@@ -1264,7 +1270,8 @@ mod tests {
         );
         assert!(strategy.pending_entry.is_some());
         assert!(strategy.pending_entry_request_id.is_some());
-        strategy.clear_stale_pending_tail(created_ts + test_config().pending_timeout_sec as i64, 0.0);
+        strategy
+            .clear_stale_pending_tail(created_ts + test_config().pending_timeout_sec as i64, 0.0);
         assert!(strategy.pending_entry.is_some());
         assert!(strategy.pending_entry_request_id.is_some());
     }
@@ -1374,7 +1381,10 @@ mod tests {
             .unwrap()
             .and_utc()
             .timestamp();
-        assert_eq!(strategy.resolve_stop_end_unix_time(created_ts_utc), expected);
+        assert_eq!(
+            strategy.resolve_stop_end_unix_time(created_ts_utc),
+            expected
+        );
     }
 
     #[test]
@@ -1394,7 +1404,10 @@ mod tests {
             .unwrap()
             .and_utc()
             .timestamp();
-        assert_eq!(strategy.resolve_stop_end_unix_time(created_ts_utc), expected);
+        assert_eq!(
+            strategy.resolve_stop_end_unix_time(created_ts_utc),
+            expected
+        );
     }
 
     #[test]
@@ -1476,7 +1489,9 @@ mod tests {
             },
         );
         assert_eq!(first.len(), 1);
-        let pending = strategy.pending_exit_request_id.expect("pending exit request");
+        let pending = strategy
+            .pending_exit_request_id
+            .expect("pending exit request");
 
         let second = strategy.map_action_to_intents(
             &ctx,
@@ -2048,8 +2063,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 .iter()
                 .map(Self::action_debug_label)
                 .collect::<Vec<_>>();
-            let should_log_info =
-                bar.origin == DataOrigin::Live || can_emit || can_execute;
+            let should_log_info = bar.origin == DataOrigin::Live || can_emit || can_execute;
             if should_log_info {
                 info!(
                     target: "strategy_runtime::hybrid_intraday_runtime",
@@ -2089,19 +2103,9 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             }
         }
         let mut intents = self.maybe_emit_repair_intents(ctx, bar.close_time_utc);
-        intents.extend(
-            actions
-                .into_iter()
-                .flat_map(|action| {
-                    self.map_action_to_intents(
-                        ctx,
-                        bar.close_time_utc,
-                        can_emit,
-                        can_execute,
-                        action,
-                    )
-                }),
-        );
+        intents.extend(actions.into_iter().flat_map(|action| {
+            self.map_action_to_intents(ctx, bar.close_time_utc, can_emit, can_execute, action)
+        }));
         self.sync_state();
         intents
     }
@@ -2514,9 +2518,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.safe_mode_close_only = *safe_mode_close_only;
             self.safe_mode_reason = safe_mode_reason.clone();
             self.last_bar_close = *last_bar_close;
-            self.last_day_local = last_day_local
-                .as_deref()
-                .and_then(Self::parse_local_day);
+            self.last_day_local = last_day_local.as_deref().and_then(Self::parse_local_day);
             self.current_day_high = *current_day_high;
             self.current_day_low = *current_day_low;
             self.prev_day_range = *prev_day_range;

@@ -293,6 +293,7 @@ mod tests {
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
             position_qty: None,
+            event_ts_utc: 0,
             now_ts_utc: 0,
             last_bar_ts: None,
         }

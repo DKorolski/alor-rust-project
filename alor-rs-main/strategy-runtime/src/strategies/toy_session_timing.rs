@@ -203,6 +203,7 @@ mod tests {
             allow_live_orders: false,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty: None,
+            event_ts_utc: 0,
             now_ts_utc: 0,
             last_bar_ts: None,
         }

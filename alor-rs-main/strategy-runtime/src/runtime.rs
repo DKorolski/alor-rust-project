@@ -611,7 +611,7 @@ impl StrategyRuntime {
         }
 
         let prev_bar_ts = self.state.last_processed_bar_ts.get(&bar.symbol).copied();
-        let ctx = self.strategy_ctx_with_last_bar(prev_bar_ts);
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, bar.close_time_utc);
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
@@ -1398,7 +1398,12 @@ impl StrategyRuntime {
             }
         }
         let event_ts = self.normalize_event_ts(ack.processed_ts_utc);
-        let ctx = self.strategy_ctx();
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, ack.processed_ts_utc);
         let intents = self.strategy.on_ack(&ctx, &ack);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, event_ts, intents).await?;
@@ -1422,7 +1427,12 @@ impl StrategyRuntime {
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(order.ts_utc);
-        let ctx = self.strategy_ctx();
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, order.ts_utc);
         let intents = self.strategy.on_order(&ctx, &order);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, event_ts, intents).await?;
@@ -1447,7 +1457,12 @@ impl StrategyRuntime {
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(stop_order.ts_utc);
-        let ctx = self.strategy_ctx();
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, stop_order.ts_utc);
         let intents = self.strategy.on_stop_order(&ctx, &stop_order);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, event_ts, intents).await?;
@@ -1589,7 +1604,12 @@ impl StrategyRuntime {
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(position.ts_utc);
-        let ctx = self.strategy_ctx();
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, position.ts_utc);
         let intents = self.strategy.on_position(&ctx, &position);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, event_ts, intents).await?;
@@ -1616,7 +1636,7 @@ impl StrategyRuntime {
         if bar.origin == DataOrigin::Live {
             self.bootstrap_state.seen_live_bar = true;
         }
-        let ctx = self.strategy_ctx_with_last_bar(prev_bar_ts);
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, event_ts);
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
@@ -2396,7 +2416,11 @@ impl StrategyRuntime {
         }
     }
 
-    fn strategy_ctx_with_last_bar(&self, last_bar_ts: Option<i64>) -> StrategyCtx {
+    fn strategy_ctx_with_last_bar_and_event_ts(
+        &self,
+        last_bar_ts: Option<i64>,
+        event_ts_utc: i64,
+    ) -> StrategyCtx {
         let gateway_phase = self
             .live_guard
             .health
@@ -2419,9 +2443,14 @@ impl StrategyRuntime {
             allow_live_orders: self.config.allow_live_orders,
             gateway_phase,
             position_qty,
+            event_ts_utc,
             now_ts_utc: Utc::now().timestamp(),
             last_bar_ts,
         }
+    }
+
+    fn strategy_ctx_with_last_bar(&self, last_bar_ts: Option<i64>) -> StrategyCtx {
+        self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, self.strategy_now_ts_utc)
     }
 
     fn strategy_ctx(&self) -> StrategyCtx {
@@ -2502,7 +2531,12 @@ impl StrategyRuntime {
             None => return Ok(()),
         };
         let created_ts = self.normalize_event_ts(snapshot.snapshot_ts_utc.unwrap_or(0));
-        let ctx = self.strategy_ctx();
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts);
         let intents = self.strategy.on_bootstrap_snapshot(&ctx, &snapshot);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, created_ts, intents).await?;
@@ -2510,12 +2544,17 @@ impl StrategyRuntime {
     }
 
     async fn notify_runtime_state_restored(&mut self) -> Result<()> {
-        let ctx = self.strategy_ctx();
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
         let restored = RuntimeStateRestored {
             known_order_ids: self.our_order_ids.iter().copied().collect(),
             pending_requests: self.our_request_ids.iter().copied().collect(),
         };
-        let created_ts = self.normalize_event_ts(ctx.last_bar_ts().unwrap_or(0));
+        let created_ts = self.normalize_event_ts(last_bar_ts.unwrap_or(0));
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts);
         let intents = self.strategy.on_runtime_state_restored(&ctx, &restored);
         self.state.strategy_state = self.strategy.state().clone();
         self.apply_intents(&ctx, created_ts, intents).await?;

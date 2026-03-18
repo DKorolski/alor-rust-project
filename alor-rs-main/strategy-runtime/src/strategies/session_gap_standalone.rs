@@ -924,6 +924,14 @@ impl Strategy for SessionGapStandaloneStrategy {
                     let side = Self::entry_side(pending.direction);
                     let (tp, sl) = self.compute_tp_sl(pending.direction, bar.o);
                     let qty = pending.size as f64;
+                    let request_id = crate::deterministic_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &bar.symbol,
+                        "place",
+                        ctx.event_ts_utc(),
+                        0,
+                    );
                     intents.push(Intent::Place {
                         price: self.live_marketable_price(side, bar),
                         qty,
@@ -931,14 +939,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         comment: None,
                     });
                     SessionGapLivePhase::PendingEntry {
-                        request_id: crate::deterministic_request_id(
-                            &ctx.strategy_id,
-                            &ctx.portfolio,
-                            &bar.symbol,
-                            "place",
-                            bar.close_time_utc,
-                            0,
-                        ),
+                        request_id,
                         side,
                         qty,
                         baseline_qty: ctx.position_qty.unwrap_or(0.0),
@@ -1032,6 +1033,14 @@ impl Strategy for SessionGapStandaloneStrategy {
                     if reason == "test_hook_exit" {
                         self.test_hook.mark_exit_dispatched();
                     }
+                    let request_id = crate::deterministic_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &bar.symbol,
+                        "place",
+                        ctx.event_ts_utc(),
+                        0,
+                    );
                     intents.push(Intent::Place {
                         price: self.live_marketable_price(exit_side, bar),
                         qty,
@@ -1039,14 +1048,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         comment: None,
                     });
                     SessionGapLivePhase::PendingExit {
-                        request_id: crate::deterministic_request_id(
-                            &ctx.strategy_id,
-                            &ctx.portfolio,
-                            &bar.symbol,
-                            "place",
-                            bar.close_time_utc,
-                            0,
-                        ),
+                        request_id,
                         side: exit_side,
                         qty,
                         baseline_qty,
@@ -1391,6 +1393,7 @@ mod tests {
             allow_live_orders,
             gateway_phase,
             position_qty: Some(0.0),
+            event_ts_utc: 0,
             now_ts_utc: 0,
             last_bar_ts: None,
         }
@@ -1408,6 +1411,7 @@ mod tests {
             allow_live_orders: false,
             gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
             position_qty: None,
+            event_ts_utc: 0,
             now_ts_utc: 0,
             last_bar_ts: None,
         }

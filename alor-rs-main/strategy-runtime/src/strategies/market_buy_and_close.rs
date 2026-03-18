@@ -240,7 +240,7 @@ impl MarketBuyAndCloseStrategy {
             &ctx.strategy_id,
             &ctx.portfolio,
             &bar.symbol,
-            bar.close_time_utc,
+            ctx.event_ts_utc(),
             self.config.side,
         );
         self.state = StrategyState::MarketLivePendingEntry {
@@ -361,14 +361,15 @@ impl Strategy for MarketBuyAndCloseStrategy {
                                 ts_utc = bar.close_time_utc,
                                 "strategy_state_transition"
                             );
+                            let request_guid = crate::deterministic_market_request_id(
+                                &ctx.strategy_id,
+                                &ctx.portfolio,
+                                &bar.symbol,
+                                ctx.event_ts_utc(),
+                                close_side,
+                            );
                             self.state = StrategyState::MarketLivePendingExit {
-                                request_guid: crate::deterministic_market_request_id(
-                                    &ctx.strategy_id,
-                                    &ctx.portfolio,
-                                    &bar.symbol,
-                                    bar.close_time_utc,
-                                    close_side,
-                                ),
+                                request_guid,
                                 reason: "next_bar".to_string(),
                                 side: close_side,
                                 qty: self.config.qty,
@@ -378,13 +379,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                                 last_bar_ts: bar.close_time_utc,
                             };
                             vec![self.build_live_intent(
-                                crate::deterministic_market_request_id(
-                                    &ctx.strategy_id,
-                                    &ctx.portfolio,
-                                    &bar.symbol,
-                                    bar.close_time_utc,
-                                    close_side,
-                                ),
+                                request_guid,
                                 close_side,
                                 self.config.qty,
                                 bar.close,
@@ -522,14 +517,15 @@ impl Strategy for MarketBuyAndCloseStrategy {
                         ts_utc = now_ts,
                         "strategy_state_transition"
                     );
+                    let request_guid = crate::deterministic_market_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &pos.symbol,
+                        ctx.event_ts_utc(),
+                        close_side,
+                    );
                     self.state = StrategyState::MarketLivePendingExit {
-                        request_guid: crate::deterministic_market_request_id(
-                            &ctx.strategy_id,
-                            &ctx.portfolio,
-                            &pos.symbol,
-                            now_ts,
-                            close_side,
-                        ),
+                        request_guid,
                         reason: "position_update".to_string(),
                         side: close_side,
                         qty: self.config.qty,
@@ -540,13 +536,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
                     };
                     let reference_price = self.last_bar_close.unwrap_or(pos.avg_price);
                     return vec![self.build_live_intent(
-                        crate::deterministic_market_request_id(
-                            &ctx.strategy_id,
-                            &ctx.portfolio,
-                            &pos.symbol,
-                            now_ts,
-                            close_side,
-                        ),
+                        request_guid,
                         close_side,
                         self.config.qty,
                         reference_price,
@@ -635,6 +625,7 @@ mod tests {
             allow_live_orders: true,
             gateway_phase: GatewayPhase::LiveReady,
             position_qty: Some(0.0),
+            event_ts_utc: 0,
             now_ts_utc: 0,
             last_bar_ts: None,
         }

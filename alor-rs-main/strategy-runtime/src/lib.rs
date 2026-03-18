@@ -134,11 +134,16 @@ pub struct StrategyCtx {
     pub allow_live_orders: bool,
     pub gateway_phase: crate::live_guard::GatewayPhase,
     pub position_qty: Option<f64>,
+    event_ts_utc: i64,
     now_ts_utc: i64,
     last_bar_ts: Option<i64>,
 }
 
 impl StrategyCtx {
+    pub fn event_ts_utc(&self) -> i64 {
+        self.event_ts_utc
+    }
+
     pub fn now_ts_utc(&self) -> i64 {
         self.now_ts_utc
     }
