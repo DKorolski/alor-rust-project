@@ -19,6 +19,17 @@ pub enum SessionGapLivePhase {
         sent_ts: i64,
         acked: bool,
     },
+    EntryRecoveryVerificationPending {
+        request_id: Uuid,
+        side: Side,
+        qty: f64,
+        baseline_qty: f64,
+        tp: Option<f64>,
+        sl: Option<f64>,
+        verification_started_ts: i64,
+        transport_error_code: Option<String>,
+        transport_error_msg: Option<String>,
+    },
     InPosition {
         side: Side,
         qty: f64,

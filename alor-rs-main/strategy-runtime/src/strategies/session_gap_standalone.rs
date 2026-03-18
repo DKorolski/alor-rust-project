@@ -205,6 +205,8 @@ pub struct SessionGapStandaloneStrategy {
 }
 
 impl SessionGapStandaloneStrategy {
+    const MIN_ENTRY_RECOVERY_VERIFICATION_MS: u64 = 5_000;
+
     pub fn new(config: SessionGapStandaloneConfig) -> Self {
         let test_hook = SessionGapTestHookState::from_env();
         Self {
@@ -593,10 +595,82 @@ impl SessionGapStandaloneStrategy {
         (Some(tp), Some(sl))
     }
 
+    fn entry_recovery_verification_window_ms(&self) -> u64 {
+        self.config
+            .entry_ack_timeout_ms
+            .max(Self::MIN_ENTRY_RECOVERY_VERIFICATION_MS)
+    }
+
+    fn is_transient_entry_transport_error(ack: &CommandAck) -> bool {
+        matches!(ack.status, AckStatus::Error)
+            && ack.error_code.as_deref() == Some("cws_error")
+            && ack.broker_order_id.is_none()
+    }
+
+    fn log_entry_terminal_failure(ack: &CommandAck) {
+        warn!(
+            strategy = "session_gap_standalone",
+            action = "entry_failed_terminal",
+            request_id = %ack.request_id,
+            status = ?ack.status,
+            error_code = ?ack.error_code,
+            error_msg = ?ack.error_msg,
+            broker_order_id = ack.broker_order_id,
+            cws_request_guid = ?ack.cws_request_guid,
+            "session gap entry failed terminally"
+        );
+    }
+
+    fn log_entry_transport_failure(ack: &CommandAck) {
+        warn!(
+            strategy = "session_gap_standalone",
+            action = "entry_failed_transport_transient",
+            request_id = %ack.request_id,
+            status = ?ack.status,
+            error_code = ?ack.error_code,
+            error_msg = ?ack.error_msg,
+            broker_order_id = ack.broker_order_id,
+            cws_request_guid = ?ack.cws_request_guid,
+            "session gap entry hit transient transport failure"
+        );
+    }
+
+    fn log_entry_recovery_pending(
+        request_id: uuid::Uuid,
+        verification_started_ts: i64,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "entry_recovery_verification_pending",
+            request_id = %request_id,
+            verification_started_ts,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap entry recovery verification started"
+        );
+    }
+
+    fn log_entry_recovered_to_flat(
+        request_id: uuid::Uuid,
+        ts_utc: i64,
+        reason: &'static str,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "entry_recovered_to_flat",
+            request_id = %request_id,
+            ts_utc,
+            reason,
+            "session gap entry recovered safely to flat"
+        );
+    }
+
     fn transition_live_reconcile_with_snapshot(
         &mut self,
-        ctx: &StrategyCtx,
         snapshot_qty: f64,
+        has_working_order: bool,
         ts_utc: i64,
     ) {
         let (
@@ -648,6 +722,36 @@ impl SessionGapStandaloneStrategy {
                     None
                 }
             }
+            SessionGapLivePhase::EntryRecoveryVerificationPending {
+                request_id,
+                side,
+                qty,
+                baseline_qty,
+                tp,
+                sl,
+                ..
+            } => {
+                if (snapshot_qty - baseline_qty).abs() > f64::EPSILON {
+                    Some(SessionGapLivePhase::InPosition {
+                        side,
+                        qty,
+                        avg_price: 0.0,
+                        baseline_qty,
+                        tp,
+                        sl,
+                        opened_ts: ts_utc,
+                    })
+                } else if !has_working_order {
+                    Self::log_entry_recovered_to_flat(
+                        request_id,
+                        ts_utc,
+                        "bootstrap_snapshot_no_position_no_working_order",
+                    );
+                    Some(SessionGapLivePhase::Flat)
+                } else {
+                    None
+                }
+            }
             SessionGapLivePhase::InPosition { baseline_qty, .. }
             | SessionGapLivePhase::PendingExit { baseline_qty, .. } => {
                 if (snapshot_qty - baseline_qty).abs() <= f64::EPSILON {
@@ -695,7 +799,6 @@ impl SessionGapStandaloneStrategy {
                     .or(persisted_phase_last_change_ts_utc),
                 last_bar_ts: persisted_last_bar_ts,
             };
-            let _ = ctx;
         }
     }
 
@@ -710,6 +813,9 @@ impl SessionGapStandaloneStrategy {
         match phase {
             SessionGapLivePhase::Flat => "Flat",
             SessionGapLivePhase::PendingEntry { .. } => "PendingEntry",
+            SessionGapLivePhase::EntryRecoveryVerificationPending { .. } => {
+                "EntryRecoveryVerificationPending"
+            }
             SessionGapLivePhase::InPosition { .. } => "InPosition",
             SessionGapLivePhase::PendingExit { .. } => "PendingExit",
             SessionGapLivePhase::Blocked { .. } => "Blocked",
@@ -977,6 +1083,42 @@ impl Strategy for SessionGapStandaloneStrategy {
                     phase
                 }
             }
+            SessionGapLivePhase::EntryRecoveryVerificationPending {
+                request_id,
+                qty,
+                baseline_qty,
+                tp,
+                sl,
+                verification_started_ts,
+                ..
+            } => {
+                let current_qty = ctx.position_qty.unwrap_or(baseline_qty);
+                let delta = current_qty - baseline_qty;
+                let elapsed = ctx
+                    .now_ts_utc()
+                    .saturating_sub(verification_started_ts)
+                    .saturating_mul(1000) as u64;
+                if delta.abs() > f64::EPSILON {
+                    SessionGapLivePhase::InPosition {
+                        side: if delta >= 0.0 { Side::Buy } else { Side::Sell },
+                        qty: delta.abs().max(qty),
+                        avg_price: 0.0,
+                        baseline_qty,
+                        tp,
+                        sl,
+                        opened_ts: ctx.now_ts_utc(),
+                    }
+                } else if elapsed > self.entry_recovery_verification_window_ms() {
+                    Self::log_entry_recovered_to_flat(
+                        request_id,
+                        ctx.now_ts_utc(),
+                        "verification_window_elapsed_without_position_or_order",
+                    );
+                    SessionGapLivePhase::Flat
+                } else {
+                    phase
+                }
+            }
             SessionGapLivePhase::InPosition {
                 side,
                 qty,
@@ -1097,9 +1239,60 @@ impl Strategy for SessionGapStandaloneStrategy {
             let previous_phase = phase.clone();
             match phase {
                 SessionGapLivePhase::PendingEntry {
-                    request_id, acked, ..
+                    request_id,
+                    side,
+                    qty,
+                    baseline_qty,
+                    tp,
+                    sl,
+                    acked,
+                    ..
+                } => {
+                    if *request_id == ack.request_id {
+                        match ack.status {
+                            AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
+                                *acked = true;
+                            }
+                            AckStatus::Rejected | AckStatus::Expired => {
+                                Self::log_entry_terminal_failure(ack);
+                                *phase = SessionGapLivePhase::Blocked {
+                                    reason: format!("ack_failed:{:?}", ack.status),
+                                    ts_utc: ack.processed_ts_utc,
+                                };
+                            }
+                            AckStatus::Error => {
+                                if Self::is_transient_entry_transport_error(ack) {
+                                    Self::log_entry_transport_failure(ack);
+                                    let request_id = *request_id;
+                                    *phase = SessionGapLivePhase::EntryRecoveryVerificationPending {
+                                        request_id,
+                                        side: *side,
+                                        qty: *qty,
+                                        baseline_qty: *baseline_qty,
+                                        tp: *tp,
+                                        sl: *sl,
+                                        verification_started_ts: ack.processed_ts_utc,
+                                        transport_error_code: ack.error_code.clone(),
+                                        transport_error_msg: ack.error_msg.clone(),
+                                    };
+                                    Self::log_entry_recovery_pending(
+                                        request_id,
+                                        ack.processed_ts_utc,
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                } else {
+                                    Self::log_entry_terminal_failure(ack);
+                                    *phase = SessionGapLivePhase::Blocked {
+                                        reason: format!("ack_failed:{:?}", ack.status),
+                                        ts_utc: ack.processed_ts_utc,
+                                    };
+                                }
+                            }
+                        }
+                    }
                 }
-                | SessionGapLivePhase::PendingExit {
+                SessionGapLivePhase::PendingExit {
                     request_id, acked, ..
                 } => {
                     if *request_id == ack.request_id {
@@ -1130,7 +1323,56 @@ impl Strategy for SessionGapStandaloneStrategy {
         Vec::new()
     }
 
-    fn on_order(&mut self, _ctx: &StrategyCtx, _ord: &crate::OrderEvent) -> Vec<Intent> {
+    fn on_order(&mut self, _ctx: &StrategyCtx, ord: &crate::OrderEvent) -> Vec<Intent> {
+        let mut phase_to_persist: Option<SessionGapLivePhase> = None;
+        if let StrategyState::SessionGapStandalone { phase, .. } = &mut self.state {
+            let previous_phase = phase.clone();
+            if let SessionGapLivePhase::EntryRecoveryVerificationPending {
+                request_id,
+                side,
+                qty,
+                baseline_qty,
+                tp,
+                sl,
+                verification_started_ts,
+                ..
+            } = phase.clone()
+            {
+                if ord.request_id == Some(request_id) {
+                    let status = ord.status.to_ascii_lowercase();
+                    if status == "filled" {
+                        *phase = SessionGapLivePhase::InPosition {
+                            side,
+                            qty,
+                            avg_price: ord.price,
+                            baseline_qty,
+                            tp,
+                            sl,
+                            opened_ts: ord.ts_utc.max(verification_started_ts),
+                        };
+                    } else if status == "working" {
+                        *phase = SessionGapLivePhase::PendingEntry {
+                            request_id,
+                            side,
+                            qty,
+                            baseline_qty,
+                            tp,
+                            sl,
+                            sent_ts: verification_started_ts,
+                            acked: true,
+                        };
+                    }
+                }
+            }
+            Self::log_phase_transition(&previous_phase, phase, ord.ts_utc);
+            if Self::phase_name(&previous_phase) != Self::phase_name(phase) {
+                self.phase_last_change_ts_utc = Some(ord.ts_utc);
+            }
+            phase_to_persist = Some(phase.clone());
+        }
+        if let Some(phase) = phase_to_persist {
+            self.persist_state_with_existing_last_bar(phase);
+        }
         Vec::new()
     }
 
@@ -1154,6 +1396,25 @@ impl Strategy for SessionGapStandaloneStrategy {
                         let side = if delta >= 0.0 { Side::Buy } else { Side::Sell };
                         *phase = SessionGapLivePhase::InPosition {
                             side,
+                            qty: delta.abs(),
+                            avg_price: pos.avg_price,
+                            baseline_qty,
+                            tp,
+                            sl,
+                            opened_ts: now_ts,
+                        };
+                    }
+                }
+                SessionGapLivePhase::EntryRecoveryVerificationPending {
+                    baseline_qty,
+                    tp,
+                    sl,
+                    ..
+                } => {
+                    let delta = pos.qty - baseline_qty;
+                    if delta.abs() > f64::EPSILON {
+                        *phase = SessionGapLivePhase::InPosition {
+                            side: if delta >= 0.0 { Side::Buy } else { Side::Sell },
                             qty: delta.abs(),
                             avg_price: pos.avg_price,
                             baseline_qty,
@@ -1207,7 +1468,7 @@ impl Strategy for SessionGapStandaloneStrategy {
 
     fn on_bootstrap_snapshot(
         &mut self,
-        ctx: &StrategyCtx,
+        _ctx: &StrategyCtx,
         snapshot: &crate::BootstrapSnapshot,
     ) -> Vec<Intent> {
         info!(
@@ -1239,8 +1500,12 @@ impl Strategy for SessionGapStandaloneStrategy {
             .get(&self.config.symbol)
             .map(|p| p.qty)
             .unwrap_or(0.0);
+        let has_working_order = snapshot
+            .working_orders_strategy
+            .values()
+            .any(|order| order.symbol == self.config.symbol);
         let ts = snapshot.snapshot_ts_utc.unwrap_or(0);
-        self.transition_live_reconcile_with_snapshot(ctx, snapshot_qty, ts);
+        self.transition_live_reconcile_with_snapshot(snapshot_qty, has_working_order, ts);
         Vec::new()
     }
 
@@ -1414,6 +1679,24 @@ mod tests {
             event_ts_utc: 0,
             now_ts_utc: 0,
             last_bar_ts: None,
+        }
+    }
+
+    fn ctx_live_at(now_ts_utc: i64, last_bar_ts: Option<i64>, position_qty: f64) -> StrategyCtx {
+        StrategyCtx {
+            strategy_id: "s".into(),
+            portfolio: "p".into(),
+            exchange: "e".into(),
+            symbol: "USDRUBF".into(),
+            tick_size: 0.01,
+            trade_mode: crate::TradeMode::Live,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
+            allow_live_orders: true,
+            gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
+            position_qty: Some(position_qty),
+            event_ts_utc: now_ts_utc,
+            now_ts_utc,
+            last_bar_ts,
         }
     }
 
@@ -2443,6 +2726,230 @@ mod tests {
                 assert_eq!(*last_bar_ts, Some(1_000));
             }
             other => panic!("unexpected state after ack: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transient_cws_error_enters_recovery_verification_instead_of_blocked() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: false,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(1_000),
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id,
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(101.0),
+                sl: Some(99.0),
+                sent_ts: 1_000,
+                acked: false,
+            },
+            phase_last_change_ts_utc: Some(1_000),
+            last_bar_ts: Some(1_000),
+        };
+
+        let mut ack = CommandAck::error(
+            request_id,
+            "cws_error",
+            "cws disconnected: protocol_reset_without_close_handshake",
+        );
+        ack.processed_ts_utc = 1_005;
+        let _ = strategy.on_ack(&ctx_live_at(1_005, Some(1_000), 0.0), &ack);
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase:
+                    SessionGapLivePhase::EntryRecoveryVerificationPending {
+                        request_id: phase_request_id,
+                        verification_started_ts,
+                        transport_error_code,
+                        transport_error_msg,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(*phase_request_id, request_id);
+                assert_eq!(*verification_started_ts, 1_005);
+                assert_eq!(transport_error_code.as_deref(), Some("cws_error"));
+                assert_eq!(
+                    transport_error_msg.as_deref(),
+                    Some("cws disconnected: protocol_reset_without_close_handshake")
+                );
+            }
+            other => panic!("unexpected state after transient cws error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn business_reject_still_blocks_pending_entry() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: false,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(1_000),
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id,
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(101.0),
+                sl: Some(99.0),
+                sent_ts: 1_000,
+                acked: false,
+            },
+            phase_last_change_ts_utc: Some(1_000),
+            last_bar_ts: Some(1_000),
+        };
+
+        let _ = strategy.on_ack(
+            &ctx_live_at(1_005, Some(1_000), 0.0),
+            &CommandAck::rejected(request_id, "business_reject", "limit price invalid"),
+        );
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::Blocked { .. },
+                ..
+            } => {}
+            other => panic!("business reject must block, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transient_error_without_position_recovers_to_flat_after_verification_window() {
+        let mut cfg = SessionGapStandaloneConfig::default();
+        cfg.entry_ack_timeout_ms = 1_000;
+        let mut strategy = SessionGapStandaloneStrategy::new(cfg);
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: false,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(100),
+            phase: SessionGapLivePhase::EntryRecoveryVerificationPending {
+                request_id,
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(101.0),
+                sl: Some(99.0),
+                verification_started_ts: 100,
+                transport_error_code: Some("cws_error".into()),
+                transport_error_msg: Some(
+                    "cws disconnected: protocol_reset_without_close_handshake".into(),
+                ),
+            },
+            phase_last_change_ts_utc: Some(100),
+            last_bar_ts: Some(100),
+        };
+
+        let mut live_bar = bar(160, 100.0, 100.2, 99.8, 100.1);
+        live_bar.origin = DataOrigin::Live;
+
+        let _ = strategy.on_bar(&ctx_live_at(106, Some(100), 0.0), &live_bar);
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::Flat,
+                ..
+            } => {}
+            other => panic!("transient recovery should return to flat, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transient_error_with_position_update_recovers_to_in_position() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: false,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(100),
+            phase: SessionGapLivePhase::EntryRecoveryVerificationPending {
+                request_id,
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(101.0),
+                sl: Some(99.0),
+                verification_started_ts: 100,
+                transport_error_code: Some("cws_error".into()),
+                transport_error_msg: Some(
+                    "cws disconnected: protocol_reset_without_close_handshake".into(),
+                ),
+            },
+            phase_last_change_ts_utc: Some(100),
+            last_bar_ts: Some(100),
+        };
+
+        let pos = PositionEvent {
+            symbol: "USDRUBF".into(),
+            qty: 1.0,
+            existing: false,
+            avg_price: 83.14,
+            ts_utc: 104,
+        };
+        let _ = strategy.on_position(&ctx_live_at(104, Some(100), 0.0), &pos);
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase:
+                    SessionGapLivePhase::InPosition {
+                        qty, avg_price, ..
+                    },
+                ..
+            } => {
+                assert_eq!(*qty, 1.0);
+                assert_eq!(*avg_price, 83.14);
+            }
+            other => panic!("position tail should recover to in-position, got: {other:?}"),
         }
     }
 

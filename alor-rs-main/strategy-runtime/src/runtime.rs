@@ -1049,6 +1049,9 @@ impl StrategyRuntime {
                 | crate::state::SessionGapLivePhase::PendingExit { request_id, .. } => {
                     vec![*request_id]
                 }
+                crate::state::SessionGapLivePhase::EntryRecoveryVerificationPending { .. } => {
+                    Vec::new()
+                }
                 crate::state::SessionGapLivePhase::Flat
                 | crate::state::SessionGapLivePhase::InPosition { .. }
                 | crate::state::SessionGapLivePhase::Blocked { .. } => Vec::new(),
