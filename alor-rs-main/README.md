@@ -87,6 +87,7 @@ timezone_offset_hours = 3
 - [Strategy Runtime Runbook](docs/strategy-runtime-runbook.md)
 - [Alor Gateway Runbook](docs/alor-gateway-runbook.md)
 - [Session Gap B2 Runbook](docs/session-gap-b2-runbook.md)
+- [Market Buy And Close Diagnostic Runbook](docs/market-buy-and-close-diagnostic-runbook.md)
 - [Replay / Backtest Guide](docs/replay-backtest-guide.md)
 - [State and Restarts](docs/state-and-restarts.md)
 - [Hybrid Stage-2 Contract Freeze](docs/hybrid-stage2-contract-freeze.md)

@@ -16,13 +16,15 @@ use chrono::{Duration, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeConfig;
 use crate::strategies::hybrid_intraday::{
-    BreakoutEodMode, HybridOrchestratorConfig, IntradayBreakoutConfig, MinRangeMode,
-    MeanReversionConfig,
+    BreakoutEodMode, HybridOrchestratorConfig, IntradayBreakoutConfig, MeanReversionConfig,
+    MinRangeMode,
 };
+use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeConfig;
 use crate::strategies::limit_cancel::LimitCancelConfig;
-use crate::strategies::market_buy_and_close::MarketBuyAndCloseConfig;
+use crate::strategies::market_buy_and_close::{
+    MarketBuyAndCloseConfig, MarketBuyAndCloseLiveOrderStyle,
+};
 use crate::strategies::mock_live_probe::{MockLiveProbeConfig, MockLiveProbeMode};
 use crate::strategies::session_gap_standalone::SessionGapStandaloneConfig;
 use crate::strategies::toy_session_timing::ToySessionTimingConfig;
@@ -389,6 +391,10 @@ pub struct StrategyConfig {
     pub symbol: String,
     pub qty: f64,
     pub side: Side,
+    #[serde(default)]
+    pub live_order_style: MarketBuyAndCloseLiveOrderStyle,
+    #[serde(default)]
+    pub marketable_limit_offset_ticks: i64,
     pub place_offset_ticks: i64,
     pub tick_size: f64,
     pub max_wait_bars_for_ack: u32,
@@ -585,6 +591,9 @@ impl StrategyConfig {
             symbol: self.symbol.clone(),
             qty: self.qty,
             side: self.side,
+            live_order_style: self.live_order_style,
+            tick_size: self.tick_size,
+            marketable_limit_offset_ticks: self.marketable_limit_offset_ticks,
             close_trigger: self.close_trigger,
             entry_ack_timeout_ms: self.entry_ack_timeout_ms,
             entry_fill_timeout_ms: self.entry_fill_timeout_ms,
@@ -655,16 +664,10 @@ impl StrategyConfig {
             .trading_periods
             .as_ref()
             .map(|p| (p.session_end.hour(), p.session_end.minute(), p.weekends_off))
-            .unwrap_or((
-                self.session_close_hour,
-                self.session_close_minute,
-                false,
-            ));
-        let mr_session_end_time = NaiveTime::parse_from_str(
-            &self.hybrid_intraday.mr_session_end_time,
-            "%H:%M:%S",
-        )
-        .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 59, 0).unwrap_or(NaiveTime::MIN));
+            .unwrap_or((self.session_close_hour, self.session_close_minute, false));
+        let mr_session_end_time =
+            NaiveTime::parse_from_str(&self.hybrid_intraday.mr_session_end_time, "%H:%M:%S")
+                .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 59, 0).unwrap_or(NaiveTime::MIN));
         let bo_min_range_mode = match self
             .hybrid_intraday
             .bo_min_range_mode
@@ -685,7 +688,9 @@ impl StrategyConfig {
             _ => BreakoutEodMode::SameDay,
         };
         let breakout_overnight_exit_time = NaiveTime::parse_from_str(
-            &self.hybrid_intraday.orchestrator_breakout_overnight_exit_time,
+            &self
+                .hybrid_intraday
+                .orchestrator_breakout_overnight_exit_time,
             "%H:%M:%S",
         )
         .unwrap_or_else(|_| NaiveTime::from_hms_opt(9, 30, 0).unwrap_or(NaiveTime::MIN));

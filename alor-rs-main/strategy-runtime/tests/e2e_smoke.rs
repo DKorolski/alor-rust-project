@@ -13,8 +13,8 @@ use alor_protocol::{AckStatus, CommandAck, Envelope, MessageType, OrderCommand};
 use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
-    deterministic_request_id, BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig,
-    PaperOutput, PositionEvent, PaperExecutionMode, HybridIntradaySettings, ReadConfig,
+    deterministic_request_id, BacktestConfig, BarEvent, DataOrigin, HybridIntradaySettings,
+    OrderEvent, PaperConfig, PaperExecutionMode, PaperOutput, PositionEvent, ReadConfig,
     ReplayConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode, TrimConfig,
 };
 
@@ -82,6 +82,9 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             symbol,
             qty: 1.0,
             side: alor_protocol::Side::Buy,
+            live_order_style:
+                strategy_runtime::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle::Market,
+            marketable_limit_offset_ticks: 0,
             place_offset_ticks: 50,
             tick_size: 0.01,
             max_wait_bars_for_ack: 3,

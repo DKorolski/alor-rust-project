@@ -7,11 +7,11 @@ use alor_types::TradingPeriods;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 use crate::{
-    BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperExecutionMode,
-    PaperOutput, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind,
-    StreamNames, TradeMode, TrimConfig,
-    HybridIntradaySettings,
+    BacktestConfig, CloseTrigger, HealthServerConfig, HybridIntradaySettings, PaperConfig,
+    PaperExecutionMode, PaperOutput, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
+    StrategyKind, StreamNames, TradeMode, TrimConfig,
 };
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
@@ -22,6 +22,9 @@ const DEFAULT_EXCHANGE: &str = "alor";
 const DEFAULT_SOURCE: &str = "strategy-runtime";
 const DEFAULT_SYMBOL: &str = "SBER";
 const DEFAULT_SIDE: &str = "buy";
+const DEFAULT_LIVE_ORDER_STYLE: MarketBuyAndCloseLiveOrderStyle =
+    MarketBuyAndCloseLiveOrderStyle::Market;
+const DEFAULT_MARKETABLE_LIMIT_OFFSET_TICKS: i64 = 0;
 const DEFAULT_PLACE_OFFSET_TICKS: i64 = 1;
 const DEFAULT_QTY: f64 = 1.0;
 const DEFAULT_TICK_SIZE: f64 = 0.01;
@@ -182,6 +185,8 @@ pub struct StrategySources {
     pub symbol: ConfigSource,
     pub qty: ConfigSource,
     pub side: ConfigSource,
+    pub live_order_style: ConfigSource,
+    pub marketable_limit_offset_ticks: ConfigSource,
     pub place_offset_ticks: ConfigSource,
     pub tick_size: ConfigSource,
     pub max_wait_bars_for_ack: ConfigSource,
@@ -337,6 +342,8 @@ impl Default for StrategySources {
             symbol: ConfigSource::Default,
             qty: ConfigSource::Default,
             side: ConfigSource::Default,
+            live_order_style: ConfigSource::Default,
+            marketable_limit_offset_ticks: ConfigSource::Default,
             place_offset_ticks: ConfigSource::Default,
             tick_size: ConfigSource::Default,
             max_wait_bars_for_ack: ConfigSource::Default,
@@ -522,6 +529,8 @@ struct StrategyConfigFile {
     symbol: Option<String>,
     qty: Option<f64>,
     side: Option<String>,
+    live_order_style: Option<String>,
+    marketable_limit_offset_ticks: Option<i64>,
     place_offset_ticks: Option<i64>,
     tick_size: Option<f64>,
     max_wait_bars_for_ack: Option<u32>,
@@ -648,6 +657,8 @@ pub fn load_runtime_config(
         symbol: DEFAULT_SYMBOL.to_string(),
         qty: DEFAULT_QTY,
         side: parse_side(DEFAULT_SIDE),
+        live_order_style: DEFAULT_LIVE_ORDER_STYLE,
+        marketable_limit_offset_ticks: DEFAULT_MARKETABLE_LIMIT_OFFSET_TICKS,
         place_offset_ticks: DEFAULT_PLACE_OFFSET_TICKS,
         tick_size: DEFAULT_TICK_SIZE,
         max_wait_bars_for_ack: DEFAULT_MAX_WAIT_BARS_FOR_ACK,
@@ -841,6 +852,14 @@ pub fn load_runtime_config(
             if let Some(value) = &strategy_file.side {
                 strategy.side = parse_side(value);
                 sources.strategy.side = ConfigSource::File;
+            }
+            if let Some(value) = &strategy_file.live_order_style {
+                strategy.live_order_style = parse_live_order_style(value);
+                sources.strategy.live_order_style = ConfigSource::File;
+            }
+            if let Some(value) = strategy_file.marketable_limit_offset_ticks {
+                strategy.marketable_limit_offset_ticks = value;
+                sources.strategy.marketable_limit_offset_ticks = ConfigSource::File;
             }
             if let Some(value) = strategy_file.place_offset_ticks {
                 strategy.place_offset_ticks = value;
@@ -1052,8 +1071,9 @@ pub fn load_runtime_config(
                     strategy.hybrid_intraday.orchestrator_breakout_eod_mode = value.clone();
                 }
                 if let Some(value) = &hybrid_file.orchestrator_breakout_overnight_exit_time {
-                    strategy.hybrid_intraday.orchestrator_breakout_overnight_exit_time =
-                        value.clone();
+                    strategy
+                        .hybrid_intraday
+                        .orchestrator_breakout_overnight_exit_time = value.clone();
                 }
                 if let Some(value) = hybrid_file.repair_deadline_sec {
                     strategy.hybrid_intraday.repair_deadline_sec = value;
@@ -1301,6 +1321,14 @@ pub fn load_runtime_config(
     if let Ok(value) = env::var("SIDE") {
         strategy.side = parse_side(&value);
         sources.strategy.side = ConfigSource::Env;
+    }
+    if let Ok(value) = env::var("LIVE_ORDER_STYLE") {
+        strategy.live_order_style = parse_live_order_style(&value);
+        sources.strategy.live_order_style = ConfigSource::Env;
+    }
+    if let Some(value) = env_parse("MARKETABLE_LIMIT_OFFSET_TICKS") {
+        strategy.marketable_limit_offset_ticks = value;
+        sources.strategy.marketable_limit_offset_ticks = ConfigSource::Env;
     }
     if let Some(value) = env_parse("PLACE_OFFSET_TICKS") {
         strategy.place_offset_ticks = value;
@@ -1678,6 +1706,13 @@ fn parse_close_trigger(value: &str) -> CloseTrigger {
     }
 }
 
+fn parse_live_order_style(value: &str) -> MarketBuyAndCloseLiveOrderStyle {
+    match value.to_ascii_lowercase().as_str() {
+        "marketable_limit" | "marketablelimit" => MarketBuyAndCloseLiveOrderStyle::MarketableLimit,
+        _ => MarketBuyAndCloseLiveOrderStyle::Market,
+    }
+}
+
 fn parse_paper_output(value: &str) -> PaperOutput {
     match value.to_lowercase().as_str() {
         "file" => PaperOutput::File,
@@ -1785,6 +1820,110 @@ timezone_offset_hours = 3
         assert_eq!(
             resolved.sources.strategy.trading_periods,
             ConfigSource::File
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_parses_market_buy_and_close_market_style() {
+        let path = write_temp_config(
+            "market-buy-close-market-style",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "demo"
+exchange = "MOEX"
+
+[strategy]
+strategy_id = "market_buy_and_close"
+strategy_kind = "market_buy_and_close"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+live_order_style = "market"
+marketable_limit_offset_ticks = 2
+"#,
+        );
+
+        let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        assert_eq!(
+            resolved.config.strategy.live_order_style,
+            MarketBuyAndCloseLiveOrderStyle::Market
+        );
+        assert_eq!(resolved.config.strategy.marketable_limit_offset_ticks, 2);
+        assert_eq!(
+            resolved.sources.strategy.live_order_style,
+            ConfigSource::File
+        );
+        assert_eq!(
+            resolved.sources.strategy.marketable_limit_offset_ticks,
+            ConfigSource::File
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_parses_market_buy_and_close_marketable_limit_style() {
+        let path = write_temp_config(
+            "market-buy-close-marketable-limit",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "demo"
+exchange = "MOEX"
+
+[strategy]
+strategy_id = "market_buy_and_close"
+strategy_kind = "market_buy_and_close"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+live_order_style = "marketable_limit"
+marketable_limit_offset_ticks = 3
+"#,
+        );
+
+        let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        assert_eq!(
+            resolved.config.strategy.live_order_style,
+            MarketBuyAndCloseLiveOrderStyle::MarketableLimit
+        );
+        assert_eq!(resolved.config.strategy.marketable_limit_offset_ticks, 3);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_defaults_market_buy_and_close_live_order_style_to_market() {
+        let path = write_temp_config(
+            "market-buy-close-default-style",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "demo"
+exchange = "MOEX"
+
+[strategy]
+strategy_id = "market_buy_and_close"
+strategy_kind = "market_buy_and_close"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+"#,
+        );
+
+        let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        assert_eq!(
+            resolved.config.strategy.live_order_style,
+            MarketBuyAndCloseLiveOrderStyle::Market
+        );
+        assert_eq!(
+            resolved.config.strategy.marketable_limit_offset_ticks,
+            DEFAULT_MARKETABLE_LIMIT_OFFSET_TICKS
+        );
+        assert_eq!(
+            resolved.sources.strategy.live_order_style,
+            ConfigSource::Default
+        );
+        assert_eq!(
+            resolved.sources.strategy.marketable_limit_offset_ticks,
+            ConfigSource::Default
         );
         let _ = std::fs::remove_file(path);
     }

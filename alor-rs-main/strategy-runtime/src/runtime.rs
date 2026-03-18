@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, NaiveTime, TimeZone, Utc, Weekday};
+use chrono::{
+    Datelike, Duration as ChronoDuration, FixedOffset, NaiveTime, TimeZone, Utc, Weekday,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::watch;
@@ -608,11 +610,7 @@ impl StrategyRuntime {
             return Ok(());
         }
 
-        let prev_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&bar.symbol)
-            .copied();
+        let prev_bar_ts = self.state.last_processed_bar_ts.get(&bar.symbol).copied();
         let ctx = self.strategy_ctx_with_last_bar(prev_bar_ts);
         let intents = self.strategy.on_bar(&ctx, &bar);
         self.state.strategy_state = self.strategy.state().clone();
@@ -1613,11 +1611,7 @@ impl StrategyRuntime {
             self.metrics.bars_acked_total = self.metrics.bars_acked_total.saturating_add(1);
             return Ok(());
         }
-        let prev_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&bar.symbol)
-            .copied();
+        let prev_bar_ts = self.state.last_processed_bar_ts.get(&bar.symbol).copied();
         let event_ts = self.normalize_event_ts(bar.close_time_utc);
         if bar.origin == DataOrigin::Live {
             self.bootstrap_state.seen_live_bar = true;
@@ -1903,7 +1897,8 @@ impl StrategyRuntime {
                             );
                             continue;
                         }
-                        let wrong_side = (side == alor_protocol::Side::Sell && current_pos_qty < 0.0)
+                        let wrong_side = (side == alor_protocol::Side::Sell
+                            && current_pos_qty < 0.0)
                             || (side == alor_protocol::Side::Buy && current_pos_qty > 0.0);
                         if wrong_side {
                             info!(
@@ -2113,8 +2108,8 @@ impl StrategyRuntime {
                         continue;
                     }
                     let is_sell = order.side.eq_ignore_ascii_case("sell");
-                    let wrong_side = (is_sell && current_pos_qty < 0.0)
-                        || (!is_sell && current_pos_qty > 0.0);
+                    let wrong_side =
+                        (is_sell && current_pos_qty < 0.0) || (!is_sell && current_pos_qty > 0.0);
                     if wrong_side {
                         info!(
                             target: "strategy_runtime::runtime",
@@ -2488,7 +2483,9 @@ impl StrategyRuntime {
             }
             let local_close = day.and_time(session_end);
             if let Some(with_offset) = offset.from_local_datetime(&local_close).single() {
-                let stop_end = with_offset.timestamp().saturating_add(STOP_END_BUFFER_SEC_DEFAULT);
+                let stop_end = with_offset
+                    .timestamp()
+                    .saturating_add(STOP_END_BUFFER_SEC_DEFAULT);
                 if stop_end > created_ts_utc {
                     return Some(stop_end);
                 }
@@ -2935,24 +2932,24 @@ impl StrategyRuntime {
                     .compute_intraday_stop_end_utc(created_ts_utc)
                     .unwrap_or(stop_end_unix_time);
                 (
-                alor_protocol::CommandAction::CreateStopLimit(
-                    alor_protocol::CreateStopLimitOrder {
-                        side,
-                        qty,
-                        trigger_price,
-                        price,
-                        condition,
-                        stop_end_unix_time: resolved_stop_end,
-                        comment: Self::sanitize_comment(
-                            comment.or_else(|| fallback_comment.clone()),
-                        ),
-                        instrument_group,
-                        check_duplicates,
-                    },
-                ),
-                5,
-                "create_stop_limit",
-            )
+                    alor_protocol::CommandAction::CreateStopLimit(
+                        alor_protocol::CreateStopLimitOrder {
+                            side,
+                            qty,
+                            trigger_price,
+                            price,
+                            condition,
+                            stop_end_unix_time: resolved_stop_end,
+                            comment: Self::sanitize_comment(
+                                comment.or_else(|| fallback_comment.clone()),
+                            ),
+                            instrument_group,
+                            check_duplicates,
+                        },
+                    ),
+                    5,
+                    "create_stop_limit",
+                )
             }
             Intent::DeleteStopLimit {
                 order_id,
@@ -3409,6 +3406,9 @@ mod tests {
                 symbol: "SBER".to_string(),
                 qty: 1.0,
                 side: alor_protocol::Side::Buy,
+                live_order_style:
+                    crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle::Market,
+                marketable_limit_offset_ticks: 0,
                 place_offset_ticks: 1,
                 tick_size: 0.01,
                 max_wait_bars_for_ack: 1,
@@ -4109,7 +4109,12 @@ mod tests {
             runtime.simulate_fills(&bar).await.unwrap();
         });
 
-        let pos_qty = runtime.state.positions.get("SBER").map(|p| p.qty).unwrap_or(0.0);
+        let pos_qty = runtime
+            .state
+            .positions
+            .get("SBER")
+            .map(|p| p.qty)
+            .unwrap_or(0.0);
         assert!(pos_qty >= 0.0, "position must not flip short");
         assert!(pos_qty.abs() <= f64::EPSILON, "position must close to flat");
         assert_eq!(runtime.ledger.order(1).unwrap().status, "filled");
@@ -4166,7 +4171,12 @@ mod tests {
             runtime.simulate_fills(&bar).await.unwrap();
         });
 
-        let pos_qty = runtime.state.positions.get("SBER").map(|p| p.qty).unwrap_or(0.0);
+        let pos_qty = runtime
+            .state
+            .positions
+            .get("SBER")
+            .map(|p| p.qty)
+            .unwrap_or(0.0);
         assert!(pos_qty <= 0.0, "position must not flip long");
         assert!(pos_qty.abs() <= f64::EPSILON, "position must close to flat");
     }

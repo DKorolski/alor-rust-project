@@ -1,15 +1,42 @@
 use alor_protocol::{AckStatus, CommandAck, Side};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::live_guard::GatewayPhase;
 use crate::state::StrategyState;
 use crate::{BarEvent, CloseTrigger, Intent, PositionEvent, Strategy, StrategyCtx, TradeMode};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketBuyAndCloseLiveOrderStyle {
+    Market,
+    MarketableLimit,
+}
+
+impl Default for MarketBuyAndCloseLiveOrderStyle {
+    fn default() -> Self {
+        Self::Market
+    }
+}
+
+impl MarketBuyAndCloseLiveOrderStyle {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Market => "market",
+            Self::MarketableLimit => "marketable_limit",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MarketBuyAndCloseConfig {
     pub symbol: String,
     pub qty: f64,
     pub side: Side,
+    pub live_order_style: MarketBuyAndCloseLiveOrderStyle,
+    pub tick_size: f64,
+    pub marketable_limit_offset_ticks: i64,
     pub close_trigger: CloseTrigger,
     pub entry_ack_timeout_ms: u64,
     pub entry_fill_timeout_ms: u64,
@@ -22,6 +49,7 @@ pub struct MarketBuyAndCloseStrategy {
     pub config: MarketBuyAndCloseConfig,
     pub state: StrategyState,
     pub last_processed_bar_ts: Option<i64>,
+    pub last_bar_close: Option<f64>,
 }
 
 impl MarketBuyAndCloseStrategy {
@@ -30,6 +58,7 @@ impl MarketBuyAndCloseStrategy {
             config,
             state: StrategyState::Idle,
             last_processed_bar_ts: None,
+            last_bar_close: None,
         }
     }
 
@@ -56,6 +85,68 @@ impl MarketBuyAndCloseStrategy {
             reason: reason.into(),
             last_bar_ts: ts,
         };
+    }
+
+    fn live_marketable_price_from_reference(&self, side: Side, reference_price: f64) -> f64 {
+        if self.config.tick_size <= 0.0 {
+            return reference_price;
+        }
+        // Keep one extra tick of aggressiveness so gateway normalization does not
+        // turn a marketable limit back into a passive one.
+        let aggressive_ticks = self.config.marketable_limit_offset_ticks.max(0) + 1;
+        let shift = aggressive_ticks as f64 * self.config.tick_size;
+        match side {
+            Side::Buy => reference_price + shift,
+            Side::Sell => reference_price - shift,
+        }
+    }
+
+    fn build_live_intent(
+        &self,
+        request_id: Uuid,
+        side: Side,
+        qty: f64,
+        reference_price: f64,
+        reason: &'static str,
+    ) -> Intent {
+        match self.config.live_order_style {
+            MarketBuyAndCloseLiveOrderStyle::Market => {
+                info!(
+                    strategy = "market_buy_and_close",
+                    live_order_style = self.config.live_order_style.as_str(),
+                    request_id = %request_id,
+                    side = ?side,
+                    qty,
+                    reason,
+                    "market_buy_and_close live intent prepared"
+                );
+                Intent::Market {
+                    qty,
+                    side,
+                    fill_price: None,
+                    comment: None,
+                }
+            }
+            MarketBuyAndCloseLiveOrderStyle::MarketableLimit => {
+                let price = self.live_marketable_price_from_reference(side, reference_price);
+                info!(
+                    strategy = "market_buy_and_close",
+                    live_order_style = self.config.live_order_style.as_str(),
+                    request_id = %request_id,
+                    side = ?side,
+                    qty,
+                    price,
+                    reason,
+                    "market_buy_and_close live intent prepared"
+                );
+                Intent::Place {
+                    price,
+                    qty,
+                    side,
+                    comment: None,
+                }
+            }
+        }
     }
 
     fn maybe_open_for_paper_backtest(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
@@ -159,12 +250,13 @@ impl MarketBuyAndCloseStrategy {
             entry_confirmed_ts: None,
             last_bar_ts: bar.close_time_utc,
         };
-        vec![Intent::Market {
-            qty: self.config.qty,
-            side: self.config.side,
-            fill_price: None,
-            comment: None,
-        }]
+        vec![self.build_live_intent(
+            request_guid,
+            self.config.side,
+            self.config.qty,
+            bar.close,
+            "entry",
+        )]
     }
 
     fn check_live_timeouts(&mut self, bar_ts: i64) {
@@ -239,6 +331,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
             return Vec::new();
         }
 
+        self.last_bar_close = Some(bar.close);
         let intents = match ctx.trade_mode {
             TradeMode::Paper | TradeMode::Backtest => self.maybe_open_for_paper_backtest(ctx, bar),
             TradeMode::Live => {
@@ -280,12 +373,19 @@ impl Strategy for MarketBuyAndCloseStrategy {
                                 acked: false,
                                 last_bar_ts: bar.close_time_utc,
                             };
-                            vec![Intent::Market {
-                                qty: self.config.qty,
-                                side: close_side,
-                                fill_price: None,
-                                comment: None,
-                            }]
+                            vec![self.build_live_intent(
+                                crate::deterministic_market_request_id(
+                                    &ctx.strategy_id,
+                                    &ctx.portfolio,
+                                    &bar.symbol,
+                                    bar.close_time_utc,
+                                    close_side,
+                                ),
+                                close_side,
+                                self.config.qty,
+                                bar.close,
+                                "flatten",
+                            )]
                         } else {
                             Vec::new()
                         }
@@ -433,12 +533,20 @@ impl Strategy for MarketBuyAndCloseStrategy {
                         acked: false,
                         last_bar_ts: now_ts,
                     };
-                    return vec![Intent::Market {
-                        qty: self.config.qty,
-                        side: close_side,
-                        fill_price: None,
-                        comment: None,
-                    }];
+                    let reference_price = self.last_bar_close.unwrap_or(pos.avg_price);
+                    return vec![self.build_live_intent(
+                        crate::deterministic_market_request_id(
+                            &ctx.strategy_id,
+                            &ctx.portfolio,
+                            &pos.symbol,
+                            now_ts,
+                            close_side,
+                        ),
+                        close_side,
+                        self.config.qty,
+                        reference_price,
+                        "flatten",
+                    )];
                 }
             }
             StrategyState::MarketLivePendingExit {
@@ -499,6 +607,9 @@ mod tests {
             symbol: "SBER".to_string(),
             qty: 1.0,
             side: Side::Buy,
+            live_order_style: MarketBuyAndCloseLiveOrderStyle::Market,
+            tick_size: 0.01,
+            marketable_limit_offset_ticks: 0,
             close_trigger: CloseTrigger::NextBar,
             entry_ack_timeout_ms: 15_000,
             entry_fill_timeout_ms: 60_000,
@@ -584,6 +695,61 @@ mod tests {
         };
         assert_eq!(strategy.on_bar(&ctx, &bar3).len(), 1);
     }
+
+    #[test]
+    fn live_market_mode_entry_still_uses_market_intent() {
+        let mut strategy = MarketBuyAndCloseStrategy::new(config());
+        let ctx = ctx(TradeMode::Live);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 10,
+            close: 10.0,
+            o: 9.5,
+            h: 10.0,
+            l: 9.5,
+            v: 1.0,
+            origin: DataOrigin::Live,
+        };
+
+        let intents = strategy.on_bar(&ctx, &bar);
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Market {
+                qty,
+                side: Side::Buy,
+                ..
+            }] if (*qty - 1.0).abs() <= f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn marketable_limit_entry_uses_place_intent() {
+        let mut cfg = config();
+        cfg.live_order_style = MarketBuyAndCloseLiveOrderStyle::MarketableLimit;
+        let mut strategy = MarketBuyAndCloseStrategy::new(cfg);
+        let ctx = ctx(TradeMode::Live);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 10,
+            close: 10.0,
+            o: 9.5,
+            h: 10.0,
+            l: 9.5,
+            v: 1.0,
+            origin: DataOrigin::Live,
+        };
+
+        let intents = strategy.on_bar(&ctx, &bar);
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Place {
+                price,
+                qty,
+                side: Side::Buy,
+                ..
+            }] if (*qty - 1.0).abs() <= f64::EPSILON && (*price - 10.01).abs() <= 1e-9
+        ));
+    }
     #[test]
     fn live_blocks_on_entry_ack_timeout() {
         let mut cfg = config();
@@ -648,6 +814,46 @@ mod tests {
     }
 
     #[test]
+    fn marketable_limit_position_update_uses_place_for_flatten() {
+        let mut cfg = config();
+        cfg.close_trigger = CloseTrigger::PositionUpdate;
+        cfg.live_order_style = MarketBuyAndCloseLiveOrderStyle::MarketableLimit;
+        let mut strategy = MarketBuyAndCloseStrategy::new(cfg);
+        let mut ctx = ctx(TradeMode::Live);
+
+        strategy.last_bar_close = Some(101.0);
+        strategy.state = StrategyState::MarketLiveInPosition {
+            side: Side::Buy,
+            qty: 1.0,
+            avg_price: 100.0,
+            baseline_qty: 0.0,
+            close_trigger: CloseTrigger::PositionUpdate,
+            opened_ts: 100,
+            last_bar_ts: 100,
+        };
+
+        ctx.last_bar_ts = Some(120);
+        let pos = PositionEvent {
+            symbol: "SBER".to_string(),
+            qty: 1.0,
+            existing: false,
+            avg_price: 101.0,
+            ts_utc: 120,
+        };
+
+        let intents = strategy.on_position(&ctx, &pos);
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Place {
+                price,
+                qty,
+                side: Side::Sell,
+                ..
+            }] if (*qty - 1.0).abs() <= f64::EPSILON && (*price - 100.99).abs() <= 1e-9
+        ));
+    }
+
+    #[test]
     fn live_next_bar_trigger_transitions_to_pending_exit() {
         let mut strategy = MarketBuyAndCloseStrategy::new(config());
         let ctx = ctx(TradeMode::Live);
@@ -682,6 +888,45 @@ mod tests {
                 sent_ts,
                 ..
             } if reason == "next_bar" && (*baseline_qty - 0.0).abs() <= f64::EPSILON && *sent_ts == 120
+        ));
+    }
+
+    #[test]
+    fn marketable_limit_next_bar_uses_place_for_flatten() {
+        let mut cfg = config();
+        cfg.live_order_style = MarketBuyAndCloseLiveOrderStyle::MarketableLimit;
+        let mut strategy = MarketBuyAndCloseStrategy::new(cfg);
+        let ctx = ctx(TradeMode::Live);
+        let bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 120,
+            close: 101.0,
+            o: 100.5,
+            h: 101.5,
+            l: 100.0,
+            v: 1.0,
+            origin: DataOrigin::Live,
+        };
+
+        strategy.state = StrategyState::MarketLiveInPosition {
+            side: Side::Buy,
+            qty: 1.0,
+            avg_price: 100.0,
+            baseline_qty: 0.0,
+            close_trigger: CloseTrigger::NextBar,
+            opened_ts: 100,
+            last_bar_ts: 100,
+        };
+
+        let intents = strategy.on_bar(&ctx, &bar);
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Place {
+                price,
+                qty,
+                side: Side::Sell,
+                ..
+            }] if (*qty - 1.0).abs() <= f64::EPSILON && (*price - 100.99).abs() <= 1e-9
         ));
     }
 
