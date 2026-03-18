@@ -145,6 +145,31 @@ impl MarketBuyAndCloseStrategy {
         }
     }
 
+    fn live_request_id(
+        live_order_style: MarketBuyAndCloseLiveOrderStyle,
+        ctx: &StrategyCtx,
+        symbol: &str,
+        side: Side,
+    ) -> Uuid {
+        match live_order_style {
+            MarketBuyAndCloseLiveOrderStyle::Market => crate::deterministic_market_request_id(
+                &ctx.strategy_id,
+                &ctx.portfolio,
+                symbol,
+                ctx.event_ts_utc(),
+                side,
+            ),
+            MarketBuyAndCloseLiveOrderStyle::MarketableLimit => crate::deterministic_request_id(
+                &ctx.strategy_id,
+                &ctx.portfolio,
+                symbol,
+                "place",
+                ctx.event_ts_utc(),
+                0,
+            ),
+        }
+    }
+
     fn maybe_open_for_paper_backtest(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
         let mut intent = None;
         let close_side = self.close_side();
@@ -236,13 +261,8 @@ impl MarketBuyAndCloseStrategy {
             return Vec::new();
         }
         let baseline_qty = ctx.position_qty.unwrap_or(0.0);
-        let request_guid = crate::deterministic_market_request_id(
-            &ctx.strategy_id,
-            &ctx.portfolio,
-            &bar.symbol,
-            ctx.event_ts_utc(),
-            self.config.side,
-        );
+        let request_guid =
+            Self::live_request_id(self.config.live_order_style, ctx, &bar.symbol, self.config.side);
         self.state = StrategyState::MarketLivePendingEntry {
             request_guid,
             side: self.config.side,
@@ -361,11 +381,10 @@ impl Strategy for MarketBuyAndCloseStrategy {
                                 ts_utc = bar.close_time_utc,
                                 "strategy_state_transition"
                             );
-                            let request_guid = crate::deterministic_market_request_id(
-                                &ctx.strategy_id,
-                                &ctx.portfolio,
+                            let request_guid = Self::live_request_id(
+                                self.config.live_order_style,
+                                ctx,
                                 &bar.symbol,
-                                ctx.event_ts_utc(),
                                 close_side,
                             );
                             self.state = StrategyState::MarketLivePendingExit {
@@ -517,11 +536,10 @@ impl Strategy for MarketBuyAndCloseStrategy {
                         ts_utc = now_ts,
                         "strategy_state_transition"
                     );
-                    let request_guid = crate::deterministic_market_request_id(
-                        &ctx.strategy_id,
-                        &ctx.portfolio,
+                    let request_guid = Self::live_request_id(
+                        self.config.live_order_style,
+                        ctx,
                         &pos.symbol,
-                        ctx.event_ts_utc(),
                         close_side,
                     );
                     self.state = StrategyState::MarketLivePendingExit {
@@ -749,6 +767,18 @@ mod tests {
                 ..
             }] if (*qty - 1.0).abs() <= f64::EPSILON && (*price - 10.01).abs() <= 1e-9
         ));
+        let expected_request_id = crate::deterministic_request_id(
+            &ctx.strategy_id,
+            &ctx.portfolio,
+            &bar.symbol,
+            "place",
+            ctx.event_ts_utc(),
+            0,
+        );
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::MarketLivePendingEntry { request_guid, .. } if *request_guid == expected_request_id
+        ));
     }
     #[test]
     fn live_blocks_on_entry_ack_timeout() {
@@ -956,6 +986,18 @@ mod tests {
                 side: Side::Sell,
                 ..
             }] if (*qty - 1.0).abs() <= f64::EPSILON && (*price - 100.99).abs() <= 1e-9
+        ));
+        let expected_request_id = crate::deterministic_request_id(
+            &ctx.strategy_id,
+            &ctx.portfolio,
+            &bar.symbol,
+            "place",
+            ctx.event_ts_utc(),
+            0,
+        );
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::MarketLivePendingExit { request_guid, .. } if *request_guid == expected_request_id
         ));
     }
 
