@@ -15,6 +15,12 @@ Two separate live incidents were observed after rollout of the residual CWS obse
   - affected pending requests were logged,
   - the published `command_ack` carried the preserved `cws_request_guid`;
 - the strategy still transitioned `PendingEntry -> Blocked`, so the remaining issue is recovery semantics after transient `cws_error`, not failure-path observability.
+- later on the same deployment line, a deterministic `runtime-native B2` lifecycle was executed successfully:
+  - runtime-generated entry,
+  - fill,
+  - runtime-generated flatten,
+  - return to `Flat`;
+- this confirms that the fixed line supports a full native runtime lifecycle when transport remains healthy.
 
 2. `hybrid`
 - runtime state persisted with:
@@ -34,7 +40,7 @@ The following verification was completed on the fixed gateway/runtime line:
 | Level A | broker contract probe for corrected `create:limit` payload | PASS |
 | Level B1 | production command path create/cancel through gateway | PASS |
 | B2 command-path | manual production-path entry -> fill -> flatten -> `Flat` | PASS |
-| B2 runtime-native | natural strategy-generated full lifecycle | NOT RUN / not confirmed |
+| B2 runtime-native | runtime-generated entry -> fill -> flatten -> `Flat` on live stack | PASS |
 
 ### B2 command-path evidence
 
@@ -56,6 +62,38 @@ Flatten:
 - runtime state returned to `phase = "Flat"`
 
 This confirms the fixed command/gateway/CWS path, but it does not by itself prove that the strategy recovers correctly after a native transient transport failure.
+
+### B2 runtime-native evidence
+
+Runtime-native B2 was later executed on the live `sessiongap` stack using the one-shot runtime hook for local session date `2026-03-17`.
+
+Entry:
+- `request_id = 11af851e-134b-5f11-b676-df93e5b419e1`
+- bar timestamp `1773774000` -> `2026-03-17 19:00:00 UTC` / `2026-03-17 22:00:00 MSK`
+- accepted/fill timestamp `1773774063` -> `2026-03-17 19:01:03 UTC` / `2026-03-17 22:01:03 MSK`
+- `broker_order_id = 2023555910021965447`
+- `cws_request_guid = 11af851e-134b-5f11-b676-df93e5b419e1`
+- order lifecycle: `working -> filled`
+- resulting position: `USDRUBF qty = 1.0 avg_price = 82.48`
+
+Flatten:
+- `request_id = e743377e-672a-5282-9cfc-d3ea06200232`
+- exit intent timestamp `1773774060` -> `2026-03-17 19:01:00 UTC` / `2026-03-17 22:01:00 MSK`
+- accepted timestamp `1773774138` -> `2026-03-17 19:02:18 UTC` / `2026-03-17 22:02:18 MSK`
+- fill timestamp `1773774154` -> `2026-03-17 19:02:34 UTC` / `2026-03-17 22:02:34 MSK`
+- `broker_order_id = 2023555910021965476`
+- `cws_request_guid = e743377e-672a-5282-9cfc-d3ea06200232`
+- order lifecycle: `working -> filled`
+- resulting position: `USDRUBF qty = 0.0`
+
+Runtime state after the cycle:
+- `phase = "Flat"`
+- `last_trade_ts = 1773774154`
+- no residual `Blocked` state remained after the cycle
+
+This confirms the native runtime path:
+- `strategy-runtime -> intent_emitted -> cmd.orders -> gateway -> CWS -> broker.orders -> broker.positions -> runtime.state`
+- end-to-end lifecycle succeeded without manual Redis injection.
 
 ## 3. Incident A: `sessiongap` native `create:limit` transport reset
 
@@ -172,6 +210,51 @@ What remains open:
 - `session_gap_standalone` still reacts to this transient transport failure by moving into `Blocked`;
 - readiness/live-guard may recover, while strategy state remains blocked until operator cleanup;
 - this is now a strategy recovery-semantics issue, not a gateway observability issue.
+- the later successful runtime-native B2 does not invalidate this incident; it only confirms that the normal native lifecycle works when transport remains healthy.
+
+## 3.7 Why the native incident failed while runtime-native B2 passed
+
+The successful runtime-native B2 materially changes the interpretation of the incident.
+
+What B2 proves:
+- the request path was native runtime-driven, not manual Redis injection;
+- the strategy emitted `intent_emitted`;
+- the same gateway command consumer path was used;
+- the same corrected `create:limit` builder was used;
+- the same broker-facing fields were present:
+  - `opcode = create:limit`,
+  - `instrument_group = RFUD`,
+  - `time_in_force = OneDay`,
+  - `allow_margin = true`,
+  - `check_duplicates = true`;
+- both entry and exit orders were accepted and filled through the normal live stack.
+
+Therefore, the residual incident can no longer be explained by:
+- "strategy path is wrong",
+- "runtime-generated requests are malformed",
+- "the fixed `create:limit` payload is still structurally invalid",
+- "only manual command-path requests work".
+
+The most likely interpretation now is narrower:
+- the failing request on `2026-03-16 15:00:02 UTC` / `2026-03-16 18:00:02 MSK` hit a transient CWS transport/session failure immediately after send;
+- the disconnect was real and protocol-level:
+  - `disconnect_kind = protocol_reset_without_close_handshake`,
+  - pending request was failed by the gateway,
+  - no broker business reject payload was received;
+- the later B2 pass shows that the same runtime-native strategy path is capable of succeeding end-to-end when the CWS session remains healthy.
+
+In other words:
+- the remaining issue is not "strategy vs non-strategy path";
+- it is "transient transport reset during an otherwise valid native strategy request", plus the strategy's current decision to become `Blocked` after that class of error.
+
+What still cannot be proved from the available evidence:
+- whether the broker-side reset was a pure network/session event,
+- or a rare protocol-sensitive broker disconnect that was not reproduced by B2.
+
+But after B2, the burden of proof has shifted:
+- request structure is presumed valid,
+- native runtime path is presumed valid,
+- investigation should focus on transport intermittency and recovery semantics.
 
 ## 4. Incident B: `hybrid` recovered position owner unknown
 
@@ -228,7 +311,9 @@ Operationally, `hybrid` should be treated as:
 - Gateway health: OK
 - Runtime health: OK
 - Transport observability fix: VERIFIED on native incident
-- Strategy state: NOT CLEAN
+- Command-path B2: PASS
+- Runtime-native B2: PASS
+- Current post-B2 state: CLEAN / `Flat`
 - Open issue: `PendingEntry -> Blocked` after transient `cws_error`
 
 ### `hybrid`
@@ -271,6 +356,13 @@ The residual CWS observability task should be considered successful:
 - disconnect class is explicit,
 - affected pending requests are visible,
 - published `command_ack` is materially more useful.
+
+The successful runtime-native B2 further narrows the problem:
+- native strategy-generated orders do pass through the same stack successfully,
+- the corrected `create:limit` path is operational in live runtime mode,
+- the unresolved `sessiongap` issue is now best framed as:
+  - intermittent CWS transport reset on an otherwise valid request,
+  - and overly harsh strategy recovery semantics after that error.
 
 At the same time, the live investigation exposed two remaining operational issues:
 - `sessiongap` strategy recovery semantics after transient transport failure,

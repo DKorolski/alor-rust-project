@@ -652,11 +652,7 @@ impl SessionGapStandaloneStrategy {
         );
     }
 
-    fn log_entry_recovered_to_flat(
-        request_id: uuid::Uuid,
-        ts_utc: i64,
-        reason: &'static str,
-    ) {
+    fn log_entry_recovered_to_flat(request_id: uuid::Uuid, ts_utc: i64, reason: &'static str) {
         info!(
             strategy = "session_gap_standalone",
             action = "entry_recovered_to_flat",
@@ -1264,17 +1260,18 @@ impl Strategy for SessionGapStandaloneStrategy {
                                 if Self::is_transient_entry_transport_error(ack) {
                                     Self::log_entry_transport_failure(ack);
                                     let request_id = *request_id;
-                                    *phase = SessionGapLivePhase::EntryRecoveryVerificationPending {
-                                        request_id,
-                                        side: *side,
-                                        qty: *qty,
-                                        baseline_qty: *baseline_qty,
-                                        tp: *tp,
-                                        sl: *sl,
-                                        verification_started_ts: ack.processed_ts_utc,
-                                        transport_error_code: ack.error_code.clone(),
-                                        transport_error_msg: ack.error_msg.clone(),
-                                    };
+                                    *phase =
+                                        SessionGapLivePhase::EntryRecoveryVerificationPending {
+                                            request_id,
+                                            side: *side,
+                                            qty: *qty,
+                                            baseline_qty: *baseline_qty,
+                                            tp: *tp,
+                                            sl: *sl,
+                                            verification_started_ts: ack.processed_ts_utc,
+                                            transport_error_code: ack.error_code.clone(),
+                                            transport_error_msg: ack.error_msg.clone(),
+                                        };
                                     Self::log_entry_recovery_pending(
                                         request_id,
                                         ack.processed_ts_utc,
@@ -2940,10 +2937,7 @@ mod tests {
 
         match &strategy.state {
             StrategyState::SessionGapStandalone {
-                phase:
-                    SessionGapLivePhase::InPosition {
-                        qty, avg_price, ..
-                    },
+                phase: SessionGapLivePhase::InPosition { qty, avg_price, .. },
                 ..
             } => {
                 assert_eq!(*qty, 1.0);

@@ -261,8 +261,12 @@ impl MarketBuyAndCloseStrategy {
             return Vec::new();
         }
         let baseline_qty = ctx.position_qty.unwrap_or(0.0);
-        let request_guid =
-            Self::live_request_id(self.config.live_order_style, ctx, &bar.symbol, self.config.side);
+        let request_guid = Self::live_request_id(
+            self.config.live_order_style,
+            ctx,
+            &bar.symbol,
+            self.config.side,
+        );
         self.state = StrategyState::MarketLivePendingEntry {
             request_guid,
             side: self.config.side,
