@@ -9,11 +9,24 @@
 
 ## Run command
 ```bash
+ALOR_STACK_NAME=${ALOR_STACK_NAME:-sessiongap} \
 RUST_LOG=info,alor_gateway::services::command_consumer=debug,alor_gateway::transport_redis=debug \
 cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
   --config ./configs/gateway.sessiongap.live.7502MIW.toml \
   --redis-url redis://127.0.0.1/
 ```
+
+Для сравнительной live-диагностики задавайте `ALOR_STACK_NAME` явно:
+
+- `sessiongap` для `sessiongap` gateway
+- `hybrid` для `hybrid` gateway
+
+Это имя появится:
+
+- в `/readiness`
+- в `cws_limit_send`
+- в `cws_transport_failure`
+- в `cws_fail_pending`
 
 ## 3) Health endpoints
 
@@ -28,7 +41,13 @@ Gateway поднимает HTTP health server:
 
 Критичные поля `/readiness`:
 - `gateway_phase` (`SyncingHistory`, `Reconnecting`, `SyncingGap`, `LiveReady`),
+- `stack_name`, `gateway_instance_id`, `auth_principal_fingerprint`,
 - `ws_connected`, `cws_authorized`,
+- `cws_connection_instance_id`, `cws_connect_seq`, `cws_reconnect_seq`,
+- `cws_last_connect_ts_utc`, `cws_last_transport_failure_ts_utc`,
+- `cws_last_limit_send_ts_utc`, `cws_last_limit_error_ts_utc`,
+- `cws_last_successful_send_ts_utc`, `cws_last_successful_ack_ts_utc`,
+- `cws_pending_count`,
 - `last_bar_age_sec`, `ws_last_rx_age_sec`,
 - `active_subscriptions_count` vs `desired_subscriptions_count`,
 - `ws_reconnects_total`, `backpressure_lagged`.
@@ -111,7 +130,16 @@ readinessProbe:
    - `cws_guid`,
    - `opcode`,
    - `symbol`.
-5. `events.health` рядом с инцидентом:
+5. telemetry around the incident:
+   - `stack_name`,
+   - `gateway_instance_id`,
+   - `auth_principal_fingerprint`,
+   - `connection_age_ms`,
+   - `time_since_last_reconnect_ms`,
+   - `in_flight_pending_count`,
+   - `last_successful_send_ts_utc`,
+   - `last_successful_ack_ts_utc`.
+6. `events.health` рядом с инцидентом:
    - `ws_connected`,
    - `cws_authorized`,
    - `gateway_phase`,

@@ -18,8 +18,14 @@ set +a
 
 ```bash
 echo "$ALOR_GATEWAY_CONFIG"
+echo "$ALOR_STACK_NAME"
 echo "$ALOR_REFRESH_TOKEN" | wc -c
 ```
+
+Рекомендация для диагностических запусков:
+
+- задавайте `ALOR_STACK_NAME` явно, например `sessiongap` или `hybrid`;
+- это позволит видеть одинаковое имя стека в `/readiness`, `cws_limit_send` и `cws_transport_failure`, а не только `HOSTNAME`.
 
 ## 2) Запуск Redis (если не запущен)
 
@@ -42,6 +48,7 @@ redis-cli PING
 Рекомендуемая команда:
 
 ```bash
+ALOR_STACK_NAME=${ALOR_STACK_NAME:-sessiongap} \
 RUST_LOG=info,alor_gateway::supervisor=info,alor_gateway::ws_hub=info \
 cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
   --config ./configs/gateway.sessiongap.live.7502MIW.toml \
