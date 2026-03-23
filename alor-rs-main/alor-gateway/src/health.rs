@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -22,12 +23,22 @@ pub enum ResyncMode {
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct HealthState {
+    pub stack_name: Option<String>,
+    pub gateway_instance_id: Option<String>,
+    pub auth_principal_fingerprint: Option<String>,
     pub ws_connected: bool,
     pub cws_authorized: bool,
     pub cws_connection_instance_id: Option<String>,
     pub cws_connect_seq: u64,
     pub cws_reconnect_seq: u64,
     pub cws_connected_ts_utc: Option<i64>,
+    pub cws_last_connect_ts_utc: Option<i64>,
+    pub cws_last_transport_failure_ts_utc: Option<i64>,
+    pub cws_last_limit_send_ts_utc: Option<i64>,
+    pub cws_last_limit_error_ts_utc: Option<i64>,
+    pub cws_last_successful_send_ts_utc: Option<i64>,
+    pub cws_last_successful_ack_ts_utc: Option<i64>,
+    pub cws_pending_count: u64,
     pub last_bar_ts: i64,
     pub last_bar_age_sec: u64,
     pub last_positions_ts: i64,
@@ -77,4 +88,8 @@ pub struct HealthState {
     pub active_subscriptions_count: u32,
     pub desired_subscriptions_count: u32,
     pub scheduler_state: Option<MarketState>,
+    #[serde(skip)]
+    pub cws_connected_at: Option<Instant>,
+    #[serde(skip)]
+    pub cws_last_reconnect_at: Option<Instant>,
 }

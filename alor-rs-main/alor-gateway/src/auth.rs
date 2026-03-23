@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -8,6 +9,7 @@ use tracing::{debug, info};
 pub struct TokenProvider {
     oauth_url: String,
     refresh_token: String,
+    principal_fingerprint: String,
     client: reqwest::Client,
     state: std::sync::Arc<RwLock<TokenState>>,
 }
@@ -29,9 +31,11 @@ struct TokenResponse {
 
 impl TokenProvider {
     pub fn new(oauth_url: impl Into<String>, refresh_token: impl Into<String>) -> Self {
+        let refresh_token = refresh_token.into();
         Self {
             oauth_url: oauth_url.into(),
-            refresh_token: refresh_token.into(),
+            principal_fingerprint: principal_fingerprint(&refresh_token),
+            refresh_token,
             client: reqwest::Client::new(),
             state: std::sync::Arc::new(RwLock::new(TokenState {
                 token: None,
@@ -47,9 +51,11 @@ impl TokenProvider {
         token: impl Into<String>,
     ) -> Self {
         let token = token.into();
+        let refresh_token = refresh_token.into();
         Self {
             oauth_url: oauth_url.into(),
-            refresh_token: refresh_token.into(),
+            principal_fingerprint: principal_fingerprint(&refresh_token),
+            refresh_token,
             client: reqwest::Client::new(),
             state: std::sync::Arc::new(RwLock::new(TokenState {
                 token: Some(token),
@@ -110,4 +116,14 @@ impl TokenProvider {
     pub async fn refresh_count(&self) -> u64 {
         self.state.read().await.refresh_count
     }
+
+    pub fn principal_fingerprint(&self) -> &str {
+        &self.principal_fingerprint
+    }
+}
+
+fn principal_fingerprint(refresh_token: &str) -> String {
+    let normalized = refresh_token.trim_matches('"').trim();
+    let digest = Sha256::digest(normalized.as_bytes());
+    format!("sha256:{}", &hex::encode(digest)[..16])
 }

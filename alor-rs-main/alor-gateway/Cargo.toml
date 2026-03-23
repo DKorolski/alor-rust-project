@@ -25,6 +25,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 redis = { version = "0.25.4", features = ["tokio-comp"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 alor-types = { path = "../alor-types" }
 alor-protocol = { path = "../alor-protocol" }

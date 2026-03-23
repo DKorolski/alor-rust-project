@@ -1,12 +1,14 @@
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{fs::OpenOptions, io::Write};
 use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::auth::TokenProvider;
 use crate::config::{AlorGatewayConfig, derive_config};
@@ -57,6 +59,32 @@ pub struct CommandTransport {
     pub info: CommandConsumerInfo,
 }
 
+fn resolve_stack_name(cfg: &AlorGatewayConfig) -> String {
+    for key in [
+        "ALOR_STACK_NAME",
+        "COMPOSE_PROJECT_NAME",
+        "STACK_NAME",
+        "HOSTNAME",
+    ] {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    format!("portfolio:{}", cfg.portfolio)
+}
+
+fn build_health_state(cfg: &AlorGatewayConfig, token_provider: &TokenProvider) -> HealthState {
+    HealthState {
+        stack_name: Some(resolve_stack_name(cfg)),
+        gateway_instance_id: Some(Uuid::new_v4().to_string()),
+        auth_principal_fingerprint: Some(token_provider.principal_fingerprint().to_string()),
+        ..HealthState::default()
+    }
+}
+
 fn market_state_for_silence_gate(
     periods: Option<&TradingPeriods>,
     now_utc_ts: i64,
@@ -99,7 +127,7 @@ impl GatewayHandle {
 impl Supervisor {
     pub fn new(cfg: AlorGatewayConfig) -> Self {
         let token_provider = TokenProvider::new(cfg.oauth_url.clone(), cfg.refresh_token.clone());
-        let health = Arc::new(RwLock::new(HealthState::default()));
+        let health = Arc::new(RwLock::new(build_health_state(&cfg, &token_provider)));
         Self {
             cfg,
             token_provider,
@@ -110,7 +138,7 @@ impl Supervisor {
     pub fn new_with_token(cfg: AlorGatewayConfig, token: String) -> Self {
         let token_provider =
             TokenProvider::new_with_token(cfg.oauth_url.clone(), cfg.refresh_token.clone(), token);
-        let health = Arc::new(RwLock::new(HealthState::default()));
+        let health = Arc::new(RwLock::new(build_health_state(&cfg, &token_provider)));
         Self {
             cfg,
             token_provider,

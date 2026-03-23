@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -48,6 +48,22 @@ struct PendingRequest {
     opcode: String,
     symbol: Option<String>,
     resp_tx: oneshot::Sender<anyhow::Result<Value>>,
+}
+
+#[derive(Debug, Clone)]
+struct CwsTelemetrySnapshot {
+    stack_name: Option<String>,
+    gateway_instance_id: Option<String>,
+    auth_principal_fingerprint: Option<String>,
+    cws_connection_instance_id: Option<String>,
+    connect_seq: u64,
+    reconnect_seq: u64,
+    connected_ts_utc: Option<i64>,
+    connection_age_ms: Option<u64>,
+    time_since_last_reconnect_ms: Option<u64>,
+    in_flight_pending_count: u64,
+    last_successful_send_ts_utc: Option<i64>,
+    last_successful_ack_ts_utc: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,8 +239,7 @@ impl CwsClient {
                             guard.cws_authorized = false;
                             reconnect_seq = reconnect_seq.saturating_add(1);
                             guard.cws_reconnect_seq = reconnect_seq;
-                            guard.cws_reconnect_total =
-                                guard.cws_reconnect_total.saturating_add(1);
+                            guard.cws_reconnect_total = guard.cws_reconnect_total.saturating_add(1);
                             guard.cws_reconnects_total =
                                 guard.cws_reconnects_total.saturating_add(1);
                         }
@@ -274,30 +289,29 @@ impl CwsHandle {
             .get("guid")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        let (
-            cws_connection_instance_id,
-            connect_seq,
-            reconnect_seq,
-            connected_ts_utc,
-        ) = {
+        let telemetry = {
             let mut guard = self.health.write();
             guard.cws_limit_send_total = guard.cws_limit_send_total.saturating_add(1);
-            (
-                guard.cws_connection_instance_id.clone(),
-                guard.cws_connect_seq,
-                guard.cws_reconnect_seq,
-                guard.cws_connected_ts_utc,
-            )
+            guard.cws_last_limit_send_ts_utc = Some(Utc::now().timestamp());
+            snapshot_cws_telemetry(&guard)
         };
         info!(
             action = "cws_limit_send",
             opcode = "create:limit",
             request_id = ?request_id,
             cws_guid,
-            cws_connection_instance_id = ?cws_connection_instance_id,
-            connect_seq,
-            reconnect_seq,
-            connected_ts_utc = ?connected_ts_utc,
+            stack_name = ?telemetry.stack_name,
+            gateway_instance_id = ?telemetry.gateway_instance_id,
+            auth_principal_fingerprint = ?telemetry.auth_principal_fingerprint,
+            cws_connection_instance_id = ?telemetry.cws_connection_instance_id,
+            connect_seq = telemetry.connect_seq,
+            reconnect_seq = telemetry.reconnect_seq,
+            connected_ts_utc = ?telemetry.connected_ts_utc,
+            connection_age_ms = ?telemetry.connection_age_ms,
+            time_since_last_reconnect_ms = ?telemetry.time_since_last_reconnect_ms,
+            in_flight_pending_count = telemetry.in_flight_pending_count,
+            last_successful_send_ts_utc = ?telemetry.last_successful_send_ts_utc,
+            last_successful_ack_ts_utc = ?telemetry.last_successful_ack_ts_utc,
             symbol,
             exchange,
             instrument_group = %self.instrument_group,
@@ -668,6 +682,30 @@ fn build_create_stop_limit_payload(
     Value::Object(payload)
 }
 
+fn elapsed_ms(since: Option<Instant>) -> Option<u64> {
+    since.map(|instant| {
+        let elapsed_ms = instant.elapsed().as_millis();
+        u64::try_from(elapsed_ms).unwrap_or(u64::MAX)
+    })
+}
+
+fn snapshot_cws_telemetry(guard: &HealthState) -> CwsTelemetrySnapshot {
+    CwsTelemetrySnapshot {
+        stack_name: guard.stack_name.clone(),
+        gateway_instance_id: guard.gateway_instance_id.clone(),
+        auth_principal_fingerprint: guard.auth_principal_fingerprint.clone(),
+        cws_connection_instance_id: guard.cws_connection_instance_id.clone(),
+        connect_seq: guard.cws_connect_seq,
+        reconnect_seq: guard.cws_reconnect_seq,
+        connected_ts_utc: guard.cws_connected_ts_utc,
+        connection_age_ms: elapsed_ms(guard.cws_connected_at),
+        time_since_last_reconnect_ms: elapsed_ms(guard.cws_last_reconnect_at),
+        in_flight_pending_count: guard.cws_pending_count,
+        last_successful_send_ts_utc: guard.cws_last_successful_send_ts_utc,
+        last_successful_ack_ts_utc: guard.cws_last_successful_ack_ts_utc,
+    }
+}
+
 async fn run_session(
     cfg: &AlorGatewayConfig,
     token_provider: &TokenProvider,
@@ -680,6 +718,7 @@ async fn run_session(
     let (ws_stream, _) = tokio_tungstenite::connect_async(&cfg.cws_url).await?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
     let connection_instance_id = new_guid();
+    let connected_at = Instant::now();
     let connected_ts_utc = Utc::now().timestamp();
 
     {
@@ -689,6 +728,10 @@ async fn run_session(
         guard.cws_connect_seq = connect_seq;
         guard.cws_reconnect_seq = reconnect_seq;
         guard.cws_connected_ts_utc = Some(connected_ts_utc);
+        guard.cws_last_connect_ts_utc = Some(connected_ts_utc);
+        guard.cws_connected_at = Some(connected_at);
+        guard.cws_last_reconnect_at = (reconnect_seq > 0).then_some(connected_at);
+        guard.cws_pending_count = 0;
         guard.cws_connect_total = guard.cws_connect_total.saturating_add(1);
     }
     authorize(&mut ws_sink, &mut ws_stream, &token, health).await?;
@@ -726,6 +769,10 @@ async fn run_session(
                                 resp_tx: cmd.resp_tx,
                             },
                         );
+                        {
+                            let mut guard = health.write();
+                            guard.cws_pending_count = pending.len() as u64;
+                        }
                         info!(opcode, guid, "cws send");
                         let redacted_payload = redact_token(&payload.to_string());
                         debug!(opcode, guid, payload = %redacted_payload, "cws send payload");
@@ -741,6 +788,9 @@ async fn run_session(
                             let session_error = handle_transport_failure(&mut pending, failure, health);
                             return Err(session_error);
                         }
+                        let now_ts_utc = Utc::now().timestamp();
+                        let mut guard = health.write();
+                        guard.cws_last_successful_send_ts_utc = Some(now_ts_utc);
                     }
                     None => return Ok(()),
                 }
@@ -754,6 +804,12 @@ async fn run_session(
                             debug!(opcode, guid = ?guid, payload = %value, "cws recv payload");
                             if let Some(guid) = guid {
                                 if let Some(request) = pending.remove(&guid) {
+                                    {
+                                        let mut guard = health.write();
+                                        guard.cws_pending_count = pending.len() as u64;
+                                        guard.cws_last_successful_ack_ts_utc =
+                                            Some(Utc::now().timestamp());
+                                    }
                                     let _ = request.resp_tx.send(Ok(value));
                                 } else {
                                     warn!(opcode, guid, "cws recv without pending request");
@@ -913,7 +969,8 @@ fn log_transport_failure(
     let request_id = first.and_then(|request| request.request_id.as_deref());
     let cws_guid = first.map(|request| request.cws_guid.as_str());
     let opcode_in_flight = first.map(|request| request.opcode.as_str());
-    let (cws_connection_instance_id, connect_seq, reconnect_seq, connected_ts_utc) = {
+    let now_ts_utc = Utc::now().timestamp();
+    let telemetry = {
         let mut guard = health.write();
         if matches!(
             failure.disconnect_kind(),
@@ -921,12 +978,8 @@ fn log_transport_failure(
         ) {
             guard.cws_protocol_reset_total = guard.cws_protocol_reset_total.saturating_add(1);
         }
-        (
-            guard.cws_connection_instance_id.clone(),
-            guard.cws_connect_seq,
-            guard.cws_reconnect_seq,
-            guard.cws_connected_ts_utc,
-        )
+        guard.cws_last_transport_failure_ts_utc = Some(now_ts_utc);
+        snapshot_cws_telemetry(&guard)
     };
     warn!(
         action = "cws_transport_failure",
@@ -934,11 +987,18 @@ fn log_transport_failure(
         opcode_in_flight = ?opcode_in_flight,
         request_id = ?request_id,
         cws_guid = ?cws_guid,
-        cws_connection_instance_id = ?cws_connection_instance_id,
-        connect_seq,
-        reconnect_seq,
-        connected_ts_utc = ?connected_ts_utc,
+        stack_name = ?telemetry.stack_name,
+        gateway_instance_id = ?telemetry.gateway_instance_id,
+        auth_principal_fingerprint = ?telemetry.auth_principal_fingerprint,
+        cws_connection_instance_id = ?telemetry.cws_connection_instance_id,
+        connect_seq = telemetry.connect_seq,
+        reconnect_seq = telemetry.reconnect_seq,
+        connected_ts_utc = ?telemetry.connected_ts_utc,
+        connection_age_ms_at_failure = ?telemetry.connection_age_ms,
+        time_since_last_reconnect_ms_at_failure = ?telemetry.time_since_last_reconnect_ms,
         pending_count = pending.len(),
+        last_successful_send_ts_utc = ?telemetry.last_successful_send_ts_utc,
+        last_successful_ack_ts_utc = ?telemetry.last_successful_ack_ts_utc,
         close_code = ?failure.close_code(),
         close_reason = ?failure.close_reason(),
         raw_error = %failure.raw_error(),
@@ -965,26 +1025,35 @@ fn fail_pending_with_transport(
         .collect::<Vec<_>>();
     if !affected.is_empty() {
         let affected_json = serde_json::Value::Array(affected);
-        let (cws_connection_instance_id, connect_seq, reconnect_seq, connected_ts_utc) = {
+        let has_limit_request = pending
+            .values()
+            .any(|request| request.opcode == "create:limit");
+        let telemetry = {
             let mut guard = health.write();
             guard.cws_pending_failed_total = guard
                 .cws_pending_failed_total
                 .saturating_add(affected_count);
-            (
-                guard.cws_connection_instance_id.clone(),
-                guard.cws_connect_seq,
-                guard.cws_reconnect_seq,
-                guard.cws_connected_ts_utc,
-            )
+            guard.cws_pending_count = 0;
+            if has_limit_request {
+                guard.cws_last_limit_error_ts_utc = Some(Utc::now().timestamp());
+            }
+            snapshot_cws_telemetry(&guard)
         };
         warn!(
             action = "cws_fail_pending",
             disconnect_kind = failure.disconnect_kind_str(),
-            cws_connection_instance_id = ?cws_connection_instance_id,
-            connect_seq,
-            reconnect_seq,
-            connected_ts_utc = ?connected_ts_utc,
+            stack_name = ?telemetry.stack_name,
+            gateway_instance_id = ?telemetry.gateway_instance_id,
+            auth_principal_fingerprint = ?telemetry.auth_principal_fingerprint,
+            cws_connection_instance_id = ?telemetry.cws_connection_instance_id,
+            connect_seq = telemetry.connect_seq,
+            reconnect_seq = telemetry.reconnect_seq,
+            connected_ts_utc = ?telemetry.connected_ts_utc,
+            connection_age_ms_at_failure = ?telemetry.connection_age_ms,
+            time_since_last_reconnect_ms_at_failure = ?telemetry.time_since_last_reconnect_ms,
             pending_count = affected_json.as_array().map_or(0, Vec::len),
+            last_successful_send_ts_utc = ?telemetry.last_successful_send_ts_utc,
+            last_successful_ack_ts_utc = ?telemetry.last_successful_ack_ts_utc,
             affected = %affected_json,
             "failing pending cws requests after transport failure"
         );
