@@ -11,6 +11,15 @@ use alor_types::MarketState;
 use crate::health::{GatewayPhase, HealthState};
 use crate::transport::{CommandEnvelope, CommandSink, CommandSource};
 
+const DIAG_CWS_SEND_SEQ: &str = "_diag_cws_send_seq";
+const DIAG_CWS_SEND_TS_UTC: &str = "_diag_cws_send_ts_utc";
+const DIAG_CWS_RECV_SEQ: &str = "_diag_cws_recv_seq";
+const DIAG_CWS_RECV_TS_UTC: &str = "_diag_cws_recv_ts_utc";
+const DIAG_CWS_MESSAGE_CLASS: &str = "_diag_cws_message_class";
+const DIAG_CWS_CONNECTION_INSTANCE_ID: &str = "_diag_cws_connection_instance_id";
+const DIAG_CWS_CONNECT_SEQ: &str = "_diag_cws_connect_seq";
+const DIAG_CWS_RECONNECT_SEQ: &str = "_diag_cws_reconnect_seq";
+
 #[derive(Debug, Clone)]
 pub struct CommandConsumerConfig {
     pub pause_when_degraded: bool,
@@ -325,6 +334,14 @@ pub async fn run_command_consumer(
                             cws_message = ?info.message,
                             cws_request_guid = ?info.request_guid,
                             broker_order_id = info.order_id,
+                            cws_send_seq = info.trace.send_seq,
+                            cws_send_ts_utc = info.trace.send_ts_utc,
+                            cws_recv_seq = info.trace.recv_seq,
+                            cws_recv_ts_utc = info.trace.recv_ts_utc,
+                            cws_message_class = ?info.trace.message_class,
+                            cws_connection_instance_id = ?info.trace.connection_instance_id,
+                            cws_connect_seq = info.trace.connect_seq,
+                            cws_reconnect_seq = info.trace.reconnect_seq,
                             "cws response"
                         );
                         if matches!(command.action, CommandAction::Place(_)) {
@@ -353,6 +370,9 @@ pub async fn run_command_consumer(
                                 broker_order_id = info.order_id,
                                 error_code = ?error_code,
                                 error_msg = ?error_msg,
+                                cws_send_seq = info.trace.send_seq,
+                                cws_recv_seq = info.trace.recv_seq,
+                                cws_message_class = ?info.trace.message_class,
                                 "cws limit ack received"
                             );
                         }
@@ -373,6 +393,14 @@ pub async fn run_command_consumer(
                             increment_counter(&health, |h| h.commands_accepted_total = h.commands_accepted_total.saturating_add(1));
                             if let Some(order_id) = info.order_id {
                                 request_map.write().insert(order_id, request_id);
+                                info!(
+                                    request_id = %request_id,
+                                    broker_order_id = order_id,
+                                    cws_request_guid = ?cws_request_guid,
+                                    cws_send_seq = info.trace.send_seq,
+                                    cws_recv_seq = info.trace.recv_seq,
+                                    "request_map updated from cws ack"
+                                );
                             }
                         } else if status == alor_protocol::AckStatus::Rejected {
                             increment_counter(&health, |h| h.commands_rejected_total = h.commands_rejected_total.saturating_add(1));
@@ -396,6 +424,7 @@ pub async fn run_command_consumer(
                                 });
                             }
                         }
+                        let ack_trace = info.trace.clone();
                         let ack = build_cws_ack(
                             request_id,
                             status,
@@ -412,6 +441,14 @@ pub async fn run_command_consumer(
                             error_code = ?ack.error_code,
                             cws_http_code = ?ack.cws_http_code,
                             cws_request_guid = ?ack.cws_request_guid,
+                            cws_send_seq = ack_trace.send_seq,
+                            cws_send_ts_utc = ack_trace.send_ts_utc,
+                            cws_recv_seq = ack_trace.recv_seq,
+                            cws_recv_ts_utc = ack_trace.recv_ts_utc,
+                            cws_message_class = ?ack_trace.message_class,
+                            cws_connection_instance_id = ?ack_trace.connection_instance_id,
+                            cws_connect_seq = ack_trace.connect_seq,
+                            cws_reconnect_seq = ack_trace.reconnect_seq,
                             "command ack published"
                         );
                         if let Some(message_id) = message_id.as_deref() {
@@ -724,6 +761,19 @@ struct CwsResponseInfo {
     request_guid: Option<String>,
     order_id: Option<i64>,
     order_id_str: Option<String>,
+    trace: CwsTraceInfo,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CwsTraceInfo {
+    send_seq: Option<u64>,
+    send_ts_utc: Option<i64>,
+    recv_seq: Option<u64>,
+    recv_ts_utc: Option<i64>,
+    message_class: Option<String>,
+    connection_instance_id: Option<String>,
+    connect_seq: Option<u64>,
+    reconnect_seq: Option<u64>,
 }
 
 fn parse_cws_response(value: &serde_json::Value) -> CwsResponseInfo {
@@ -739,12 +789,33 @@ fn parse_cws_response(value: &serde_json::Value) -> CwsResponseInfo {
         .map(|value| value.to_string());
     let order_id = extract_order_id(value);
     let order_id_str = extract_order_id_str(value);
+    let trace = parse_cws_trace(value);
     CwsResponseInfo {
         http_code,
         message,
         request_guid,
         order_id,
         order_id_str,
+        trace,
+    }
+}
+
+fn parse_cws_trace(value: &serde_json::Value) -> CwsTraceInfo {
+    CwsTraceInfo {
+        send_seq: value.get(DIAG_CWS_SEND_SEQ).and_then(to_u64),
+        send_ts_utc: value.get(DIAG_CWS_SEND_TS_UTC).and_then(to_i64),
+        recv_seq: value.get(DIAG_CWS_RECV_SEQ).and_then(to_u64),
+        recv_ts_utc: value.get(DIAG_CWS_RECV_TS_UTC).and_then(to_i64),
+        message_class: value
+            .get(DIAG_CWS_MESSAGE_CLASS)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.to_string()),
+        connection_instance_id: value
+            .get(DIAG_CWS_CONNECTION_INSTANCE_ID)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.to_string()),
+        connect_seq: value.get(DIAG_CWS_CONNECT_SEQ).and_then(to_u64),
+        reconnect_seq: value.get(DIAG_CWS_RECONNECT_SEQ).and_then(to_u64),
     }
 }
 
@@ -786,6 +857,16 @@ fn to_i64(value: &serde_json::Value) -> Option<i64> {
         return Some(v as i64);
     }
     value.as_str().and_then(|value| value.parse::<i64>().ok())
+}
+
+fn to_u64(value: &serde_json::Value) -> Option<u64> {
+    if let Some(v) = value.as_u64() {
+        return Some(v);
+    }
+    if let Some(v) = value.as_i64() {
+        return (v >= 0).then_some(v as u64);
+    }
+    value.as_str().and_then(|value| value.parse::<u64>().ok())
 }
 
 fn build_cws_ack(
@@ -889,6 +970,7 @@ mod tests {
         assert_eq!(info.message.as_deref(), Some("ok"));
         assert_eq!(info.request_guid.as_deref(), Some("guid-123"));
         assert_eq!(info.order_id, Some(12345));
+        assert_eq!(info.trace.recv_seq, None);
     }
 
     #[test]
@@ -921,6 +1003,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_cws_response_extracts_diag_trace_fields() {
+        let value = json!({
+            "httpCode": 200,
+            "requestGuid": "guid-trace",
+            "_diag_cws_send_seq": 11,
+            "_diag_cws_send_ts_utc": 1774285000,
+            "_diag_cws_recv_seq": 12,
+            "_diag_cws_recv_ts_utc": 1774285001,
+            "_diag_cws_message_class": "response",
+            "_diag_cws_connection_instance_id": "conn-1",
+            "_diag_cws_connect_seq": 3,
+            "_diag_cws_reconnect_seq": 2
+        });
+        let info = parse_cws_response(&value);
+        assert_eq!(info.trace.send_seq, Some(11));
+        assert_eq!(info.trace.send_ts_utc, Some(1774285000));
+        assert_eq!(info.trace.recv_seq, Some(12));
+        assert_eq!(info.trace.recv_ts_utc, Some(1774285001));
+        assert_eq!(info.trace.message_class.as_deref(), Some("response"));
+        assert_eq!(info.trace.connection_instance_id.as_deref(), Some("conn-1"));
+        assert_eq!(info.trace.connect_seq, Some(3));
+        assert_eq!(info.trace.reconnect_seq, Some(2));
+    }
+
+    #[test]
     fn build_cws_ack_carries_string_order_id() {
         let ack = build_cws_ack(
             uuid::Uuid::new_v4(),
@@ -931,6 +1038,7 @@ mod tests {
                 request_guid: Some("guid-1".to_string()),
                 order_id: None,
                 order_id_str: Some("A-12345".to_string()),
+                trace: CwsTraceInfo::default(),
             },
             None,
             None,

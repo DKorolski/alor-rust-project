@@ -25,6 +25,17 @@ const CWS_TIME_IN_FORCE: &str = "OneDay";
 const CWS_ALLOW_MARGIN: bool = true;
 const CWS_MARKET_TIME_IN_FORCE: &str = "oneday";
 const CWS_MARKET_ALLOW_MARGIN: bool = true;
+const DIAG_CWS_SEND_SEQ: &str = "_diag_cws_send_seq";
+const DIAG_CWS_SEND_TS_UTC: &str = "_diag_cws_send_ts_utc";
+const DIAG_CWS_RECV_SEQ: &str = "_diag_cws_recv_seq";
+const DIAG_CWS_RECV_TS_UTC: &str = "_diag_cws_recv_ts_utc";
+const DIAG_CWS_MESSAGE_CLASS: &str = "_diag_cws_message_class";
+const DIAG_CWS_CONNECTION_INSTANCE_ID: &str = "_diag_cws_connection_instance_id";
+const DIAG_CWS_CONNECT_SEQ: &str = "_diag_cws_connect_seq";
+const DIAG_CWS_RECONNECT_SEQ: &str = "_diag_cws_reconnect_seq";
+const DIAG_CWS_CORRELATION_GUID: &str = "_diag_cws_correlation_guid";
+const DIAG_CWS_ORDER_ID: &str = "_diag_cws_order_id";
+const DIAG_CWS_SYMBOL: &str = "_diag_cws_symbol";
 
 #[derive(Debug, Clone)]
 pub struct CwsHandle {
@@ -47,6 +58,9 @@ struct PendingRequest {
     cws_guid: String,
     opcode: String,
     symbol: Option<String>,
+    send_seq: u64,
+    send_ts_utc: i64,
+    pending_count_before_send: u64,
     resp_tx: oneshot::Sender<anyhow::Result<Value>>,
 }
 
@@ -64,6 +78,36 @@ struct CwsTelemetrySnapshot {
     in_flight_pending_count: u64,
     last_successful_send_ts_utc: Option<i64>,
     last_successful_ack_ts_utc: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawCwsMessageClass {
+    RequestResponse,
+    DomainEvent,
+    Transport,
+    Unknown,
+}
+
+impl RawCwsMessageClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::RequestResponse => "response",
+            Self::DomainEvent => "event",
+            Self::Transport => "transport",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InboundCwsMessageMeta {
+    message_class: RawCwsMessageClass,
+    guid: Option<String>,
+    request_guid: Option<String>,
+    correlation_guid: Option<String>,
+    opcode: Option<String>,
+    order_id: Option<String>,
+    symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,12 +781,17 @@ async fn run_session(
     authorize(&mut ws_sink, &mut ws_stream, &token, health).await?;
 
     let mut pending: HashMap<String, PendingRequest> = HashMap::new();
+    let mut send_seq = 0_u64;
+    let mut recv_seq = 0_u64;
 
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(cmd) => {
+                        let pending_count_before_send = pending.len() as u64;
+                        send_seq = send_seq.saturating_add(1);
+                        let send_ts_utc = Utc::now().timestamp();
                         let guid = cmd
                             .payload
                             .get("guid")
@@ -766,6 +815,9 @@ async fn run_session(
                                 cws_guid: guid.clone(),
                                 opcode: opcode.clone(),
                                 symbol: cmd.symbol.or_else(|| symbol_of_payload(&payload)),
+                                send_seq,
+                                send_ts_utc,
+                                pending_count_before_send,
                                 resp_tx: cmd.resp_tx,
                             },
                         );
@@ -773,7 +825,20 @@ async fn run_session(
                             let mut guard = health.write();
                             guard.cws_pending_count = pending.len() as u64;
                         }
-                        info!(opcode, guid, "cws send");
+                        let connection_age_ms = connected_at.elapsed().as_millis() as u64;
+                        info!(
+                            opcode,
+                            guid,
+                            send_seq,
+                            send_ts_utc,
+                            request_id = pending.get(&guid).and_then(|request| request.request_id.as_deref()),
+                            cws_connection_instance_id = %connection_instance_id,
+                            connect_seq,
+                            reconnect_seq,
+                            connection_age_ms,
+                            pending_count_before_send,
+                            "cws send"
+                        );
                         let redacted_payload = redact_token(&payload.to_string());
                         debug!(opcode, guid, payload = %redacted_payload, "cws send payload");
                         if let Err(error) = ws_sink
@@ -798,27 +863,105 @@ async fn run_session(
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
+                        recv_seq = recv_seq.saturating_add(1);
+                        let recv_ts_utc = Utc::now().timestamp();
                         if let Ok(value) = serde_json::from_str::<Value>(&txt) {
-                            let guid = guid_of(&value);
-                            let opcode = value.get("opcode").and_then(Value::as_str).unwrap_or("unknown");
-                            debug!(opcode, guid = ?guid, payload = %value, "cws recv payload");
-                            if let Some(guid) = guid {
-                                if let Some(request) = pending.remove(&guid) {
+                            let meta = inspect_inbound_cws_message(&value);
+                            let opcode = meta.opcode.as_deref().unwrap_or("unknown");
+                            debug!(
+                                recv_seq,
+                                recv_ts_utc,
+                                cws_connection_instance_id = %connection_instance_id,
+                                connect_seq,
+                                reconnect_seq,
+                                raw_message_class = meta.message_class.as_str(),
+                                opcode,
+                                guid = ?meta.guid,
+                                request_guid = ?meta.request_guid,
+                                correlation_guid = ?meta.correlation_guid,
+                                order_id = ?meta.order_id,
+                                symbol = ?meta.symbol,
+                                payload = %value,
+                                "cws recv payload"
+                            );
+                            if matches!(meta.message_class, RawCwsMessageClass::RequestResponse) {
+                                if let Some(guid) = meta.correlation_guid.clone() {
+                                    if let Some(request) = pending.remove(&guid) {
+                                        let mut value = value;
+                                        attach_diag_trace_fields(
+                                            &mut value,
+                                            &meta,
+                                            &request,
+                                            recv_seq,
+                                            recv_ts_utc,
+                                            &connection_instance_id,
+                                            connect_seq,
+                                            reconnect_seq,
+                                        );
+                                        info!(
+                                            recv_seq,
+                                            recv_ts_utc,
+                                            send_seq = request.send_seq,
+                                            send_ts_utc = request.send_ts_utc,
+                                            request_id = request.request_id.as_deref(),
+                                            cws_guid = request.cws_guid.as_str(),
+                                            message_class = meta.message_class.as_str(),
+                                            "cws response matched pending request"
+                                        );
                                     {
                                         let mut guard = health.write();
                                         guard.cws_pending_count = pending.len() as u64;
                                         guard.cws_last_successful_ack_ts_utc =
                                             Some(Utc::now().timestamp());
                                     }
-                                    let _ = request.resp_tx.send(Ok(value));
+                                        let _ = request.resp_tx.send(Ok(value));
+                                    } else {
+                                        warn!(
+                                            recv_seq,
+                                            recv_ts_utc,
+                                            opcode,
+                                            guid,
+                                            raw_message_class = meta.message_class.as_str(),
+                                            "cws recv response without pending request"
+                                        );
+                                    }
                                 } else {
-                                    warn!(opcode, guid, "cws recv without pending request");
+                                    warn!(
+                                        recv_seq,
+                                        recv_ts_utc,
+                                        opcode,
+                                        raw_message_class = meta.message_class.as_str(),
+                                        "cws recv response without correlation guid"
+                                    );
                                 }
                             } else {
-                                warn!(opcode, "cws recv without guid");
+                                let matched_pending = meta
+                                    .correlation_guid
+                                    .as_ref()
+                                    .map(|guid| pending.contains_key(guid))
+                                    .unwrap_or(false);
+                                if matched_pending {
+                                    warn!(
+                                        recv_seq,
+                                        recv_ts_utc,
+                                        opcode,
+                                        raw_message_class = meta.message_class.as_str(),
+                                        correlation_guid = ?meta.correlation_guid,
+                                        pending_count = pending.len(),
+                                        "cws recv non-response frame matched pending guid; pending left open"
+                                    );
+                                }
                             }
                         } else {
-                            warn!(payload = %txt, "cws recv non-json payload");
+                            warn!(
+                                recv_seq,
+                                recv_ts_utc,
+                                cws_connection_instance_id = %connection_instance_id,
+                                connect_seq,
+                                reconnect_seq,
+                                payload = %txt,
+                                "cws recv non-json payload"
+                            );
                         }
                     }
                     Some(Ok(Message::Close(frame))) => {
@@ -1020,6 +1163,9 @@ fn fail_pending_with_transport(
                 "cws_guid": request.cws_guid.as_str(),
                 "opcode": request.opcode.as_str(),
                 "symbol": request.symbol.as_deref(),
+                "send_seq": request.send_seq,
+                "send_ts_utc": request.send_ts_utc,
+                "pending_count_before_send": request.pending_count_before_send,
             })
         })
         .collect::<Vec<_>>();
@@ -1133,6 +1279,176 @@ fn guid_of(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.get("requestGuid").and_then(Value::as_str))
         .map(|value| value.to_string())
+}
+
+fn request_guid_of(value: &Value) -> Option<String> {
+    value
+        .get("requestGuid")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn transport_guid_of(value: &Value) -> Option<String> {
+    value
+        .get("guid")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn correlation_guid_of(value: &Value) -> Option<String> {
+    request_guid_of(value).or_else(|| transport_guid_of(value))
+}
+
+fn order_id_of_value(value: &Value) -> Option<String> {
+    value
+        .get("orderNumber")
+        .or_else(|| value.get("orderId"))
+        .and_then(value_to_string)
+        .or_else(|| {
+            value.get("data").and_then(|data| {
+                data.get("orderNumber")
+                    .or_else(|| data.get("orderId"))
+                    .and_then(value_to_string)
+            })
+        })
+}
+
+fn symbol_of_value(value: &Value) -> Option<String> {
+    value
+        .get("symbol")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            value.get("data").and_then(|data| {
+                data.get("symbol")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+        })
+        .or_else(|| symbol_of_payload(value))
+}
+
+fn classify_inbound_cws_message(value: &Value) -> RawCwsMessageClass {
+    let has_http_code = value.get("httpCode").is_some();
+    let has_request_guid = value.get("requestGuid").is_some();
+    let has_numeric_status = value
+        .get("status")
+        .map(|status| status.is_i64() || status.is_u64() || status.is_f64())
+        .unwrap_or(false);
+    let has_authorize_flag =
+        value.get("cwsAuthorized").is_some() || value.get("cws_authorized").is_some();
+    if has_http_code || has_request_guid || has_numeric_status || has_authorize_flag {
+        return RawCwsMessageClass::RequestResponse;
+    }
+
+    let has_order_marker = value.get("orderId").is_some()
+        || value.get("orderNumber").is_some()
+        || value
+            .get("data")
+            .and_then(Value::as_object)
+            .map(|data| {
+                data.contains_key("orderId")
+                    || data.contains_key("orderNumber")
+                    || data.contains_key("symbol")
+                    || data.contains_key("existing")
+                    || data.contains_key("status")
+            })
+            .unwrap_or(false);
+    if has_order_marker {
+        return RawCwsMessageClass::DomainEvent;
+    }
+
+    let has_transport_marker =
+        value.get("event").is_some() || value.get("type").is_some() || value.get("code").is_some();
+    if has_transport_marker {
+        return RawCwsMessageClass::Transport;
+    }
+
+    RawCwsMessageClass::Unknown
+}
+
+fn inspect_inbound_cws_message(value: &Value) -> InboundCwsMessageMeta {
+    InboundCwsMessageMeta {
+        message_class: classify_inbound_cws_message(value),
+        guid: transport_guid_of(value),
+        request_guid: request_guid_of(value),
+        correlation_guid: correlation_guid_of(value),
+        opcode: value
+            .get("opcode")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        order_id: order_id_of_value(value),
+        symbol: symbol_of_value(value),
+    }
+}
+
+fn attach_diag_trace_fields(
+    value: &mut Value,
+    meta: &InboundCwsMessageMeta,
+    request: &PendingRequest,
+    recv_seq: u64,
+    recv_ts_utc: i64,
+    connection_instance_id: &str,
+    connect_seq: u64,
+    reconnect_seq: u64,
+) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.insert(DIAG_CWS_SEND_SEQ.to_string(), Value::from(request.send_seq));
+    obj.insert(
+        DIAG_CWS_SEND_TS_UTC.to_string(),
+        Value::from(request.send_ts_utc),
+    );
+    obj.insert(DIAG_CWS_RECV_SEQ.to_string(), Value::from(recv_seq));
+    obj.insert(DIAG_CWS_RECV_TS_UTC.to_string(), Value::from(recv_ts_utc));
+    obj.insert(
+        DIAG_CWS_MESSAGE_CLASS.to_string(),
+        Value::String(meta.message_class.as_str().to_string()),
+    );
+    obj.insert(
+        DIAG_CWS_CONNECTION_INSTANCE_ID.to_string(),
+        Value::String(connection_instance_id.to_string()),
+    );
+    obj.insert(DIAG_CWS_CONNECT_SEQ.to_string(), Value::from(connect_seq));
+    obj.insert(
+        DIAG_CWS_RECONNECT_SEQ.to_string(),
+        Value::from(reconnect_seq),
+    );
+    if let Some(correlation_guid) = meta.correlation_guid.as_deref() {
+        obj.insert(
+            DIAG_CWS_CORRELATION_GUID.to_string(),
+            Value::String(correlation_guid.to_string()),
+        );
+    }
+    if let Some(order_id) = meta.order_id.as_deref() {
+        obj.insert(
+            DIAG_CWS_ORDER_ID.to_string(),
+            Value::String(order_id.to_string()),
+        );
+    }
+    if let Some(symbol) = meta.symbol.as_deref() {
+        obj.insert(
+            DIAG_CWS_SYMBOL.to_string(),
+            Value::String(symbol.to_string()),
+        );
+    }
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value.as_i64() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value.as_u64() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value.as_f64() {
+        return Some(value.to_string());
+    }
+    None
 }
 
 fn redact_token(payload: &str) -> String {
@@ -1361,6 +1677,79 @@ mod tests {
     }
 
     #[test]
+    fn classify_inbound_cws_message_distinguishes_response_and_event() {
+        let response = serde_json::json!({
+            "requestGuid": "guid-1",
+            "httpCode": 200,
+            "message": "ok"
+        });
+        let event = serde_json::json!({
+            "guid": "guid-1",
+            "data": {
+                "orderNumber": 12345,
+                "symbol": "USDRUBF",
+                "status": "working"
+            }
+        });
+        assert_eq!(
+            classify_inbound_cws_message(&response),
+            RawCwsMessageClass::RequestResponse
+        );
+        assert_eq!(
+            classify_inbound_cws_message(&event),
+            RawCwsMessageClass::DomainEvent
+        );
+    }
+
+    #[test]
+    fn attach_diag_trace_fields_preserves_send_and_recv_correlation() {
+        let mut response = serde_json::json!({
+            "requestGuid": "guid-1",
+            "httpCode": 200
+        });
+        let meta = inspect_inbound_cws_message(&response);
+        let (resp_tx, _resp_rx) = oneshot::channel();
+        let request = PendingRequest {
+            request_id: Some("req-1".to_string()),
+            cws_guid: "guid-1".to_string(),
+            opcode: "create:limit".to_string(),
+            symbol: Some("USDRUBF".to_string()),
+            send_seq: 7,
+            send_ts_utc: 1774285000,
+            pending_count_before_send: 0,
+            resp_tx,
+        };
+        attach_diag_trace_fields(
+            &mut response,
+            &meta,
+            &request,
+            8,
+            1774285001,
+            "conn-1",
+            3,
+            2,
+        );
+        assert_eq!(
+            response.get(DIAG_CWS_SEND_SEQ).and_then(Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            response.get(DIAG_CWS_RECV_SEQ).and_then(Value::as_u64),
+            Some(8)
+        );
+        assert_eq!(
+            response.get(DIAG_CWS_MESSAGE_CLASS).and_then(Value::as_str),
+            Some("response")
+        );
+        assert_eq!(
+            response
+                .get(DIAG_CWS_CONNECTION_INSTANCE_ID)
+                .and_then(Value::as_str),
+            Some("conn-1")
+        );
+    }
+
+    #[test]
     fn build_create_stop_limit_payload_nests_instrument_group() {
         let payload = build_create_stop_limit_payload(
             "D39004",
@@ -1459,6 +1848,9 @@ mod tests {
                 cws_guid: "guid-1".to_string(),
                 opcode: "create:limit".to_string(),
                 symbol: Some("USDRUBF".to_string()),
+                send_seq: 1,
+                send_ts_utc: 1774285000,
+                pending_count_before_send: 0,
                 resp_tx: tx_one,
             },
         );
@@ -1469,6 +1861,9 @@ mod tests {
                 cws_guid: "guid-2".to_string(),
                 opcode: "delete:limit".to_string(),
                 symbol: None,
+                send_seq: 2,
+                send_ts_utc: 1774285001,
+                pending_count_before_send: 1,
                 resp_tx: tx_two,
             },
         );

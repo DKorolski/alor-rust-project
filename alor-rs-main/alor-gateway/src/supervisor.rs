@@ -538,7 +538,8 @@ impl Supervisor {
                 while let Some(order) = orders_rx.recv().await {
                     let mut order = order;
                     let event_request_id = order.request_id;
-                    match request_map_orders.read().get(&order.order_id).copied() {
+                    let state_request_id = request_map_orders.read().get(&order.order_id).copied();
+                    match state_request_id {
                         Some(request_id) if event_request_id != Some(request_id) => {
                             info!(
                                 order_id = order.order_id,
@@ -567,6 +568,9 @@ impl Supervisor {
                         status = order.status,
                         existing = order.existing,
                         request_id = ?order.request_id,
+                        event_request_id = ?event_request_id,
+                        state_request_id = ?state_request_id,
+                        request_map_hit = state_request_id.is_some(),
                         "order event received"
                     );
                     if let Some(publisher) = publisher.as_ref() {
