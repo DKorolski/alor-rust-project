@@ -9,6 +9,7 @@ Usage:
   limit_diag.sh capture post <run_dir>
   limit_diag.sh place <sessiongap|hybrid> <price> [qty] [side]
   limit_diag.sh cancel <sessiongap|hybrid> <order_id>
+  limit_diag.sh loop <sessiongap|hybrid> <price> [iterations] [qty] [side] [sleep_sec]
   limit_diag.sh trace <run_dir> <sessiongap|hybrid> <request_id>
   limit_diag.sh trace-order <run_dir> <sessiongap|hybrid> <order_id>
 
@@ -17,6 +18,7 @@ Examples:
   scripts/limit_diag.sh capture pre "$RUN_DIR"
   scripts/limit_diag.sh place sessiongap 81.71
   scripts/limit_diag.sh cancel sessiongap 2023555922907497864
+  scripts/limit_diag.sh loop sessiongap 80.10 20
   scripts/limit_diag.sh capture post "$RUN_DIR"
   scripts/limit_diag.sh trace "$RUN_DIR" sessiongap 75b8a7f6-0d34-4664-beac-bc2060625f43
   scripts/limit_diag.sh trace-order "$RUN_DIR" sessiongap 2023555922907497864
@@ -102,6 +104,7 @@ capture_phase() {
   local phase=$1
   local run_dir=$2
   local log_minutes
+  local current_stack
 
   mkdir -p "$run_dir"
   case "$phase" in
@@ -113,24 +116,24 @@ capture_phase() {
       ;;
   esac
 
-  for stack_name in sessiongap hybrid; do
-    stack_env "$stack_name"
-    capture_readiness "$stack_name" > "${run_dir}/${stack_name}.readiness.${phase}.json"
-    compose_ps "$stack_name" > "${run_dir}/${stack_name}.ps.${phase}.txt"
+  for current_stack in sessiongap hybrid; do
+    stack_env "$current_stack"
+    capture_readiness "$current_stack" > "${run_dir}/${current_stack}.readiness.${phase}.json"
+    compose_ps "$current_stack" > "${run_dir}/${current_stack}.ps.${phase}.txt"
 
-    capture_stream_tail "$stack_name" "$STACK_CMD_STREAM" 80 \
-      > "${run_dir}/${stack_name}.cmd.orders.${phase}.txt"
-    capture_stream_tail "$stack_name" "$STACK_ACK_STREAM" 80 \
-      > "${run_dir}/${stack_name}.cmd.acks.${phase}.txt"
-    capture_stream_tail "$stack_name" "$STACK_BROKER_ORDERS_STREAM" 80 \
-      > "${run_dir}/${stack_name}.broker.orders.${phase}.txt"
-    capture_stream_tail "$stack_name" "$STACK_BROKER_POSITIONS_STREAM" 80 \
-      > "${run_dir}/${stack_name}.broker.positions.${phase}.txt"
+    capture_stream_tail "$current_stack" "$STACK_CMD_STREAM" 80 \
+      > "${run_dir}/${current_stack}.cmd.orders.${phase}.txt"
+    capture_stream_tail "$current_stack" "$STACK_ACK_STREAM" 80 \
+      > "${run_dir}/${current_stack}.cmd.acks.${phase}.txt"
+    capture_stream_tail "$current_stack" "$STACK_BROKER_ORDERS_STREAM" 80 \
+      > "${run_dir}/${current_stack}.broker.orders.${phase}.txt"
+    capture_stream_tail "$current_stack" "$STACK_BROKER_POSITIONS_STREAM" 80 \
+      > "${run_dir}/${current_stack}.broker.positions.${phase}.txt"
 
-    capture_logs "$stack_name" alor-gateway "$log_minutes" \
-      > "${run_dir}/${stack_name}.gateway.${phase}.log"
-    capture_logs "$stack_name" strategy-runtime "$log_minutes" \
-      > "${run_dir}/${stack_name}.runtime.${phase}.log"
+    capture_logs "$current_stack" alor-gateway "$log_minutes" \
+      > "${run_dir}/${current_stack}.gateway.${phase}.log"
+    capture_logs "$current_stack" strategy-runtime "$log_minutes" \
+      > "${run_dir}/${current_stack}.runtime.${phase}.log"
   done
 }
 
@@ -250,6 +253,187 @@ trace_order() {
   done
 }
 
+json_string_field() {
+  local line=$1
+  local key=$2
+  printf '%s\n' "$line" | sed -n "s/.*\"$key\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1
+}
+
+json_number_field() {
+  local line=$1
+  local key=$2
+  printf '%s\n' "$line" | sed -n "s/.*\"$key\":\\([-0-9.][0-9.]*\\).*/\\1/p" | head -n 1
+}
+
+latest_stream_match() {
+  local stack_name=$1
+  local stream_name=$2
+  local pattern=$3
+  local count=${4:-160}
+
+  capture_stream_tail "$stack_name" "$stream_name" "$count" | grep "$pattern" | head -n 1 || true
+}
+
+wait_for_stream_match() {
+  local stack_name=$1
+  local stream_name=$2
+  local pattern=$3
+  local timeout_sec=${4:-20}
+  local count=${5:-160}
+  local i line
+
+  for i in $(seq 1 "$timeout_sec"); do
+    line=$(latest_stream_match "$stack_name" "$stream_name" "$pattern" "$count")
+    if [ -n "$line" ]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+latest_symbol_position_line() {
+  local stack_name=$1
+  stack_env "$stack_name"
+  latest_stream_match "$stack_name" "$STACK_BROKER_POSITIONS_STREAM" "\"symbol\":\"$STACK_SYMBOL\"" 160
+}
+
+loop_limit_cycle() {
+  local stack_name=$1
+  local price=$2
+  local iterations=${3:-20}
+  local qty=${4:-1.0}
+  local side=${5:-buy}
+  local sleep_sec=${6:-2}
+
+  local run_dir summary_file
+  local place_out place_req_id place_ack_line place_status order_id order_line order_status order_filled
+  local cancel_out cancel_req_id cancel_ack_line cancel_status
+  local pos_line pos_qty iter
+
+  run_dir="/opt/diag-captures/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$run_dir"
+  capture_phase pre "$run_dir"
+  summary_file="${run_dir}/${stack_name}.loop.summary.txt"
+  : > "$summary_file"
+
+  stack_env "$stack_name"
+  pos_line=$(latest_symbol_position_line "$stack_name")
+  pos_qty=$(json_number_field "${pos_line:-}" "qty")
+  if [ -n "${pos_qty:-}" ] && [ "$pos_qty" != "0" ] && [ "$pos_qty" != "0.0" ]; then
+    echo "ABORT: ${STACK_SYMBOL} position is not flat before loop: qty=${pos_qty}" | tee -a "$summary_file" >&2
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 2
+  fi
+
+  for iter in $(seq 1 "$iterations"); do
+    echo "ITERATION=$iter phase=place_start price=$price qty=$qty side=$side" | tee -a "$summary_file"
+
+    place_out=$(send_place "$stack_name" "$price" "$qty" "$side")
+    place_req_id=$(printf '%s\n' "$place_out" | sed -n 's/^REQ_ID=//p')
+    echo "$place_out" | tee -a "$summary_file"
+
+    place_ack_line=$(wait_for_stream_match "$stack_name" "$STACK_ACK_STREAM" "$place_req_id" 20 160 || true)
+    if [ -z "$place_ack_line" ]; then
+      echo "ITERATION=$iter result=stop reason=place_ack_timeout request_id=$place_req_id" | tee -a "$summary_file"
+      break
+    fi
+
+    place_status=$(json_string_field "$place_ack_line" "status")
+    order_id=$(json_number_field "$place_ack_line" "broker_order_id")
+    echo "ITERATION=$iter place_status=$place_status order_id=${order_id:-}" | tee -a "$summary_file"
+    echo "$place_ack_line" >> "$summary_file"
+
+    if [ "$place_status" != "accepted" ] || [ -z "${order_id:-}" ]; then
+      echo "ITERATION=$iter result=stop reason=place_not_accepted request_id=$place_req_id" | tee -a "$summary_file"
+      break
+    fi
+
+    order_line=$(wait_for_stream_match "$stack_name" "$STACK_BROKER_ORDERS_STREAM" "$order_id" 20 200 || true)
+    if [ -z "$order_line" ]; then
+      echo "ITERATION=$iter result=stop reason=order_event_timeout order_id=$order_id" | tee -a "$summary_file"
+      break
+    fi
+
+    order_status=$(json_string_field "$order_line" "status")
+    order_filled=$(json_number_field "$order_line" "filled")
+    echo "ITERATION=$iter place_order_status=$order_status filled=${order_filled:-}" | tee -a "$summary_file"
+    echo "$order_line" >> "$summary_file"
+
+    if [ "${order_filled:-0}" != "0" ] && [ "${order_filled:-0}" != "0.0" ]; then
+      echo "ITERATION=$iter result=stop reason=unexpected_fill order_id=$order_id filled=$order_filled" | tee -a "$summary_file"
+      break
+    fi
+
+    if [ "$order_status" != "working" ]; then
+      echo "ITERATION=$iter result=stop reason=place_not_working order_id=$order_id status=$order_status" | tee -a "$summary_file"
+      break
+    fi
+
+    cancel_out=$(send_cancel "$stack_name" "$order_id")
+    cancel_req_id=$(printf '%s\n' "$cancel_out" | sed -n 's/^REQ_ID=//p')
+    echo "$cancel_out" | tee -a "$summary_file"
+
+    cancel_ack_line=$(wait_for_stream_match "$stack_name" "$STACK_ACK_STREAM" "$cancel_req_id" 20 200 || true)
+    if [ -z "$cancel_ack_line" ]; then
+      echo "ITERATION=$iter result=stop reason=cancel_ack_timeout request_id=$cancel_req_id order_id=$order_id" | tee -a "$summary_file"
+      break
+    fi
+
+    cancel_status=$(json_string_field "$cancel_ack_line" "status")
+    echo "ITERATION=$iter cancel_status=$cancel_status order_id=$order_id" | tee -a "$summary_file"
+    echo "$cancel_ack_line" >> "$summary_file"
+
+    order_line=
+    order_status=
+    order_filled=
+    for _ in $(seq 1 20); do
+      order_line=$(latest_stream_match "$stack_name" "$STACK_BROKER_ORDERS_STREAM" "$order_id" 200)
+      if [ -n "$order_line" ]; then
+        order_status=$(json_string_field "$order_line" "status")
+        order_filled=$(json_number_field "$order_line" "filled")
+        if [ "$order_status" = "canceled" ] || [ "$order_status" = "filled" ]; then
+          break
+        fi
+      fi
+      sleep 1
+    done
+
+    if [ -z "$order_line" ]; then
+      echo "ITERATION=$iter result=stop reason=cancel_order_event_timeout order_id=$order_id request_id=$cancel_req_id" | tee -a "$summary_file"
+      break
+    fi
+
+    echo "ITERATION=$iter cancel_order_status=$order_status filled=${order_filled:-}" | tee -a "$summary_file"
+    echo "$order_line" >> "$summary_file"
+
+    if [ "$cancel_status" != "accepted" ]; then
+      echo "ITERATION=$iter result=stop reason=cancel_not_accepted request_id=$cancel_req_id order_id=$order_id" | tee -a "$summary_file"
+      break
+    fi
+
+    if [ "${order_filled:-0}" != "0" ] && [ "${order_filled:-0}" != "0.0" ]; then
+      echo "ITERATION=$iter result=stop reason=fill_during_cancel order_id=$order_id filled=$order_filled" | tee -a "$summary_file"
+      break
+    fi
+
+    if [ "$order_status" != "canceled" ]; then
+      echo "ITERATION=$iter result=stop reason=cancel_not_final order_id=$order_id status=$order_status request_id=$cancel_req_id" | tee -a "$summary_file"
+      break
+    fi
+
+    echo "ITERATION=$iter result=pass request_id_place=$place_req_id request_id_cancel=$cancel_req_id order_id=$order_id" | tee -a "$summary_file"
+    sleep "$sleep_sec"
+  done
+
+  capture_phase post "$run_dir"
+  echo "RUN_DIR=$run_dir"
+  echo "SUMMARY_FILE=$summary_file"
+}
+
 main() {
   require_arg 1 "$@"
 
@@ -272,6 +456,10 @@ main() {
     cancel)
       require_arg 3 "$@"
       send_cancel "$2" "$3"
+      ;;
+    loop)
+      require_arg 3 "$@"
+      loop_limit_cycle "$2" "$3" "${4:-20}" "${5:-1.0}" "${6:-buy}" "${7:-2}"
       ;;
     trace)
       require_arg 4 "$@"
