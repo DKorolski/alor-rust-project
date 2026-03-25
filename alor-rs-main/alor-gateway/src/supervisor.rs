@@ -542,6 +542,9 @@ impl Supervisor {
                     match state_request_id {
                         Some(request_id) if event_request_id != Some(request_id) => {
                             info!(
+                                handler = "supervisor",
+                                state_before = "event_request_id_unresolved",
+                                state_after = "event_request_id_restored_from_request_map",
                                 order_id = order.order_id,
                                 event_request_id = ?event_request_id,
                                 state_request_id = ?request_id,
@@ -563,6 +566,17 @@ impl Supervisor {
                         *entry = entry.saturating_add(1);
                     }
                     info!(
+                        handler = "supervisor",
+                        state_before = if event_request_id.is_some() {
+                            "event_request_id_present"
+                        } else {
+                            "event_request_id_missing"
+                        },
+                        state_after = if order.request_id.is_some() {
+                            "event_request_id_resolved"
+                        } else {
+                            "event_request_id_unresolved"
+                        },
                         order_id = order.order_id,
                         symbol = order.symbol,
                         status = order.status,

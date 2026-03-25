@@ -19,6 +19,8 @@ const DIAG_CWS_MESSAGE_CLASS: &str = "_diag_cws_message_class";
 const DIAG_CWS_CONNECTION_INSTANCE_ID: &str = "_diag_cws_connection_instance_id";
 const DIAG_CWS_CONNECT_SEQ: &str = "_diag_cws_connect_seq";
 const DIAG_CWS_RECONNECT_SEQ: &str = "_diag_cws_reconnect_seq";
+const DIAG_CWS_ORDER_ID: &str = "_diag_cws_order_id";
+const DIAG_CWS_REQUEST_ORDER_ID: &str = "_diag_cws_request_order_id";
 
 #[derive(Debug, Clone)]
 pub struct CommandConsumerConfig {
@@ -238,10 +240,14 @@ pub async fn run_command_consumer(
                     guard.command_consumer_last_message_id = Some(message_id.to_string());
                 }
                 info!(
+                    handler = "command_consumer",
+                    state_before = "command_received",
+                    state_after = "command_validated",
                     request_id = %request_id,
                     strategy_id = %command.strategy_id,
                     symbol = %command.symbol,
                     action = %command_action_label(&command.action),
+                    target_order_id = ?command_target_order_id(&command.action),
                     ttl_ms = ?command.ttl_ms,
                     stream_id = ?message_id,
                     "command received"
@@ -319,7 +325,17 @@ pub async fn run_command_consumer(
                 }
 
                 if let CommandAction::Cancel(payload) = &command.action {
-                    request_map.write().insert(payload.order_id, request_id);
+                    let previous_request_id = request_map.write().insert(payload.order_id, request_id);
+                    info!(
+                        handler = "command_consumer",
+                        state_before = "request_map_before_cancel_preinsert",
+                        state_after = "request_map_after_cancel_preinsert",
+                        request_id = %request_id,
+                        broker_order_id = payload.order_id,
+                        previous_request_id = ?previous_request_id,
+                        current_request_id = %request_id,
+                        "request_map updated from cancel intent"
+                    );
                 }
 
                 match execute_command(&cws, &command, request_id, price_step, volume_step).await {
@@ -328,12 +344,18 @@ pub async fn run_command_consumer(
                         let http_code = info.http_code.unwrap_or(0);
                         let cws_request_guid = info.request_guid.clone();
                         info!(
+                            handler = "command_consumer",
+                            state_before = "response_received",
+                            state_after = "response_classified",
                             request_id = %request_id,
                             action = %command_action_label(&command.action),
+                            target_order_id = ?command_target_order_id(&command.action),
                             cws_http_code = http_code,
                             cws_message = ?info.message,
                             cws_request_guid = ?info.request_guid,
                             broker_order_id = info.order_id,
+                            cws_order_id = ?info.trace.order_id,
+                            cws_request_order_id = ?info.trace.request_order_id,
                             cws_send_seq = info.trace.send_seq,
                             cws_send_ts_utc = info.trace.send_ts_utc,
                             cws_recv_seq = info.trace.recv_seq,
@@ -392,10 +414,15 @@ pub async fn run_command_consumer(
                             increment_counter(&health, |h| h.command_processed_total = h.command_processed_total.saturating_add(1));
                             increment_counter(&health, |h| h.commands_accepted_total = h.commands_accepted_total.saturating_add(1));
                             if let Some(order_id) = info.order_id {
-                                request_map.write().insert(order_id, request_id);
+                                let previous_request_id = request_map.write().insert(order_id, request_id);
                                 info!(
+                                    handler = "command_consumer",
+                                    state_before = "request_map_before_ack_insert",
+                                    state_after = "request_map_after_ack_insert",
                                     request_id = %request_id,
                                     broker_order_id = order_id,
+                                    previous_request_id = ?previous_request_id,
+                                    current_request_id = %request_id,
                                     cws_request_guid = ?cws_request_guid,
                                     cws_send_seq = info.trace.send_seq,
                                     cws_recv_seq = info.trace.recv_seq,
@@ -434,13 +461,19 @@ pub async fn run_command_consumer(
                         );
                         sink.publish_ack(ack.clone()).await?;
                         info!(
+                            handler = "command_consumer",
+                            state_before = "ack_ready_to_publish",
+                            state_after = "ack_published",
                             request_id = %ack.request_id,
                             status = ?ack.status,
                             processed_ts_utc = ack.processed_ts_utc,
                             broker_order_id = ack.broker_order_id,
+                            target_order_id = ?command_target_order_id(&command.action),
                             error_code = ?ack.error_code,
                             cws_http_code = ?ack.cws_http_code,
                             cws_request_guid = ?ack.cws_request_guid,
+                            cws_order_id = ?ack_trace.order_id,
+                            cws_request_order_id = ?ack_trace.request_order_id,
                             cws_send_seq = ack_trace.send_seq,
                             cws_send_ts_utc = ack_trace.send_ts_utc,
                             cws_recv_seq = ack_trace.recv_seq,
@@ -469,6 +502,8 @@ pub async fn run_command_consumer(
                         let cws_guid = transport_failure.map(|failure| failure.cws_guid().to_string());
                         let disconnect_kind = transport_failure
                             .map(|failure| failure.transport().disconnect_kind_str().to_string());
+                        let failure_order_id = transport_failure
+                            .and_then(|failure| failure.order_id().map(ToString::to_string));
                         if matches!(command.action, CommandAction::Place(_)) {
                             info!(
                                 action = "cws_limit_ack",
@@ -486,10 +521,15 @@ pub async fn run_command_consumer(
                         let ack = build_transport_error_ack(request_id, &error);
                         sink.publish_ack(ack.clone()).await?;
                         info!(
+                            handler = "command_consumer",
+                            state_before = "transport_error_ready_to_publish",
+                            state_after = "ack_published",
                             request_id = %ack.request_id,
                             status = ?ack.status,
                             processed_ts_utc = ack.processed_ts_utc,
                             broker_order_id = ack.broker_order_id,
+                            target_order_id = ?command_target_order_id(&command.action),
+                            failure_order_id = ?failure_order_id,
                             error_code = ?ack.error_code,
                             cws_http_code = ?ack.cws_http_code,
                             cws_request_guid = ?ack.cws_request_guid,
@@ -774,6 +814,8 @@ struct CwsTraceInfo {
     connection_instance_id: Option<String>,
     connect_seq: Option<u64>,
     reconnect_seq: Option<u64>,
+    order_id: Option<String>,
+    request_order_id: Option<String>,
 }
 
 fn parse_cws_response(value: &serde_json::Value) -> CwsResponseInfo {
@@ -816,6 +858,14 @@ fn parse_cws_trace(value: &serde_json::Value) -> CwsTraceInfo {
             .map(|value| value.to_string()),
         connect_seq: value.get(DIAG_CWS_CONNECT_SEQ).and_then(to_u64),
         reconnect_seq: value.get(DIAG_CWS_RECONNECT_SEQ).and_then(to_u64),
+        order_id: value
+            .get(DIAG_CWS_ORDER_ID)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.to_string()),
+        request_order_id: value
+            .get(DIAG_CWS_REQUEST_ORDER_ID)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.to_string()),
     }
 }
 
@@ -924,6 +974,15 @@ fn side_str(side: Side) -> &'static str {
     }
 }
 
+fn command_target_order_id(action: &CommandAction) -> Option<String> {
+    match action {
+        CommandAction::Cancel(payload) => Some(payload.order_id.to_string()),
+        CommandAction::Replace(payload) => Some(payload.order_id.to_string()),
+        CommandAction::DeleteStopLimit(payload) => Some(payload.order_id.clone()),
+        _ => None,
+    }
+}
+
 fn normalize_price(price: f64, step: f64, side: Side) -> f64 {
     if step <= 0.0 {
         return price;
@@ -1014,7 +1073,9 @@ mod tests {
             "_diag_cws_message_class": "response",
             "_diag_cws_connection_instance_id": "conn-1",
             "_diag_cws_connect_seq": 3,
-            "_diag_cws_reconnect_seq": 2
+            "_diag_cws_reconnect_seq": 2,
+            "_diag_cws_order_id": "2023555931497048623",
+            "_diag_cws_request_order_id": "2023555931497048623"
         });
         let info = parse_cws_response(&value);
         assert_eq!(info.trace.send_seq, Some(11));
@@ -1025,6 +1086,11 @@ mod tests {
         assert_eq!(info.trace.connection_instance_id.as_deref(), Some("conn-1"));
         assert_eq!(info.trace.connect_seq, Some(3));
         assert_eq!(info.trace.reconnect_seq, Some(2));
+        assert_eq!(info.trace.order_id.as_deref(), Some("2023555931497048623"));
+        assert_eq!(
+            info.trace.request_order_id.as_deref(),
+            Some("2023555931497048623")
+        );
     }
 
     #[test]
@@ -1054,6 +1120,7 @@ mod tests {
             Some(request_id.to_string()),
             "guid-1".to_string(),
             "create:limit".to_string(),
+            Some("2023555931497048623".to_string()),
             Some("USDRUBF".to_string()),
             crate::cws_client::CwsTransportFailure::new(
                 crate::cws_client::CwsDisconnectKind::ProtocolResetWithoutCloseHandshake,

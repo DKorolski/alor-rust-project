@@ -10,6 +10,7 @@ Usage:
   limit_diag.sh place <sessiongap|hybrid> <price> [qty] [side]
   limit_diag.sh cancel <sessiongap|hybrid> <order_id>
   limit_diag.sh trace <run_dir> <sessiongap|hybrid> <request_id>
+  limit_diag.sh trace-order <run_dir> <sessiongap|hybrid> <order_id>
 
 Examples:
   RUN_DIR=$(scripts/limit_diag.sh init-run)
@@ -18,6 +19,7 @@ Examples:
   scripts/limit_diag.sh cancel sessiongap 2023555922907497864
   scripts/limit_diag.sh capture post "$RUN_DIR"
   scripts/limit_diag.sh trace "$RUN_DIR" sessiongap 75b8a7f6-0d34-4664-beac-bc2060625f43
+  scripts/limit_diag.sh trace-order "$RUN_DIR" sessiongap 2023555922907497864
 
 Notes:
   - Intended to run on the VPS host where /opt/trading-sessiongap and /opt/trading-hybrid exist.
@@ -226,6 +228,28 @@ trace_req() {
   fi
 }
 
+trace_order() {
+  local run_dir=$1
+  local stack_name=$2
+  local order_id=$3
+
+  echo "--- ${stack_name} order trace: ${order_id} ---"
+  for file in \
+    "${run_dir}/${stack_name}.cmd.orders.post.txt" \
+    "${run_dir}/${stack_name}.cmd.acks.post.txt" \
+    "${run_dir}/${stack_name}.broker.orders.post.txt" \
+    "${run_dir}/${stack_name}.broker.positions.post.txt" \
+    "${run_dir}/${stack_name}.gateway.post.log" \
+    "${run_dir}/${stack_name}.runtime.post.log"; do
+    echo "--- $(basename "$file") ---"
+    if [ -f "$file" ]; then
+      grep -n "$order_id" "$file" || true
+    else
+      echo "missing: $file"
+    fi
+  done
+}
+
 main() {
   require_arg 1 "$@"
 
@@ -252,6 +276,10 @@ main() {
     trace)
       require_arg 4 "$@"
       trace_req "$2" "$3" "$4"
+      ;;
+    trace-order)
+      require_arg 4 "$@"
+      trace_order "$2" "$3" "$4"
       ;;
     *)
       usage >&2

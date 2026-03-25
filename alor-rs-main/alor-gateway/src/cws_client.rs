@@ -35,6 +35,7 @@ const DIAG_CWS_CONNECT_SEQ: &str = "_diag_cws_connect_seq";
 const DIAG_CWS_RECONNECT_SEQ: &str = "_diag_cws_reconnect_seq";
 const DIAG_CWS_CORRELATION_GUID: &str = "_diag_cws_correlation_guid";
 const DIAG_CWS_ORDER_ID: &str = "_diag_cws_order_id";
+const DIAG_CWS_REQUEST_ORDER_ID: &str = "_diag_cws_request_order_id";
 const DIAG_CWS_SYMBOL: &str = "_diag_cws_symbol";
 
 #[derive(Debug, Clone)]
@@ -57,6 +58,7 @@ struct PendingRequest {
     request_id: Option<String>,
     cws_guid: String,
     opcode: String,
+    order_id: Option<String>,
     symbol: Option<String>,
     send_seq: u64,
     send_ts_utc: i64,
@@ -194,6 +196,7 @@ pub struct CwsRequestFailure {
     request_id: Option<String>,
     cws_guid: String,
     opcode: String,
+    order_id: Option<String>,
     symbol: Option<String>,
     transport: CwsTransportFailure,
 }
@@ -203,6 +206,7 @@ impl CwsRequestFailure {
         request_id: Option<String>,
         cws_guid: String,
         opcode: String,
+        order_id: Option<String>,
         symbol: Option<String>,
         transport: CwsTransportFailure,
     ) -> Self {
@@ -210,6 +214,7 @@ impl CwsRequestFailure {
             request_id,
             cws_guid,
             opcode,
+            order_id,
             symbol,
             transport,
         }
@@ -225,6 +230,10 @@ impl CwsRequestFailure {
 
     pub fn opcode(&self) -> &str {
         &self.opcode
+    }
+
+    pub fn order_id(&self) -> Option<&str> {
+        self.order_id.as_deref()
     }
 
     pub fn symbol(&self) -> Option<&str> {
@@ -814,6 +823,7 @@ async fn run_session(
                                 request_id: cmd.request_id,
                                 cws_guid: guid.clone(),
                                 opcode: opcode.clone(),
+                                order_id: order_id_of_value(&payload),
                                 symbol: cmd.symbol.or_else(|| symbol_of_payload(&payload)),
                                 send_seq,
                                 send_ts_utc,
@@ -827,11 +837,15 @@ async fn run_session(
                         }
                         let connection_age_ms = connected_at.elapsed().as_millis() as u64;
                         info!(
+                            handler = "socket_writer",
+                            state_before = "ready_to_send",
+                            state_after = "pending_registered",
                             opcode,
                             guid,
                             send_seq,
                             send_ts_utc,
                             request_id = pending.get(&guid).and_then(|request| request.request_id.as_deref()),
+                            order_id = pending.get(&guid).and_then(|request| request.order_id.as_deref()),
                             cws_connection_instance_id = %connection_instance_id,
                             connect_seq,
                             reconnect_seq,
@@ -869,6 +883,9 @@ async fn run_session(
                             let meta = inspect_inbound_cws_message(&value);
                             let opcode = meta.opcode.as_deref().unwrap_or("unknown");
                             debug!(
+                                handler = "socket_reader",
+                                state_before = "frame_received",
+                                state_after = "message_classified",
                                 recv_seq,
                                 recv_ts_utc,
                                 cws_connection_instance_id = %connection_instance_id,
@@ -887,6 +904,8 @@ async fn run_session(
                             if matches!(meta.message_class, RawCwsMessageClass::RequestResponse) {
                                 if let Some(guid) = meta.correlation_guid.clone() {
                                     if let Some(request) = pending.remove(&guid) {
+                                        let pending_count_before = pending.len().saturating_add(1);
+                                        let pending_count_after = pending.len();
                                         let mut value = value;
                                         attach_diag_trace_fields(
                                             &mut value,
@@ -899,13 +918,19 @@ async fn run_session(
                                             reconnect_seq,
                                         );
                                         info!(
+                                            handler = "pending_resolver",
+                                            state_before = "pending_open",
+                                            state_after = "pending_resolved_response",
                                             recv_seq,
                                             recv_ts_utc,
                                             send_seq = request.send_seq,
                                             send_ts_utc = request.send_ts_utc,
                                             request_id = request.request_id.as_deref(),
                                             cws_guid = request.cws_guid.as_str(),
+                                            order_id = meta.order_id.as_deref().or(request.order_id.as_deref()),
                                             message_class = meta.message_class.as_str(),
+                                            pending_count_before,
+                                            pending_count_after,
                                             "cws response matched pending request"
                                         );
                                     {
@@ -917,6 +942,9 @@ async fn run_session(
                                         let _ = request.resp_tx.send(Ok(value));
                                     } else {
                                         warn!(
+                                            handler = "pending_resolver",
+                                            state_before = "pending_missing",
+                                            state_after = "pending_missing",
                                             recv_seq,
                                             recv_ts_utc,
                                             opcode,
@@ -927,6 +955,9 @@ async fn run_session(
                                     }
                                 } else {
                                     warn!(
+                                        handler = "pending_resolver",
+                                        state_before = "response_unmatched",
+                                        state_after = "response_unmatched",
                                         recv_seq,
                                         recv_ts_utc,
                                         opcode,
@@ -935,18 +966,22 @@ async fn run_session(
                                     );
                                 }
                             } else {
-                                let matched_pending = meta
+                                let matched_request = meta
                                     .correlation_guid
                                     .as_ref()
-                                    .map(|guid| pending.contains_key(guid))
-                                    .unwrap_or(false);
-                                if matched_pending {
+                                    .and_then(|guid| pending.get(guid));
+                                if let Some(request) = matched_request {
                                     warn!(
+                                        handler = "pending_resolver",
+                                        state_before = "pending_open",
+                                        state_after = "pending_open",
                                         recv_seq,
                                         recv_ts_utc,
                                         opcode,
                                         raw_message_class = meta.message_class.as_str(),
                                         correlation_guid = ?meta.correlation_guid,
+                                        request_id = request.request_id.as_deref(),
+                                        order_id = meta.order_id.as_deref().or(request.order_id.as_deref()),
                                         pending_count = pending.len(),
                                         "cws recv non-response frame matched pending guid; pending left open"
                                     );
@@ -1112,6 +1147,7 @@ fn log_transport_failure(
     let request_id = first.and_then(|request| request.request_id.as_deref());
     let cws_guid = first.map(|request| request.cws_guid.as_str());
     let opcode_in_flight = first.map(|request| request.opcode.as_str());
+    let order_id_in_flight = first.and_then(|request| request.order_id.as_deref());
     let now_ts_utc = Utc::now().timestamp();
     let telemetry = {
         let mut guard = health.write();
@@ -1125,11 +1161,15 @@ fn log_transport_failure(
         snapshot_cws_telemetry(&guard)
     };
     warn!(
+        handler = "socket_reader",
+        state_before = "pending_open",
+        state_after = "transport_failure_detected",
         action = "cws_transport_failure",
         disconnect_kind = failure.disconnect_kind_str(),
         opcode_in_flight = ?opcode_in_flight,
         request_id = ?request_id,
         cws_guid = ?cws_guid,
+        order_id = ?order_id_in_flight,
         stack_name = ?telemetry.stack_name,
         gateway_instance_id = ?telemetry.gateway_instance_id,
         auth_principal_fingerprint = ?telemetry.auth_principal_fingerprint,
@@ -1162,6 +1202,7 @@ fn fail_pending_with_transport(
                 "request_id": request.request_id.as_deref(),
                 "cws_guid": request.cws_guid.as_str(),
                 "opcode": request.opcode.as_str(),
+                "order_id": request.order_id.as_deref(),
                 "symbol": request.symbol.as_deref(),
                 "send_seq": request.send_seq,
                 "send_ts_utc": request.send_ts_utc,
@@ -1186,6 +1227,9 @@ fn fail_pending_with_transport(
             snapshot_cws_telemetry(&guard)
         };
         warn!(
+            handler = "pending_resolver",
+            state_before = "pending_open",
+            state_after = "pending_failed_transport",
             action = "cws_fail_pending",
             disconnect_kind = failure.disconnect_kind_str(),
             stack_name = ?telemetry.stack_name,
@@ -1209,6 +1253,7 @@ fn fail_pending_with_transport(
             request.request_id,
             request.cws_guid,
             request.opcode,
+            request.order_id,
             request.symbol,
             failure.clone(),
         );
@@ -1424,6 +1469,17 @@ fn attach_diag_trace_fields(
     if let Some(order_id) = meta.order_id.as_deref() {
         obj.insert(
             DIAG_CWS_ORDER_ID.to_string(),
+            Value::String(order_id.to_string()),
+        );
+    } else if let Some(order_id) = request.order_id.as_deref() {
+        obj.insert(
+            DIAG_CWS_ORDER_ID.to_string(),
+            Value::String(order_id.to_string()),
+        );
+    }
+    if let Some(order_id) = request.order_id.as_deref() {
+        obj.insert(
+            DIAG_CWS_REQUEST_ORDER_ID.to_string(),
             Value::String(order_id.to_string()),
         );
     }
@@ -1713,6 +1769,7 @@ mod tests {
             request_id: Some("req-1".to_string()),
             cws_guid: "guid-1".to_string(),
             opcode: "create:limit".to_string(),
+            order_id: Some("2023555931497048623".to_string()),
             symbol: Some("USDRUBF".to_string()),
             send_seq: 7,
             send_ts_utc: 1774285000,
@@ -1746,6 +1803,12 @@ mod tests {
                 .get(DIAG_CWS_CONNECTION_INSTANCE_ID)
                 .and_then(Value::as_str),
             Some("conn-1")
+        );
+        assert_eq!(
+            response
+                .get(DIAG_CWS_REQUEST_ORDER_ID)
+                .and_then(Value::as_str),
+            Some("2023555931497048623")
         );
     }
 
@@ -1847,6 +1910,7 @@ mod tests {
                 request_id: Some("req-1".to_string()),
                 cws_guid: "guid-1".to_string(),
                 opcode: "create:limit".to_string(),
+                order_id: Some("123".to_string()),
                 symbol: Some("USDRUBF".to_string()),
                 send_seq: 1,
                 send_ts_utc: 1774285000,
@@ -1860,6 +1924,7 @@ mod tests {
                 request_id: Some("req-2".to_string()),
                 cws_guid: "guid-2".to_string(),
                 opcode: "delete:limit".to_string(),
+                order_id: Some("456".to_string()),
                 symbol: None,
                 send_seq: 2,
                 send_ts_utc: 1774285001,
