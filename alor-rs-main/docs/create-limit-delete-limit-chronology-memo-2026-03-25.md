@@ -100,6 +100,22 @@ before any broker confirmation of the second cancel existed.
 
 Therefore the final `canceled` event was locally attributed to the second cancel request, but that attribution does not prove broker-side acceptance of that gateway cancel.
 
+### 2.4 Post-failure auth behavior points to cached-token recovery
+
+After later reconnect attempts on the same diagnostic line, both gateways showed repeated:
+
+- `httpCode = 401`
+- `message = "Invalid JWT token!"`
+- `cws_authorized = false`
+
+Operationally, restarting only `alor-gateway` with the same unchanged `refresh_token` restored CWS authorization on both stacks.
+
+This materially strengthens the following narrow interpretation:
+
+- the failing post-incident auth loop is plausibly driven by a stale cached `access_token`;
+- it is not best explained as a permanently invalid `refresh_token`;
+- a targeted cache invalidation on explicit CWS `401` is the appropriate minimal fix.
+
 ## 3. Strongest Current Conclusion
 
 The current failing run supports the following narrow conclusion.
@@ -136,4 +152,6 @@ For engineering review:
   - handler ownership
   - transition state
   - pending/request-map causality.
-
+- an additional narrow fix is now justified:
+  - invalidate cached `access_token` on explicit CWS authorize `401`
+  - so the next reconnect can refresh a new token without process restart.

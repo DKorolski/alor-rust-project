@@ -329,6 +329,33 @@ This ambiguity is itself relevant to the engineering task, because it reinforces
 - direct command ack and eventual order lifecycle should not be treated as the same source of truth;
 - transport failure on the direct response path does not prove that no downstream business action occurred.
 
+## 4.8 Post-failure CWS auth recovery observation
+
+After later incident-driven reconnect attempts on the same diagnostic line, both gateways entered repeated CWS authorization failures:
+
+- `httpCode = 401`
+- `message = "Invalid JWT token!"`
+- `cws_authorized = false`
+
+Important operational observation:
+
+- the configured `refresh_token` values were not changed;
+- restarting only `alor-gateway` with the same `refresh_token` restored both stacks to:
+  - `readiness = true`
+  - `gateway_phase = LiveReady`
+  - `cws_authorized = true`
+
+Interpretation:
+
+- this does not look like a permanently invalid `refresh_token`;
+- it is more consistent with a stale cached `access_token` remaining in memory across the failing reconnect loop;
+- restart likely recovered the stacks by forcing a fresh OAuth access-token refresh from the same unchanged `refresh_token`.
+
+Code follow-up implemented after this observation:
+
+- cached `access_token` is now invalidated on explicit CWS authorize `401`;
+- this allows the next reconnect attempt to fetch a fresh token without requiring a process restart.
+
 ## 5. What Was Verified Against The Task
 
 ## 5.1 Completed in this phase
@@ -369,6 +396,7 @@ This ambiguity is itself relevant to the engineering task, because it reinforces
    - primarily client-side ordering/correlation,
    - primarily broker/CWS transport,
    - or combined.
+5. Final confirmation whether the new auth-cache invalidation removes the repeated post-failure `401 Invalid JWT token!` loop in future incidents.
 
 ## 6. What This Interim Result Strengthens
 
@@ -407,6 +435,7 @@ The strongest current fresh framing is therefore:
 - in the fresh instrumented run, the most reproducible failing step is `delete:limit`;
 - separate tokens do not eliminate the problem class;
 - response/event correlation and transport failure handling remain central engineering review targets.
+- repeated post-failure `401 Invalid JWT token!` does not currently point to a dead refresh token; it is more plausibly a cached-access-token recovery problem.
 
 ## 9. Recommended Next Step
 

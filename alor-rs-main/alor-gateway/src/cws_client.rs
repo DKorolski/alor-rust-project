@@ -787,7 +787,7 @@ async fn run_session(
         guard.cws_pending_count = 0;
         guard.cws_connect_total = guard.cws_connect_total.saturating_add(1);
     }
-    authorize(&mut ws_sink, &mut ws_stream, &token, health).await?;
+    authorize(&mut ws_sink, &mut ws_stream, token_provider, &token, health).await?;
 
     let mut pending: HashMap<String, PendingRequest> = HashMap::new();
     let mut send_seq = 0_u64;
@@ -1043,6 +1043,7 @@ async fn authorize(
         Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
     > + Unpin
          ),
+    token_provider: &TokenProvider,
     token: &str,
     health: &Arc<RwLock<HealthState>>,
 ) -> anyhow::Result<()> {
@@ -1085,6 +1086,9 @@ async fn authorize(
         });
         Ok(())
     } else {
+        if is_invalid_jwt_response(&response) {
+            token_provider.invalidate("cws_authorize_401").await;
+        }
         {
             let mut guard = health.write();
             guard.cws_authorized = false;
@@ -1096,6 +1100,20 @@ async fn authorize(
         });
         Err(anyhow::anyhow!("cws authorization failed"))
     }
+}
+
+fn is_invalid_jwt_response(response: &Value) -> bool {
+    let status = response.get("status").and_then(Value::as_i64);
+    let http_code = response.get("httpCode").and_then(Value::as_i64);
+    if status == Some(401) || http_code == Some(401) {
+        return true;
+    }
+
+    response
+        .get("message")
+        .and_then(Value::as_str)
+        .map(|message| message.to_ascii_lowercase().contains("invalid jwt token"))
+        .unwrap_or(false)
 }
 
 async fn read_until_guid(
@@ -1810,6 +1828,25 @@ mod tests {
                 .and_then(Value::as_str),
             Some("2023555931497048623")
         );
+    }
+
+    #[test]
+    fn invalid_jwt_response_detected_by_http_code_or_message() {
+        let http_code = serde_json::json!({
+            "httpCode": 401,
+            "message": "Invalid JWT token!"
+        });
+        let message_only = serde_json::json!({
+            "message": "Invalid JWT token!"
+        });
+        let ok = serde_json::json!({
+            "httpCode": 200,
+            "message": "ok"
+        });
+
+        assert!(is_invalid_jwt_response(&http_code));
+        assert!(is_invalid_jwt_response(&message_only));
+        assert!(!is_invalid_jwt_response(&ok));
     }
 
     #[test]

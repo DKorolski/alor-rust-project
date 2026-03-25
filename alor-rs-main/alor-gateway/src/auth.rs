@@ -117,6 +117,21 @@ impl TokenProvider {
         self.state.read().await.refresh_count
     }
 
+    pub async fn invalidate(&self, reason: &str) -> bool {
+        let mut guard = self.state.write().await;
+        let had_token = guard.token.is_some();
+        guard.token = None;
+        guard.expires_at = None;
+        info!(
+            reason,
+            had_token,
+            refresh_count = guard.refresh_count,
+            auth_principal_fingerprint = self.principal_fingerprint(),
+            "invalidated cached alor access token"
+        );
+        had_token
+    }
+
     pub fn principal_fingerprint(&self) -> &str {
         &self.principal_fingerprint
     }
@@ -126,4 +141,32 @@ fn principal_fingerprint(refresh_token: &str) -> String {
     let normalized = refresh_token.trim_matches('"').trim();
     let digest = Sha256::digest(normalized.as_bytes());
     format!("sha256:{}", &hex::encode(digest)[..16])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalidate_clears_cached_token_and_expiry() {
+        let provider = TokenProvider::new_with_token(
+            "http://example.test/oauth",
+            "refresh-token",
+            "cached-access-token",
+        );
+
+        {
+            let guard = provider.state.read().await;
+            assert_eq!(guard.token.as_deref(), Some("cached-access-token"));
+            assert!(guard.expires_at.is_some());
+        }
+
+        let had_token = provider.invalidate("test_invalidation").await;
+        assert!(had_token);
+
+        let guard = provider.state.read().await;
+        assert!(guard.token.is_none());
+        assert!(guard.expires_at.is_none());
+        assert_eq!(guard.refresh_count, 0);
+    }
 }
