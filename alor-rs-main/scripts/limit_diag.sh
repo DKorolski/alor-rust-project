@@ -200,15 +200,16 @@ trace_req() {
   local run_dir=$1
   local stack_name=$2
   local req_id=$3
+  local phase_file
 
   echo "--- ${stack_name} request trace: ${req_id} ---"
   for file in \
-    "${run_dir}/${stack_name}.cmd.orders.after.txt" \
-    "${run_dir}/${stack_name}.cmd.acks.after.txt" \
-    "${run_dir}/${stack_name}.broker.orders.after.txt" \
-    "${run_dir}/${stack_name}.broker.positions.after.txt" \
-    "${run_dir}/${stack_name}.gateway.after.log" \
-    "${run_dir}/${stack_name}.runtime.after.log"; do
+    "${run_dir}/${stack_name}.cmd.orders.post.txt" \
+    "${run_dir}/${stack_name}.cmd.acks.post.txt" \
+    "${run_dir}/${stack_name}.broker.orders.post.txt" \
+    "${run_dir}/${stack_name}.broker.positions.post.txt" \
+    "${run_dir}/${stack_name}.gateway.post.log" \
+    "${run_dir}/${stack_name}.runtime.post.log"; do
     echo "--- $(basename "$file") ---"
     if [ -f "$file" ]; then
       grep -n "$req_id" "$file" || true
@@ -217,10 +218,11 @@ trace_req() {
     fi
   done
 
-  if [ -f "${run_dir}/${stack_name}.gateway.after.log" ]; then
-    echo "--- $(basename "${run_dir}/${stack_name}.gateway.after.log") diagnostics ---"
+  phase_file="${run_dir}/${stack_name}.gateway.post.log"
+  if [ -f "$phase_file" ]; then
+    echo "--- $(basename "$phase_file") diagnostics ---"
     grep -nE "cws send|cws recv payload|matched pending|cws_transport_failure|cws_fail_pending|command ack published" \
-      "${run_dir}/${stack_name}.gateway.after.log" || true
+      "$phase_file" || true
   fi
 }
 
