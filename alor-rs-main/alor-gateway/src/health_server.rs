@@ -1,3 +1,4 @@
+use std::time::Instant;
 use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
@@ -5,7 +6,7 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use tracing::info;
 
-use crate::health::{GatewayPhase, HealthState, ResyncMode};
+use crate::health::{CwsFrameTraceEntry, GatewayPhase, HealthState, ResyncMode};
 use alor_types::MarketState;
 
 #[derive(Debug, Serialize)]
@@ -31,10 +32,21 @@ struct ReadinessResponse {
     cws_connected_ts_utc: Option<i64>,
     cws_last_connect_ts_utc: Option<i64>,
     cws_last_transport_failure_ts_utc: Option<i64>,
+    cws_last_rx_ts_utc: Option<i64>,
+    cws_last_rx_age_ms: Option<u64>,
+    cws_last_tx_ts_utc: Option<i64>,
+    cws_last_tx_age_ms: Option<u64>,
     cws_last_limit_send_ts_utc: Option<i64>,
     cws_last_limit_error_ts_utc: Option<i64>,
     cws_last_successful_send_ts_utc: Option<i64>,
     cws_last_successful_ack_ts_utc: Option<i64>,
+    cws_last_control_success_ts_utc: Option<i64>,
+    cws_last_control_success_age_ms: Option<u64>,
+    cws_last_control_failure_ts_utc: Option<i64>,
+    cws_last_control_failure_age_ms: Option<u64>,
+    cws_last_ping_ts_utc: Option<i64>,
+    cws_last_pong_ts_utc: Option<i64>,
+    cws_last_ping_pong_age_ms: Option<u64>,
     cws_connect_total: u64,
     cws_reconnect_total: u64,
     cws_protocol_reset_total: u64,
@@ -42,6 +54,18 @@ struct ReadinessResponse {
     cws_limit_error_total: u64,
     cws_pending_failed_total: u64,
     cws_pending_count: u64,
+    cws_pending_guids: Vec<String>,
+    cws_oldest_pending_age_ms: Option<u64>,
+    request_map_size: u64,
+    cws_create_limit_send_total: u64,
+    cws_create_limit_success_total: u64,
+    cws_create_limit_failure_total: u64,
+    cws_delete_limit_send_total: u64,
+    cws_delete_limit_success_total: u64,
+    cws_delete_limit_failure_total: u64,
+    cws_replace_limit_send_total: u64,
+    cws_replace_limit_success_total: u64,
+    cws_replace_limit_failure_total: u64,
     reconnect_count: u64,
     token_refresh_count: u64,
     last_bar_age_sec: u64,
@@ -79,10 +103,52 @@ struct ReadinessResponse {
     ws_reconnects_total: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct CwsDebugResponse {
+    stack_name: Option<String>,
+    gateway_instance_id: Option<String>,
+    auth_principal_fingerprint: Option<String>,
+    access_token_fingerprint: Option<String>,
+    access_token_last_source: Option<String>,
+    access_token_last_consumer: Option<String>,
+    cws_authorized: bool,
+    cws_connection_instance_id: Option<String>,
+    cws_connect_seq: u64,
+    cws_reconnect_seq: u64,
+    cws_connected_ts_utc: Option<i64>,
+    cws_last_rx_ts_utc: Option<i64>,
+    cws_last_rx_age_ms: Option<u64>,
+    cws_last_tx_ts_utc: Option<i64>,
+    cws_last_tx_age_ms: Option<u64>,
+    cws_last_control_success_ts_utc: Option<i64>,
+    cws_last_control_success_age_ms: Option<u64>,
+    cws_last_control_failure_ts_utc: Option<i64>,
+    cws_last_control_failure_age_ms: Option<u64>,
+    cws_last_ping_ts_utc: Option<i64>,
+    cws_last_pong_ts_utc: Option<i64>,
+    cws_last_ping_pong_age_ms: Option<u64>,
+    cws_pending_count: u64,
+    cws_pending_guids: Vec<String>,
+    cws_oldest_pending_age_ms: Option<u64>,
+    request_map_size: u64,
+    cws_create_limit_send_total: u64,
+    cws_create_limit_success_total: u64,
+    cws_create_limit_failure_total: u64,
+    cws_delete_limit_send_total: u64,
+    cws_delete_limit_success_total: u64,
+    cws_delete_limit_failure_total: u64,
+    cws_replace_limit_send_total: u64,
+    cws_replace_limit_success_total: u64,
+    cws_replace_limit_failure_total: u64,
+    recent_inbound_frames: Vec<CwsFrameTraceEntry>,
+    recent_outbound_frames: Vec<CwsFrameTraceEntry>,
+}
+
 pub async fn serve(health: Arc<RwLock<HealthState>>, addr: String) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/liveness", get(liveness))
         .route("/readiness", get(readiness))
+        .route("/debug/cws", get(cws_debug))
         .with_state(health);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -100,6 +166,11 @@ async fn readiness(
     State(health): State<Arc<RwLock<HealthState>>>,
 ) -> (StatusCode, Json<ReadinessResponse>) {
     let guard = health.read();
+    let cws_last_rx_age_ms = age_ms(guard.cws_last_rx_at);
+    let cws_last_tx_age_ms = age_ms(guard.cws_last_tx_at);
+    let cws_last_control_success_age_ms = age_ms(guard.cws_last_control_success_at);
+    let cws_last_control_failure_age_ms = age_ms(guard.cws_last_control_failure_at);
+    let cws_last_ping_pong_age_ms = min_age_ms(guard.cws_last_ping_at, guard.cws_last_pong_at);
     let status = if guard.readiness {
         StatusCode::OK
     } else {
@@ -130,10 +201,21 @@ async fn readiness(
             cws_connected_ts_utc: guard.cws_connected_ts_utc,
             cws_last_connect_ts_utc: guard.cws_last_connect_ts_utc,
             cws_last_transport_failure_ts_utc: guard.cws_last_transport_failure_ts_utc,
+            cws_last_rx_ts_utc: guard.cws_last_rx_ts_utc,
+            cws_last_rx_age_ms,
+            cws_last_tx_ts_utc: guard.cws_last_tx_ts_utc,
+            cws_last_tx_age_ms,
             cws_last_limit_send_ts_utc: guard.cws_last_limit_send_ts_utc,
             cws_last_limit_error_ts_utc: guard.cws_last_limit_error_ts_utc,
             cws_last_successful_send_ts_utc: guard.cws_last_successful_send_ts_utc,
             cws_last_successful_ack_ts_utc: guard.cws_last_successful_ack_ts_utc,
+            cws_last_control_success_ts_utc: guard.cws_last_control_success_ts_utc,
+            cws_last_control_success_age_ms,
+            cws_last_control_failure_ts_utc: guard.cws_last_control_failure_ts_utc,
+            cws_last_control_failure_age_ms,
+            cws_last_ping_ts_utc: guard.cws_last_ping_ts_utc,
+            cws_last_pong_ts_utc: guard.cws_last_pong_ts_utc,
+            cws_last_ping_pong_age_ms,
             cws_connect_total: guard.cws_connect_total,
             cws_reconnect_total: guard.cws_reconnect_total,
             cws_protocol_reset_total: guard.cws_protocol_reset_total,
@@ -141,6 +223,18 @@ async fn readiness(
             cws_limit_error_total: guard.cws_limit_error_total,
             cws_pending_failed_total: guard.cws_pending_failed_total,
             cws_pending_count: guard.cws_pending_count,
+            cws_pending_guids: guard.cws_pending_guids.clone(),
+            cws_oldest_pending_age_ms: guard.cws_oldest_pending_age_ms,
+            request_map_size: guard.request_map_size,
+            cws_create_limit_send_total: guard.cws_create_limit_send_total,
+            cws_create_limit_success_total: guard.cws_create_limit_success_total,
+            cws_create_limit_failure_total: guard.cws_create_limit_failure_total,
+            cws_delete_limit_send_total: guard.cws_delete_limit_send_total,
+            cws_delete_limit_success_total: guard.cws_delete_limit_success_total,
+            cws_delete_limit_failure_total: guard.cws_delete_limit_failure_total,
+            cws_replace_limit_send_total: guard.cws_replace_limit_send_total,
+            cws_replace_limit_success_total: guard.cws_replace_limit_success_total,
+            cws_replace_limit_failure_total: guard.cws_replace_limit_failure_total,
             reconnect_count: guard.reconnect_count,
             token_refresh_count: guard.token_refresh_count,
             last_bar_age_sec: guard.last_bar_age_sec,
@@ -178,4 +272,71 @@ async fn readiness(
             ws_reconnects_total: guard.ws_reconnects_total,
         }),
     )
+}
+
+async fn cws_debug(
+    State(health): State<Arc<RwLock<HealthState>>>,
+) -> (StatusCode, Json<CwsDebugResponse>) {
+    let guard = health.read();
+    let status = if guard.readiness {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(CwsDebugResponse {
+            stack_name: guard.stack_name.clone(),
+            gateway_instance_id: guard.gateway_instance_id.clone(),
+            auth_principal_fingerprint: guard.auth_principal_fingerprint.clone(),
+            access_token_fingerprint: guard.access_token_fingerprint.clone(),
+            access_token_last_source: guard.access_token_last_source.clone(),
+            access_token_last_consumer: guard.access_token_last_consumer.clone(),
+            cws_authorized: guard.cws_authorized,
+            cws_connection_instance_id: guard.cws_connection_instance_id.clone(),
+            cws_connect_seq: guard.cws_connect_seq,
+            cws_reconnect_seq: guard.cws_reconnect_seq,
+            cws_connected_ts_utc: guard.cws_connected_ts_utc,
+            cws_last_rx_ts_utc: guard.cws_last_rx_ts_utc,
+            cws_last_rx_age_ms: age_ms(guard.cws_last_rx_at),
+            cws_last_tx_ts_utc: guard.cws_last_tx_ts_utc,
+            cws_last_tx_age_ms: age_ms(guard.cws_last_tx_at),
+            cws_last_control_success_ts_utc: guard.cws_last_control_success_ts_utc,
+            cws_last_control_success_age_ms: age_ms(guard.cws_last_control_success_at),
+            cws_last_control_failure_ts_utc: guard.cws_last_control_failure_ts_utc,
+            cws_last_control_failure_age_ms: age_ms(guard.cws_last_control_failure_at),
+            cws_last_ping_ts_utc: guard.cws_last_ping_ts_utc,
+            cws_last_pong_ts_utc: guard.cws_last_pong_ts_utc,
+            cws_last_ping_pong_age_ms: min_age_ms(guard.cws_last_ping_at, guard.cws_last_pong_at),
+            cws_pending_count: guard.cws_pending_count,
+            cws_pending_guids: guard.cws_pending_guids.clone(),
+            cws_oldest_pending_age_ms: guard.cws_oldest_pending_age_ms,
+            request_map_size: guard.request_map_size,
+            cws_create_limit_send_total: guard.cws_create_limit_send_total,
+            cws_create_limit_success_total: guard.cws_create_limit_success_total,
+            cws_create_limit_failure_total: guard.cws_create_limit_failure_total,
+            cws_delete_limit_send_total: guard.cws_delete_limit_send_total,
+            cws_delete_limit_success_total: guard.cws_delete_limit_success_total,
+            cws_delete_limit_failure_total: guard.cws_delete_limit_failure_total,
+            cws_replace_limit_send_total: guard.cws_replace_limit_send_total,
+            cws_replace_limit_success_total: guard.cws_replace_limit_success_total,
+            cws_replace_limit_failure_total: guard.cws_replace_limit_failure_total,
+            recent_inbound_frames: guard.cws_recent_inbound_frames.clone(),
+            recent_outbound_frames: guard.cws_recent_outbound_frames.clone(),
+        }),
+    )
+}
+
+fn age_ms(value: Option<Instant>) -> Option<u64> {
+    value.map(|instant| instant.elapsed().as_millis() as u64)
+}
+
+fn min_age_ms(first: Option<Instant>, second: Option<Instant>) -> Option<u64> {
+    match (age_ms(first), age_ms(second)) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
 }

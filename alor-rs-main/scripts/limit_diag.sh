@@ -84,6 +84,12 @@ capture_readiness() {
   docker exec "${STACK_PROJECT}-alor-gateway-1" curl -sS http://127.0.0.1:8081/readiness
 }
 
+capture_cws_debug() {
+  local stack_name=$1
+  stack_env "$stack_name"
+  docker exec "${STACK_PROJECT}-alor-gateway-1" curl -sS http://127.0.0.1:8081/debug/cws
+}
+
 capture_stream_tail() {
   local stack_name=$1
   local stream_name=$2
@@ -121,6 +127,7 @@ capture_phase() {
   for current_stack in sessiongap hybrid; do
     stack_env "$current_stack"
     capture_readiness "$current_stack" > "${run_dir}/${current_stack}.readiness.${phase}.json"
+    capture_cws_debug "$current_stack" > "${run_dir}/${current_stack}.cws.debug.${phase}.json"
     compose_ps "$current_stack" > "${run_dir}/${current_stack}.ps.${phase}.txt"
 
     capture_stream_tail "$current_stack" "$STACK_CMD_STREAM" 80 \
@@ -273,6 +280,12 @@ json_bool_field() {
   printf '%s\n' "$line" | sed -n "s/.*\"$key\":\\(true\\|false\\).*/\\1/p" | head -n 1
 }
 
+json_array_field() {
+  local line=$1
+  local key=$2
+  printf '%s\n' "$line" | sed -n "s/.*\"$key\":\\(\\[[^]]*\\]\\).*/\\1/p" | head -n 1
+}
+
 value_or_na() {
   local value=${1:-}
   if [ -n "$value" ]; then
@@ -311,6 +324,7 @@ preflight_compact_line() {
   local summary_file=$1
   local readiness phase conn_id conn_age reconnects limit_sends limit_errors pending
   local last_orders_age last_positions_age commands_processed token_refresh access_token
+  local last_rx_age last_tx_age last_control_success_age last_control_failure_age request_map_size oldest_pending_age
 
   readiness=$(summary_value "$summary_file" READINESS)
   phase=$(summary_value "$summary_file" GATEWAY_PHASE)
@@ -325,8 +339,14 @@ preflight_compact_line() {
   commands_processed=$(summary_value "$summary_file" COMMAND_PROCESSED_TOTAL)
   token_refresh=$(summary_value "$summary_file" TOKEN_REFRESH_COUNT)
   access_token=$(summary_value "$summary_file" ACCESS_TOKEN_FINGERPRINT)
+  last_rx_age=$(summary_value "$summary_file" CWS_LAST_RX_AGE_MS)
+  last_tx_age=$(summary_value "$summary_file" CWS_LAST_TX_AGE_MS)
+  last_control_success_age=$(summary_value "$summary_file" CWS_LAST_CONTROL_SUCCESS_AGE_MS)
+  last_control_failure_age=$(summary_value "$summary_file" CWS_LAST_CONTROL_FAILURE_AGE_MS)
+  request_map_size=$(summary_value "$summary_file" REQUEST_MAP_SIZE)
+  oldest_pending_age=$(summary_value "$summary_file" CWS_OLDEST_PENDING_AGE_MS)
 
-  printf 'readiness=%s phase=%s conn_id=%s conn_age_sec=%s reconnect_seq=%s limit_send_total=%s limit_error_total=%s pending_count=%s last_orders_age_sec=%s last_positions_age_sec=%s command_processed_total=%s token_refresh_count=%s access_token=%s\n' \
+  printf 'readiness=%s phase=%s conn_id=%s conn_age_sec=%s reconnect_seq=%s limit_send_total=%s limit_error_total=%s pending_count=%s oldest_pending_age_ms=%s request_map_size=%s last_rx_age_ms=%s last_tx_age_ms=%s last_control_success_age_ms=%s last_control_failure_age_ms=%s last_orders_age_sec=%s last_positions_age_sec=%s command_processed_total=%s token_refresh_count=%s access_token=%s\n' \
     "$(value_or_na "$readiness")" \
     "$(value_or_na "$phase")" \
     "$(value_or_na "$conn_id")" \
@@ -335,6 +355,12 @@ preflight_compact_line() {
     "$(value_or_na "$limit_sends")" \
     "$(value_or_na "$limit_errors")" \
     "$(value_or_na "$pending")" \
+    "$(value_or_na "$oldest_pending_age")" \
+    "$(value_or_na "$request_map_size")" \
+    "$(value_or_na "$last_rx_age")" \
+    "$(value_or_na "$last_tx_age")" \
+    "$(value_or_na "$last_control_success_age")" \
+    "$(value_or_na "$last_control_failure_age")" \
     "$(value_or_na "$last_orders_age")" \
     "$(value_or_na "$last_positions_age")" \
     "$(value_or_na "$commands_processed")" \
@@ -349,6 +375,7 @@ capture_preflight() {
   local log_minutes=${PREFLIGHT_LOG_WINDOW_MIN:-3}
   local stream_count=${PREFLIGHT_STREAM_COUNT:-40}
   local readiness_json now_ts summary_file readiness_file gateway_log_file runtime_log_file
+  local cws_debug_file
   local cmd_orders_file cmd_acks_file broker_orders_file broker_positions_file ps_file
   local readiness gateway_phase gateway_instance_id auth_principal_fingerprint access_token_fingerprint
   local access_token_source access_token_consumer access_token_obtained_ts access_token_last_used_ts
@@ -364,12 +391,21 @@ capture_preflight() {
   local command_validation_failed_total command_processed_total command_consumer_alive
   local command_consumer_last_poll_ts command_consumer_last_poll_age_sec command_consumer_last_message_id
   local command_consumer_errors_total command_consumer_redis_timeouts_total cws_errors_total orders_ws_events_total
+  local cws_last_rx_ts cws_last_rx_age_ms cws_last_tx_ts cws_last_tx_age_ms
+  local cws_last_control_success_ts cws_last_control_success_age_ms
+  local cws_last_control_failure_ts cws_last_control_failure_age_ms
+  local cws_last_ping_ts cws_last_pong_ts cws_last_ping_pong_age_ms
+  local cws_pending_guids cws_oldest_pending_age_ms request_map_size
+  local cws_create_limit_send_total cws_create_limit_success_total cws_create_limit_failure_total
+  local cws_delete_limit_send_total cws_delete_limit_success_total cws_delete_limit_failure_total
+  local cws_replace_limit_send_total cws_replace_limit_success_total cws_replace_limit_failure_total
 
   mkdir -p "$run_dir"
   stack_env "$stack_name"
   now_ts=$(date +%s)
 
   readiness_file="${run_dir}/${STACK}.preflight.${label}.readiness.json"
+  cws_debug_file="${run_dir}/${STACK}.preflight.${label}.cws.debug.json"
   summary_file="${run_dir}/${STACK}.preflight.${label}.summary.txt"
   ps_file="${run_dir}/${STACK}.preflight.${label}.ps.txt"
   cmd_orders_file="${run_dir}/${STACK}.preflight.${label}.cmd.orders.txt"
@@ -380,6 +416,7 @@ capture_preflight() {
   runtime_log_file="${run_dir}/${STACK}.preflight.${label}.runtime.log"
 
   capture_readiness "$stack_name" > "$readiness_file"
+  capture_cws_debug "$stack_name" > "$cws_debug_file"
   compose_ps "$stack_name" > "$ps_file"
   capture_stream_tail "$stack_name" "$STACK_CMD_STREAM" "$stream_count" > "$cmd_orders_file"
   capture_stream_tail "$stack_name" "$STACK_ACK_STREAM" "$stream_count" > "$cmd_acks_file"
@@ -413,10 +450,21 @@ capture_preflight() {
   cws_pending_failed_total=$(json_number_field "$readiness_json" "cws_pending_failed_total")
   cws_pending_count=$(json_number_field "$readiness_json" "cws_pending_count")
   cws_last_transport_failure_ts=$(json_number_field "$readiness_json" "cws_last_transport_failure_ts_utc")
+  cws_last_rx_ts=$(json_number_field "$readiness_json" "cws_last_rx_ts_utc")
+  cws_last_rx_age_ms=$(json_number_field "$readiness_json" "cws_last_rx_age_ms")
+  cws_last_tx_ts=$(json_number_field "$readiness_json" "cws_last_tx_ts_utc")
+  cws_last_tx_age_ms=$(json_number_field "$readiness_json" "cws_last_tx_age_ms")
   cws_last_limit_send_ts=$(json_number_field "$readiness_json" "cws_last_limit_send_ts_utc")
   cws_last_limit_error_ts=$(json_number_field "$readiness_json" "cws_last_limit_error_ts_utc")
   cws_last_successful_send_ts=$(json_number_field "$readiness_json" "cws_last_successful_send_ts_utc")
   cws_last_successful_ack_ts=$(json_number_field "$readiness_json" "cws_last_successful_ack_ts_utc")
+  cws_last_control_success_ts=$(json_number_field "$readiness_json" "cws_last_control_success_ts_utc")
+  cws_last_control_success_age_ms=$(json_number_field "$readiness_json" "cws_last_control_success_age_ms")
+  cws_last_control_failure_ts=$(json_number_field "$readiness_json" "cws_last_control_failure_ts_utc")
+  cws_last_control_failure_age_ms=$(json_number_field "$readiness_json" "cws_last_control_failure_age_ms")
+  cws_last_ping_ts=$(json_number_field "$readiness_json" "cws_last_ping_ts_utc")
+  cws_last_pong_ts=$(json_number_field "$readiness_json" "cws_last_pong_ts_utc")
+  cws_last_ping_pong_age_ms=$(json_number_field "$readiness_json" "cws_last_ping_pong_age_ms")
   reconnect_count=$(json_number_field "$readiness_json" "reconnect_count")
   token_refresh_count=$(json_number_field "$readiness_json" "token_refresh_count")
   ws_last_rx_age_sec=$(json_number_field "$readiness_json" "ws_last_rx_age_sec")
@@ -426,6 +474,9 @@ capture_preflight() {
   last_positions_age_sec=$(age_sec_from_ts "$last_positions_ts" "$now_ts")
   active_subscriptions_count=$(json_number_field "$readiness_json" "active_subscriptions_count")
   desired_subscriptions_count=$(json_number_field "$readiness_json" "desired_subscriptions_count")
+  cws_pending_guids=$(json_array_field "$readiness_json" "cws_pending_guids")
+  cws_oldest_pending_age_ms=$(json_number_field "$readiness_json" "cws_oldest_pending_age_ms")
+  request_map_size=$(json_number_field "$readiness_json" "request_map_size")
   backpressure_lagged=$(json_bool_field "$readiness_json" "backpressure_lagged")
   event_backpressure_lagged=$(json_bool_field "$readiness_json" "event_backpressure_lagged")
   event_sink_degraded=$(json_bool_field "$readiness_json" "event_sink_degraded")
@@ -447,6 +498,15 @@ capture_preflight() {
   command_consumer_redis_timeouts_total=$(json_number_field "$readiness_json" "command_consumer_redis_timeouts_total")
   cws_errors_total=$(json_number_field "$readiness_json" "cws_errors_total")
   orders_ws_events_total=$(json_number_field "$readiness_json" "orders_ws_events_total")
+  cws_create_limit_send_total=$(json_number_field "$readiness_json" "cws_create_limit_send_total")
+  cws_create_limit_success_total=$(json_number_field "$readiness_json" "cws_create_limit_success_total")
+  cws_create_limit_failure_total=$(json_number_field "$readiness_json" "cws_create_limit_failure_total")
+  cws_delete_limit_send_total=$(json_number_field "$readiness_json" "cws_delete_limit_send_total")
+  cws_delete_limit_success_total=$(json_number_field "$readiness_json" "cws_delete_limit_success_total")
+  cws_delete_limit_failure_total=$(json_number_field "$readiness_json" "cws_delete_limit_failure_total")
+  cws_replace_limit_send_total=$(json_number_field "$readiness_json" "cws_replace_limit_send_total")
+  cws_replace_limit_success_total=$(json_number_field "$readiness_json" "cws_replace_limit_success_total")
+  cws_replace_limit_failure_total=$(json_number_field "$readiness_json" "cws_replace_limit_failure_total")
 
   cat > "$summary_file" <<EOF
 CAPTURED_TS_UTC=$now_ts
@@ -470,15 +530,38 @@ CWS_CONNECTION_AGE_SEC=$(value_or_na "$cws_connection_age_sec")
 CWS_CONNECT_SEQ=$(value_or_na "$cws_connect_seq")
 CWS_RECONNECT_SEQ=$(value_or_na "$cws_reconnect_seq")
 CWS_PROTOCOL_RESET_TOTAL=$(value_or_na "$cws_protocol_reset_total")
+CWS_LAST_RX_TS_UTC=$(value_or_na "$cws_last_rx_ts")
+CWS_LAST_RX_AGE_MS=$(value_or_na "$cws_last_rx_age_ms")
+CWS_LAST_TX_TS_UTC=$(value_or_na "$cws_last_tx_ts")
+CWS_LAST_TX_AGE_MS=$(value_or_na "$cws_last_tx_age_ms")
 CWS_LIMIT_SEND_TOTAL=$(value_or_na "$cws_limit_send_total")
 CWS_LIMIT_ERROR_TOTAL=$(value_or_na "$cws_limit_error_total")
 CWS_PENDING_FAILED_TOTAL=$(value_or_na "$cws_pending_failed_total")
 CWS_PENDING_COUNT=$(value_or_na "$cws_pending_count")
+CWS_PENDING_GUIDS=$(value_or_na "$cws_pending_guids")
+CWS_OLDEST_PENDING_AGE_MS=$(value_or_na "$cws_oldest_pending_age_ms")
+REQUEST_MAP_SIZE=$(value_or_na "$request_map_size")
 CWS_LAST_TRANSPORT_FAILURE_TS_UTC=$(value_or_na "$cws_last_transport_failure_ts")
 CWS_LAST_LIMIT_SEND_TS_UTC=$(value_or_na "$cws_last_limit_send_ts")
 CWS_LAST_LIMIT_ERROR_TS_UTC=$(value_or_na "$cws_last_limit_error_ts")
 CWS_LAST_SUCCESSFUL_SEND_TS_UTC=$(value_or_na "$cws_last_successful_send_ts")
 CWS_LAST_SUCCESSFUL_ACK_TS_UTC=$(value_or_na "$cws_last_successful_ack_ts")
+CWS_LAST_CONTROL_SUCCESS_TS_UTC=$(value_or_na "$cws_last_control_success_ts")
+CWS_LAST_CONTROL_SUCCESS_AGE_MS=$(value_or_na "$cws_last_control_success_age_ms")
+CWS_LAST_CONTROL_FAILURE_TS_UTC=$(value_or_na "$cws_last_control_failure_ts")
+CWS_LAST_CONTROL_FAILURE_AGE_MS=$(value_or_na "$cws_last_control_failure_age_ms")
+CWS_LAST_PING_TS_UTC=$(value_or_na "$cws_last_ping_ts")
+CWS_LAST_PONG_TS_UTC=$(value_or_na "$cws_last_pong_ts")
+CWS_LAST_PING_PONG_AGE_MS=$(value_or_na "$cws_last_ping_pong_age_ms")
+CWS_CREATE_LIMIT_SEND_TOTAL=$(value_or_na "$cws_create_limit_send_total")
+CWS_CREATE_LIMIT_SUCCESS_TOTAL=$(value_or_na "$cws_create_limit_success_total")
+CWS_CREATE_LIMIT_FAILURE_TOTAL=$(value_or_na "$cws_create_limit_failure_total")
+CWS_DELETE_LIMIT_SEND_TOTAL=$(value_or_na "$cws_delete_limit_send_total")
+CWS_DELETE_LIMIT_SUCCESS_TOTAL=$(value_or_na "$cws_delete_limit_success_total")
+CWS_DELETE_LIMIT_FAILURE_TOTAL=$(value_or_na "$cws_delete_limit_failure_total")
+CWS_REPLACE_LIMIT_SEND_TOTAL=$(value_or_na "$cws_replace_limit_send_total")
+CWS_REPLACE_LIMIT_SUCCESS_TOTAL=$(value_or_na "$cws_replace_limit_success_total")
+CWS_REPLACE_LIMIT_FAILURE_TOTAL=$(value_or_na "$cws_replace_limit_failure_total")
 RECONNECT_COUNT=$(value_or_na "$reconnect_count")
 TOKEN_REFRESH_COUNT=$(value_or_na "$token_refresh_count")
 WS_LAST_RX_AGE_SEC=$(value_or_na "$ws_last_rx_age_sec")
@@ -516,6 +599,7 @@ RUN_DIR=$run_dir
 STACK=$STACK
 LABEL=$label
 READINESS_FILE=$readiness_file
+CWS_DEBUG_FILE=$cws_debug_file
 SUMMARY_FILE=$summary_file
 EOF
 }

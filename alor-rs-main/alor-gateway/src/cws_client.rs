@@ -19,7 +19,7 @@ use alor_protocol::StopLimitCondition;
 use crate::auth::{AccessTokenSnapshot, TokenProvider};
 use crate::config::AlorGatewayConfig;
 use crate::gateway_events::{GatewayEvent, log_event};
-use crate::health::HealthState;
+use crate::health::{CwsFrameTraceEntry, HealthState};
 
 const CWS_TIME_IN_FORCE: &str = "OneDay";
 const CWS_ALLOW_MARGIN: bool = true;
@@ -37,6 +37,8 @@ const DIAG_CWS_CORRELATION_GUID: &str = "_diag_cws_correlation_guid";
 const DIAG_CWS_ORDER_ID: &str = "_diag_cws_order_id";
 const DIAG_CWS_REQUEST_ORDER_ID: &str = "_diag_cws_request_order_id";
 const DIAG_CWS_SYMBOL: &str = "_diag_cws_symbol";
+const CWS_PENDING_GUID_SUMMARY_LIMIT: usize = 8;
+const CWS_FRAME_RING_LIMIT: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct CwsHandle {
@@ -62,6 +64,7 @@ struct PendingRequest {
     symbol: Option<String>,
     send_seq: u64,
     send_ts_utc: i64,
+    send_at: Instant,
     pending_count_before_send: u64,
     resp_tx: oneshot::Sender<anyhow::Result<Value>>,
 }
@@ -775,6 +778,166 @@ fn record_access_token_snapshot(
     guard.token_refresh_count = snapshot.refresh_count();
 }
 
+fn control_opcode_key(opcode: &str) -> Option<&'static str> {
+    match opcode {
+        "create:limit" => Some("create:limit"),
+        "delete:limit" => Some("delete:limit"),
+        "replace:limit" => Some("replace:limit"),
+        _ => None,
+    }
+}
+
+fn update_control_send_counters(guard: &mut HealthState, opcode: &str, ts_utc: i64, at: Instant) {
+    guard.cws_last_tx_ts_utc = Some(ts_utc);
+    guard.cws_last_tx_at = Some(at);
+    match control_opcode_key(opcode) {
+        Some("create:limit") => {
+            guard.cws_create_limit_send_total =
+                guard.cws_create_limit_send_total.saturating_add(1);
+        }
+        Some("delete:limit") => {
+            guard.cws_delete_limit_send_total =
+                guard.cws_delete_limit_send_total.saturating_add(1);
+        }
+        Some("replace:limit") => {
+            guard.cws_replace_limit_send_total =
+                guard.cws_replace_limit_send_total.saturating_add(1);
+        }
+        _ => {}
+    }
+}
+
+fn update_control_result_counters(
+    guard: &mut HealthState,
+    opcode: &str,
+    success: bool,
+    ts_utc: i64,
+    at: Instant,
+) {
+    if success {
+        guard.cws_last_control_success_ts_utc = Some(ts_utc);
+        guard.cws_last_control_success_at = Some(at);
+    } else {
+        guard.cws_last_control_failure_ts_utc = Some(ts_utc);
+        guard.cws_last_control_failure_at = Some(at);
+    }
+    match (control_opcode_key(opcode), success) {
+        (Some("create:limit"), true) => {
+            guard.cws_create_limit_success_total =
+                guard.cws_create_limit_success_total.saturating_add(1);
+        }
+        (Some("create:limit"), false) => {
+            guard.cws_create_limit_failure_total =
+                guard.cws_create_limit_failure_total.saturating_add(1);
+        }
+        (Some("delete:limit"), true) => {
+            guard.cws_delete_limit_success_total =
+                guard.cws_delete_limit_success_total.saturating_add(1);
+        }
+        (Some("delete:limit"), false) => {
+            guard.cws_delete_limit_failure_total =
+                guard.cws_delete_limit_failure_total.saturating_add(1);
+        }
+        (Some("replace:limit"), true) => {
+            guard.cws_replace_limit_success_total =
+                guard.cws_replace_limit_success_total.saturating_add(1);
+        }
+        (Some("replace:limit"), false) => {
+            guard.cws_replace_limit_failure_total =
+                guard.cws_replace_limit_failure_total.saturating_add(1);
+        }
+        _ => {}
+    }
+}
+
+fn record_frame(
+    frames: &mut Vec<CwsFrameTraceEntry>,
+    entry: CwsFrameTraceEntry,
+) {
+    frames.push(entry);
+    if frames.len() > CWS_FRAME_RING_LIMIT {
+        let remove_count = frames.len() - CWS_FRAME_RING_LIMIT;
+        frames.drain(0..remove_count);
+    }
+}
+
+fn record_outbound_frame(
+    health: &Arc<RwLock<HealthState>>,
+    connection_instance_id: &str,
+    seq: u64,
+    ts_utc: i64,
+    opcode: &str,
+    guid: &str,
+    order_id: Option<&str>,
+    symbol: Option<&str>,
+) {
+    let mut guard = health.write();
+    record_frame(
+        &mut guard.cws_recent_outbound_frames,
+        CwsFrameTraceEntry {
+            ts_utc,
+            seq,
+            direction: "outbound".to_string(),
+            conn_instance_id: Some(connection_instance_id.to_string()),
+            opcode: Some(opcode.to_string()),
+            guid: Some(guid.to_string()),
+            request_guid: None,
+            correlation_guid: Some(guid.to_string()),
+            order_id: order_id.map(ToString::to_string),
+            symbol: symbol.map(ToString::to_string),
+            message_class: "command".to_string(),
+        },
+    );
+}
+
+fn record_inbound_frame(
+    health: &Arc<RwLock<HealthState>>,
+    connection_instance_id: &str,
+    seq: u64,
+    ts_utc: i64,
+    meta: &InboundCwsMessageMeta,
+    at: Instant,
+) {
+    let mut guard = health.write();
+    guard.cws_last_rx_ts_utc = Some(ts_utc);
+    guard.cws_last_rx_at = Some(at);
+    record_frame(
+        &mut guard.cws_recent_inbound_frames,
+        CwsFrameTraceEntry {
+            ts_utc,
+            seq,
+            direction: "inbound".to_string(),
+            conn_instance_id: Some(connection_instance_id.to_string()),
+            opcode: meta.opcode.clone(),
+            guid: meta.guid.clone(),
+            request_guid: meta.request_guid.clone(),
+            correlation_guid: meta.correlation_guid.clone(),
+            order_id: meta.order_id.clone(),
+            symbol: meta.symbol.clone(),
+            message_class: meta.message_class.as_str().to_string(),
+        },
+    );
+}
+
+fn sync_pending_health(health: &Arc<RwLock<HealthState>>, pending: &HashMap<String, PendingRequest>) {
+    let mut pending_items = pending.values().collect::<Vec<_>>();
+    pending_items.sort_by_key(|request| request.send_seq);
+
+    let pending_guids = pending_items
+        .iter()
+        .take(CWS_PENDING_GUID_SUMMARY_LIMIT)
+        .map(|request| request.cws_guid.clone())
+        .collect::<Vec<_>>();
+    let oldest_pending_age_ms = pending_items
+        .first()
+        .map(|request| request.send_at.elapsed().as_millis() as u64);
+
+    let mut guard = health.write();
+    guard.cws_pending_count = pending.len() as u64;
+    guard.cws_pending_guids = pending_guids;
+    guard.cws_oldest_pending_age_ms = oldest_pending_age_ms;
+}
+
 async fn run_session(
     cfg: &AlorGatewayConfig,
     token_provider: &TokenProvider,
@@ -804,6 +967,18 @@ async fn run_session(
         guard.cws_connected_at = Some(connected_at);
         guard.cws_last_reconnect_at = (reconnect_seq > 0).then_some(connected_at);
         guard.cws_pending_count = 0;
+        guard.cws_pending_guids.clear();
+        guard.cws_oldest_pending_age_ms = None;
+        guard.cws_recent_inbound_frames.clear();
+        guard.cws_recent_outbound_frames.clear();
+        guard.cws_last_rx_ts_utc = None;
+        guard.cws_last_tx_ts_utc = None;
+        guard.cws_last_rx_at = None;
+        guard.cws_last_tx_at = None;
+        guard.cws_last_ping_ts_utc = None;
+        guard.cws_last_pong_ts_utc = None;
+        guard.cws_last_ping_at = None;
+        guard.cws_last_pong_at = None;
         guard.cws_connect_total = guard.cws_connect_total.saturating_add(1);
     }
     authorize(
@@ -826,6 +1001,7 @@ async fn run_session(
                     Some(cmd) => {
                         let pending_count_before_send = pending.len() as u64;
                         send_seq = send_seq.saturating_add(1);
+                        let send_at = Instant::now();
                         let send_ts_utc = Utc::now().timestamp();
                         let guid = cmd
                             .payload
@@ -856,14 +1032,26 @@ async fn run_session(
                                 symbol: cmd.symbol.or_else(|| symbol_of_payload(&payload)),
                                 send_seq,
                                 send_ts_utc,
+                                send_at,
                                 pending_count_before_send,
                                 resp_tx: cmd.resp_tx,
                             },
                         );
+                        sync_pending_health(health, &pending);
                         {
                             let mut guard = health.write();
-                            guard.cws_pending_count = pending.len() as u64;
+                            update_control_send_counters(&mut guard, &opcode, send_ts_utc, send_at);
                         }
+                        record_outbound_frame(
+                            health,
+                            &connection_instance_id,
+                            send_seq,
+                            send_ts_utc,
+                            &opcode,
+                            &guid,
+                            pending.get(&guid).and_then(|request| request.order_id.as_deref()),
+                            pending.get(&guid).and_then(|request| request.symbol.as_deref()),
+                        );
                         let connection_age_ms = connected_at.elapsed().as_millis() as u64;
                         info!(
                             handler = "socket_writer",
@@ -907,9 +1095,18 @@ async fn run_session(
                 match msg {
                     Some(Ok(Message::Text(txt))) => {
                         recv_seq = recv_seq.saturating_add(1);
+                        let recv_at = Instant::now();
                         let recv_ts_utc = Utc::now().timestamp();
                         if let Ok(value) = serde_json::from_str::<Value>(&txt) {
                             let meta = inspect_inbound_cws_message(&value);
+                            record_inbound_frame(
+                                health,
+                                &connection_instance_id,
+                                recv_seq,
+                                recv_ts_utc,
+                                &meta,
+                                recv_at,
+                            );
                             let opcode = meta.opcode.as_deref().unwrap_or("unknown");
                             debug!(
                                 handler = "socket_reader",
@@ -946,6 +1143,7 @@ async fn run_session(
                                             connect_seq,
                                             reconnect_seq,
                                         );
+                                        let response_success = response_is_success(&value);
                                         info!(
                                             handler = "pending_resolver",
                                             state_before = "pending_open",
@@ -962,12 +1160,19 @@ async fn run_session(
                                             pending_count_after,
                                             "cws response matched pending request"
                                         );
-                                    {
-                                        let mut guard = health.write();
-                                        guard.cws_pending_count = pending.len() as u64;
-                                        guard.cws_last_successful_ack_ts_utc =
-                                            Some(Utc::now().timestamp());
-                                    }
+                                        {
+                                            let mut guard = health.write();
+                                            guard.cws_last_successful_ack_ts_utc =
+                                                Some(Utc::now().timestamp());
+                                            update_control_result_counters(
+                                                &mut guard,
+                                                &request.opcode,
+                                                response_success,
+                                                recv_ts_utc,
+                                                recv_at,
+                                            );
+                                        }
+                                        sync_pending_health(health, &pending);
                                         let _ = request.resp_tx.send(Ok(value));
                                     } else {
                                         warn!(
@@ -1028,6 +1233,20 @@ async fn run_session(
                             );
                         }
                     }
+                    Some(Ok(Message::Ping(_))) => {
+                        let now_at = Instant::now();
+                        let now_ts_utc = Utc::now().timestamp();
+                        let mut guard = health.write();
+                        guard.cws_last_ping_ts_utc = Some(now_ts_utc);
+                        guard.cws_last_ping_at = Some(now_at);
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        let now_at = Instant::now();
+                        let now_ts_utc = Utc::now().timestamp();
+                        let mut guard = health.write();
+                        guard.cws_last_pong_ts_utc = Some(now_ts_utc);
+                        guard.cws_last_pong_at = Some(now_at);
+                    }
                     Some(Ok(Message::Close(frame))) => {
                         {
                             let mut guard = health.write();
@@ -1078,11 +1297,35 @@ async fn authorize(
 ) -> anyhow::Result<()> {
     record_access_token_snapshot(health, "cws_authorize", token_snapshot);
     let guid = new_guid();
+    let send_at = Instant::now();
+    let send_ts_utc = Utc::now().timestamp();
     let payload = serde_json::json!({
         "opcode": "authorize",
         "guid": guid,
         "token": token_snapshot.token(),
     });
+    {
+        let mut guard = health.write();
+        guard.cws_last_tx_ts_utc = Some(send_ts_utc);
+        guard.cws_last_tx_at = Some(send_at);
+        let connection_instance_id = guard.cws_connection_instance_id.clone();
+        record_frame(
+            &mut guard.cws_recent_outbound_frames,
+            CwsFrameTraceEntry {
+                ts_utc: send_ts_utc,
+                seq: 0,
+                direction: "outbound".to_string(),
+                conn_instance_id: connection_instance_id,
+                opcode: Some("authorize".to_string()),
+                guid: Some(guid.clone()),
+                request_guid: None,
+                correlation_guid: Some(guid.clone()),
+                order_id: None,
+                symbol: None,
+                message_class: "authorize".to_string(),
+            },
+        );
+    }
     info!(
         guid,
         label = "authorize",
@@ -1102,6 +1345,34 @@ async fn authorize(
         .await?;
 
     let response = read_until_guid(ws_stream, &guid, Duration::from_secs(5)).await?;
+    let recv_at = Instant::now();
+    let recv_ts_utc = Utc::now().timestamp();
+    {
+        let mut guard = health.write();
+        guard.cws_last_rx_ts_utc = Some(recv_ts_utc);
+        guard.cws_last_rx_at = Some(recv_at);
+        let connection_instance_id = guard.cws_connection_instance_id.clone();
+        record_frame(
+            &mut guard.cws_recent_inbound_frames,
+            CwsFrameTraceEntry {
+                ts_utc: recv_ts_utc,
+                seq: 0,
+                direction: "inbound".to_string(),
+                conn_instance_id: connection_instance_id,
+                opcode: response
+                    .get("opcode")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+                    .or_else(|| Some("authorize".to_string())),
+                guid: transport_guid_of(&response),
+                request_guid: request_guid_of(&response),
+                correlation_guid: correlation_guid_of(&response),
+                order_id: order_id_of_value(&response),
+                symbol: symbol_of_value(&response),
+                message_class: classify_inbound_cws_message(&response).as_str().to_string(),
+            },
+        );
+    }
     info!(
         payload = %response,
         guid,
@@ -1179,6 +1450,12 @@ fn is_invalid_jwt_response(response: &Value) -> bool {
         .and_then(Value::as_str)
         .map(|message| message.to_ascii_lowercase().contains("invalid jwt token"))
         .unwrap_or(false)
+}
+
+fn response_is_success(response: &Value) -> bool {
+    let status = response.get("status").and_then(Value::as_i64);
+    let http_code = response.get("httpCode").and_then(Value::as_i64);
+    status == Some(200) || http_code == Some(200)
 }
 
 async fn read_until_guid(
@@ -1298,14 +1575,27 @@ fn fail_pending_with_transport(
         let has_limit_request = pending
             .values()
             .any(|request| request.opcode == "create:limit");
+        let now_at = Instant::now();
+        let now_ts_utc = Utc::now().timestamp();
         let telemetry = {
             let mut guard = health.write();
             guard.cws_pending_failed_total = guard
                 .cws_pending_failed_total
                 .saturating_add(affected_count);
             guard.cws_pending_count = 0;
+            guard.cws_pending_guids.clear();
+            guard.cws_oldest_pending_age_ms = None;
             if has_limit_request {
-                guard.cws_last_limit_error_ts_utc = Some(Utc::now().timestamp());
+                guard.cws_last_limit_error_ts_utc = Some(now_ts_utc);
+            }
+            for request in pending.values() {
+                update_control_result_counters(
+                    &mut guard,
+                    &request.opcode,
+                    false,
+                    now_ts_utc,
+                    now_at,
+                );
             }
             snapshot_cws_telemetry(&guard)
         };
@@ -1342,6 +1632,7 @@ fn fail_pending_with_transport(
         );
         let _ = request.resp_tx.send(Err(anyhow::Error::new(error)));
     }
+    sync_pending_health(health, pending);
 }
 
 fn transport_failure_from_send_error(error: &WsError) -> CwsTransportFailure {
@@ -1856,6 +2147,7 @@ mod tests {
             symbol: Some("USDRUBF".to_string()),
             send_seq: 7,
             send_ts_utc: 1774285000,
+            send_at: Instant::now(),
             pending_count_before_send: 0,
             resp_tx,
         };
@@ -2016,6 +2308,7 @@ mod tests {
                 symbol: Some("USDRUBF".to_string()),
                 send_seq: 1,
                 send_ts_utc: 1774285000,
+                send_at: Instant::now(),
                 pending_count_before_send: 0,
                 resp_tx: tx_one,
             },
@@ -2030,6 +2323,7 @@ mod tests {
                 symbol: None,
                 send_seq: 2,
                 send_ts_utc: 1774285001,
+                send_at: Instant::now(),
                 pending_count_before_send: 1,
                 resp_tx: tx_two,
             },

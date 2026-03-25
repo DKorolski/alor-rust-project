@@ -325,7 +325,12 @@ pub async fn run_command_consumer(
                 }
 
                 if let CommandAction::Cancel(payload) = &command.action {
-                    let previous_request_id = request_map.write().insert(payload.order_id, request_id);
+                    let (previous_request_id, request_map_size) = {
+                        let mut map = request_map.write();
+                        let previous_request_id = map.insert(payload.order_id, request_id);
+                        (previous_request_id, map.len() as u64)
+                    };
+                    increment_counter(&health, |h| h.request_map_size = request_map_size);
                     info!(
                         handler = "command_consumer",
                         state_before = "request_map_before_cancel_preinsert",
@@ -414,7 +419,12 @@ pub async fn run_command_consumer(
                             increment_counter(&health, |h| h.command_processed_total = h.command_processed_total.saturating_add(1));
                             increment_counter(&health, |h| h.commands_accepted_total = h.commands_accepted_total.saturating_add(1));
                             if let Some(order_id) = info.order_id {
-                                let previous_request_id = request_map.write().insert(order_id, request_id);
+                                let (previous_request_id, request_map_size) = {
+                                    let mut map = request_map.write();
+                                    let previous_request_id = map.insert(order_id, request_id);
+                                    (previous_request_id, map.len() as u64)
+                                };
+                                increment_counter(&health, |h| h.request_map_size = request_map_size);
                                 info!(
                                     handler = "command_consumer",
                                     state_before = "request_map_before_ack_insert",

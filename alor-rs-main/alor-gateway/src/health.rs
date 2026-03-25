@@ -5,6 +5,21 @@ use serde::Serialize;
 
 use alor_types::MarketState;
 
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct CwsFrameTraceEntry {
+    pub ts_utc: i64,
+    pub seq: u64,
+    pub direction: String,
+    pub conn_instance_id: Option<String>,
+    pub opcode: Option<String>,
+    pub guid: Option<String>,
+    pub request_guid: Option<String>,
+    pub correlation_guid: Option<String>,
+    pub order_id: Option<String>,
+    pub symbol: Option<String>,
+    pub message_class: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum GatewayPhase {
     #[default]
@@ -41,11 +56,20 @@ pub struct HealthState {
     pub cws_connected_ts_utc: Option<i64>,
     pub cws_last_connect_ts_utc: Option<i64>,
     pub cws_last_transport_failure_ts_utc: Option<i64>,
+    pub cws_last_rx_ts_utc: Option<i64>,
+    pub cws_last_tx_ts_utc: Option<i64>,
     pub cws_last_limit_send_ts_utc: Option<i64>,
     pub cws_last_limit_error_ts_utc: Option<i64>,
     pub cws_last_successful_send_ts_utc: Option<i64>,
     pub cws_last_successful_ack_ts_utc: Option<i64>,
+    pub cws_last_control_success_ts_utc: Option<i64>,
+    pub cws_last_control_failure_ts_utc: Option<i64>,
+    pub cws_last_ping_ts_utc: Option<i64>,
+    pub cws_last_pong_ts_utc: Option<i64>,
     pub cws_pending_count: u64,
+    pub cws_pending_guids: Vec<String>,
+    pub cws_oldest_pending_age_ms: Option<u64>,
+    pub request_map_size: u64,
     pub last_bar_ts: i64,
     pub last_bar_age_sec: u64,
     pub last_positions_ts: i64,
@@ -79,6 +103,15 @@ pub struct HealthState {
     pub cws_limit_send_total: u64,
     pub cws_limit_error_total: u64,
     pub cws_pending_failed_total: u64,
+    pub cws_create_limit_send_total: u64,
+    pub cws_create_limit_success_total: u64,
+    pub cws_create_limit_failure_total: u64,
+    pub cws_delete_limit_send_total: u64,
+    pub cws_delete_limit_success_total: u64,
+    pub cws_delete_limit_failure_total: u64,
+    pub cws_replace_limit_send_total: u64,
+    pub cws_replace_limit_success_total: u64,
+    pub cws_replace_limit_failure_total: u64,
     pub orders_ws_events_total: u64,
     pub orders_ws_status_total: HashMap<String, u64>,
     pub command_consumer_alive: bool,
@@ -95,8 +128,22 @@ pub struct HealthState {
     pub active_subscriptions_count: u32,
     pub desired_subscriptions_count: u32,
     pub scheduler_state: Option<MarketState>,
+    pub cws_recent_inbound_frames: Vec<CwsFrameTraceEntry>,
+    pub cws_recent_outbound_frames: Vec<CwsFrameTraceEntry>,
     #[serde(skip)]
     pub cws_connected_at: Option<Instant>,
+    #[serde(skip)]
+    pub cws_last_rx_at: Option<Instant>,
+    #[serde(skip)]
+    pub cws_last_tx_at: Option<Instant>,
+    #[serde(skip)]
+    pub cws_last_control_success_at: Option<Instant>,
+    #[serde(skip)]
+    pub cws_last_control_failure_at: Option<Instant>,
+    #[serde(skip)]
+    pub cws_last_ping_at: Option<Instant>,
+    #[serde(skip)]
+    pub cws_last_pong_at: Option<Instant>,
     #[serde(skip)]
     pub cws_last_reconnect_at: Option<Instant>,
 }
