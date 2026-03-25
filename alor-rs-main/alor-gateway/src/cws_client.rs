@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use alor_protocol::StopLimitCondition;
 
-use crate::auth::TokenProvider;
+use crate::auth::{AccessTokenSnapshot, TokenProvider};
 use crate::config::AlorGatewayConfig;
 use crate::gateway_events::{GatewayEvent, log_event};
 use crate::health::HealthState;
@@ -759,6 +759,22 @@ fn snapshot_cws_telemetry(guard: &HealthState) -> CwsTelemetrySnapshot {
     }
 }
 
+fn record_access_token_snapshot(
+    health: &Arc<RwLock<HealthState>>,
+    consumer: &str,
+    snapshot: &AccessTokenSnapshot,
+) {
+    let mut guard = health.write();
+    guard.access_token_fingerprint = Some(snapshot.fingerprint().to_string());
+    guard.access_token_last_source = Some(snapshot.source().as_str().to_string());
+    guard.access_token_last_consumer = Some(consumer.to_string());
+    guard.access_token_obtained_ts_utc = snapshot.obtained_ts_utc();
+    guard.access_token_last_used_ts_utc = Some(Utc::now().timestamp());
+    guard.access_token_age_ms = snapshot.age_ms();
+    guard.access_token_ttl_remaining_ms = snapshot.ttl_remaining_ms();
+    guard.token_refresh_count = snapshot.refresh_count();
+}
+
 async fn run_session(
     cfg: &AlorGatewayConfig,
     token_provider: &TokenProvider,
@@ -767,7 +783,10 @@ async fn run_session(
     connect_seq: u64,
     reconnect_seq: u64,
 ) -> anyhow::Result<()> {
-    let token = token_provider.access_token().await?;
+    let token_snapshot = token_provider
+        .access_token_with_context("cws_run_session")
+        .await?;
+    record_access_token_snapshot(health, "cws_run_session", &token_snapshot);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&cfg.cws_url).await?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
     let connection_instance_id = new_guid();
@@ -787,7 +806,14 @@ async fn run_session(
         guard.cws_pending_count = 0;
         guard.cws_connect_total = guard.cws_connect_total.saturating_add(1);
     }
-    authorize(&mut ws_sink, &mut ws_stream, token_provider, &token, health).await?;
+    authorize(
+        &mut ws_sink,
+        &mut ws_stream,
+        token_provider,
+        &token_snapshot,
+        health,
+    )
+    .await?;
 
     let mut pending: HashMap<String, PendingRequest> = HashMap::new();
     let mut send_seq = 0_u64;
@@ -810,7 +836,10 @@ async fn run_session(
                         let mut payload = cmd.payload;
                         if let Some(map) = payload.as_object_mut() {
                             map.insert("guid".to_string(), Value::String(guid.clone()));
-                            map.insert("token".to_string(), Value::String(token.clone()));
+                            map.insert(
+                                "token".to_string(),
+                                Value::String(token_snapshot.token().to_string()),
+                            );
                         }
                         let opcode = payload
                             .get("opcode")
@@ -1044,16 +1073,28 @@ async fn authorize(
     > + Unpin
          ),
     token_provider: &TokenProvider,
-    token: &str,
+    token_snapshot: &AccessTokenSnapshot,
     health: &Arc<RwLock<HealthState>>,
 ) -> anyhow::Result<()> {
+    record_access_token_snapshot(health, "cws_authorize", token_snapshot);
     let guid = new_guid();
     let payload = serde_json::json!({
         "opcode": "authorize",
         "guid": guid,
-        "token": token,
+        "token": token_snapshot.token(),
     });
-    info!(guid, label = "authorize", "ws subscribe send");
+    info!(
+        guid,
+        label = "authorize",
+        auth_principal_fingerprint = token_provider.principal_fingerprint(),
+        access_token_fingerprint = token_snapshot.fingerprint(),
+        access_token_source = token_snapshot.source().as_str(),
+        token_refresh_count = token_snapshot.refresh_count(),
+        access_token_obtained_ts_utc = token_snapshot.obtained_ts_utc(),
+        access_token_age_ms = token_snapshot.age_ms(),
+        access_token_ttl_remaining_ms = token_snapshot.ttl_remaining_ms(),
+        "ws subscribe send"
+    );
     let redacted_payload = redact_token(&payload.to_string());
     debug!(payload = %redacted_payload, guid, label = "authorize", "ws subscribe payload");
     ws_sink
@@ -1061,7 +1102,19 @@ async fn authorize(
         .await?;
 
     let response = read_until_guid(ws_stream, &guid, Duration::from_secs(5)).await?;
-    info!(payload = %response, guid, label = "authorize", "ws subscribe ack");
+    info!(
+        payload = %response,
+        guid,
+        label = "authorize",
+        auth_principal_fingerprint = token_provider.principal_fingerprint(),
+        access_token_fingerprint = token_snapshot.fingerprint(),
+        access_token_source = token_snapshot.source().as_str(),
+        token_refresh_count = token_snapshot.refresh_count(),
+        access_token_obtained_ts_utc = token_snapshot.obtained_ts_utc(),
+        access_token_age_ms = token_snapshot.age_ms(),
+        access_token_ttl_remaining_ms = token_snapshot.ttl_remaining_ms(),
+        "ws subscribe ack"
+    );
     let status = response.get("status").and_then(Value::as_i64);
     let http_code = response.get("httpCode").and_then(Value::as_i64);
     let cws_authorized = response
@@ -1087,6 +1140,18 @@ async fn authorize(
         Ok(())
     } else {
         if is_invalid_jwt_response(&response) {
+            warn!(
+                guid,
+                label = "authorize",
+                auth_principal_fingerprint = token_provider.principal_fingerprint(),
+                access_token_fingerprint = token_snapshot.fingerprint(),
+                access_token_source = token_snapshot.source().as_str(),
+                token_refresh_count = token_snapshot.refresh_count(),
+                access_token_obtained_ts_utc = token_snapshot.obtained_ts_utc(),
+                access_token_age_ms = token_snapshot.age_ms(),
+                access_token_ttl_remaining_ms = token_snapshot.ttl_remaining_ms(),
+                "cws authorize rejected access token; invalidating cached token"
+            );
             token_provider.invalidate("cws_authorize_401").await;
         }
         {

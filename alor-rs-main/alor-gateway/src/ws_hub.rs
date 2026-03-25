@@ -294,7 +294,9 @@ async fn connect_and_run(
     backfill_plan: Arc<RwLock<BackfillPlan>>,
     generation: u64,
 ) -> anyhow::Result<()> {
-    let token = token_provider.access_token().await?;
+    let token = token_provider
+        .access_token_with_context("ws_hub_connect")
+        .await?;
     let (ws_stream, _) = tokio_tungstenite::connect_async(&cfg.ws_url).await?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
     let mut subscription_manager = SubscriptionManager::default();
@@ -343,7 +345,7 @@ async fn connect_and_run(
         .await;
     let mut bars_guid_map = subscribe_all(
         cfg,
-        &token,
+        token.token(),
         &mut ws_sink,
         &mut ws_stream,
         plan.from_ts,
@@ -400,7 +402,7 @@ async fn connect_and_run(
                             .await;
                         bars_guid_map = subscribe_all(
                             cfg,
-                            &token,
+                            token.token(),
                             &mut ws_sink,
                             &mut ws_stream,
                             from_ts,
@@ -429,7 +431,7 @@ async fn connect_and_run(
                         if let Err(error) = best_effort_unsubscribe_all(
                             &mut ws_sink,
                             &subscription_manager,
-                            &token,
+                            token.token(),
                         )
                         .await
                         {
