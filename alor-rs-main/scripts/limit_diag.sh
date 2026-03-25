@@ -7,6 +7,7 @@ Usage:
   limit_diag.sh init-run [base_dir]
   limit_diag.sh capture pre <run_dir>
   limit_diag.sh capture post <run_dir>
+  limit_diag.sh preflight <run_dir> <sessiongap|hybrid> [label]
   limit_diag.sh place <sessiongap|hybrid> <price> [qty] [side]
   limit_diag.sh cancel <sessiongap|hybrid> <order_id>
   limit_diag.sh loop <sessiongap|hybrid> <price> [iterations] [qty] [side] [sleep_sec]
@@ -16,6 +17,7 @@ Usage:
 Examples:
   RUN_DIR=$(scripts/limit_diag.sh init-run)
   scripts/limit_diag.sh capture pre "$RUN_DIR"
+  scripts/limit_diag.sh preflight "$RUN_DIR" sessiongap iter1.before
   scripts/limit_diag.sh place sessiongap 81.71
   scripts/limit_diag.sh cancel sessiongap 2023555922907497864
   scripts/limit_diag.sh loop sessiongap 80.10 20
@@ -265,6 +267,259 @@ json_number_field() {
   printf '%s\n' "$line" | sed -n "s/.*\"$key\":\\([-0-9.][0-9.]*\\).*/\\1/p" | head -n 1
 }
 
+json_bool_field() {
+  local line=$1
+  local key=$2
+  printf '%s\n' "$line" | sed -n "s/.*\"$key\":\\(true\\|false\\).*/\\1/p" | head -n 1
+}
+
+value_or_na() {
+  local value=${1:-}
+  if [ -n "$value" ]; then
+    printf '%s\n' "$value"
+  else
+    printf 'na\n'
+  fi
+}
+
+age_sec_from_ts() {
+  local ts=${1:-}
+  local now_ts=${2:-$(date +%s)}
+
+  case "$ts" in
+    ""|null|na) return 0 ;;
+  esac
+
+  if ! printf '%s\n' "$ts" | grep -Eq '^-?[0-9]+$'; then
+    return 0
+  fi
+
+  if [ "$ts" -le 0 ]; then
+    return 0
+  fi
+
+  printf '%s\n' $((now_ts - ts))
+}
+
+summary_value() {
+  local summary_file=$1
+  local key=$2
+  sed -n "s/^${key}=//p" "$summary_file" | head -n 1
+}
+
+preflight_compact_line() {
+  local summary_file=$1
+  local readiness phase conn_id conn_age reconnects limit_sends limit_errors pending
+  local last_orders_age last_positions_age commands_processed token_refresh access_token
+
+  readiness=$(summary_value "$summary_file" READINESS)
+  phase=$(summary_value "$summary_file" GATEWAY_PHASE)
+  conn_id=$(summary_value "$summary_file" CWS_CONNECTION_INSTANCE_ID)
+  conn_age=$(summary_value "$summary_file" CWS_CONNECTION_AGE_SEC)
+  reconnects=$(summary_value "$summary_file" CWS_RECONNECT_SEQ)
+  limit_sends=$(summary_value "$summary_file" CWS_LIMIT_SEND_TOTAL)
+  limit_errors=$(summary_value "$summary_file" CWS_LIMIT_ERROR_TOTAL)
+  pending=$(summary_value "$summary_file" CWS_PENDING_COUNT)
+  last_orders_age=$(summary_value "$summary_file" LAST_ORDERS_AGE_SEC)
+  last_positions_age=$(summary_value "$summary_file" LAST_POSITIONS_AGE_SEC)
+  commands_processed=$(summary_value "$summary_file" COMMAND_PROCESSED_TOTAL)
+  token_refresh=$(summary_value "$summary_file" TOKEN_REFRESH_COUNT)
+  access_token=$(summary_value "$summary_file" ACCESS_TOKEN_FINGERPRINT)
+
+  printf 'readiness=%s phase=%s conn_id=%s conn_age_sec=%s reconnect_seq=%s limit_send_total=%s limit_error_total=%s pending_count=%s last_orders_age_sec=%s last_positions_age_sec=%s command_processed_total=%s token_refresh_count=%s access_token=%s\n' \
+    "$(value_or_na "$readiness")" \
+    "$(value_or_na "$phase")" \
+    "$(value_or_na "$conn_id")" \
+    "$(value_or_na "$conn_age")" \
+    "$(value_or_na "$reconnects")" \
+    "$(value_or_na "$limit_sends")" \
+    "$(value_or_na "$limit_errors")" \
+    "$(value_or_na "$pending")" \
+    "$(value_or_na "$last_orders_age")" \
+    "$(value_or_na "$last_positions_age")" \
+    "$(value_or_na "$commands_processed")" \
+    "$(value_or_na "$token_refresh")" \
+    "$(value_or_na "$access_token")"
+}
+
+capture_preflight() {
+  local run_dir=$1
+  local stack_name=$2
+  local label=${3:-manual}
+  local log_minutes=${PREFLIGHT_LOG_WINDOW_MIN:-3}
+  local stream_count=${PREFLIGHT_STREAM_COUNT:-40}
+  local readiness_json now_ts summary_file readiness_file gateway_log_file runtime_log_file
+  local cmd_orders_file cmd_acks_file broker_orders_file broker_positions_file ps_file
+  local readiness gateway_phase gateway_instance_id auth_principal_fingerprint access_token_fingerprint
+  local access_token_source access_token_consumer access_token_obtained_ts access_token_last_used_ts
+  local access_token_age_ms access_token_ttl_remaining_ms cws_authorized cws_connection_instance_id
+  local cws_connected_ts cws_connection_age_sec cws_connect_seq cws_reconnect_seq cws_protocol_reset_total
+  local cws_limit_send_total cws_limit_error_total cws_pending_failed_total cws_pending_count
+  local cws_last_transport_failure_ts cws_last_limit_send_ts cws_last_limit_error_ts cws_last_successful_send_ts
+  local cws_last_successful_ack_ts reconnect_count token_refresh_count ws_last_rx_age_sec
+  local last_orders_ts last_orders_age_sec last_positions_ts last_positions_age_sec active_subscriptions_count
+  local desired_subscriptions_count backpressure_lagged event_backpressure_lagged event_sink_degraded
+  local last_event_publish_ts last_event_publish_age_sec commands_received_total commands_accepted_total
+  local commands_rejected_total commands_duplicate_total command_duplicate_total command_expired_total
+  local command_validation_failed_total command_processed_total command_consumer_alive
+  local command_consumer_last_poll_ts command_consumer_last_poll_age_sec command_consumer_last_message_id
+  local command_consumer_errors_total command_consumer_redis_timeouts_total cws_errors_total orders_ws_events_total
+
+  mkdir -p "$run_dir"
+  stack_env "$stack_name"
+  now_ts=$(date +%s)
+
+  readiness_file="${run_dir}/${STACK}.preflight.${label}.readiness.json"
+  summary_file="${run_dir}/${STACK}.preflight.${label}.summary.txt"
+  ps_file="${run_dir}/${STACK}.preflight.${label}.ps.txt"
+  cmd_orders_file="${run_dir}/${STACK}.preflight.${label}.cmd.orders.txt"
+  cmd_acks_file="${run_dir}/${STACK}.preflight.${label}.cmd.acks.txt"
+  broker_orders_file="${run_dir}/${STACK}.preflight.${label}.broker.orders.txt"
+  broker_positions_file="${run_dir}/${STACK}.preflight.${label}.broker.positions.txt"
+  gateway_log_file="${run_dir}/${STACK}.preflight.${label}.gateway.log"
+  runtime_log_file="${run_dir}/${STACK}.preflight.${label}.runtime.log"
+
+  capture_readiness "$stack_name" > "$readiness_file"
+  compose_ps "$stack_name" > "$ps_file"
+  capture_stream_tail "$stack_name" "$STACK_CMD_STREAM" "$stream_count" > "$cmd_orders_file"
+  capture_stream_tail "$stack_name" "$STACK_ACK_STREAM" "$stream_count" > "$cmd_acks_file"
+  capture_stream_tail "$stack_name" "$STACK_BROKER_ORDERS_STREAM" "$stream_count" > "$broker_orders_file"
+  capture_stream_tail "$stack_name" "$STACK_BROKER_POSITIONS_STREAM" "$stream_count" > "$broker_positions_file"
+  capture_logs "$stack_name" alor-gateway "$log_minutes" > "$gateway_log_file"
+  capture_logs "$stack_name" strategy-runtime "$log_minutes" > "$runtime_log_file"
+
+  readiness_json=$(cat "$readiness_file")
+
+  readiness=$(json_bool_field "$readiness_json" "readiness")
+  gateway_phase=$(json_string_field "$readiness_json" "gateway_phase")
+  gateway_instance_id=$(json_string_field "$readiness_json" "gateway_instance_id")
+  auth_principal_fingerprint=$(json_string_field "$readiness_json" "auth_principal_fingerprint")
+  access_token_fingerprint=$(json_string_field "$readiness_json" "access_token_fingerprint")
+  access_token_source=$(json_string_field "$readiness_json" "access_token_last_source")
+  access_token_consumer=$(json_string_field "$readiness_json" "access_token_last_consumer")
+  access_token_obtained_ts=$(json_number_field "$readiness_json" "access_token_obtained_ts_utc")
+  access_token_last_used_ts=$(json_number_field "$readiness_json" "access_token_last_used_ts_utc")
+  access_token_age_ms=$(json_number_field "$readiness_json" "access_token_age_ms")
+  access_token_ttl_remaining_ms=$(json_number_field "$readiness_json" "access_token_ttl_remaining_ms")
+  cws_authorized=$(json_bool_field "$readiness_json" "cws_authorized")
+  cws_connection_instance_id=$(json_string_field "$readiness_json" "cws_connection_instance_id")
+  cws_connected_ts=$(json_number_field "$readiness_json" "cws_connected_ts_utc")
+  cws_connection_age_sec=$(age_sec_from_ts "$cws_connected_ts" "$now_ts")
+  cws_connect_seq=$(json_number_field "$readiness_json" "cws_connect_seq")
+  cws_reconnect_seq=$(json_number_field "$readiness_json" "cws_reconnect_seq")
+  cws_protocol_reset_total=$(json_number_field "$readiness_json" "cws_protocol_reset_total")
+  cws_limit_send_total=$(json_number_field "$readiness_json" "cws_limit_send_total")
+  cws_limit_error_total=$(json_number_field "$readiness_json" "cws_limit_error_total")
+  cws_pending_failed_total=$(json_number_field "$readiness_json" "cws_pending_failed_total")
+  cws_pending_count=$(json_number_field "$readiness_json" "cws_pending_count")
+  cws_last_transport_failure_ts=$(json_number_field "$readiness_json" "cws_last_transport_failure_ts_utc")
+  cws_last_limit_send_ts=$(json_number_field "$readiness_json" "cws_last_limit_send_ts_utc")
+  cws_last_limit_error_ts=$(json_number_field "$readiness_json" "cws_last_limit_error_ts_utc")
+  cws_last_successful_send_ts=$(json_number_field "$readiness_json" "cws_last_successful_send_ts_utc")
+  cws_last_successful_ack_ts=$(json_number_field "$readiness_json" "cws_last_successful_ack_ts_utc")
+  reconnect_count=$(json_number_field "$readiness_json" "reconnect_count")
+  token_refresh_count=$(json_number_field "$readiness_json" "token_refresh_count")
+  ws_last_rx_age_sec=$(json_number_field "$readiness_json" "ws_last_rx_age_sec")
+  last_orders_ts=$(json_number_field "$readiness_json" "last_orders_ts")
+  last_orders_age_sec=$(age_sec_from_ts "$last_orders_ts" "$now_ts")
+  last_positions_ts=$(json_number_field "$readiness_json" "last_positions_ts")
+  last_positions_age_sec=$(age_sec_from_ts "$last_positions_ts" "$now_ts")
+  active_subscriptions_count=$(json_number_field "$readiness_json" "active_subscriptions_count")
+  desired_subscriptions_count=$(json_number_field "$readiness_json" "desired_subscriptions_count")
+  backpressure_lagged=$(json_bool_field "$readiness_json" "backpressure_lagged")
+  event_backpressure_lagged=$(json_bool_field "$readiness_json" "event_backpressure_lagged")
+  event_sink_degraded=$(json_bool_field "$readiness_json" "event_sink_degraded")
+  last_event_publish_ts=$(json_number_field "$readiness_json" "last_event_publish_ts")
+  last_event_publish_age_sec=$(age_sec_from_ts "$last_event_publish_ts" "$now_ts")
+  commands_received_total=$(json_number_field "$readiness_json" "commands_received_total")
+  commands_accepted_total=$(json_number_field "$readiness_json" "commands_accepted_total")
+  commands_rejected_total=$(json_number_field "$readiness_json" "commands_rejected_total")
+  commands_duplicate_total=$(json_number_field "$readiness_json" "commands_duplicate_total")
+  command_duplicate_total=$(json_number_field "$readiness_json" "command_duplicate_total")
+  command_expired_total=$(json_number_field "$readiness_json" "command_expired_total")
+  command_validation_failed_total=$(json_number_field "$readiness_json" "command_validation_failed_total")
+  command_processed_total=$(json_number_field "$readiness_json" "command_processed_total")
+  command_consumer_alive=$(json_bool_field "$readiness_json" "command_consumer_alive")
+  command_consumer_last_poll_ts=$(json_number_field "$readiness_json" "command_consumer_last_poll_ts_utc")
+  command_consumer_last_poll_age_sec=$(age_sec_from_ts "$command_consumer_last_poll_ts" "$now_ts")
+  command_consumer_last_message_id=$(json_string_field "$readiness_json" "command_consumer_last_message_id")
+  command_consumer_errors_total=$(json_number_field "$readiness_json" "command_consumer_errors_total")
+  command_consumer_redis_timeouts_total=$(json_number_field "$readiness_json" "command_consumer_redis_timeouts_total")
+  cws_errors_total=$(json_number_field "$readiness_json" "cws_errors_total")
+  orders_ws_events_total=$(json_number_field "$readiness_json" "orders_ws_events_total")
+
+  cat > "$summary_file" <<EOF
+CAPTURED_TS_UTC=$now_ts
+STACK=$STACK
+LABEL=$label
+READINESS=$(value_or_na "$readiness")
+GATEWAY_PHASE=$(value_or_na "$gateway_phase")
+GATEWAY_INSTANCE_ID=$(value_or_na "$gateway_instance_id")
+AUTH_PRINCIPAL_FINGERPRINT=$(value_or_na "$auth_principal_fingerprint")
+ACCESS_TOKEN_FINGERPRINT=$(value_or_na "$access_token_fingerprint")
+ACCESS_TOKEN_LAST_SOURCE=$(value_or_na "$access_token_source")
+ACCESS_TOKEN_LAST_CONSUMER=$(value_or_na "$access_token_consumer")
+ACCESS_TOKEN_OBTAINED_TS_UTC=$(value_or_na "$access_token_obtained_ts")
+ACCESS_TOKEN_LAST_USED_TS_UTC=$(value_or_na "$access_token_last_used_ts")
+ACCESS_TOKEN_AGE_MS=$(value_or_na "$access_token_age_ms")
+ACCESS_TOKEN_TTL_REMAINING_MS=$(value_or_na "$access_token_ttl_remaining_ms")
+CWS_AUTHORIZED=$(value_or_na "$cws_authorized")
+CWS_CONNECTION_INSTANCE_ID=$(value_or_na "$cws_connection_instance_id")
+CWS_CONNECTED_TS_UTC=$(value_or_na "$cws_connected_ts")
+CWS_CONNECTION_AGE_SEC=$(value_or_na "$cws_connection_age_sec")
+CWS_CONNECT_SEQ=$(value_or_na "$cws_connect_seq")
+CWS_RECONNECT_SEQ=$(value_or_na "$cws_reconnect_seq")
+CWS_PROTOCOL_RESET_TOTAL=$(value_or_na "$cws_protocol_reset_total")
+CWS_LIMIT_SEND_TOTAL=$(value_or_na "$cws_limit_send_total")
+CWS_LIMIT_ERROR_TOTAL=$(value_or_na "$cws_limit_error_total")
+CWS_PENDING_FAILED_TOTAL=$(value_or_na "$cws_pending_failed_total")
+CWS_PENDING_COUNT=$(value_or_na "$cws_pending_count")
+CWS_LAST_TRANSPORT_FAILURE_TS_UTC=$(value_or_na "$cws_last_transport_failure_ts")
+CWS_LAST_LIMIT_SEND_TS_UTC=$(value_or_na "$cws_last_limit_send_ts")
+CWS_LAST_LIMIT_ERROR_TS_UTC=$(value_or_na "$cws_last_limit_error_ts")
+CWS_LAST_SUCCESSFUL_SEND_TS_UTC=$(value_or_na "$cws_last_successful_send_ts")
+CWS_LAST_SUCCESSFUL_ACK_TS_UTC=$(value_or_na "$cws_last_successful_ack_ts")
+RECONNECT_COUNT=$(value_or_na "$reconnect_count")
+TOKEN_REFRESH_COUNT=$(value_or_na "$token_refresh_count")
+WS_LAST_RX_AGE_SEC=$(value_or_na "$ws_last_rx_age_sec")
+LAST_ORDERS_TS=$(value_or_na "$last_orders_ts")
+LAST_ORDERS_AGE_SEC=$(value_or_na "$last_orders_age_sec")
+LAST_POSITIONS_TS=$(value_or_na "$last_positions_ts")
+LAST_POSITIONS_AGE_SEC=$(value_or_na "$last_positions_age_sec")
+ACTIVE_SUBSCRIPTIONS_COUNT=$(value_or_na "$active_subscriptions_count")
+DESIRED_SUBSCRIPTIONS_COUNT=$(value_or_na "$desired_subscriptions_count")
+BACKPRESSURE_LAGGED=$(value_or_na "$backpressure_lagged")
+EVENT_BACKPRESSURE_LAGGED=$(value_or_na "$event_backpressure_lagged")
+EVENT_SINK_DEGRADED=$(value_or_na "$event_sink_degraded")
+LAST_EVENT_PUBLISH_TS=$(value_or_na "$last_event_publish_ts")
+LAST_EVENT_PUBLISH_AGE_SEC=$(value_or_na "$last_event_publish_age_sec")
+COMMANDS_RECEIVED_TOTAL=$(value_or_na "$commands_received_total")
+COMMANDS_ACCEPTED_TOTAL=$(value_or_na "$commands_accepted_total")
+COMMANDS_REJECTED_TOTAL=$(value_or_na "$commands_rejected_total")
+COMMANDS_DUPLICATE_TOTAL=$(value_or_na "$commands_duplicate_total")
+COMMAND_DUPLICATE_TOTAL=$(value_or_na "$command_duplicate_total")
+COMMAND_EXPIRED_TOTAL=$(value_or_na "$command_expired_total")
+COMMAND_VALIDATION_FAILED_TOTAL=$(value_or_na "$command_validation_failed_total")
+COMMAND_PROCESSED_TOTAL=$(value_or_na "$command_processed_total")
+COMMAND_CONSUMER_ALIVE=$(value_or_na "$command_consumer_alive")
+COMMAND_CONSUMER_LAST_POLL_TS_UTC=$(value_or_na "$command_consumer_last_poll_ts")
+COMMAND_CONSUMER_LAST_POLL_AGE_SEC=$(value_or_na "$command_consumer_last_poll_age_sec")
+COMMAND_CONSUMER_LAST_MESSAGE_ID=$(value_or_na "$command_consumer_last_message_id")
+COMMAND_CONSUMER_ERRORS_TOTAL=$(value_or_na "$command_consumer_errors_total")
+COMMAND_CONSUMER_REDIS_TIMEOUTS_TOTAL=$(value_or_na "$command_consumer_redis_timeouts_total")
+CWS_ERRORS_TOTAL=$(value_or_na "$cws_errors_total")
+ORDERS_WS_EVENTS_TOTAL=$(value_or_na "$orders_ws_events_total")
+EOF
+
+  cat <<EOF
+RUN_DIR=$run_dir
+STACK=$STACK
+LABEL=$label
+READINESS_FILE=$readiness_file
+SUMMARY_FILE=$summary_file
+EOF
+}
+
 latest_stream_match() {
   local stack_name=$1
   local stream_name=$2
@@ -330,6 +585,8 @@ loop_limit_cycle() {
   fi
 
   for iter in $(seq 1 "$iterations"); do
+    capture_preflight "$run_dir" "$stack_name" "iter${iter}.before" >/dev/null
+    echo "ITERATION=$iter phase=preflight $(preflight_compact_line "${run_dir}/${stack_name}.preflight.iter${iter}.before.summary.txt")" | tee -a "$summary_file"
     echo "ITERATION=$iter phase=place_start price=$price qty=$qty side=$side" | tee -a "$summary_file"
 
     place_out=$(send_place "$stack_name" "$price" "$qty" "$side")
@@ -448,6 +705,10 @@ main() {
     capture)
       require_arg 3 "$@"
       capture_phase "$2" "$3"
+      ;;
+    preflight)
+      require_arg 3 "$@"
+      capture_preflight "$2" "$3" "${4:-manual}"
       ;;
     place)
       require_arg 3 "$@"
