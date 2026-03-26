@@ -9,6 +9,8 @@ Primary artifacts:
 - `docs/create-limit-tz1.5-results-2026-03-26-artifacts/README.md`
 - `docs/create-limit-tz1.6-results-2026-03-26.md`
 - `docs/create-limit-tz1.6-results-2026-03-26-artifacts/README.md`
+- `docs/create-limit-hardening-2.0-results-2026-03-26.md`
+- `docs/create-limit-hardening-2.0-results-2026-03-26-artifacts/README.md`
 - `docs/create-limit-and-sessiongap-review-ready-2026-03-23.md`
 - `docs/create-limit-delete-limit-formal-chronology-2026-03-25.md`
 - `docs/create-limit-delete-limit-chronology-memo-2026-03-25.md`
@@ -58,6 +60,10 @@ Since the earlier `2026-03-23` review-ready report, this package now also includ
    - `10m cadence REPRO`
    - `5m cadence REPRO`
    - `reconnect before first order PASS`.
+9. `TZ 2.0` hardening rollout validation:
+   - fresh path `PASS` without recycle
+   - stale path `PASS` via explicit recycle-before-send
+   - market path regression `PASS`
 
 ## 3. Strongest Current Conclusions
 
@@ -134,6 +140,22 @@ This is the strongest current practical conclusion in the whole package:
 - regular safe cadence keepalive is insufficient;
 - proactive reconnect or recycle before the first limit command after a long quiet window is the strongest current workaround direction.
 
+### 3.7 `TZ 2.0` validates the chosen hardening path live
+
+The first hardening rollout now shows the intended split directly:
+
+- fresh `sessiongap` passive limit path passes without recycle;
+- stale `sessiongap` passive limit path is detected as stale, recycled, and then passes on a fresh connection;
+- `hybrid` market path passes without entering the new recycle flow.
+
+This moves the package from:
+
+- "diagnostically strong and ready for hardening"
+
+to:
+
+- "first hardening line implemented and live-validated".
+
 ## 4. Practical Readout For Review
 
 What this package now supports with confidence:
@@ -155,7 +177,7 @@ What this package still does not prove conclusively:
 The remaining work is now comparatively narrow:
 
 1. translate the `TZ 1.6` conclusion into a hardening implementation;
-2. validate that implementation on live runs;
+2. optionally add one controlled recycle-failure validation;
 3. optionally add one real network-driven reconnect comparison if engineering still wants broker-vs-client confidence beyond the current operational gate.
 
 ## 6. Requested Review Focus
@@ -174,7 +196,7 @@ Requested focus for project review:
 
 - accept the package as materially narrowed and review-ready;
 - accept the analytic phase as sufficiently resolved for hardening;
-- approve moving from further broad diagnosis to a narrow hardening implementation.
+- accept the first hardening line as live-validated for fresh-path, stale-path, and market-regression checks.
 
 ## 7. Bottom Line
 
@@ -192,4 +214,4 @@ It contains:
 Recommended overall position:
 
 - ready for review;
-- ready to move into hardening.
+- ready to move from hardening validation into rollout hardening/operationalization.

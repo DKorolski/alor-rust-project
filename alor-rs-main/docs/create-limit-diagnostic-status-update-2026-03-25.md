@@ -11,6 +11,7 @@ Related documents:
 - `docs/create-limit-delete-limit-post-fix-clean-loop-2026-03-25.md`
 - `docs/create-limit-tz1.5-results-2026-03-26.md`
 - `docs/create-limit-tz1.6-results-2026-03-26.md`
+- `docs/create-limit-hardening-2.0-results-2026-03-26.md`
 - `docs/session-gap-b2-runbook.md`
 
 Follow-on note:
@@ -21,6 +22,9 @@ Follow-on note:
 - later `TZ 1.6` cadence-vs-reconnect final validation was also captured on `2026-03-26` and is documented separately in:
   - `docs/create-limit-tz1.6-results-2026-03-26.md`
   - `docs/create-limit-tz1.6-results-2026-03-26-artifacts/README.md`
+- later `TZ 2.0` hardening rollout validation was also captured on `2026-03-26` and is documented separately in:
+  - `docs/create-limit-hardening-2.0-results-2026-03-26.md`
+  - `docs/create-limit-hardening-2.0-results-2026-03-26-artifacts/README.md`
 
 ## 1. Purpose
 

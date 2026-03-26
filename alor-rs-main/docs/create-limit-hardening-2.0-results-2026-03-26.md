@@ -8,6 +8,7 @@ Related documents:
 - `docs/create-limit-review-submission-2026-03-25.md`
 - `docs/create-limit-diagnostic-status-update-2026-03-25.md`
 - `docs/create-limit-hardening-2.0-rollout-runbook-2026-03-26.md`
+- `docs/create-limit-hardening-2.0-results-2026-03-26-artifacts/README.md`
 
 ## 1. Purpose
 
@@ -151,7 +152,164 @@ The local test set now covers:
 - timeout/failure path with controlled block
 - scope filter for `Entry + Place` only
 
-## 6. Strongest Current Conclusion
+## 6. Live Rollout And Acceptance
+
+The hardening line was rolled out on `2026-03-26` as:
+
+- gateway image: `ghcr.io/dkorolski/alor-rust-project/alor-gateway:dev-774b917-diag-20260326`
+
+Rollout scope:
+
+- only `alor-gateway` was recreated
+- `sessiongap` and `hybrid` were both updated
+- `strategy-runtime` was not recreated
+
+Post-rollout readiness on both stacks exposed the new `TZ 2.0` fields:
+
+- `control_path_stale`
+- `control_path_stale_reason`
+- `control_path_stale_for_ms`
+- `control_path_stale_detected_total`
+- `control_path_recycle_total`
+- `control_path_recycle_success_total`
+- `control_path_recycle_failed_total`
+- `control_path_stale_blocked_send_total`
+
+### 6.1 Fresh path passed without recycle
+
+Run directory:
+
+- `/opt/diag-captures/20260326-225749`
+
+Observed:
+
+- fresh `sessiongap` passive `create:limit -> delete:limit` completed cleanly
+- `place`:
+  - `request_id = 20f9cb69-ac40-41eb-8752-3a56ea7eec94`
+  - `broker_order_id = 2023555935792437604`
+  - `accepted -> working`
+- `cancel`:
+  - `request_id = 390f4ea6-8489-4a30-a93d-aba37ce5710d`
+  - `accepted -> canceled`
+  - `filled = 0.0`
+
+No fresh-path hardening events were emitted:
+
+- no `control_path_stale_detected`
+- no `control_path_recycle_start`
+- no `control_path_send_after_recycle`
+
+Interpretation:
+
+- fresh entry path remained unchanged operationally;
+- the hardening did not introduce unnecessary recycle on healthy fresh control path.
+
+### 6.2 Stale path passed via recycle-before-send
+
+Run directory:
+
+- `/opt/diag-captures/20260326-225923`
+
+Pre-send stale baseline:
+
+- `CWS_CONNECTION_INSTANCE_ID = 0fd446a4-0eae-4707-9a39-b480fb20230d`
+- `CWS_CONNECTION_AGE_SEC = 1052`
+- `CWS_LAST_TX_AGE_MS = 1052133`
+- `CWS_LAST_CONTROL_SUCCESS_AGE_MS = na`
+- `CWS_PENDING_COUNT = 0`
+- `REQUEST_MAP_SIZE = 0`
+
+First stale-path `place`:
+
+- `request_id = f0e60be3-0778-4459-8023-99846893c015`
+- `broker_order_id = 2023555935792442183`
+
+Hardening logs:
+
+- `control_path_stale_detected`
+- `control_path_recycle_start`
+- `control_path_recycle_success`
+- `control_path_send_after_recycle`
+
+Connection switch:
+
+- previous `cws_connection_instance_id = 0fd446a4-0eae-4707-9a39-b480fb20230d`
+- fresh `cws_connection_instance_id = 53c26739-3775-4f67-9998-84145da78e9f`
+
+Order lifecycle after recycle:
+
+- `place accepted -> working`
+- `cancel request_id = 3fe9596f-2933-4224-ab84-34b1c9ef3d1e`
+- `cancel accepted -> canceled`
+- `filled = 0.0`
+
+Counters after run:
+
+- `control_path_stale_detected_total = 1`
+- `control_path_recycle_total = 1`
+- `control_path_recycle_success_total = 1`
+- `control_path_recycle_failed_total = 0`
+- `control_path_stale_blocked_send_total = 0`
+
+Interpretation:
+
+- the stale path no longer sent blindly into the aged control session;
+- the live run validated the intended `recycle-before-send` behavior.
+
+### 6.3 Market path regression passed
+
+Run directory:
+
+- `/opt/diag-captures/20260326-231806-hybrid-market`
+
+Stack:
+
+- `hybrid` paper
+
+Observed:
+
+- market buy:
+  - `request_id = 7eed03c0-115c-4536-82a6-28934287e414`
+  - `broker_order_id = 2033126085000190190`
+  - `filled`
+- market sell:
+  - `request_id = 996824f7-4515-49f9-81b3-fd83da5328b1`
+  - `broker_order_id = 2033126085000190238`
+  - `filled`
+
+No hardening recycle events were emitted on the market path.
+
+Interpretation:
+
+- `market` remained out of scope operationally, as intended;
+- no fresh regression was introduced into market order routing.
+
+### 6.4 Operational note: one duplicate manual entry was operator-induced
+
+During the first fresh-path acceptance, two separate manual `create:limit` commands were sent:
+
+- `f4711fbe-6174-4cc0-8eb5-57ec907f0bf8`
+- `20f9cb69-ac40-41eb-8752-3a56ea7eec94`
+
+These appeared in `cmd.orders.7502MIW` as two distinct stream messages and produced two distinct broker orders:
+
+- `2023555935792437596`
+- `2023555935792437604`
+
+This was not a gateway-side duplicate of one request. It was an operator-induced double send during an ambiguous acceptance run. The lingering first order was later canceled successfully:
+
+- cancel request:
+  - `2bda3071-0ccb-43d1-a24a-d4f82509d317`
+- terminal state:
+  - `2023555935792437596 status = canceled`
+  - `filled = 0.0`
+
+Interpretation:
+
+- no new hardening bug is indicated by this duplicate;
+- the acceptance runbook should avoid `loop 1` style flows that can encourage accidental manual re-entry while a previous helper invocation is still unresolved.
+
+## 7. Strongest Current Conclusion
 
 The hardening has been implemented in the narrow form requested by `TZ 2.0`:
 
@@ -165,15 +323,19 @@ Operationally, this is aligned with the strongest `TZ 1.6` conclusion:
 - cadence keepalive was insufficient
 - reconnect/recycle before the first live limit order after long silence was the strongest workaround
 
-## 7. Remaining Work
+The live rollout now supports the same conclusion directly:
 
-This document captures code-complete local hardening.
+- fresh path passes without recycle;
+- stale path passes via explicit recycle-before-send;
+- market path stays unaffected.
 
-Still pending after this step:
+## 8. Remaining Work
 
-1. deploy the new gateway build
-2. run live acceptance checks:
-   - fresh path `PASS`
-   - stale path `recycle-before-send PASS`
-   - optional recycle-failure simulation
-3. collect the first rollout review bundle
+This document now captures both code-complete hardening and first live acceptance.
+
+Still optional after this step:
+
+1. run controlled recycle-failure simulation:
+   - expect `control_path_recycle_failed`
+   - expect blocked send with controlled error ack;
+2. decide whether to keep `TZ 2.0` as the first production hardening line or layer an additional operational wrapper around it.
