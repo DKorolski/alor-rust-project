@@ -119,11 +119,15 @@ Expected:
 - no `control_path_recycle_start`;
 - no `control_path_send_after_recycle`.
 
+Use the explicit single-shot helper instead of `loop ... 1`.
+
+This avoids ambiguous operator behavior where a helper looks quiet and a manual second `place` gets sent on top of a still-running first acceptance attempt.
+
 ```bash
 RUN_DIR=$(/opt/limit_diag.sh init-run)
 /opt/limit_diag.sh restart-gateway sessiongap 180 >/dev/null
 /opt/limit_diag.sh preflight "$RUN_DIR" sessiongap fresh_before >/dev/null
-/opt/limit_diag.sh loop sessiongap 79.00 1 1.0 buy 1
+/opt/limit_diag.sh single sessiongap 79.00 1.0 buy fresh_probe "$RUN_DIR"
 ```
 
 Inspect:
@@ -164,8 +168,7 @@ RUN_DIR=$(/opt/limit_diag.sh init-run)
 /opt/limit_diag.sh preflight "$RUN_DIR" sessiongap stale_baseline >/dev/null
 sleep 960
 /opt/limit_diag.sh preflight "$RUN_DIR" sessiongap stale_before >/dev/null
-/opt/limit_diag.sh loop sessiongap 79.00 1 1.0 buy 1
-/opt/limit_diag.sh capture post "$RUN_DIR"
+/opt/limit_diag.sh single sessiongap 79.00 1.0 buy stale_probe "$RUN_DIR"
 ```
 
 Inspect readiness before and after:
@@ -189,6 +192,11 @@ Stale-path acceptance:
 - `control_path_recycle_success` is present;
 - `control_path_send_after_recycle` is present;
 - order cycle ends `accepted -> working -> canceled`, `filled = 0.0`.
+
+Operational note:
+
+- do not send a manual fallback `place` while `single` is still running;
+- if the helper output appears quiet, inspect the summary or process state first rather than issuing a second live command.
 
 ## 6. Acceptance C: Recycle Failure Controlled Error
 

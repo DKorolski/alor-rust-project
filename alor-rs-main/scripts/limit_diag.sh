@@ -12,6 +12,7 @@ Usage:
   limit_diag.sh restart-gateway <sessiongap|hybrid> [timeout_sec]
   limit_diag.sh place <sessiongap|hybrid> <price> [qty] [side]
   limit_diag.sh cancel <sessiongap|hybrid> <order_id>
+  limit_diag.sh single <sessiongap|hybrid> <price> [qty] [side] [label] [run_dir]
   limit_diag.sh loop <sessiongap|hybrid> <price> [iterations] [qty] [side] [sleep_sec]
   limit_diag.sh tz16-baseline <sessiongap|hybrid> <price> [idle_sec] [qty] [side]
   limit_diag.sh tz16-cadence <sessiongap|hybrid> <price> <interval_sec> [total_window_sec] [qty] [side]
@@ -27,6 +28,7 @@ Examples:
   scripts/limit_diag.sh restart-gateway sessiongap 120
   scripts/limit_diag.sh place sessiongap 81.71
   scripts/limit_diag.sh cancel sessiongap 2023555922907497864
+  scripts/limit_diag.sh single sessiongap 79.00
   scripts/limit_diag.sh loop sessiongap 80.10 20
   scripts/limit_diag.sh tz16-baseline sessiongap 79.00 1800
   scripts/limit_diag.sh tz16-cadence sessiongap 79.00 600 1800
@@ -1099,6 +1101,43 @@ loop_limit_cycle() {
   echo "SUMMARY_FILE=$summary_file"
 }
 
+single_limit_cycle() {
+  local stack_name=$1
+  local price=$2
+  local qty=${3:-1.0}
+  local side=${4:-buy}
+  local label=${5:-single}
+  local run_dir=${6:-}
+  local summary_file
+
+  if [ -z "$run_dir" ]; then
+    run_dir="/opt/diag-captures/$(date +%Y%m%d-%H%M%S)"
+  fi
+
+  mkdir -p "$run_dir"
+  capture_phase pre "$run_dir"
+  summary_file="${run_dir}/${stack_name}.${label}.summary.txt"
+  : > "$summary_file"
+
+  tz16_assert_flat "$stack_name" "$summary_file" || {
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 2
+  }
+
+  if ! run_limit_cycle "$run_dir" "$stack_name" "$price" "$qty" "$side" "$label" "$summary_file"; then
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 1
+  fi
+
+  capture_phase post "$run_dir"
+  echo "RUN_DIR=$run_dir"
+  echo "SUMMARY_FILE=$summary_file"
+}
+
 main() {
   require_arg 1 "$@"
 
@@ -1133,6 +1172,10 @@ main() {
     cancel)
       require_arg 3 "$@"
       send_cancel "$2" "$3"
+      ;;
+    single)
+      require_arg 3 "$@"
+      single_limit_cycle "$2" "$3" "${4:-1.0}" "${5:-buy}" "${6:-single}" "${7:-}"
       ;;
     loop)
       require_arg 3 "$@"
