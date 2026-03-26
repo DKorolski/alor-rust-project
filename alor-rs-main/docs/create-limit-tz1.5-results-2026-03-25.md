@@ -6,6 +6,14 @@ Related documents:
 
 - `docs/create-limit-tz1.4-results-2026-03-25.md`
 - `docs/create-limit-tz1.4-preflight-and-activity-aging-2026-03-25.md`
+- `docs/create-limit-tz1.5-results-2026-03-26.md`
+
+Status note:
+
+- this `2026-03-25` file records the prepared `TZ 1.5` plan and telemetry rollout state before live execution;
+- the actual live `TZ 1.5` results were recorded later in:
+  - `docs/create-limit-tz1.5-results-2026-03-26.md`
+  - `docs/create-limit-tz1.5-results-2026-03-26-artifacts/README.md`
 
 ## 1. Purpose
 

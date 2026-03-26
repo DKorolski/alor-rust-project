@@ -9,7 +9,14 @@ Related documents:
 - `docs/create-limit-delete-limit-formal-chronology-2026-03-25.md`
 - `docs/create-limit-delete-limit-chronology-memo-2026-03-25.md`
 - `docs/create-limit-delete-limit-post-fix-clean-loop-2026-03-25.md`
+- `docs/create-limit-tz1.5-results-2026-03-26.md`
 - `docs/session-gap-b2-runbook.md`
+
+Follow-on note:
+
+- later `TZ 1.5` idle/keepalive-specific live results were captured on `2026-03-26` and are documented separately in:
+  - `docs/create-limit-tz1.5-results-2026-03-26.md`
+  - `docs/create-limit-tz1.5-results-2026-03-26-artifacts/README.md`
 
 ## 1. Purpose
 

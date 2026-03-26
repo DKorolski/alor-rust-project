@@ -5,6 +5,8 @@ Date: 2026-03-25
 Primary artifacts:
 
 - `docs/create-limit-diagnostic-status-update-2026-03-25.md`
+- `docs/create-limit-tz1.5-results-2026-03-26.md`
+- `docs/create-limit-tz1.5-results-2026-03-26-artifacts/README.md`
 - `docs/create-limit-and-sessiongap-review-ready-2026-03-23.md`
 - `docs/create-limit-delete-limit-formal-chronology-2026-03-25.md`
 - `docs/create-limit-delete-limit-chronology-memo-2026-03-25.md`
@@ -45,6 +47,10 @@ Since the earlier `2026-03-23` review-ready report, this package now also includ
 6. immediate retry after reconnect on both stacks:
    - `hybrid PASS`
    - `sessiongap PASS`.
+7. `TZ 1.5` idle/control-path silence aging results:
+   - `idle 20m PASS`
+   - `idle 30m REPRO`
+   - `idle 30m + mid-window keepalive still REPRO`.
 
 ## 3. Strongest Current Conclusions
 
@@ -96,6 +102,16 @@ The package now contains direct evidence that:
 - earlier post-incident `401 Invalid JWT token!` loops are better explained by stale cached-token reuse during recovery than by a permanently invalid `refresh_token`.
 
 This narrows the auth issue, but it does not by itself close the primary root cause for the transport reset incidents.
+
+### 3.5 `TZ 1.5` narrows the idle/keepalive hypothesis further
+
+The new `2026-03-26` `TZ 1.5` package now shows:
+
+- `idle 20m` can pass cleanly;
+- `idle 30m` can fail cleanly on the first `create:limit`;
+- one successful mid-window keepalive at ~15m does not prevent the later ~30m `REPRO`.
+
+This strengthens the view that the residual issue is tied to longer-lived, mostly idle CWS/control-path session state more than to ordinary safe create/delete activity, while also weakening the idea that one small keepalive is enough to clear it.
 
 ## 4. Practical Readout For Review
 
