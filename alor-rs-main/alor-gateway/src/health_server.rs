@@ -1,4 +1,3 @@
-use std::time::Instant;
 use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
@@ -6,7 +5,10 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use tracing::info;
 
-use crate::health::{CwsFrameTraceEntry, GatewayPhase, HealthState, ResyncMode};
+use crate::health::{
+    CwsFrameTraceEntry, GatewayPhase, HealthState, ResyncMode,
+    evaluate_control_path_stale,
+};
 use alor_types::MarketState;
 
 #[derive(Debug, Serialize)]
@@ -47,6 +49,15 @@ struct ReadinessResponse {
     cws_last_ping_ts_utc: Option<i64>,
     cws_last_pong_ts_utc: Option<i64>,
     cws_last_ping_pong_age_ms: Option<u64>,
+    control_path_stale_after_sec: u64,
+    control_path_stale: bool,
+    control_path_stale_reason: Option<String>,
+    control_path_stale_for_ms: Option<u64>,
+    control_path_stale_detected_total: u64,
+    control_path_recycle_total: u64,
+    control_path_recycle_success_total: u64,
+    control_path_recycle_failed_total: u64,
+    control_path_stale_blocked_send_total: u64,
     cws_connect_total: u64,
     cws_reconnect_total: u64,
     cws_protocol_reset_total: u64,
@@ -127,6 +138,15 @@ struct CwsDebugResponse {
     cws_last_ping_ts_utc: Option<i64>,
     cws_last_pong_ts_utc: Option<i64>,
     cws_last_ping_pong_age_ms: Option<u64>,
+    control_path_stale_after_sec: u64,
+    control_path_stale: bool,
+    control_path_stale_reason: Option<String>,
+    control_path_stale_for_ms: Option<u64>,
+    control_path_stale_detected_total: u64,
+    control_path_recycle_total: u64,
+    control_path_recycle_success_total: u64,
+    control_path_recycle_failed_total: u64,
+    control_path_stale_blocked_send_total: u64,
     cws_pending_count: u64,
     cws_pending_guids: Vec<String>,
     cws_oldest_pending_age_ms: Option<u64>,
@@ -166,11 +186,7 @@ async fn readiness(
     State(health): State<Arc<RwLock<HealthState>>>,
 ) -> (StatusCode, Json<ReadinessResponse>) {
     let guard = health.read();
-    let cws_last_rx_age_ms = age_ms(guard.cws_last_rx_at);
-    let cws_last_tx_age_ms = age_ms(guard.cws_last_tx_at);
-    let cws_last_control_success_age_ms = age_ms(guard.cws_last_control_success_at);
-    let cws_last_control_failure_age_ms = age_ms(guard.cws_last_control_failure_at);
-    let cws_last_ping_pong_age_ms = min_age_ms(guard.cws_last_ping_at, guard.cws_last_pong_at);
+    let stale = evaluate_control_path_stale(&guard);
     let status = if guard.readiness {
         StatusCode::OK
     } else {
@@ -202,20 +218,29 @@ async fn readiness(
             cws_last_connect_ts_utc: guard.cws_last_connect_ts_utc,
             cws_last_transport_failure_ts_utc: guard.cws_last_transport_failure_ts_utc,
             cws_last_rx_ts_utc: guard.cws_last_rx_ts_utc,
-            cws_last_rx_age_ms,
+            cws_last_rx_age_ms: stale.last_rx_age_ms,
             cws_last_tx_ts_utc: guard.cws_last_tx_ts_utc,
-            cws_last_tx_age_ms,
+            cws_last_tx_age_ms: stale.last_tx_age_ms,
             cws_last_limit_send_ts_utc: guard.cws_last_limit_send_ts_utc,
             cws_last_limit_error_ts_utc: guard.cws_last_limit_error_ts_utc,
             cws_last_successful_send_ts_utc: guard.cws_last_successful_send_ts_utc,
             cws_last_successful_ack_ts_utc: guard.cws_last_successful_ack_ts_utc,
             cws_last_control_success_ts_utc: guard.cws_last_control_success_ts_utc,
-            cws_last_control_success_age_ms,
+            cws_last_control_success_age_ms: stale.last_control_success_age_ms,
             cws_last_control_failure_ts_utc: guard.cws_last_control_failure_ts_utc,
-            cws_last_control_failure_age_ms,
+            cws_last_control_failure_age_ms: stale.last_control_failure_age_ms,
             cws_last_ping_ts_utc: guard.cws_last_ping_ts_utc,
             cws_last_pong_ts_utc: guard.cws_last_pong_ts_utc,
-            cws_last_ping_pong_age_ms,
+            cws_last_ping_pong_age_ms: stale.last_ping_pong_age_ms,
+            control_path_stale_after_sec: guard.control_path_stale_after_sec,
+            control_path_stale: stale.stale,
+            control_path_stale_reason: stale.reason.map(str::to_string),
+            control_path_stale_for_ms: stale.stale_for_ms,
+            control_path_stale_detected_total: guard.control_path_stale_detected_total,
+            control_path_recycle_total: guard.control_path_recycle_total,
+            control_path_recycle_success_total: guard.control_path_recycle_success_total,
+            control_path_recycle_failed_total: guard.control_path_recycle_failed_total,
+            control_path_stale_blocked_send_total: guard.control_path_stale_blocked_send_total,
             cws_connect_total: guard.cws_connect_total,
             cws_reconnect_total: guard.cws_reconnect_total,
             cws_protocol_reset_total: guard.cws_protocol_reset_total,
@@ -278,6 +303,7 @@ async fn cws_debug(
     State(health): State<Arc<RwLock<HealthState>>>,
 ) -> (StatusCode, Json<CwsDebugResponse>) {
     let guard = health.read();
+    let stale = evaluate_control_path_stale(&guard);
     let status = if guard.readiness {
         StatusCode::OK
     } else {
@@ -299,16 +325,25 @@ async fn cws_debug(
             cws_reconnect_seq: guard.cws_reconnect_seq,
             cws_connected_ts_utc: guard.cws_connected_ts_utc,
             cws_last_rx_ts_utc: guard.cws_last_rx_ts_utc,
-            cws_last_rx_age_ms: age_ms(guard.cws_last_rx_at),
+            cws_last_rx_age_ms: stale.last_rx_age_ms,
             cws_last_tx_ts_utc: guard.cws_last_tx_ts_utc,
-            cws_last_tx_age_ms: age_ms(guard.cws_last_tx_at),
+            cws_last_tx_age_ms: stale.last_tx_age_ms,
             cws_last_control_success_ts_utc: guard.cws_last_control_success_ts_utc,
-            cws_last_control_success_age_ms: age_ms(guard.cws_last_control_success_at),
+            cws_last_control_success_age_ms: stale.last_control_success_age_ms,
             cws_last_control_failure_ts_utc: guard.cws_last_control_failure_ts_utc,
-            cws_last_control_failure_age_ms: age_ms(guard.cws_last_control_failure_at),
+            cws_last_control_failure_age_ms: stale.last_control_failure_age_ms,
             cws_last_ping_ts_utc: guard.cws_last_ping_ts_utc,
             cws_last_pong_ts_utc: guard.cws_last_pong_ts_utc,
-            cws_last_ping_pong_age_ms: min_age_ms(guard.cws_last_ping_at, guard.cws_last_pong_at),
+            cws_last_ping_pong_age_ms: stale.last_ping_pong_age_ms,
+            control_path_stale_after_sec: guard.control_path_stale_after_sec,
+            control_path_stale: stale.stale,
+            control_path_stale_reason: stale.reason.map(str::to_string),
+            control_path_stale_for_ms: stale.stale_for_ms,
+            control_path_stale_detected_total: guard.control_path_stale_detected_total,
+            control_path_recycle_total: guard.control_path_recycle_total,
+            control_path_recycle_success_total: guard.control_path_recycle_success_total,
+            control_path_recycle_failed_total: guard.control_path_recycle_failed_total,
+            control_path_stale_blocked_send_total: guard.control_path_stale_blocked_send_total,
             cws_pending_count: guard.cws_pending_count,
             cws_pending_guids: guard.cws_pending_guids.clone(),
             cws_oldest_pending_age_ms: guard.cws_oldest_pending_age_ms,
@@ -326,17 +361,4 @@ async fn cws_debug(
             recent_outbound_frames: guard.cws_recent_outbound_frames.clone(),
         }),
     )
-}
-
-fn age_ms(value: Option<Instant>) -> Option<u64> {
-    value.map(|instant| instant.elapsed().as_millis() as u64)
-}
-
-fn min_age_ms(first: Option<Instant>, second: Option<Instant>) -> Option<u64> {
-    match (age_ms(first), age_ms(second)) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(left), None) => Some(left),
-        (None, Some(right)) => Some(right),
-        (None, None) => None,
-    }
 }

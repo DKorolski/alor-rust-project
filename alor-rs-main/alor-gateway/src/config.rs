@@ -51,6 +51,10 @@ pub struct AlorGatewayConfig {
     pub gap_backfill_padding_bars: u8,
     pub cold_start_history_days_back: u8,
     pub bar_silence_resync_min_sec: u64,
+    pub control_path_stale_after_sec: u64,
+    pub control_path_pre_entry_recycle_enabled: bool,
+    pub control_path_recycle_timeout_ms: u64,
+    pub control_path_hardening_log_only: bool,
     pub data_report_path: Option<String>,
     pub bar_dump_path: Option<String>,
 }
@@ -145,6 +149,19 @@ impl AlorGatewayConfig {
             gap_backfill_padding_bars: parse_u8("ALOR_GAP_BACKFILL_PADDING_BARS", 2)?,
             cold_start_history_days_back: parse_u8("ALOR_COLD_START_HISTORY_DAYS_BACK", 4)?,
             bar_silence_resync_min_sec: parse_u64("ALOR_BAR_SILENCE_RESYNC_MIN_SEC", 300)?,
+            control_path_stale_after_sec: parse_u64("ALOR_CONTROL_PATH_STALE_AFTER_SEC", 900)?,
+            control_path_pre_entry_recycle_enabled: parse_bool(
+                "ALOR_CONTROL_PATH_PRE_ENTRY_RECYCLE_ENABLED",
+                true,
+            ),
+            control_path_recycle_timeout_ms: parse_u64(
+                "ALOR_CONTROL_PATH_RECYCLE_TIMEOUT_MS",
+                5_000,
+            )?,
+            control_path_hardening_log_only: parse_bool(
+                "ALOR_CONTROL_PATH_HARDENING_LOG_ONLY",
+                false,
+            ),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         })
@@ -284,6 +301,26 @@ impl AlorGatewayConfig {
                 300,
                 &mut sources,
             )?,
+            control_path_stale_after_sec: parse_u64_with_source(
+                "ALOR_CONTROL_PATH_STALE_AFTER_SEC",
+                900,
+                &mut sources,
+            )?,
+            control_path_pre_entry_recycle_enabled: parse_bool_with_source(
+                "ALOR_CONTROL_PATH_PRE_ENTRY_RECYCLE_ENABLED",
+                true,
+                &mut sources,
+            ),
+            control_path_recycle_timeout_ms: parse_u64_with_source(
+                "ALOR_CONTROL_PATH_RECYCLE_TIMEOUT_MS",
+                5_000,
+                &mut sources,
+            )?,
+            control_path_hardening_log_only: parse_bool_with_source(
+                "ALOR_CONTROL_PATH_HARDENING_LOG_ONLY",
+                false,
+                &mut sources,
+            ),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         };
@@ -440,6 +477,16 @@ impl AlorGatewayConfig {
                 .as_ref()
                 .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
                 .unwrap_or(300),
+            control_path_stale_after_sec: file_cfg.control_path_stale_after_sec.unwrap_or(900),
+            control_path_pre_entry_recycle_enabled: file_cfg
+                .control_path_pre_entry_recycle_enabled
+                .unwrap_or(true),
+            control_path_recycle_timeout_ms: file_cfg
+                .control_path_recycle_timeout_ms
+                .unwrap_or(5_000),
+            control_path_hardening_log_only: file_cfg
+                .control_path_hardening_log_only
+                .unwrap_or(false),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         })
@@ -630,6 +677,16 @@ impl AlorGatewayConfig {
                 .as_ref()
                 .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
                 .unwrap_or(300),
+            control_path_stale_after_sec: file_cfg.control_path_stale_after_sec.unwrap_or(900),
+            control_path_pre_entry_recycle_enabled: file_cfg
+                .control_path_pre_entry_recycle_enabled
+                .unwrap_or(true),
+            control_path_recycle_timeout_ms: file_cfg
+                .control_path_recycle_timeout_ms
+                .unwrap_or(5_000),
+            control_path_hardening_log_only: file_cfg
+                .control_path_hardening_log_only
+                .unwrap_or(false),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         };
@@ -724,6 +781,10 @@ struct FileConfig {
     log_cash_positions: Option<bool>,
     cash_symbols: Option<Vec<String>>,
     log_existing_snapshot_orders: Option<bool>,
+    control_path_stale_after_sec: Option<u64>,
+    control_path_pre_entry_recycle_enabled: Option<bool>,
+    control_path_recycle_timeout_ms: Option<u64>,
+    control_path_hardening_log_only: Option<bool>,
     ws: Option<WsConfig>,
     reconnect: Option<ReconnectConfig>,
 }
@@ -1123,6 +1184,26 @@ fn track_file_sources(file_cfg: &FileConfig, sources: &mut BTreeMap<&'static str
             .and_then(|reconnect| reconnect.bar_silence_resync_min_sec)
             .is_some(),
     );
+    set_source(
+        sources,
+        "control_path_stale_after_sec",
+        file_cfg.control_path_stale_after_sec.is_some(),
+    );
+    set_source(
+        sources,
+        "control_path_pre_entry_recycle_enabled",
+        file_cfg.control_path_pre_entry_recycle_enabled.is_some(),
+    );
+    set_source(
+        sources,
+        "control_path_recycle_timeout_ms",
+        file_cfg.control_path_recycle_timeout_ms.is_some(),
+    );
+    set_source(
+        sources,
+        "control_path_hardening_log_only",
+        file_cfg.control_path_hardening_log_only.is_some(),
+    );
     sources.insert(
         "data_report_path",
         if env::var("DATA_REPORT_PATH").is_ok() {
@@ -1187,6 +1268,10 @@ pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>)
         gap_backfill_padding_bars = cfg.gap_backfill_padding_bars,
         cold_start_history_days_back = cfg.cold_start_history_days_back,
         bar_silence_resync_min_sec = cfg.bar_silence_resync_min_sec,
+        control_path_stale_after_sec = cfg.control_path_stale_after_sec,
+        control_path_pre_entry_recycle_enabled = cfg.control_path_pre_entry_recycle_enabled,
+        control_path_recycle_timeout_ms = cfg.control_path_recycle_timeout_ms,
+        control_path_hardening_log_only = cfg.control_path_hardening_log_only,
         data_report_path = ?cfg.data_report_path,
         bar_dump_path = ?cfg.bar_dump_path,
         "Resolved config"

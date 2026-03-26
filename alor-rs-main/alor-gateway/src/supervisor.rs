@@ -500,7 +500,15 @@ impl Supervisor {
                     health,
                     &mut shutdown_rx,
                     transport.info,
-                    CommandConsumerConfig::default(),
+                    CommandConsumerConfig {
+                        control_path_pre_entry_recycle_enabled: cfg
+                            .control_path_pre_entry_recycle_enabled,
+                        control_path_recycle_timeout: Duration::from_millis(
+                            cfg.control_path_recycle_timeout_ms,
+                        ),
+                        control_path_hardening_log_only: cfg.control_path_hardening_log_only,
+                        ..CommandConsumerConfig::default()
+                    },
                 )
                 .await
                 {

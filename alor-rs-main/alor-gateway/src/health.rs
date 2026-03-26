@@ -5,6 +5,18 @@ use serde::Serialize;
 
 use alor_types::MarketState;
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlPathStaleStatus {
+    pub stale: bool,
+    pub reason: Option<&'static str>,
+    pub stale_for_ms: Option<u64>,
+    pub last_rx_age_ms: Option<u64>,
+    pub last_tx_age_ms: Option<u64>,
+    pub last_control_success_age_ms: Option<u64>,
+    pub last_control_failure_age_ms: Option<u64>,
+    pub last_ping_pong_age_ms: Option<u64>,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CwsFrameTraceEntry {
     pub ts_utc: i64,
@@ -70,6 +82,12 @@ pub struct HealthState {
     pub cws_pending_guids: Vec<String>,
     pub cws_oldest_pending_age_ms: Option<u64>,
     pub request_map_size: u64,
+    pub control_path_stale_after_sec: u64,
+    pub control_path_stale_detected_total: u64,
+    pub control_path_recycle_total: u64,
+    pub control_path_recycle_success_total: u64,
+    pub control_path_recycle_failed_total: u64,
+    pub control_path_stale_blocked_send_total: u64,
     pub last_bar_ts: i64,
     pub last_bar_age_sec: u64,
     pub last_positions_ts: i64,
@@ -146,4 +164,118 @@ pub struct HealthState {
     pub cws_last_pong_at: Option<Instant>,
     #[serde(skip)]
     pub cws_last_reconnect_at: Option<Instant>,
+}
+
+pub fn age_ms(value: Option<Instant>) -> Option<u64> {
+    value.map(|instant| instant.elapsed().as_millis() as u64)
+}
+
+pub fn min_age_ms(first: Option<Instant>, second: Option<Instant>) -> Option<u64> {
+    match (age_ms(first), age_ms(second)) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+pub fn evaluate_control_path_stale(health: &HealthState) -> ControlPathStaleStatus {
+    let threshold_ms = health
+        .control_path_stale_after_sec
+        .saturating_mul(1_000);
+    let last_rx_age_ms = age_ms(health.cws_last_rx_at);
+    let last_tx_age_ms = age_ms(health.cws_last_tx_at);
+    let last_control_success_age_ms = age_ms(health.cws_last_control_success_at);
+    let last_control_failure_age_ms = age_ms(health.cws_last_control_failure_at);
+    let last_ping_pong_age_ms = min_age_ms(health.cws_last_ping_at, health.cws_last_pong_at);
+
+    if threshold_ms == 0 {
+        return ControlPathStaleStatus {
+            stale: false,
+            reason: None,
+            stale_for_ms: None,
+            last_rx_age_ms,
+            last_tx_age_ms,
+            last_control_success_age_ms,
+            last_control_failure_age_ms,
+            last_ping_pong_age_ms,
+        };
+    }
+
+    let (reason, stale_for_ms) = match (last_control_success_age_ms, last_tx_age_ms) {
+        (Some(age), _) if age > threshold_ms => (
+            Some("cws_last_control_success_age_ms_exceeded"),
+            Some(age - threshold_ms),
+        ),
+        (None, Some(age)) if age > threshold_ms => (
+            Some("cws_last_control_success_missing_and_cws_last_tx_age_ms_exceeded"),
+            Some(age - threshold_ms),
+        ),
+        (Some(_), Some(age)) if age > threshold_ms => (
+            Some("cws_last_tx_age_ms_exceeded"),
+            Some(age - threshold_ms),
+        ),
+        _ => (None, None),
+    };
+
+    ControlPathStaleStatus {
+        stale: reason.is_some(),
+        reason,
+        stale_for_ms,
+        last_rx_age_ms,
+        last_tx_age_ms,
+        last_control_success_age_ms,
+        last_control_failure_age_ms,
+        last_ping_pong_age_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn control_path_not_stale_when_recent_tx_exists() {
+        let state = HealthState {
+            control_path_stale_after_sec: 900,
+            cws_last_tx_at: Some(Instant::now() - Duration::from_secs(30)),
+            ..HealthState::default()
+        };
+
+        let stale = evaluate_control_path_stale(&state);
+        assert!(!stale.stale);
+        assert_eq!(stale.reason, None);
+    }
+
+    #[test]
+    fn control_path_stale_when_no_control_success_and_tx_is_old() {
+        let state = HealthState {
+            control_path_stale_after_sec: 900,
+            cws_last_tx_at: Some(Instant::now() - Duration::from_secs(901)),
+            ..HealthState::default()
+        };
+
+        let stale = evaluate_control_path_stale(&state);
+        assert!(stale.stale);
+        assert_eq!(
+            stale.reason,
+            Some("cws_last_control_success_missing_and_cws_last_tx_age_ms_exceeded")
+        );
+        assert!(stale.stale_for_ms.unwrap_or_default() > 0);
+    }
+
+    #[test]
+    fn control_path_stale_when_control_success_is_old() {
+        let state = HealthState {
+            control_path_stale_after_sec: 900,
+            cws_last_tx_at: Some(Instant::now() - Duration::from_secs(10)),
+            cws_last_control_success_at: Some(Instant::now() - Duration::from_secs(901)),
+            ..HealthState::default()
+        };
+
+        let stale = evaluate_control_path_stale(&state);
+        assert!(stale.stale);
+        assert_eq!(stale.reason, Some("cws_last_control_success_age_ms_exceeded"));
+    }
 }

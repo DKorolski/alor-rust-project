@@ -35,6 +35,10 @@ history_sessions = 4
 history_days_back = 4
 session_rollover_hour_utc = 6
 health_listen_addr = "127.0.0.1:8081"
+control_path_stale_after_sec = 900
+control_path_pre_entry_recycle_enabled = true
+control_path_recycle_timeout_ms = 5000
+control_path_hardening_log_only = false
 
 [trading_periods]
 session_start = "09:00:00"

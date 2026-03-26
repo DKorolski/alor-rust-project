@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use alor_protocol::{CommandAck, CommandAction, OrderCommand, Side};
+use alor_protocol::{CommandAck, CommandAction, IntentClass, OrderCommand, Side};
 use alor_types::MarketState;
 
 use crate::health::{GatewayPhase, HealthState};
@@ -25,6 +25,9 @@ const DIAG_CWS_REQUEST_ORDER_ID: &str = "_diag_cws_request_order_id";
 #[derive(Debug, Clone)]
 pub struct CommandConsumerConfig {
     pub pause_when_degraded: bool,
+    pub control_path_pre_entry_recycle_enabled: bool,
+    pub control_path_recycle_timeout: Duration,
+    pub control_path_hardening_log_only: bool,
     pub idempotency_ttl: Duration,
     pub idempotency_max: usize,
     pub error_backoff_base: Duration,
@@ -36,6 +39,9 @@ impl Default for CommandConsumerConfig {
     fn default() -> Self {
         Self {
             pause_when_degraded: true,
+            control_path_pre_entry_recycle_enabled: true,
+            control_path_recycle_timeout: Duration::from_secs(5),
+            control_path_hardening_log_only: false,
             idempotency_ttl: Duration::from_secs(300),
             idempotency_max: 10_000,
             error_backoff_base: Duration::from_millis(50),
@@ -343,6 +349,75 @@ pub async fn run_command_consumer(
                     );
                 }
 
+                let mut sent_after_recycle = false;
+                if should_apply_control_path_hardening(&command)
+                    && config.control_path_pre_entry_recycle_enabled
+                {
+                    match cws
+                        .ensure_fresh_control_path_for_live_limit_entry(
+                            request_id,
+                            config.control_path_recycle_timeout,
+                            config.control_path_hardening_log_only,
+                        )
+                        .await
+                    {
+                        Ok(outcome) => {
+                            if outcome.recycled {
+                                sent_after_recycle = true;
+                                info!(
+                                    handler = "command_consumer",
+                                    state_before = "control_path_recycled",
+                                    state_after = "ready_to_send_after_recycle",
+                                    request_id = %request_id,
+                                    strategy_id = %command.strategy_id,
+                                    symbol = %command.symbol,
+                                    previous_cws_connection_instance_id = ?outcome.previous_connection_instance_id,
+                                    current_cws_connection_instance_id = ?outcome.current_connection_instance_id,
+                                    control_path_stale_reason = ?outcome.stale_reason,
+                                    control_path_stale_for_ms = ?outcome.stale_for_ms,
+                                    "control_path_send_after_recycle"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            increment_counter(&health, |h| {
+                                h.cws_errors_total = h.cws_errors_total.saturating_add(1)
+                            });
+                            let ack = build_control_path_error_ack(
+                                request_id,
+                                error.code(),
+                                error.message(),
+                            );
+                            warn!(
+                                handler = "command_consumer",
+                                state_before = "control_path_stale_detected",
+                                state_after = "send_blocked_due_to_stale",
+                                request_id = %request_id,
+                                strategy_id = %command.strategy_id,
+                                symbol = %command.symbol,
+                                error_code = error.code(),
+                                error_msg = error.message(),
+                                "control_path_send_blocked_due_to_stale"
+                            );
+                            sink.publish_ack(ack.clone()).await?;
+                            info!(
+                                handler = "command_consumer",
+                                state_before = "control_path_block_ack_ready",
+                                state_after = "ack_published",
+                                request_id = %ack.request_id,
+                                status = ?ack.status,
+                                processed_ts_utc = ack.processed_ts_utc,
+                                error_code = ?ack.error_code,
+                                "command ack published"
+                            );
+                            if let Some(message_id) = message_id.as_deref() {
+                                source.ack(message_id).await?;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
                 match execute_command(&cws, &command, request_id, price_step, volume_step).await {
                     Ok(response) => {
                         let info = parse_cws_response(&response);
@@ -369,6 +444,7 @@ pub async fn run_command_consumer(
                             cws_connection_instance_id = ?info.trace.connection_instance_id,
                             cws_connect_seq = info.trace.connect_seq,
                             cws_reconnect_seq = info.trace.reconnect_seq,
+                            sent_after_recycle,
                             "cws response"
                         );
                         if matches!(command.action, CommandAction::Place(_)) {
@@ -492,6 +568,7 @@ pub async fn run_command_consumer(
                             cws_connection_instance_id = ?ack_trace.connection_instance_id,
                             cws_connect_seq = ack_trace.connect_seq,
                             cws_reconnect_seq = ack_trace.reconnect_seq,
+                            sent_after_recycle,
                             "command ack published"
                         );
                         if let Some(message_id) = message_id.as_deref() {
@@ -543,6 +620,7 @@ pub async fn run_command_consumer(
                             error_code = ?ack.error_code,
                             cws_http_code = ?ack.cws_http_code,
                             cws_request_guid = ?ack.cws_request_guid,
+                            sent_after_recycle,
                             "command ack published"
                         );
                         if let Some(message_id) = message_id.as_deref() {
@@ -595,6 +673,11 @@ fn increment_http_code(health: &Arc<parking_lot::RwLock<HealthState>>, http_code
         .entry(http_code)
         .or_insert(0);
     *entry = entry.saturating_add(1);
+}
+
+fn should_apply_control_path_hardening(command: &OrderCommand) -> bool {
+    matches!(command.action, CommandAction::Place(_))
+        && matches!(command.effective_intent_class(), IntentClass::Entry)
 }
 
 fn validate_command(
@@ -689,6 +772,25 @@ fn is_command_expired(command: &OrderCommand) -> bool {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let deadline_ms = command.created_ts_utc.saturating_mul(1_000) + ttl_ms as i64;
     now_ms > deadline_ms
+}
+
+fn build_control_path_error_ack(
+    request_id: uuid::Uuid,
+    error_code: &str,
+    error_msg: &str,
+) -> CommandAck {
+    CommandAck {
+        request_id,
+        status: alor_protocol::AckStatus::Error,
+        broker_order_id: None,
+        broker_order_id_str: None,
+        error_code: Some(error_code.to_string()),
+        error_msg: Some(error_msg.to_string()),
+        cws_http_code: None,
+        cws_message: None,
+        cws_request_guid: None,
+        processed_ts_utc: chrono::Utc::now().timestamp(),
+    }
 }
 
 async fn execute_command(
@@ -1184,6 +1286,26 @@ mod tests {
     fn command_not_expired_when_ttl_is_set_but_created_ts_missing() {
         let command = sample_command(0, Some(1_000));
         assert!(!is_command_expired(&command));
+    }
+
+    #[test]
+    fn control_path_hardening_targets_entry_place_only() {
+        let mut place_entry = sample_command(chrono::Utc::now().timestamp(), None);
+        place_entry.action = CommandAction::Place(alor_protocol::PlaceOrder {
+            side: Side::Buy,
+            qty: 1.0,
+            price: 79.0,
+            comment: None,
+        });
+        place_entry.intent_class = Some(IntentClass::Entry);
+        assert!(should_apply_control_path_hardening(&place_entry));
+
+        let mut place_exit = place_entry.clone();
+        place_exit.intent_class = Some(IntentClass::Exit);
+        assert!(!should_apply_control_path_hardening(&place_exit));
+
+        let market_entry = sample_command(chrono::Utc::now().timestamp(), None);
+        assert!(!should_apply_control_path_hardening(&market_entry));
     }
 
     #[test]
