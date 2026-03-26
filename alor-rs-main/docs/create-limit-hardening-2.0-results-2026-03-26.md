@@ -329,7 +329,24 @@ The live rollout now supports the same conclusion directly:
 - stale path passes via explicit recycle-before-send;
 - market path stays unaffected.
 
-## 8. Remaining Work
+## 8. Recommended Guarded Soak Watchlist
+
+The next practical step is a guarded soak, not another broad analytic cycle.
+
+During soak, the most important fields and counters to watch are:
+
+- `control_path_stale_detected_total`
+- `control_path_recycle_total`
+- `control_path_recycle_success_total`
+- `control_path_recycle_failed_total`
+- `control_path_stale_blocked_send_total`
+- `control_path_stale`
+- `control_path_stale_reason`
+- `control_path_stale_for_ms`
+
+Operationally, the main watchpoint is whether future incidents suggest that some other CWS traffic can appear to refresh the stale projection while the live entry path is still degraded. Nothing in the current rollout proves that yet, but it is the right place to watch during soak.
+
+## 9. Remaining Work
 
 This document now captures both code-complete hardening and first live acceptance.
 
