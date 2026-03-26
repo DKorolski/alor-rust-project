@@ -1,0 +1,29 @@
+SCENARIO=idle30-reconnect-before-order stack=sessiongap idle_sec=1800 price=79.00 qty=1.0 side=buy
+SCENARIO=idle30-reconnect-before-order phase=baseline readiness=true phase=LiveReady conn_id=a0a08080-3dc6-49c8-b542-5c559b9cf334 conn_age_sec=43 reconnect_seq=0 limit_send_total=0 limit_error_total=0 pending_count=0 oldest_pending_age_ms=na request_map_size=0 last_rx_age_ms=42421 last_tx_age_ms=43062 last_control_success_age_ms=na last_control_failure_age_ms=na last_orders_age_sec=398 last_positions_age_sec=na command_processed_total=0 token_refresh_count=1 access_token=sha256:7767354373953dfa
+SCENARIO=idle30-reconnect-before-order phase=idle sleep_sec=1800
+SCENARIO=idle30-reconnect-before-order phase=before_reconnect readiness=true phase=LiveReady conn_id=a0a08080-3dc6-49c8-b542-5c559b9cf334 conn_age_sec=1845 reconnect_seq=0 limit_send_total=0 limit_error_total=0 pending_count=0 oldest_pending_age_ms=na request_map_size=0 last_rx_age_ms=1844770 last_tx_age_ms=1845411 last_control_success_age_ms=na last_control_failure_age_ms=na last_orders_age_sec=2200 last_positions_age_sec=na command_processed_total=0 token_refresh_count=1 access_token=sha256:7767354373953dfa
+SCENARIO=idle30-reconnect-before-order phase=after_reconnect readiness=true phase=LiveReady conn_id=f8842c37-e393-4b0f-aea8-927401f1c2e9 conn_age_sec=4 reconnect_seq=0 limit_send_total=0 limit_error_total=0 pending_count=0 oldest_pending_age_ms=na request_map_size=0 last_rx_age_ms=4674 last_tx_age_ms=4691 last_control_success_age_ms=na last_control_failure_age_ms=na last_orders_age_sec=2209 last_positions_age_sec=na command_processed_total=0 token_refresh_count=1 access_token=sha256:5275ce2cdce2f9b0
+LABEL=main_probe phase=preflight readiness=true phase=LiveReady conn_id=f8842c37-e393-4b0f-aea8-927401f1c2e9 conn_age_sec=6 reconnect_seq=0 limit_send_total=0 limit_error_total=0 pending_count=0 oldest_pending_age_ms=na request_map_size=0 last_rx_age_ms=6827 last_tx_age_ms=6845 last_control_success_age_ms=na last_control_failure_age_ms=na last_orders_age_sec=2211 last_positions_age_sec=na command_processed_total=0 token_refresh_count=1 access_token=sha256:5275ce2cdce2f9b0
+LABEL=main_probe phase=place_start price=79.00 qty=1.0 side=buy
+STACK=sessiongap
+REQ_ID=f8cae750-182a-4247-95c1-dda5dae4670f
+TS_UTC=1774548502
+PRICE=79.00
+QTY=1.0
+SIDE=buy
+STREAM=cmd.orders.7502MIW
+LABEL=main_probe place_status=accepted order_id=2023555935792429672
+{"schema_version":1,"ts_utc":1774548502,"source":"gateway-1-bcf4ae2b-73c0-4aee-bed7-ec4775064945","msg_type":"command_ack","payload":{"request_id":"f8cae750-182a-4247-95c1-dda5dae4670f","status":"accepted","broker_order_id":2023555935792429672,"broker_order_id_str":"2023555935792429672","error_code":null,"error_msg":null,"cws_http_code":200,"cws_message":"An order '2023555935792429672' has been created.","cws_request_guid":"f8cae750-182a-4247-95c1-dda5dae4670f","processed_ts_utc":1774548502}}
+LABEL=main_probe place_order_status=working filled=0.0
+{"schema_version":1,"ts_utc":1774548502,"source":"gateway-1-bcf4ae2b-73c0-4aee-bed7-ec4775064945","msg_type":"order","payload":{"order_id":2023555935792429672,"request_id":"f8cae750-182a-4247-95c1-dda5dae4670f","symbol":"USDRUBF","status":"working","side":"buy","order_type":"limit","qty":1.0,"filled":0.0,"price":79.0,"existing":false,"comment":"sessiongap_f8cae750-182a-4247-95c1-dda5dae4670f","ts_utc":1774548502}}
+STACK=sessiongap
+REQ_ID=fed3413b-d459-426a-925b-058911a8cebc
+TS_UTC=1774548502
+ORDER_ID=2023555935792429672
+STREAM=cmd.orders.7502MIW
+LABEL=main_probe cancel_status=accepted order_id=2023555935792429672
+{"schema_version":1,"ts_utc":1774548503,"source":"gateway-1-bcf4ae2b-73c0-4aee-bed7-ec4775064945","msg_type":"command_ack","payload":{"request_id":"fed3413b-d459-426a-925b-058911a8cebc","status":"accepted","broker_order_id":2023555935792429672,"broker_order_id_str":"2023555935792429672","error_code":null,"error_msg":null,"cws_http_code":200,"cws_message":"An order '2023555935792429672' has been deleted.","cws_request_guid":"7a23b3ea-ef64-4c26-a026-f6b2e985764a","processed_ts_utc":1774548503}}
+LABEL=main_probe cancel_order_status=canceled filled=0.0
+{"schema_version":1,"ts_utc":1774548503,"source":"gateway-1-bcf4ae2b-73c0-4aee-bed7-ec4775064945","msg_type":"order","payload":{"order_id":2023555935792429672,"request_id":"fed3413b-d459-426a-925b-058911a8cebc","symbol":"USDRUBF","status":"canceled","side":"buy","order_type":"limit","qty":1.0,"filled":0.0,"price":79.0,"existing":false,"comment":"sessiongap_f8cae750-182a-4247-95c1-dda5dae4670f","ts_utc":1774548503}}
+LABEL=main_probe result=pass request_id_place=f8cae750-182a-4247-95c1-dda5dae4670f request_id_cancel=fed3413b-d459-426a-925b-058911a8cebc order_id=2023555935792429672
+SCENARIO=idle30-reconnect-before-order result=pass

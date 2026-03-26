@@ -1,0 +1,15 @@
+SCENARIO=idle30-baseline stack=sessiongap idle_sec=1800 price=79.00 qty=1.0 side=buy
+SCENARIO=idle30-baseline phase=baseline readiness=true phase=LiveReady conn_id=5e865502-8eae-4127-9ef4-02133ac6dc85 conn_age_sec=5 reconnect_seq=0 limit_send_total=0 limit_error_total=0 pending_count=0 oldest_pending_age_ms=na request_map_size=0 last_rx_age_ms=5219 last_tx_age_ms=5238 last_control_success_age_ms=na last_control_failure_age_ms=na last_orders_age_sec=25140 last_positions_age_sec=na command_processed_total=0 token_refresh_count=1 access_token=sha256:7426a415408bd1ff
+SCENARIO=idle30-baseline phase=idle sleep_sec=1800
+LABEL=main_probe phase=preflight readiness=true phase=LiveReady conn_id=5e865502-8eae-4127-9ef4-02133ac6dc85 conn_age_sec=1808 reconnect_seq=0 limit_send_total=0 limit_error_total=0 pending_count=0 oldest_pending_age_ms=na request_map_size=0 last_rx_age_ms=1807779 last_tx_age_ms=1807797 last_control_success_age_ms=na last_control_failure_age_ms=na last_orders_age_sec=26943 last_positions_age_sec=na command_processed_total=0 token_refresh_count=1 access_token=sha256:7426a415408bd1ff
+LABEL=main_probe phase=place_start price=79.00 qty=1.0 side=buy
+STACK=sessiongap
+REQ_ID=d71b55d4-f019-4d47-8686-98c539d0137e
+TS_UTC=1774542737
+PRICE=79.00
+QTY=1.0
+SIDE=buy
+STREAM=cmd.orders.7502MIW
+LABEL=main_probe place_status=error order_id=
+{"schema_version":1,"ts_utc":1774542737,"source":"gateway-1-c858c6a8-0435-472d-8ac1-94cf476e62b4","msg_type":"command_ack","payload":{"request_id":"d71b55d4-f019-4d47-8686-98c539d0137e","status":"error","broker_order_id":null,"broker_order_id_str":null,"error_code":"cws_error","error_msg":"cws disconnected: protocol_reset_without_close_handshake","cws_http_code":null,"cws_message":null,"cws_request_guid":"d71b55d4-f019-4d47-8686-98c539d0137e","processed_ts_utc":1774542737}}
+LABEL=main_probe result=fail reason=place_not_accepted request_id=d71b55d4-f019-4d47-8686-98c539d0137e

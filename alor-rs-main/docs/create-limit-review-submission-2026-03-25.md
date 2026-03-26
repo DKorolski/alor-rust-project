@@ -7,6 +7,8 @@ Primary artifacts:
 - `docs/create-limit-diagnostic-status-update-2026-03-25.md`
 - `docs/create-limit-tz1.5-results-2026-03-26.md`
 - `docs/create-limit-tz1.5-results-2026-03-26-artifacts/README.md`
+- `docs/create-limit-tz1.6-results-2026-03-26.md`
+- `docs/create-limit-tz1.6-results-2026-03-26-artifacts/README.md`
 - `docs/create-limit-and-sessiongap-review-ready-2026-03-23.md`
 - `docs/create-limit-delete-limit-formal-chronology-2026-03-25.md`
 - `docs/create-limit-delete-limit-chronology-memo-2026-03-25.md`
@@ -51,6 +53,11 @@ Since the earlier `2026-03-23` review-ready report, this package now also includ
    - `idle 20m PASS`
    - `idle 30m REPRO`
    - `idle 30m + mid-window keepalive still REPRO`.
+8. `TZ 1.6` final validation before hardening:
+   - `idle30 baseline REPRO`
+   - `10m cadence REPRO`
+   - `5m cadence REPRO`
+   - `reconnect before first order PASS`.
 
 ## 3. Strongest Current Conclusions
 
@@ -113,6 +120,20 @@ The new `2026-03-26` `TZ 1.5` package now shows:
 
 This strengthens the view that the residual issue is tied to longer-lived, mostly idle CWS/control-path session state more than to ordinary safe create/delete activity, while also weakening the idea that one small keepalive is enough to clear it.
 
+### 3.6 `TZ 1.6` resolves the practical hardening discriminator
+
+The new `2026-03-26` `TZ 1.6` package now shows:
+
+- `idle30 baseline -> REPRO`
+- `idle30 + cadence 10m -> REPRO`
+- `idle30 + cadence 5m -> REPRO`
+- `idle30 + reconnect before first order -> PASS`
+
+This is the strongest current practical conclusion in the whole package:
+
+- regular safe cadence keepalive is insufficient;
+- proactive reconnect or recycle before the first limit command after a long quiet window is the strongest current workaround direction.
+
 ## 4. Practical Readout For Review
 
 What this package now supports with confidence:
@@ -133,33 +154,27 @@ What this package still does not prove conclusively:
 
 The remaining work is now comparatively narrow:
 
-1. run one real network-driven reconnect experiment;
-2. collect one more fresh failing artifact on the current line if possible under that reconnect condition;
-3. compare:
-   - fresh repro
-   - immediate recovered retry
-   - token fingerprint / handler chronology
-   - request/order correlation
+1. translate the `TZ 1.6` conclusion into a hardening implementation;
+2. validate that implementation on live runs;
+3. optionally add one real network-driven reconnect comparison if engineering still wants broker-vs-client confidence beyond the current operational gate.
 
 ## 6. Requested Review Focus
 
 Requested focus for engineering review:
 
-- treat the residual issue as intermittent transport/control-path behavior until disproved;
-- evaluate whether the current evidence suggests:
-  - broker-side instability,
-  - client-side correlation weakness,
-  - or a combined explanation;
-- recommend whether the next highest-value action should be:
-  - network-driven reconnect test,
-  - another narrow live capture,
-  - or broker-facing escalation.
+- accept `TZ 1.6` as the final analytic gate before hardening;
+- treat the strongest current workaround as:
+  - proactive reconnect or recycle before the first live `limit` order after a long quiet window;
+- review whether the hardening should live:
+  - in gateway session management,
+  - in runtime orchestration,
+  - or in both.
 
 Requested focus for project review:
 
 - accept the package as materially narrowed and review-ready;
-- do not treat it as closed;
-- approve the next step as a narrow reconnect/repro comparison rather than another broad rerun.
+- accept the analytic phase as sufficiently resolved for hardening;
+- approve moving from further broad diagnosis to a narrow hardening implementation.
 
 ## 7. Bottom Line
 
@@ -171,9 +186,10 @@ It contains:
 - old and new clean-pass evidence;
 - repeated-loop stability evidence;
 - marketable-limit evidence;
-- and immediate post-reconnect retry evidence on both stacks.
+- immediate post-reconnect retry evidence on both stacks;
+- and a final `TZ 1.6` hardening discriminator that favors reconnect/recycle over cadence keepalive.
 
 Recommended overall position:
 
 - ready for review;
-- not ready for closure.
+- ready to move into hardening.
