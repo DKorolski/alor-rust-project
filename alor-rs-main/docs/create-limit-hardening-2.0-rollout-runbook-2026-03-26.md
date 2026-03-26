@@ -24,14 +24,32 @@ Goal:
 
 Run from the workspace that contains `Dockerfile.gateway` and `alor-rs-main/`.
 
+If you build from Apple Silicon/macOS, use `buildx` and publish at least `linux/amd64`, because the VPS pulls `linux/amd64`.
+
 ```bash
 cd /path/to/bybit_barter_test
 
 TAG=dev-774b917-diag-20260326
 IMG=ghcr.io/dkorolski/alor-rust-project/alor-gateway:$TAG
 
-docker build -f Dockerfile.gateway -t "$IMG" .
-docker push "$IMG"
+docker buildx create --use --name alor-multiarch >/dev/null 2>&1 || docker buildx use alor-multiarch
+docker buildx build \
+  --platform linux/amd64 \
+  -f Dockerfile.gateway \
+  -t "$IMG" \
+  --push \
+  .
+```
+
+Optional multi-arch variant:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -f Dockerfile.gateway \
+  -t "$IMG" \
+  --push \
+  .
 ```
 
 ## 3. Rollout On VPS
