@@ -506,6 +506,10 @@ fn test_config(
         gap_backfill_padding_bars: 1,
         cold_start_history_days_back: 1,
         bar_silence_resync_min_sec: 60,
+        control_path_stale_after_sec: 900,
+        control_path_pre_entry_recycle_enabled: true,
+        control_path_recycle_timeout_ms: 5_000,
+        control_path_hardening_log_only: false,
         data_report_path: Some(report_path),
         bar_dump_path: Some(bar_dump_path),
     }
