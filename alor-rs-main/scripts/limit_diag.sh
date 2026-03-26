@@ -8,9 +8,14 @@ Usage:
   limit_diag.sh capture pre <run_dir>
   limit_diag.sh capture post <run_dir>
   limit_diag.sh preflight <run_dir> <sessiongap|hybrid> [label]
+  limit_diag.sh wait-ready <sessiongap|hybrid> [timeout_sec]
+  limit_diag.sh restart-gateway <sessiongap|hybrid> [timeout_sec]
   limit_diag.sh place <sessiongap|hybrid> <price> [qty] [side]
   limit_diag.sh cancel <sessiongap|hybrid> <order_id>
   limit_diag.sh loop <sessiongap|hybrid> <price> [iterations] [qty] [side] [sleep_sec]
+  limit_diag.sh tz16-baseline <sessiongap|hybrid> <price> [idle_sec] [qty] [side]
+  limit_diag.sh tz16-cadence <sessiongap|hybrid> <price> <interval_sec> [total_window_sec] [qty] [side]
+  limit_diag.sh tz16-reconnect <sessiongap|hybrid> <price> [idle_sec] [qty] [side]
   limit_diag.sh trace <run_dir> <sessiongap|hybrid> <request_id>
   limit_diag.sh trace-order <run_dir> <sessiongap|hybrid> <order_id>
 
@@ -18,9 +23,14 @@ Examples:
   RUN_DIR=$(scripts/limit_diag.sh init-run)
   scripts/limit_diag.sh capture pre "$RUN_DIR"
   scripts/limit_diag.sh preflight "$RUN_DIR" sessiongap iter1.before
+  scripts/limit_diag.sh wait-ready sessiongap 120
+  scripts/limit_diag.sh restart-gateway sessiongap 120
   scripts/limit_diag.sh place sessiongap 81.71
   scripts/limit_diag.sh cancel sessiongap 2023555922907497864
   scripts/limit_diag.sh loop sessiongap 80.10 20
+  scripts/limit_diag.sh tz16-baseline sessiongap 79.00 1800
+  scripts/limit_diag.sh tz16-cadence sessiongap 79.00 600 1800
+  scripts/limit_diag.sh tz16-reconnect sessiongap 79.00 1800
   scripts/limit_diag.sh capture post "$RUN_DIR"
   scripts/limit_diag.sh trace "$RUN_DIR" sessiongap 75b8a7f6-0d34-4664-beac-bc2060625f43
   scripts/limit_diag.sh trace-order "$RUN_DIR" sessiongap 2023555922907497864
@@ -639,6 +649,320 @@ latest_symbol_position_line() {
   latest_stream_match "$stack_name" "$STACK_BROKER_POSITIONS_STREAM" "\"symbol\":\"$STACK_SYMBOL\"" 160
 }
 
+wait_gateway_ready() {
+  local stack_name=$1
+  local timeout_sec=${2:-120}
+  local i readiness_json ready authorized phase
+
+  for i in $(seq 1 "$timeout_sec"); do
+    readiness_json=$(capture_readiness "$stack_name" 2>/dev/null || true)
+    if [ -n "$readiness_json" ]; then
+      ready=$(json_bool_field "$readiness_json" "readiness")
+      authorized=$(json_bool_field "$readiness_json" "cws_authorized")
+      phase=$(json_string_field "$readiness_json" "gateway_phase")
+      if [ "$ready" = "true" ] && [ "$authorized" = "true" ] && [ "$phase" = "LiveReady" ]; then
+        printf '%s\n' "$readiness_json"
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+restart_gateway() {
+  local stack_name=$1
+  local timeout_sec=${2:-120}
+
+  stack_env "$stack_name"
+  docker compose -p "$STACK_PROJECT" -f "$STACK_COMPOSE_FILE" restart alor-gateway >/dev/null
+  wait_gateway_ready "$stack_name" "$timeout_sec"
+}
+
+tz16_assert_flat() {
+  local stack_name=$1
+  local summary_file=$2
+  local pos_line pos_qty
+
+  stack_env "$stack_name"
+  pos_line=$(latest_symbol_position_line "$stack_name")
+  pos_qty=$(json_number_field "${pos_line:-}" "qty")
+  if [ -n "${pos_qty:-}" ] && [ "$pos_qty" != "0" ] && [ "$pos_qty" != "0.0" ]; then
+    echo "ABORT: ${STACK_SYMBOL} position is not flat: qty=${pos_qty}" | tee -a "$summary_file" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+run_limit_cycle() {
+  local run_dir=$1
+  local stack_name=$2
+  local price=$3
+  local qty=${4:-1.0}
+  local side=${5:-buy}
+  local label=${6:-probe}
+  local summary_file=${7:-}
+
+  local place_out place_req_id place_ack_line place_status order_id order_line order_status order_filled
+  local cancel_out cancel_req_id cancel_ack_line cancel_status prefix
+
+  if [ -z "$summary_file" ]; then
+    summary_file="${run_dir}/${stack_name}.${label}.summary.txt"
+  fi
+
+  capture_preflight "$run_dir" "$stack_name" "${label}_before" >/dev/null
+  prefix="LABEL=${label}"
+  echo "${prefix} phase=preflight $(preflight_compact_line "${run_dir}/${stack_name}.preflight.${label}_before.summary.txt")" | tee -a "$summary_file"
+  echo "${prefix} phase=place_start price=$price qty=$qty side=$side" | tee -a "$summary_file"
+
+  place_out=$(send_place "$stack_name" "$price" "$qty" "$side")
+  place_req_id=$(printf '%s\n' "$place_out" | sed -n 's/^REQ_ID=//p')
+  echo "$place_out" | tee -a "$summary_file"
+
+  stack_env "$stack_name"
+  place_ack_line=$(wait_for_stream_match "$stack_name" "$STACK_ACK_STREAM" "$place_req_id" 20 160 || true)
+  if [ -z "$place_ack_line" ]; then
+    echo "${prefix} result=fail reason=place_ack_timeout request_id=$place_req_id" | tee -a "$summary_file"
+    return 1
+  fi
+
+  place_status=$(json_string_field "$place_ack_line" "status")
+  order_id=$(json_number_field "$place_ack_line" "broker_order_id")
+  echo "${prefix} place_status=$place_status order_id=${order_id:-}" | tee -a "$summary_file"
+  echo "$place_ack_line" >> "$summary_file"
+
+  if [ "$place_status" != "accepted" ] || [ -z "${order_id:-}" ]; then
+    echo "${prefix} result=fail reason=place_not_accepted request_id=$place_req_id" | tee -a "$summary_file"
+    return 1
+  fi
+
+  order_line=$(wait_for_stream_match "$stack_name" "$STACK_BROKER_ORDERS_STREAM" "$order_id" 20 200 || true)
+  if [ -z "$order_line" ]; then
+    echo "${prefix} result=fail reason=order_event_timeout order_id=$order_id request_id=$place_req_id" | tee -a "$summary_file"
+    return 1
+  fi
+
+  order_status=$(json_string_field "$order_line" "status")
+  order_filled=$(json_number_field "$order_line" "filled")
+  echo "${prefix} place_order_status=$order_status filled=${order_filled:-}" | tee -a "$summary_file"
+  echo "$order_line" >> "$summary_file"
+
+  if [ "${order_filled:-0}" != "0" ] && [ "${order_filled:-0}" != "0.0" ]; then
+    echo "${prefix} result=fail reason=unexpected_fill order_id=$order_id filled=$order_filled" | tee -a "$summary_file"
+    return 1
+  fi
+
+  if [ "$order_status" != "working" ]; then
+    echo "${prefix} result=fail reason=place_not_working order_id=$order_id status=$order_status" | tee -a "$summary_file"
+    return 1
+  fi
+
+  cancel_out=$(send_cancel "$stack_name" "$order_id")
+  cancel_req_id=$(printf '%s\n' "$cancel_out" | sed -n 's/^REQ_ID=//p')
+  echo "$cancel_out" | tee -a "$summary_file"
+
+  cancel_ack_line=$(wait_for_stream_match "$stack_name" "$STACK_ACK_STREAM" "$cancel_req_id" 20 200 || true)
+  if [ -z "$cancel_ack_line" ]; then
+    echo "${prefix} result=fail reason=cancel_ack_timeout request_id=$cancel_req_id order_id=$order_id" | tee -a "$summary_file"
+    return 1
+  fi
+
+  cancel_status=$(json_string_field "$cancel_ack_line" "status")
+  echo "${prefix} cancel_status=$cancel_status order_id=$order_id" | tee -a "$summary_file"
+  echo "$cancel_ack_line" >> "$summary_file"
+
+  order_line=
+  order_status=
+  order_filled=
+  for _ in $(seq 1 20); do
+    order_line=$(latest_stream_match "$stack_name" "$STACK_BROKER_ORDERS_STREAM" "$order_id" 200)
+    if [ -n "$order_line" ]; then
+      order_status=$(json_string_field "$order_line" "status")
+      order_filled=$(json_number_field "$order_line" "filled")
+      if [ "$order_status" = "canceled" ] || [ "$order_status" = "filled" ]; then
+        break
+      fi
+    fi
+    sleep 1
+  done
+
+  if [ -z "$order_line" ]; then
+    echo "${prefix} result=fail reason=cancel_order_event_timeout order_id=$order_id request_id=$cancel_req_id" | tee -a "$summary_file"
+    return 1
+  fi
+
+  echo "${prefix} cancel_order_status=$order_status filled=${order_filled:-}" | tee -a "$summary_file"
+  echo "$order_line" >> "$summary_file"
+
+  if [ "$cancel_status" != "accepted" ]; then
+    echo "${prefix} result=fail reason=cancel_not_accepted request_id=$cancel_req_id order_id=$order_id" | tee -a "$summary_file"
+    return 1
+  fi
+
+  if [ "${order_filled:-0}" != "0" ] && [ "${order_filled:-0}" != "0.0" ]; then
+    echo "${prefix} result=fail reason=fill_during_cancel order_id=$order_id filled=$order_filled" | tee -a "$summary_file"
+    return 1
+  fi
+
+  if [ "$order_status" != "canceled" ]; then
+    echo "${prefix} result=fail reason=cancel_not_final order_id=$order_id status=$order_status request_id=$cancel_req_id" | tee -a "$summary_file"
+    return 1
+  fi
+
+  echo "${prefix} result=pass request_id_place=$place_req_id request_id_cancel=$cancel_req_id order_id=$order_id" | tee -a "$summary_file"
+  return 0
+}
+
+run_tz16_baseline() {
+  local stack_name=$1
+  local price=$2
+  local idle_sec=${3:-1800}
+  local qty=${4:-1.0}
+  local side=${5:-buy}
+  local run_dir summary_file
+
+  run_dir="/opt/diag-captures/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$run_dir"
+  summary_file="${run_dir}/${stack_name}.tz16.idle30-baseline.summary.txt"
+  : > "$summary_file"
+
+  echo "SCENARIO=idle30-baseline stack=$stack_name idle_sec=$idle_sec price=$price qty=$qty side=$side" | tee -a "$summary_file"
+  restart_gateway "$stack_name" 120 >/dev/null
+  capture_preflight "$run_dir" "$stack_name" "baseline" >/dev/null
+  echo "SCENARIO=idle30-baseline phase=baseline $(preflight_compact_line "${run_dir}/${stack_name}.preflight.baseline.summary.txt")" | tee -a "$summary_file"
+
+  tz16_assert_flat "$stack_name" "$summary_file" || {
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 2
+  }
+
+  echo "SCENARIO=idle30-baseline phase=idle sleep_sec=$idle_sec" | tee -a "$summary_file"
+  sleep "$idle_sec"
+
+  if ! run_limit_cycle "$run_dir" "$stack_name" "$price" "$qty" "$side" "main_probe" "$summary_file"; then
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 1
+  fi
+
+  capture_phase post "$run_dir"
+  echo "SCENARIO=idle30-baseline result=pass" | tee -a "$summary_file"
+  echo "RUN_DIR=$run_dir"
+  echo "SUMMARY_FILE=$summary_file"
+}
+
+run_tz16_cadence() {
+  local stack_name=$1
+  local price=$2
+  local interval_sec=$3
+  local total_window_sec=${4:-1800}
+  local qty=${5:-1.0}
+  local side=${6:-buy}
+  local run_dir summary_file last_mark mark
+
+  if [ "$interval_sec" -le 0 ] || [ "$interval_sec" -ge "$total_window_sec" ]; then
+    echo "invalid cadence interval: interval_sec=$interval_sec total_window_sec=$total_window_sec" >&2
+    return 2
+  fi
+
+  run_dir="/opt/diag-captures/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$run_dir"
+  summary_file="${run_dir}/${stack_name}.tz16.cadence-${interval_sec}s.summary.txt"
+  : > "$summary_file"
+
+  echo "SCENARIO=idle30-cadence stack=$stack_name interval_sec=$interval_sec total_window_sec=$total_window_sec price=$price qty=$qty side=$side" | tee -a "$summary_file"
+  restart_gateway "$stack_name" 120 >/dev/null
+  capture_preflight "$run_dir" "$stack_name" "baseline" >/dev/null
+  echo "SCENARIO=idle30-cadence phase=baseline $(preflight_compact_line "${run_dir}/${stack_name}.preflight.baseline.summary.txt")" | tee -a "$summary_file"
+
+  tz16_assert_flat "$stack_name" "$summary_file" || {
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 2
+  }
+
+  last_mark=0
+  for mark in $(seq "$interval_sec" "$interval_sec" $((total_window_sec - interval_sec))); do
+    echo "SCENARIO=idle30-cadence phase=idle_until keepalive_at_sec=$mark sleep_sec=$((mark - last_mark))" | tee -a "$summary_file"
+    sleep $((mark - last_mark))
+    if ! run_limit_cycle "$run_dir" "$stack_name" "$price" "$qty" "$side" "keepalive${mark}s" "$summary_file"; then
+      capture_phase post "$run_dir"
+      echo "RUN_DIR=$run_dir"
+      echo "SUMMARY_FILE=$summary_file"
+      return 1
+    fi
+    last_mark=$mark
+  done
+
+  echo "SCENARIO=idle30-cadence phase=idle_until main_probe_at_sec=$total_window_sec sleep_sec=$((total_window_sec - last_mark))" | tee -a "$summary_file"
+  sleep $((total_window_sec - last_mark))
+
+  if ! run_limit_cycle "$run_dir" "$stack_name" "$price" "$qty" "$side" "main_probe" "$summary_file"; then
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 1
+  fi
+
+  capture_phase post "$run_dir"
+  echo "SCENARIO=idle30-cadence result=pass" | tee -a "$summary_file"
+  echo "RUN_DIR=$run_dir"
+  echo "SUMMARY_FILE=$summary_file"
+}
+
+run_tz16_reconnect() {
+  local stack_name=$1
+  local price=$2
+  local idle_sec=${3:-1800}
+  local qty=${4:-1.0}
+  local side=${5:-buy}
+  local run_dir summary_file
+
+  run_dir="/opt/diag-captures/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$run_dir"
+  summary_file="${run_dir}/${stack_name}.tz16.reconnect-before-order.summary.txt"
+  : > "$summary_file"
+
+  echo "SCENARIO=idle30-reconnect-before-order stack=$stack_name idle_sec=$idle_sec price=$price qty=$qty side=$side" | tee -a "$summary_file"
+  restart_gateway "$stack_name" 120 >/dev/null
+  capture_preflight "$run_dir" "$stack_name" "baseline" >/dev/null
+  echo "SCENARIO=idle30-reconnect-before-order phase=baseline $(preflight_compact_line "${run_dir}/${stack_name}.preflight.baseline.summary.txt")" | tee -a "$summary_file"
+
+  tz16_assert_flat "$stack_name" "$summary_file" || {
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 2
+  }
+
+  echo "SCENARIO=idle30-reconnect-before-order phase=idle sleep_sec=$idle_sec" | tee -a "$summary_file"
+  sleep "$idle_sec"
+  capture_preflight "$run_dir" "$stack_name" "before_reconnect" >/dev/null
+  echo "SCENARIO=idle30-reconnect-before-order phase=before_reconnect $(preflight_compact_line "${run_dir}/${stack_name}.preflight.before_reconnect.summary.txt")" | tee -a "$summary_file"
+
+  restart_gateway "$stack_name" 120 >/dev/null
+  capture_preflight "$run_dir" "$stack_name" "after_reconnect" >/dev/null
+  echo "SCENARIO=idle30-reconnect-before-order phase=after_reconnect $(preflight_compact_line "${run_dir}/${stack_name}.preflight.after_reconnect.summary.txt")" | tee -a "$summary_file"
+
+  if ! run_limit_cycle "$run_dir" "$stack_name" "$price" "$qty" "$side" "main_probe" "$summary_file"; then
+    capture_phase post "$run_dir"
+    echo "RUN_DIR=$run_dir"
+    echo "SUMMARY_FILE=$summary_file"
+    return 1
+  fi
+
+  capture_phase post "$run_dir"
+  echo "SCENARIO=idle30-reconnect-before-order result=pass" | tee -a "$summary_file"
+  echo "RUN_DIR=$run_dir"
+  echo "SUMMARY_FILE=$summary_file"
+}
+
 loop_limit_cycle() {
   local stack_name=$1
   local price=$2
@@ -794,6 +1118,14 @@ main() {
       require_arg 3 "$@"
       capture_preflight "$2" "$3" "${4:-manual}"
       ;;
+    wait-ready)
+      require_arg 2 "$@"
+      wait_gateway_ready "$2" "${3:-120}"
+      ;;
+    restart-gateway)
+      require_arg 2 "$@"
+      restart_gateway "$2" "${3:-120}"
+      ;;
     place)
       require_arg 3 "$@"
       send_place "$2" "$3" "${4:-1.0}" "${5:-buy}"
@@ -805,6 +1137,18 @@ main() {
     loop)
       require_arg 3 "$@"
       loop_limit_cycle "$2" "$3" "${4:-20}" "${5:-1.0}" "${6:-buy}" "${7:-2}"
+      ;;
+    tz16-baseline)
+      require_arg 3 "$@"
+      run_tz16_baseline "$2" "$3" "${4:-1800}" "${5:-1.0}" "${6:-buy}"
+      ;;
+    tz16-cadence)
+      require_arg 4 "$@"
+      run_tz16_cadence "$2" "$3" "$4" "${5:-1800}" "${6:-1.0}" "${7:-buy}"
+      ;;
+    tz16-reconnect)
+      require_arg 3 "$@"
+      run_tz16_reconnect "$2" "$3" "${4:-1800}" "${5:-1.0}" "${6:-buy}"
       ;;
     trace)
       require_arg 4 "$@"
