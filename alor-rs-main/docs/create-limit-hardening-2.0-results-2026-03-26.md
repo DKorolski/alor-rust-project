@@ -7,6 +7,7 @@ Related documents:
 - `docs/create-limit-tz1.6-results-2026-03-26.md`
 - `docs/create-limit-review-submission-2026-03-25.md`
 - `docs/create-limit-diagnostic-status-update-2026-03-25.md`
+- `docs/create-limit-hardening-2.0-rollout-runbook-2026-03-26.md`
 
 ## 1. Purpose
 
