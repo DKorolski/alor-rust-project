@@ -104,6 +104,7 @@ pub struct ControlPathRecycleOutcome {
     pub stale_for_ms: Option<u64>,
     pub previous_connection_instance_id: Option<String>,
     pub current_connection_instance_id: Option<String>,
+    pub post_recycle_exit_send_armed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +130,25 @@ impl ControlPathRecycleFailure {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlPathAdmissionPolicy {
+    Entry,
+    ExitRiskReducing,
+}
+
+impl ControlPathAdmissionPolicy {
+    fn allows_post_recycle_exit_send(self) -> bool {
+        matches!(self, Self::ExitRiskReducing)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Entry => "entry",
+            Self::ExitRiskReducing => "exit_risk_reducing",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RequestedRecycle {
     reason: String,
@@ -146,11 +166,7 @@ impl RequestedRecycle {
 
 impl fmt::Display for RequestedRecycle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "control path recycle requested: {}",
-            self.reason
-        )
+        write!(f, "control path recycle requested: {}", self.reason)
     }
 }
 
@@ -368,7 +384,7 @@ impl CwsClient {
                         let requested_recycle = error.downcast_ref::<RequestedRecycle>().cloned();
                         {
                             let mut guard = session_health.write();
-                            guard.cws_authorized = false;
+                            mark_cws_unauthorized(&mut guard);
                             reconnect_seq = reconnect_seq.saturating_add(1);
                             guard.cws_reconnect_seq = reconnect_seq;
                             guard.cws_reconnect_total = guard.cws_reconnect_total.saturating_add(1);
@@ -651,10 +667,12 @@ impl CwsHandle {
         Ok(response)
     }
 
-    pub async fn ensure_fresh_control_path_for_live_limit_entry(
+    pub async fn ensure_fresh_control_path_for_live_limit_command(
         &self,
         request_id: uuid::Uuid,
+        policy: ControlPathAdmissionPolicy,
         recycle_timeout: Duration,
+        post_recycle_exit_send_window: Duration,
         log_only: bool,
     ) -> Result<ControlPathRecycleOutcome, ControlPathRecycleFailure> {
         let initial = {
@@ -676,6 +694,7 @@ impl CwsHandle {
                 stale_for_ms: None,
                 previous_connection_instance_id: initial.1.clone(),
                 current_connection_instance_id: initial.1,
+                post_recycle_exit_send_armed: false,
             });
         }
 
@@ -692,6 +711,7 @@ impl CwsHandle {
             control_path_stale_after_sec = initial.3,
             cws_connect_seq = initial.4,
             cws_reconnect_seq = initial.5,
+            control_path_policy = policy.as_str(),
             control_path_stale_reason = ?initial.0.reason,
             control_path_stale_for_ms = ?initial.0.stale_for_ms,
             cws_last_tx_age_ms = ?initial.0.last_tx_age_ms,
@@ -706,6 +726,7 @@ impl CwsHandle {
                 stale_for_ms: initial.0.stale_for_ms,
                 previous_connection_instance_id: initial.1.clone(),
                 current_connection_instance_id: initial.1,
+                post_recycle_exit_send_armed: false,
             });
         }
 
@@ -729,6 +750,7 @@ impl CwsHandle {
                 stale_for_ms: None,
                 previous_connection_instance_id: current.1.clone(),
                 current_connection_instance_id: current.1,
+                post_recycle_exit_send_armed: false,
             });
         }
 
@@ -744,6 +766,7 @@ impl CwsHandle {
             control_path_stale_after_sec = current.3,
             cws_connect_seq = current.4,
             cws_reconnect_seq = current.5,
+            control_path_policy = policy.as_str(),
             control_path_stale_reason = ?current.0.reason,
             control_path_stale_for_ms = ?current.0.stale_for_ms,
             recycle_timeout_ms = recycle_timeout.as_millis() as u64,
@@ -751,18 +774,13 @@ impl CwsHandle {
         );
         self.cmd_tx
             .send(SessionCommand::Recycle(CwsRecycleCommand {
-                reason: current
-                    .0
-                    .reason
-                    .unwrap_or("control_path_stale")
-                    .to_string(),
+                reason: current.0.reason.unwrap_or("control_path_stale").to_string(),
             }))
             .await
             .map_err(|_| {
                 let mut guard = self.health.write();
-                guard.control_path_recycle_failed_total = guard
-                    .control_path_recycle_failed_total
-                    .saturating_add(1);
+                guard.control_path_recycle_failed_total =
+                    guard.control_path_recycle_failed_total.saturating_add(1);
                 guard.control_path_stale_blocked_send_total = guard
                     .control_path_stale_blocked_send_total
                     .saturating_add(1);
@@ -782,40 +800,80 @@ impl CwsHandle {
                     guard.readiness,
                     guard.cws_authorized,
                     guard.cws_connection_instance_id.clone(),
+                    guard.cws_last_authorize_ts_utc,
                     stale,
                     guard.cws_connect_seq,
                     guard.cws_reconnect_seq,
                 )
             };
-            let new_connection_ready = snapshot.0
+            let new_connection_established = snapshot.0
                 && snapshot.1
                 && snapshot.2.is_some()
-                && snapshot.2 != previous_connection_instance_id
-                && !snapshot.3.stale;
+                && snapshot.2 != previous_connection_instance_id;
+            let new_connection_ready = if policy.allows_post_recycle_exit_send() {
+                new_connection_established
+            } else {
+                new_connection_established && !snapshot.4.stale
+            };
             if new_connection_ready {
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                let mut post_recycle_exit_send_armed = false;
+                let mut fresh_cws_authorize_ts_utc = None;
                 {
                     let mut guard = self.health.write();
-                    guard.control_path_recycle_success_total = guard
-                        .control_path_recycle_success_total
-                        .saturating_add(1);
+                    guard.control_path_recycle_success_total =
+                        guard.control_path_recycle_success_total.saturating_add(1);
+                    if policy.allows_post_recycle_exit_send() {
+                        let window_ms = u64::try_from(post_recycle_exit_send_window.as_millis())
+                            .unwrap_or(u64::MAX);
+                        let authorize_ts_utc = snapshot.3.unwrap_or_else(|| Utc::now().timestamp());
+                        guard.post_recycle_exit_send_armed = true;
+                        guard.post_recycle_exit_send_used = false;
+                        guard.post_recycle_exit_send_window_ms = Some(window_ms);
+                        guard.post_recycle_exit_send_result = None;
+                        guard.fresh_cws_authorized_after_recycle = true;
+                        guard.fresh_cws_conn_instance_id = snapshot.2.clone();
+                        guard.fresh_cws_authorize_ts_utc = Some(authorize_ts_utc);
+                        guard.stale_block_reason = current.0.reason.map(str::to_string);
+                        guard.post_recycle_exit_send_armed_total =
+                            guard.post_recycle_exit_send_armed_total.saturating_add(1);
+                        guard.post_recycle_exit_send_armed_at = Some(Instant::now());
+                        guard.post_recycle_exit_send_expected_conn_instance_id = snapshot.2.clone();
+                        guard.post_recycle_exit_send_request_id = Some(request_id.to_string());
+                        post_recycle_exit_send_armed = true;
+                        fresh_cws_authorize_ts_utc = Some(authorize_ts_utc);
+                    }
                 }
                 info!(
                     request_id = %request_id,
                     action = "control_path_recycle_success",
                     previous_cws_connection_instance_id = ?previous_connection_instance_id,
                     current_cws_connection_instance_id = ?snapshot.2,
-                    cws_connect_seq = snapshot.4,
-                    cws_reconnect_seq = snapshot.5,
+                    cws_connect_seq = snapshot.5,
+                    cws_reconnect_seq = snapshot.6,
                     elapsed_ms,
+                    control_path_policy = policy.as_str(),
                     "control_path_recycle_success"
                 );
+                if post_recycle_exit_send_armed {
+                    info!(
+                        request_id = %request_id,
+                        action = "post_recycle_exit_send_armed",
+                        current_cws_connection_instance_id = ?snapshot.2,
+                        fresh_cws_authorize_ts_utc = fresh_cws_authorize_ts_utc,
+                        post_recycle_exit_send_window_ms =
+                            u64::try_from(post_recycle_exit_send_window.as_millis()).unwrap_or(u64::MAX),
+                        stale_block_reason = ?current.0.reason,
+                        "post_recycle_exit_send_armed"
+                    );
+                }
                 return Ok(ControlPathRecycleOutcome {
                     recycled: true,
                     stale_reason: current.0.reason.map(str::to_string),
                     stale_for_ms: current.0.stale_for_ms,
                     previous_connection_instance_id,
                     current_connection_instance_id: snapshot.2,
+                    post_recycle_exit_send_armed,
                 });
             }
 
@@ -826,21 +884,23 @@ impl CwsHandle {
                 );
                 {
                     let mut guard = self.health.write();
-                    guard.control_path_recycle_failed_total = guard
-                        .control_path_recycle_failed_total
-                        .saturating_add(1);
+                    guard.control_path_recycle_failed_total =
+                        guard.control_path_recycle_failed_total.saturating_add(1);
                     guard.control_path_stale_blocked_send_total = guard
                         .control_path_stale_blocked_send_total
                         .saturating_add(1);
+                    guard.stale_block_reason = snapshot.4.reason.map(str::to_string);
                 }
                 warn!(
                     request_id = %request_id,
                     action = "control_path_recycle_failed",
                     previous_cws_connection_instance_id = ?previous_connection_instance_id,
                     current_cws_connection_instance_id = ?snapshot.2,
-                    cws_connect_seq = snapshot.4,
-                    cws_reconnect_seq = snapshot.5,
+                    cws_connect_seq = snapshot.5,
+                    cws_reconnect_seq = snapshot.6,
                     recycle_timeout_ms = recycle_timeout.as_millis() as u64,
+                    control_path_policy = policy.as_str(),
+                    control_path_stale_reason = ?snapshot.4.reason,
                     error = error.message(),
                     "control_path_recycle_failed"
                 );
@@ -849,6 +909,164 @@ impl CwsHandle {
 
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    pub fn begin_post_recycle_exit_send(
+        &self,
+        request_id: uuid::Uuid,
+        current_connection_instance_id: Option<&str>,
+    ) -> Result<(), ControlPathRecycleFailure> {
+        let request_id_string = request_id.to_string();
+        let mut guard = self.health.write();
+        let window_ms = guard.post_recycle_exit_send_window_ms.unwrap_or(0);
+        let window_expired = match (
+            guard.post_recycle_exit_send_armed_at,
+            guard.post_recycle_exit_send_window_ms,
+        ) {
+            (Some(armed_at), Some(limit_ms)) => armed_at.elapsed().as_millis() as u64 > limit_ms,
+            _ => false,
+        };
+        let blocked_reason = if !guard.post_recycle_exit_send_armed {
+            Some("not_armed")
+        } else if guard.post_recycle_exit_send_used {
+            Some("already_used")
+        } else if guard.post_recycle_exit_send_request_id.as_deref()
+            != Some(request_id_string.as_str())
+        {
+            Some("request_mismatch")
+        } else if guard
+            .post_recycle_exit_send_expected_conn_instance_id
+            .as_deref()
+            != current_connection_instance_id
+        {
+            Some("connection_mismatch")
+        } else if window_expired {
+            Some("window_expired")
+        } else {
+            None
+        };
+
+        if let Some(reason) = blocked_reason {
+            guard.post_recycle_exit_send_armed = false;
+            guard.post_recycle_exit_send_result = Some(
+                if reason == "window_expired" {
+                    "window_expired"
+                } else {
+                    "blocked"
+                }
+                .to_string(),
+            );
+            guard.post_recycle_exit_send_blocked_total =
+                guard.post_recycle_exit_send_blocked_total.saturating_add(1);
+            guard.post_recycle_exit_send_request_id = None;
+            guard.post_recycle_exit_send_expected_conn_instance_id = None;
+            guard.post_recycle_exit_send_armed_at = None;
+            let current_conn = guard.fresh_cws_conn_instance_id.clone();
+            let stale_block_reason = guard.stale_block_reason.clone();
+            drop(guard);
+            if reason == "window_expired" {
+                warn!(
+                    request_id = %request_id,
+                    action = "post_recycle_exit_send_window_expired",
+                    current_cws_connection_instance_id = ?current_conn,
+                    post_recycle_exit_send_window_ms = window_ms,
+                    stale_block_reason = ?stale_block_reason,
+                    "post_recycle_exit_send_window_expired"
+                );
+            } else {
+                warn!(
+                    request_id = %request_id,
+                    action = "post_recycle_exit_send_blocked",
+                    current_cws_connection_instance_id = ?current_conn,
+                    blocked_reason = reason,
+                    stale_block_reason = ?stale_block_reason,
+                    "post_recycle_exit_send_blocked"
+                );
+            }
+            info!(
+                request_id = %request_id,
+                action = "post_recycle_exit_send_disarmed",
+                current_cws_connection_instance_id = ?current_conn,
+                disarm_reason = reason,
+                "post_recycle_exit_send_disarmed"
+            );
+            return Err(ControlPathRecycleFailure::new(
+                "control_path_recycle_failed",
+                format!("post-recycle exit send unavailable: {reason}"),
+            ));
+        }
+
+        guard.post_recycle_exit_send_used = true;
+        guard.post_recycle_exit_send_armed = false;
+        guard.post_recycle_exit_send_result = Some("attempted".to_string());
+        guard.post_recycle_exit_send_attempt_total =
+            guard.post_recycle_exit_send_attempt_total.saturating_add(1);
+        guard.post_recycle_exit_send_request_id = None;
+        guard.post_recycle_exit_send_expected_conn_instance_id = None;
+        guard.post_recycle_exit_send_armed_at = None;
+        let current_conn = guard.fresh_cws_conn_instance_id.clone();
+        let stale_block_reason = guard.stale_block_reason.clone();
+        drop(guard);
+
+        info!(
+            request_id = %request_id,
+            action = "post_recycle_exit_send_allowed",
+            current_cws_connection_instance_id = ?current_conn,
+            stale_block_reason = ?stale_block_reason,
+            "post_recycle_exit_send_allowed"
+        );
+        info!(
+            request_id = %request_id,
+            action = "post_recycle_exit_send_attempt",
+            current_cws_connection_instance_id = ?current_conn,
+            "post_recycle_exit_send_attempt"
+        );
+        Ok(())
+    }
+
+    pub fn finish_post_recycle_exit_send(
+        &self,
+        request_id: uuid::Uuid,
+        success: bool,
+        detail: impl Into<String>,
+    ) {
+        let detail = detail.into();
+        let mut guard = self.health.write();
+        if success {
+            guard.post_recycle_exit_send_success_total =
+                guard.post_recycle_exit_send_success_total.saturating_add(1);
+            guard.post_recycle_exit_send_result = Some("success".to_string());
+        } else {
+            guard.post_recycle_exit_send_failed_total =
+                guard.post_recycle_exit_send_failed_total.saturating_add(1);
+            guard.post_recycle_exit_send_result = Some("failed".to_string());
+        }
+        let current_conn = guard.fresh_cws_conn_instance_id.clone();
+        drop(guard);
+
+        if success {
+            info!(
+                request_id = %request_id,
+                action = "post_recycle_exit_send_success",
+                current_cws_connection_instance_id = ?current_conn,
+                detail,
+                "post_recycle_exit_send_success"
+            );
+        } else {
+            warn!(
+                request_id = %request_id,
+                action = "post_recycle_exit_send_failed",
+                current_cws_connection_instance_id = ?current_conn,
+                detail,
+                "post_recycle_exit_send_failed"
+            );
+        }
+        info!(
+            request_id = %request_id,
+            action = "post_recycle_exit_send_disarmed",
+            current_cws_connection_instance_id = ?current_conn,
+            "post_recycle_exit_send_disarmed"
+        );
     }
 }
 
@@ -1068,6 +1286,25 @@ fn record_access_token_snapshot(
     guard.token_refresh_count = snapshot.refresh_count();
 }
 
+fn reset_post_recycle_exit_send_state(guard: &mut HealthState) {
+    guard.post_recycle_exit_send_armed = false;
+    guard.post_recycle_exit_send_used = false;
+    guard.post_recycle_exit_send_window_ms = None;
+    guard.post_recycle_exit_send_result = None;
+    guard.fresh_cws_authorized_after_recycle = false;
+    guard.fresh_cws_conn_instance_id = None;
+    guard.fresh_cws_authorize_ts_utc = None;
+    guard.stale_block_reason = None;
+    guard.post_recycle_exit_send_armed_at = None;
+    guard.post_recycle_exit_send_expected_conn_instance_id = None;
+    guard.post_recycle_exit_send_request_id = None;
+}
+
+fn mark_cws_unauthorized(guard: &mut HealthState) {
+    guard.cws_authorized = false;
+    reset_post_recycle_exit_send_state(guard);
+}
+
 fn control_opcode_key(opcode: &str) -> Option<&'static str> {
     match opcode {
         "create:limit" => Some("create:limit"),
@@ -1082,12 +1319,10 @@ fn update_control_send_counters(guard: &mut HealthState, opcode: &str, ts_utc: i
     guard.cws_last_tx_at = Some(at);
     match control_opcode_key(opcode) {
         Some("create:limit") => {
-            guard.cws_create_limit_send_total =
-                guard.cws_create_limit_send_total.saturating_add(1);
+            guard.cws_create_limit_send_total = guard.cws_create_limit_send_total.saturating_add(1);
         }
         Some("delete:limit") => {
-            guard.cws_delete_limit_send_total =
-                guard.cws_delete_limit_send_total.saturating_add(1);
+            guard.cws_delete_limit_send_total = guard.cws_delete_limit_send_total.saturating_add(1);
         }
         Some("replace:limit") => {
             guard.cws_replace_limit_send_total =
@@ -1140,10 +1375,7 @@ fn update_control_result_counters(
     }
 }
 
-fn record_frame(
-    frames: &mut Vec<CwsFrameTraceEntry>,
-    entry: CwsFrameTraceEntry,
-) {
+fn record_frame(frames: &mut Vec<CwsFrameTraceEntry>, entry: CwsFrameTraceEntry) {
     frames.push(entry);
     if frames.len() > CWS_FRAME_RING_LIMIT {
         let remove_count = frames.len() - CWS_FRAME_RING_LIMIT;
@@ -1209,7 +1441,10 @@ fn record_inbound_frame(
     );
 }
 
-fn sync_pending_health(health: &Arc<RwLock<HealthState>>, pending: &HashMap<String, PendingRequest>) {
+fn sync_pending_health(
+    health: &Arc<RwLock<HealthState>>,
+    pending: &HashMap<String, PendingRequest>,
+) {
     let mut pending_items = pending.values().collect::<Vec<_>>();
     pending_items.sort_by_key(|request| request.send_seq);
 
@@ -1248,7 +1483,7 @@ async fn run_session(
 
     {
         let mut guard = health.write();
-        guard.cws_authorized = false;
+        mark_cws_unauthorized(&mut guard);
         guard.cws_connection_instance_id = Some(connection_instance_id.clone());
         guard.cws_connect_seq = connect_seq;
         guard.cws_reconnect_seq = reconnect_seq;
@@ -1368,7 +1603,7 @@ async fn run_session(
                         {
                             {
                                 let mut guard = health.write();
-                                guard.cws_authorized = false;
+                                mark_cws_unauthorized(&mut guard);
                             }
                             let failure = transport_failure_from_send_error(&error);
                             let session_error = handle_transport_failure(&mut pending, failure, health);
@@ -1381,7 +1616,7 @@ async fn run_session(
                     Some(SessionCommand::Recycle(recycle)) => {
                         {
                             let mut guard = health.write();
-                            guard.cws_authorized = false;
+                            mark_cws_unauthorized(&mut guard);
                         }
                         info!(
                             handler = "socket_writer",
@@ -1562,7 +1797,7 @@ async fn run_session(
                     Some(Ok(Message::Close(frame))) => {
                         {
                             let mut guard = health.write();
-                            guard.cws_authorized = false;
+                            mark_cws_unauthorized(&mut guard);
                         }
                         let failure = transport_failure_from_close_frame(frame);
                         let session_error = handle_transport_failure(&mut pending, failure, health);
@@ -1572,7 +1807,7 @@ async fn run_session(
                     Some(Err(error)) => {
                         {
                             let mut guard = health.write();
-                            guard.cws_authorized = false;
+                            mark_cws_unauthorized(&mut guard);
                         }
                         let failure = transport_failure_from_receive_error(&error);
                         let session_error = handle_transport_failure(&mut pending, failure, health);
@@ -1581,7 +1816,7 @@ async fn run_session(
                     None => {
                         {
                             let mut guard = health.write();
-                            guard.cws_authorized = false;
+                            mark_cws_unauthorized(&mut guard);
                         }
                         let failure = transport_failure_from_eof();
                         let session_error = handle_transport_failure(&mut pending, failure, health);
@@ -1714,6 +1949,8 @@ async fn authorize(
         {
             let mut guard = health.write();
             guard.cws_authorized = true;
+            guard.cws_last_authorize_ts_utc = Some(recv_ts_utc);
+            guard.cws_last_authorize_at = Some(recv_at);
         }
         log_event(GatewayEvent::CwsAuthorization {
             success: true,
@@ -1739,7 +1976,7 @@ async fn authorize(
         }
         {
             let mut guard = health.write();
-            guard.cws_authorized = false;
+            mark_cws_unauthorized(&mut guard);
         }
         log_event(GatewayEvent::CwsAuthorization {
             success: false,
@@ -2718,9 +2955,11 @@ mod tests {
         let (handle, mut rx) = test_handle_with_health(health.clone());
 
         let outcome = handle
-            .ensure_fresh_control_path_for_live_limit_entry(
+            .ensure_fresh_control_path_for_live_limit_command(
                 Uuid::new_v4(),
+                ControlPathAdmissionPolicy::Entry,
                 Duration::from_millis(150),
+                Duration::from_millis(50),
                 false,
             )
             .await
@@ -2758,9 +2997,11 @@ mod tests {
         });
 
         let outcome = handle
-            .ensure_fresh_control_path_for_live_limit_entry(
+            .ensure_fresh_control_path_for_live_limit_command(
                 Uuid::new_v4(),
+                ControlPathAdmissionPolicy::Entry,
                 Duration::from_millis(300),
+                Duration::from_millis(50),
                 false,
             )
             .await
@@ -2795,9 +3036,11 @@ mod tests {
         let (handle, _rx) = test_handle_with_health(health.clone());
 
         let error = handle
-            .ensure_fresh_control_path_for_live_limit_entry(
+            .ensure_fresh_control_path_for_live_limit_command(
                 Uuid::new_v4(),
+                ControlPathAdmissionPolicy::Entry,
                 Duration::from_millis(120),
+                Duration::from_millis(50),
                 false,
             )
             .await
@@ -2810,5 +3053,108 @@ mod tests {
         assert_eq!(guard.control_path_recycle_success_total, 0);
         assert_eq!(guard.control_path_recycle_failed_total, 1);
         assert_eq!(guard.control_path_stale_blocked_send_total, 1);
+    }
+
+    #[tokio::test]
+    async fn stale_exit_path_arms_first_send_after_recycle_authorize() {
+        let health = Arc::new(RwLock::new(HealthState {
+            control_path_stale_after_sec: 900,
+            cws_connection_instance_id: Some("conn-old".to_string()),
+            readiness: true,
+            cws_authorized: true,
+            cws_last_control_success_at: Some(Instant::now() - Duration::from_secs(901)),
+            cws_last_control_success_ts_utc: Some(Utc::now().timestamp() - 901),
+            ..HealthState::default()
+        }));
+        let (handle, mut rx) = test_handle_with_health(health.clone());
+        let health_for_task = health.clone();
+        tokio::spawn(async move {
+            if let Some(SessionCommand::Recycle(_)) = rx.recv().await {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                let mut guard = health_for_task.write();
+                guard.readiness = true;
+                guard.cws_authorized = true;
+                guard.cws_connection_instance_id = Some("conn-new".to_string());
+                guard.cws_last_authorize_ts_utc = Some(Utc::now().timestamp());
+                guard.cws_last_authorize_at = Some(Instant::now());
+            }
+        });
+
+        let request_id = Uuid::new_v4();
+        let outcome = handle
+            .ensure_fresh_control_path_for_live_limit_command(
+                request_id,
+                ControlPathAdmissionPolicy::ExitRiskReducing,
+                Duration::from_millis(300),
+                Duration::from_millis(75),
+                false,
+            )
+            .await
+            .expect("exit recycle should arm post-recycle send");
+
+        assert!(outcome.recycled);
+        assert!(outcome.post_recycle_exit_send_armed);
+        handle
+            .begin_post_recycle_exit_send(
+                request_id,
+                outcome.current_connection_instance_id.as_deref(),
+            )
+            .expect("armed exit send should be allowed");
+        handle.finish_post_recycle_exit_send(request_id, true, "accepted");
+
+        let guard = health.read();
+        assert_eq!(guard.control_path_recycle_success_total, 1);
+        assert!(guard.post_recycle_exit_send_used);
+        assert_eq!(
+            guard.post_recycle_exit_send_result.as_deref(),
+            Some("success")
+        );
+        assert_eq!(guard.post_recycle_exit_send_armed_total, 1);
+        assert_eq!(guard.post_recycle_exit_send_attempt_total, 1);
+        assert_eq!(guard.post_recycle_exit_send_success_total, 1);
+        assert_eq!(guard.post_recycle_exit_send_failed_total, 0);
+    }
+
+    #[tokio::test]
+    async fn stale_entry_path_still_times_out_without_fresh_control_success() {
+        let health = Arc::new(RwLock::new(HealthState {
+            control_path_stale_after_sec: 900,
+            cws_connection_instance_id: Some("conn-old".to_string()),
+            readiness: true,
+            cws_authorized: true,
+            cws_last_control_success_at: Some(Instant::now() - Duration::from_secs(901)),
+            cws_last_control_success_ts_utc: Some(Utc::now().timestamp() - 901),
+            ..HealthState::default()
+        }));
+        let (handle, mut rx) = test_handle_with_health(health.clone());
+        let health_for_task = health.clone();
+        tokio::spawn(async move {
+            if let Some(SessionCommand::Recycle(_)) = rx.recv().await {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                let mut guard = health_for_task.write();
+                guard.readiness = true;
+                guard.cws_authorized = true;
+                guard.cws_connection_instance_id = Some("conn-new".to_string());
+                guard.cws_last_authorize_ts_utc = Some(Utc::now().timestamp());
+                guard.cws_last_authorize_at = Some(Instant::now());
+            }
+        });
+
+        let error = handle
+            .ensure_fresh_control_path_for_live_limit_command(
+                Uuid::new_v4(),
+                ControlPathAdmissionPolicy::Entry,
+                Duration::from_millis(150),
+                Duration::from_millis(75),
+                false,
+            )
+            .await
+            .expect_err("entry must still block until fresh control success exists");
+
+        assert_eq!(error.code(), "control_path_recycle_failed");
+        let guard = health.read();
+        assert_eq!(guard.control_path_recycle_success_total, 0);
+        assert_eq!(guard.post_recycle_exit_send_armed_total, 0);
+        assert_eq!(guard.control_path_recycle_failed_total, 1);
     }
 }

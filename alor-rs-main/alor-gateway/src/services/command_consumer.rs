@@ -8,6 +8,8 @@ use tracing::{debug, info, warn};
 use alor_protocol::{CommandAck, CommandAction, IntentClass, OrderCommand, Side};
 use alor_types::MarketState;
 
+use crate::action_scope_cws::ActionScopeCwsManager;
+use crate::config::ControlCwsMode;
 use crate::health::{GatewayPhase, HealthState};
 use crate::transport::{CommandEnvelope, CommandSink, CommandSource};
 
@@ -26,8 +28,16 @@ const DIAG_CWS_REQUEST_ORDER_ID: &str = "_diag_cws_request_order_id";
 pub struct CommandConsumerConfig {
     pub pause_when_degraded: bool,
     pub control_path_pre_entry_recycle_enabled: bool,
+    pub control_path_pre_exit_recycle_enabled: bool,
     pub control_path_recycle_timeout: Duration,
+    pub control_path_recycle_timeout_exit: Duration,
+    pub control_path_post_recycle_exit_send_window: Duration,
     pub control_path_hardening_log_only: bool,
+    pub control_cws_mode: ControlCwsMode,
+    pub action_scope_enable_create_limit: bool,
+    pub action_scope_enable_delete_limit: bool,
+    pub action_scope_enable_replace_limit: bool,
+    pub action_scope_enable_exit: bool,
     pub idempotency_ttl: Duration,
     pub idempotency_max: usize,
     pub error_backoff_base: Duration,
@@ -40,8 +50,16 @@ impl Default for CommandConsumerConfig {
         Self {
             pause_when_degraded: true,
             control_path_pre_entry_recycle_enabled: true,
+            control_path_pre_exit_recycle_enabled: true,
             control_path_recycle_timeout: Duration::from_secs(5),
+            control_path_recycle_timeout_exit: Duration::from_secs(10),
+            control_path_post_recycle_exit_send_window: Duration::from_secs(5),
             control_path_hardening_log_only: false,
+            control_cws_mode: ControlCwsMode::LegacyLongLived,
+            action_scope_enable_create_limit: false,
+            action_scope_enable_delete_limit: false,
+            action_scope_enable_replace_limit: false,
+            action_scope_enable_exit: false,
             idempotency_ttl: Duration::from_secs(300),
             idempotency_max: 10_000,
             error_backoff_base: Duration::from_millis(50),
@@ -49,6 +67,18 @@ impl Default for CommandConsumerConfig {
             no_message_log_interval: Duration::from_secs(20),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlPathHardeningPolicy {
+    Entry,
+    Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandExecutionPath {
+    LegacyLongLived,
+    ActionScoped,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +201,7 @@ pub async fn run_command_consumer(
     idempotency: Arc<dyn IdempotencyStore>,
     request_map: Arc<parking_lot::RwLock<HashMap<i64, uuid::Uuid>>>,
     cws: crate::cws_client::CwsHandle,
+    action_scope_cws: Arc<ActionScopeCwsManager>,
     price_step: f64,
     volume_step: f64,
     health: Arc<parking_lot::RwLock<HealthState>>,
@@ -350,13 +381,21 @@ pub async fn run_command_consumer(
                 }
 
                 let mut sent_after_recycle = false;
-                if should_apply_control_path_hardening(&command)
-                    && config.control_path_pre_entry_recycle_enabled
-                {
+                let mut post_recycle_exit_send_active = false;
+                let mut post_recycle_exit_send_conn_id = None;
+                let execution_path = execution_path_for_command(&command, &config);
+                if execution_path == CommandExecutionPath::LegacyLongLived {
+                    if let Some(policy) = control_path_hardening_policy(&command, &config) {
+                    let recycle_timeout = match policy {
+                        ControlPathHardeningPolicy::Entry => config.control_path_recycle_timeout,
+                        ControlPathHardeningPolicy::Exit => config.control_path_recycle_timeout_exit,
+                    };
                     match cws
-                        .ensure_fresh_control_path_for_live_limit_entry(
+                        .ensure_fresh_control_path_for_live_limit_command(
                             request_id,
-                            config.control_path_recycle_timeout,
+                            control_path_admission_policy(policy),
+                            recycle_timeout,
+                            config.control_path_post_recycle_exit_send_window,
                             config.control_path_hardening_log_only,
                         )
                         .await
@@ -364,6 +403,9 @@ pub async fn run_command_consumer(
                         Ok(outcome) => {
                             if outcome.recycled {
                                 sent_after_recycle = true;
+                                post_recycle_exit_send_active = outcome.post_recycle_exit_send_armed;
+                                post_recycle_exit_send_conn_id =
+                                    outcome.current_connection_instance_id.clone();
                                 info!(
                                     handler = "command_consumer",
                                     state_before = "control_path_recycled",
@@ -375,6 +417,8 @@ pub async fn run_command_consumer(
                                     current_cws_connection_instance_id = ?outcome.current_connection_instance_id,
                                     control_path_stale_reason = ?outcome.stale_reason,
                                     control_path_stale_for_ms = ?outcome.stale_for_ms,
+                                    post_recycle_exit_send_armed = outcome.post_recycle_exit_send_armed,
+                                    control_path_policy = ?policy,
                                     "control_path_send_after_recycle"
                                 );
                             }
@@ -397,6 +441,7 @@ pub async fn run_command_consumer(
                                 symbol = %command.symbol,
                                 error_code = error.code(),
                                 error_msg = error.message(),
+                                control_path_policy = ?policy,
                                 "control_path_send_blocked_due_to_stale"
                             );
                             sink.publish_ack(ack.clone()).await?;
@@ -417,8 +462,60 @@ pub async fn run_command_consumer(
                         }
                     }
                 }
+                }
+                if post_recycle_exit_send_active {
+                    if let Err(error) = cws.begin_post_recycle_exit_send(
+                        request_id,
+                        post_recycle_exit_send_conn_id.as_deref(),
+                    ) {
+                        increment_counter(&health, |h| {
+                            h.cws_errors_total = h.cws_errors_total.saturating_add(1)
+                        });
+                        let ack = build_control_path_error_ack(
+                            request_id,
+                            error.code(),
+                            error.message(),
+                        );
+                        warn!(
+                            handler = "command_consumer",
+                            state_before = "post_recycle_exit_send_armed",
+                            state_after = "post_recycle_exit_send_blocked",
+                            request_id = %request_id,
+                            strategy_id = %command.strategy_id,
+                            symbol = %command.symbol,
+                            error_code = error.code(),
+                            error_msg = error.message(),
+                            "post_recycle_exit_send_blocked"
+                        );
+                        sink.publish_ack(ack.clone()).await?;
+                        info!(
+                            handler = "command_consumer",
+                            state_before = "post_recycle_exit_send_block_ack_ready",
+                            state_after = "ack_published",
+                            request_id = %ack.request_id,
+                            status = ?ack.status,
+                            processed_ts_utc = ack.processed_ts_utc,
+                            error_code = ?ack.error_code,
+                            "command ack published"
+                        );
+                        if let Some(message_id) = message_id.as_deref() {
+                            source.ack(message_id).await?;
+                        }
+                        continue;
+                    }
+                }
 
-                match execute_command(&cws, &command, request_id, price_step, volume_step).await {
+                match execute_command(
+                    &cws,
+                    &action_scope_cws,
+                    execution_path,
+                    &command,
+                    request_id,
+                    price_step,
+                    volume_step,
+                )
+                .await
+                {
                     Ok(response) => {
                         let info = parse_cws_response(&response);
                         let http_code = info.http_code.unwrap_or(0);
@@ -447,6 +544,16 @@ pub async fn run_command_consumer(
                             sent_after_recycle,
                             "cws response"
                         );
+                        if post_recycle_exit_send_active {
+                            let detail = if http_code == 200 {
+                                "accepted".to_string()
+                            } else if http_code > 0 {
+                                format!("http_code={http_code}")
+                            } else {
+                                "missing_http_code".to_string()
+                            };
+                            cws.finish_post_recycle_exit_send(request_id, http_code == 200, detail);
+                        }
                         if matches!(command.action, CommandAction::Place(_)) {
                             let (status, error_code, error_msg): (&str, Option<String>, Option<String>) =
                                 if http_code == 200 {
@@ -576,6 +683,13 @@ pub async fn run_command_consumer(
                         }
                     }
                     Err(error) => {
+                        if post_recycle_exit_send_active {
+                            cws.finish_post_recycle_exit_send(
+                                request_id,
+                                false,
+                                format_transport_error_message(&error),
+                            );
+                        }
                         increment_counter(&health, |h| h.cws_errors_total = h.cws_errors_total.saturating_add(1));
                         if matches!(command.action, CommandAction::Place(_)) {
                             increment_counter(&health, |h| {
@@ -675,9 +789,52 @@ fn increment_http_code(health: &Arc<parking_lot::RwLock<HealthState>>, http_code
     *entry = entry.saturating_add(1);
 }
 
-fn should_apply_control_path_hardening(command: &OrderCommand) -> bool {
-    matches!(command.action, CommandAction::Place(_))
-        && matches!(command.effective_intent_class(), IntentClass::Entry)
+fn control_path_hardening_policy(
+    command: &OrderCommand,
+    config: &CommandConsumerConfig,
+) -> Option<ControlPathHardeningPolicy> {
+    if !matches!(command.action, CommandAction::Place(_)) {
+        return None;
+    }
+    match command.effective_intent_class() {
+        IntentClass::Entry if config.control_path_pre_entry_recycle_enabled => {
+            Some(ControlPathHardeningPolicy::Entry)
+        }
+        IntentClass::Exit if config.control_path_pre_exit_recycle_enabled => {
+            Some(ControlPathHardeningPolicy::Exit)
+        }
+        _ => None,
+    }
+}
+
+fn execution_path_for_command(
+    command: &OrderCommand,
+    config: &CommandConsumerConfig,
+) -> CommandExecutionPath {
+    if config.control_cws_mode != ControlCwsMode::ActionScoped {
+        return CommandExecutionPath::LegacyLongLived;
+    }
+
+    match command.action {
+        CommandAction::Place(_) if config.action_scope_enable_create_limit => {
+            CommandExecutionPath::ActionScoped
+        }
+        CommandAction::Cancel(_) if config.action_scope_enable_delete_limit => {
+            CommandExecutionPath::ActionScoped
+        }
+        _ => CommandExecutionPath::LegacyLongLived,
+    }
+}
+
+fn control_path_admission_policy(
+    policy: ControlPathHardeningPolicy,
+) -> crate::cws_client::ControlPathAdmissionPolicy {
+    match policy {
+        ControlPathHardeningPolicy::Entry => crate::cws_client::ControlPathAdmissionPolicy::Entry,
+        ControlPathHardeningPolicy::Exit => {
+            crate::cws_client::ControlPathAdmissionPolicy::ExitRiskReducing
+        }
+    }
 }
 
 fn validate_command(
@@ -795,6 +952,8 @@ fn build_control_path_error_ack(
 
 async fn execute_command(
     cws: &crate::cws_client::CwsHandle,
+    action_scope_cws: &ActionScopeCwsManager,
+    execution_path: CommandExecutionPath,
     command: &OrderCommand,
     request_id: uuid::Uuid,
     price_step: f64,
@@ -805,18 +964,35 @@ async fn execute_command(
             let request_id_str = request_id.to_string();
             let price = normalize_price(payload.price, price_step, payload.side);
             let qty = normalize_qty(payload.qty, volume_step);
-            let response = cws
-                .create_limit(
-                    &command.portfolio,
-                    &command.exchange,
-                    &command.symbol,
-                    price,
-                    qty,
-                    side_str(payload.side),
-                    payload.comment.as_deref(),
-                    Some(request_id_str.as_str()),
-                )
-                .await?;
+            let response = match execution_path {
+                CommandExecutionPath::LegacyLongLived => {
+                    cws.create_limit(
+                        &command.portfolio,
+                        &command.exchange,
+                        &command.symbol,
+                        price,
+                        qty,
+                        side_str(payload.side),
+                        payload.comment.as_deref(),
+                        Some(request_id_str.as_str()),
+                    )
+                    .await?
+                }
+                CommandExecutionPath::ActionScoped => {
+                    action_scope_cws
+                        .create_limit(
+                            &command.portfolio,
+                            &command.exchange,
+                            &command.symbol,
+                            price,
+                            qty,
+                            side_str(payload.side),
+                            payload.comment.as_deref(),
+                            request_id_str.as_str(),
+                        )
+                        .await?
+                }
+            };
             Ok(response)
         }
         CommandAction::Market(payload) => {
@@ -837,14 +1013,27 @@ async fn execute_command(
         }
         CommandAction::Cancel(payload) => {
             let request_id_str = request_id.to_string();
-            let response = cws
-                .cancel(
-                    &command.portfolio,
-                    &command.exchange,
-                    payload.order_id,
-                    Some(request_id_str.as_str()),
-                )
-                .await?;
+            let response = match execution_path {
+                CommandExecutionPath::LegacyLongLived => {
+                    cws.cancel(
+                        &command.portfolio,
+                        &command.exchange,
+                        payload.order_id,
+                        Some(request_id_str.as_str()),
+                    )
+                    .await?
+                }
+                CommandExecutionPath::ActionScoped => {
+                    action_scope_cws
+                        .cancel(
+                            &command.portfolio,
+                            &command.exchange,
+                            payload.order_id,
+                            request_id_str.as_str(),
+                        )
+                        .await?
+                }
+            };
             Ok(response)
         }
         CommandAction::Replace(payload) => {
@@ -1289,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn control_path_hardening_targets_entry_place_only() {
+    fn control_path_hardening_distinguishes_entry_and_exit_place() {
         let mut place_entry = sample_command(chrono::Utc::now().timestamp(), None);
         place_entry.action = CommandAction::Place(alor_protocol::PlaceOrder {
             side: Side::Buy,
@@ -1298,14 +1487,58 @@ mod tests {
             comment: None,
         });
         place_entry.intent_class = Some(IntentClass::Entry);
-        assert!(should_apply_control_path_hardening(&place_entry));
+        assert_eq!(
+            control_path_hardening_policy(&place_entry, &CommandConsumerConfig::default()),
+            Some(ControlPathHardeningPolicy::Entry)
+        );
 
         let mut place_exit = place_entry.clone();
         place_exit.intent_class = Some(IntentClass::Exit);
-        assert!(!should_apply_control_path_hardening(&place_exit));
+        assert_eq!(
+            control_path_hardening_policy(&place_exit, &CommandConsumerConfig::default()),
+            Some(ControlPathHardeningPolicy::Exit)
+        );
 
         let market_entry = sample_command(chrono::Utc::now().timestamp(), None);
-        assert!(!should_apply_control_path_hardening(&market_entry));
+        assert_eq!(
+            control_path_hardening_policy(&market_entry, &CommandConsumerConfig::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn execution_path_uses_action_scoped_only_for_enabled_phase1_ops() {
+        let mut config = CommandConsumerConfig {
+            control_cws_mode: ControlCwsMode::ActionScoped,
+            action_scope_enable_create_limit: true,
+            action_scope_enable_delete_limit: true,
+            ..CommandConsumerConfig::default()
+        };
+
+        let mut place = sample_command(chrono::Utc::now().timestamp(), None);
+        place.action = CommandAction::Place(alor_protocol::PlaceOrder {
+            side: Side::Buy,
+            qty: 1.0,
+            price: 79.0,
+            comment: None,
+        });
+        assert_eq!(
+            execution_path_for_command(&place, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
+        let mut cancel = sample_command(chrono::Utc::now().timestamp(), None);
+        cancel.action = CommandAction::Cancel(alor_protocol::CancelOrder { order_id: 42 });
+        assert_eq!(
+            execution_path_for_command(&cancel, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
+        config.action_scope_enable_delete_limit = false;
+        assert_eq!(
+            execution_path_for_command(&cancel, &config),
+            CommandExecutionPath::LegacyLongLived
+        );
     }
 
     #[test]

@@ -47,3 +47,8 @@ paper_trades.jsonl
 **/Thumbs.db
 **/.idea/
 **/.vscode/
+
+# Local build / deploy bundles
+/target-linux-amd64/
+docs/*.tar.gz
+docs/*-artifacts/

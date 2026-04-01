@@ -4,13 +4,15 @@ members = [
     "alor-types",
     "alor-protocol",
     "alor-gateway",
-    "strategy-runtime"
+    "strategy-runtime",
+    "standalone-cws-stability-probe"
 ]
 default-members = [
     "alor-types",
     "alor-protocol",
     "alor-gateway",
-    "strategy-runtime"
+    "strategy-runtime",
+    "standalone-cws-stability-probe"
 ]
 
 [workspace.dependencies]

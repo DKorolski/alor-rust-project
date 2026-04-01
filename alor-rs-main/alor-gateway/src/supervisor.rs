@@ -10,6 +10,7 @@ use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::action_scope_cws::{ActionScopeCwsConfig, ActionScopeCwsManager};
 use crate::auth::TokenProvider;
 use crate::config::{AlorGatewayConfig, derive_config};
 use crate::cws_client::CwsClient;
@@ -81,6 +82,7 @@ fn build_health_state(cfg: &AlorGatewayConfig, token_provider: &TokenProvider) -
         stack_name: Some(resolve_stack_name(cfg)),
         gateway_instance_id: Some(Uuid::new_v4().to_string()),
         auth_principal_fingerprint: Some(token_provider.principal_fingerprint().to_string()),
+        control_cws_mode: cfg.control_cws_mode.as_str().to_string(),
         ..HealthState::default()
     }
 }
@@ -479,10 +481,26 @@ impl Supervisor {
             self.token_provider.clone(),
             self.health.clone(),
         );
+        let action_scope_cws = Arc::new(ActionScopeCwsManager::new(
+            cfg.cws_url.clone(),
+            cfg.instrument_group.clone(),
+            self.token_provider.clone(),
+            self.health.clone(),
+            ActionScopeCwsConfig {
+                open_timeout: Duration::from_millis(cfg.action_scope_open_timeout_ms),
+                authorize_timeout: Duration::from_millis(cfg.action_scope_authorize_timeout_ms),
+                followup_window: Duration::from_millis(cfg.action_scope_followup_window_ms),
+                max_session_lifetime: Duration::from_millis(
+                    cfg.action_scope_max_session_lifetime_ms,
+                ),
+                close_timeout: Duration::from_millis(cfg.action_scope_close_timeout_ms),
+            },
+        ));
         let request_map = Arc::new(RwLock::new(HashMap::<i64, uuid::Uuid>::new()));
 
         if let Some(transport) = command_transport {
             let cws_handle = cws_handle.clone();
+            let action_scope_cws = action_scope_cws.clone();
             let price_step = cfg.price_step;
             let volume_step = cfg.volume_step;
             let health = self.health.clone();
@@ -495,6 +513,7 @@ impl Supervisor {
                     transport.idempotency,
                     request_map_consumer,
                     cws_handle,
+                    action_scope_cws,
                     price_step,
                     volume_step,
                     health,
@@ -503,10 +522,23 @@ impl Supervisor {
                     CommandConsumerConfig {
                         control_path_pre_entry_recycle_enabled: cfg
                             .control_path_pre_entry_recycle_enabled,
+                        control_path_pre_exit_recycle_enabled: cfg
+                            .control_path_pre_exit_recycle_enabled,
                         control_path_recycle_timeout: Duration::from_millis(
                             cfg.control_path_recycle_timeout_ms,
                         ),
+                        control_path_recycle_timeout_exit: Duration::from_millis(
+                            cfg.control_path_recycle_timeout_ms_exit,
+                        ),
+                        control_path_post_recycle_exit_send_window: Duration::from_millis(
+                            cfg.control_path_post_recycle_exit_send_window_ms,
+                        ),
                         control_path_hardening_log_only: cfg.control_path_hardening_log_only,
+                        control_cws_mode: cfg.control_cws_mode,
+                        action_scope_enable_create_limit: cfg.action_scope_enable_create_limit,
+                        action_scope_enable_delete_limit: cfg.action_scope_enable_delete_limit,
+                        action_scope_enable_replace_limit: cfg.action_scope_enable_replace_limit,
+                        action_scope_enable_exit: cfg.action_scope_enable_exit,
                         ..CommandConsumerConfig::default()
                     },
                 )

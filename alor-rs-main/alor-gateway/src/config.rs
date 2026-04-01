@@ -8,6 +8,31 @@ use thiserror::Error;
 
 use alor_types::TradingPeriods;
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlCwsMode {
+    #[default]
+    LegacyLongLived,
+    ActionScoped,
+}
+
+impl ControlCwsMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyLongLived => "legacy_long_lived",
+            Self::ActionScoped => "action_scoped",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self, ConfigError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "legacy_long_lived" => Ok(Self::LegacyLongLived),
+            "action_scoped" => Ok(Self::ActionScoped),
+            _ => Err(ConfigError::InvalidControlCwsMode(raw.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlorGatewayConfig {
     pub portfolio: String,
@@ -53,8 +78,21 @@ pub struct AlorGatewayConfig {
     pub bar_silence_resync_min_sec: u64,
     pub control_path_stale_after_sec: u64,
     pub control_path_pre_entry_recycle_enabled: bool,
+    pub control_path_pre_exit_recycle_enabled: bool,
     pub control_path_recycle_timeout_ms: u64,
+    pub control_path_recycle_timeout_ms_exit: u64,
+    pub control_path_post_recycle_exit_send_window_ms: u64,
     pub control_path_hardening_log_only: bool,
+    pub control_cws_mode: ControlCwsMode,
+    pub action_scope_enable_create_limit: bool,
+    pub action_scope_enable_delete_limit: bool,
+    pub action_scope_enable_replace_limit: bool,
+    pub action_scope_enable_exit: bool,
+    pub action_scope_open_timeout_ms: u64,
+    pub action_scope_authorize_timeout_ms: u64,
+    pub action_scope_followup_window_ms: u64,
+    pub action_scope_max_session_lifetime_ms: u64,
+    pub action_scope_close_timeout_ms: u64,
     pub data_report_path: Option<String>,
     pub bar_dump_path: Option<String>,
 }
@@ -154,14 +192,57 @@ impl AlorGatewayConfig {
                 "ALOR_CONTROL_PATH_PRE_ENTRY_RECYCLE_ENABLED",
                 true,
             ),
+            control_path_pre_exit_recycle_enabled: parse_bool(
+                "ALOR_CONTROL_PATH_PRE_EXIT_RECYCLE_ENABLED",
+                true,
+            ),
             control_path_recycle_timeout_ms: parse_u64(
                 "ALOR_CONTROL_PATH_RECYCLE_TIMEOUT_MS",
+                5_000,
+            )?,
+            control_path_recycle_timeout_ms_exit: parse_u64(
+                "ALOR_CONTROL_PATH_RECYCLE_TIMEOUT_MS_EXIT",
+                10_000,
+            )?,
+            control_path_post_recycle_exit_send_window_ms: parse_u64(
+                "ALOR_CONTROL_PATH_POST_RECYCLE_EXIT_SEND_WINDOW_MS",
                 5_000,
             )?,
             control_path_hardening_log_only: parse_bool(
                 "ALOR_CONTROL_PATH_HARDENING_LOG_ONLY",
                 false,
             ),
+            control_cws_mode: parse_control_cws_mode(
+                "ALOR_CONTROL_CWS_MODE",
+                ControlCwsMode::LegacyLongLived,
+            )?,
+            action_scope_enable_create_limit: parse_bool(
+                "ALOR_ACTION_SCOPE_ENABLE_CREATE_LIMIT",
+                false,
+            ),
+            action_scope_enable_delete_limit: parse_bool(
+                "ALOR_ACTION_SCOPE_ENABLE_DELETE_LIMIT",
+                false,
+            ),
+            action_scope_enable_replace_limit: parse_bool(
+                "ALOR_ACTION_SCOPE_ENABLE_REPLACE_LIMIT",
+                false,
+            ),
+            action_scope_enable_exit: parse_bool("ALOR_ACTION_SCOPE_ENABLE_EXIT", false),
+            action_scope_open_timeout_ms: parse_u64("ALOR_ACTION_SCOPE_OPEN_TIMEOUT_MS", 5_000)?,
+            action_scope_authorize_timeout_ms: parse_u64(
+                "ALOR_ACTION_SCOPE_AUTHORIZE_TIMEOUT_MS",
+                5_000,
+            )?,
+            action_scope_followup_window_ms: parse_u64(
+                "ALOR_ACTION_SCOPE_FOLLOWUP_WINDOW_MS",
+                5_000,
+            )?,
+            action_scope_max_session_lifetime_ms: parse_u64(
+                "ALOR_ACTION_SCOPE_MAX_SESSION_LIFETIME_MS",
+                15_000,
+            )?,
+            action_scope_close_timeout_ms: parse_u64("ALOR_ACTION_SCOPE_CLOSE_TIMEOUT_MS", 2_000)?,
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         })
@@ -311,8 +392,23 @@ impl AlorGatewayConfig {
                 true,
                 &mut sources,
             ),
+            control_path_pre_exit_recycle_enabled: parse_bool_with_source(
+                "ALOR_CONTROL_PATH_PRE_EXIT_RECYCLE_ENABLED",
+                true,
+                &mut sources,
+            ),
             control_path_recycle_timeout_ms: parse_u64_with_source(
                 "ALOR_CONTROL_PATH_RECYCLE_TIMEOUT_MS",
+                5_000,
+                &mut sources,
+            )?,
+            control_path_recycle_timeout_ms_exit: parse_u64_with_source(
+                "ALOR_CONTROL_PATH_RECYCLE_TIMEOUT_MS_EXIT",
+                10_000,
+                &mut sources,
+            )?,
+            control_path_post_recycle_exit_send_window_ms: parse_u64_with_source(
+                "ALOR_CONTROL_PATH_POST_RECYCLE_EXIT_SEND_WINDOW_MS",
                 5_000,
                 &mut sources,
             )?,
@@ -321,6 +417,56 @@ impl AlorGatewayConfig {
                 false,
                 &mut sources,
             ),
+            control_cws_mode: parse_control_cws_mode_with_source(
+                "ALOR_CONTROL_CWS_MODE",
+                ControlCwsMode::LegacyLongLived,
+                &mut sources,
+            )?,
+            action_scope_enable_create_limit: parse_bool_with_source(
+                "ALOR_ACTION_SCOPE_ENABLE_CREATE_LIMIT",
+                false,
+                &mut sources,
+            ),
+            action_scope_enable_delete_limit: parse_bool_with_source(
+                "ALOR_ACTION_SCOPE_ENABLE_DELETE_LIMIT",
+                false,
+                &mut sources,
+            ),
+            action_scope_enable_replace_limit: parse_bool_with_source(
+                "ALOR_ACTION_SCOPE_ENABLE_REPLACE_LIMIT",
+                false,
+                &mut sources,
+            ),
+            action_scope_enable_exit: parse_bool_with_source(
+                "ALOR_ACTION_SCOPE_ENABLE_EXIT",
+                false,
+                &mut sources,
+            ),
+            action_scope_open_timeout_ms: parse_u64_with_source(
+                "ALOR_ACTION_SCOPE_OPEN_TIMEOUT_MS",
+                5_000,
+                &mut sources,
+            )?,
+            action_scope_authorize_timeout_ms: parse_u64_with_source(
+                "ALOR_ACTION_SCOPE_AUTHORIZE_TIMEOUT_MS",
+                5_000,
+                &mut sources,
+            )?,
+            action_scope_followup_window_ms: parse_u64_with_source(
+                "ALOR_ACTION_SCOPE_FOLLOWUP_WINDOW_MS",
+                5_000,
+                &mut sources,
+            )?,
+            action_scope_max_session_lifetime_ms: parse_u64_with_source(
+                "ALOR_ACTION_SCOPE_MAX_SESSION_LIFETIME_MS",
+                15_000,
+                &mut sources,
+            )?,
+            action_scope_close_timeout_ms: parse_u64_with_source(
+                "ALOR_ACTION_SCOPE_CLOSE_TIMEOUT_MS",
+                2_000,
+                &mut sources,
+            )?,
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         };
@@ -481,12 +627,43 @@ impl AlorGatewayConfig {
             control_path_pre_entry_recycle_enabled: file_cfg
                 .control_path_pre_entry_recycle_enabled
                 .unwrap_or(true),
+            control_path_pre_exit_recycle_enabled: file_cfg
+                .control_path_pre_exit_recycle_enabled
+                .unwrap_or(true),
             control_path_recycle_timeout_ms: file_cfg
                 .control_path_recycle_timeout_ms
+                .unwrap_or(5_000),
+            control_path_recycle_timeout_ms_exit: file_cfg
+                .control_path_recycle_timeout_ms_exit
+                .unwrap_or(10_000),
+            control_path_post_recycle_exit_send_window_ms: file_cfg
+                .control_path_post_recycle_exit_send_window_ms
                 .unwrap_or(5_000),
             control_path_hardening_log_only: file_cfg
                 .control_path_hardening_log_only
                 .unwrap_or(false),
+            control_cws_mode: file_cfg.control_cws_mode.unwrap_or_default(),
+            action_scope_enable_create_limit: file_cfg
+                .action_scope_enable_create_limit
+                .unwrap_or(false),
+            action_scope_enable_delete_limit: file_cfg
+                .action_scope_enable_delete_limit
+                .unwrap_or(false),
+            action_scope_enable_replace_limit: file_cfg
+                .action_scope_enable_replace_limit
+                .unwrap_or(false),
+            action_scope_enable_exit: file_cfg.action_scope_enable_exit.unwrap_or(false),
+            action_scope_open_timeout_ms: file_cfg.action_scope_open_timeout_ms.unwrap_or(5_000),
+            action_scope_authorize_timeout_ms: file_cfg
+                .action_scope_authorize_timeout_ms
+                .unwrap_or(5_000),
+            action_scope_followup_window_ms: file_cfg
+                .action_scope_followup_window_ms
+                .unwrap_or(5_000),
+            action_scope_max_session_lifetime_ms: file_cfg
+                .action_scope_max_session_lifetime_ms
+                .unwrap_or(15_000),
+            action_scope_close_timeout_ms: file_cfg.action_scope_close_timeout_ms.unwrap_or(2_000),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         })
@@ -681,12 +858,43 @@ impl AlorGatewayConfig {
             control_path_pre_entry_recycle_enabled: file_cfg
                 .control_path_pre_entry_recycle_enabled
                 .unwrap_or(true),
+            control_path_pre_exit_recycle_enabled: file_cfg
+                .control_path_pre_exit_recycle_enabled
+                .unwrap_or(true),
             control_path_recycle_timeout_ms: file_cfg
                 .control_path_recycle_timeout_ms
+                .unwrap_or(5_000),
+            control_path_recycle_timeout_ms_exit: file_cfg
+                .control_path_recycle_timeout_ms_exit
+                .unwrap_or(10_000),
+            control_path_post_recycle_exit_send_window_ms: file_cfg
+                .control_path_post_recycle_exit_send_window_ms
                 .unwrap_or(5_000),
             control_path_hardening_log_only: file_cfg
                 .control_path_hardening_log_only
                 .unwrap_or(false),
+            control_cws_mode: file_cfg.control_cws_mode.unwrap_or_default(),
+            action_scope_enable_create_limit: file_cfg
+                .action_scope_enable_create_limit
+                .unwrap_or(false),
+            action_scope_enable_delete_limit: file_cfg
+                .action_scope_enable_delete_limit
+                .unwrap_or(false),
+            action_scope_enable_replace_limit: file_cfg
+                .action_scope_enable_replace_limit
+                .unwrap_or(false),
+            action_scope_enable_exit: file_cfg.action_scope_enable_exit.unwrap_or(false),
+            action_scope_open_timeout_ms: file_cfg.action_scope_open_timeout_ms.unwrap_or(5_000),
+            action_scope_authorize_timeout_ms: file_cfg
+                .action_scope_authorize_timeout_ms
+                .unwrap_or(5_000),
+            action_scope_followup_window_ms: file_cfg
+                .action_scope_followup_window_ms
+                .unwrap_or(5_000),
+            action_scope_max_session_lifetime_ms: file_cfg
+                .action_scope_max_session_lifetime_ms
+                .unwrap_or(15_000),
+            action_scope_close_timeout_ms: file_cfg.action_scope_close_timeout_ms.unwrap_or(2_000),
             data_report_path: env::var("DATA_REPORT_PATH").ok(),
             bar_dump_path: env::var("BAR_DUMP_PATH").ok(),
         };
@@ -733,6 +941,8 @@ pub enum ConfigError {
     InvalidInt(&'static str, #[source] std::num::ParseIntError),
     #[error("invalid float env var {0}: {1}")]
     InvalidFloat(&'static str, #[source] std::num::ParseFloatError),
+    #[error("invalid control_cws_mode: {0}")]
+    InvalidControlCwsMode(String),
     #[error("failed to read config file {path}: {source}")]
     ReadFile {
         path: String,
@@ -784,7 +994,20 @@ struct FileConfig {
     control_path_stale_after_sec: Option<u64>,
     control_path_pre_entry_recycle_enabled: Option<bool>,
     control_path_recycle_timeout_ms: Option<u64>,
+    control_path_pre_exit_recycle_enabled: Option<bool>,
+    control_path_recycle_timeout_ms_exit: Option<u64>,
+    control_path_post_recycle_exit_send_window_ms: Option<u64>,
     control_path_hardening_log_only: Option<bool>,
+    control_cws_mode: Option<ControlCwsMode>,
+    action_scope_enable_create_limit: Option<bool>,
+    action_scope_enable_delete_limit: Option<bool>,
+    action_scope_enable_replace_limit: Option<bool>,
+    action_scope_enable_exit: Option<bool>,
+    action_scope_open_timeout_ms: Option<u64>,
+    action_scope_authorize_timeout_ms: Option<u64>,
+    action_scope_followup_window_ms: Option<u64>,
+    action_scope_max_session_lifetime_ms: Option<u64>,
+    action_scope_close_timeout_ms: Option<u64>,
     ws: Option<WsConfig>,
     reconnect: Option<ReconnectConfig>,
 }
@@ -866,6 +1089,16 @@ fn parse_bool(key: &'static str, default: bool) -> bool {
         .ok()
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(default)
+}
+
+fn parse_control_cws_mode(
+    key: &'static str,
+    default: ControlCwsMode,
+) -> Result<ControlCwsMode, ConfigError> {
+    match env::var(key) {
+        Ok(value) => ControlCwsMode::parse(&value),
+        Err(_) => Ok(default),
+    }
 }
 
 pub fn derive_config(cfg: &AlorGatewayConfig) -> DerivedConfig {
@@ -1016,6 +1249,23 @@ fn parse_bool_with_source(
         Err(_) => {
             sources.insert(key, "default".to_string());
             default
+        }
+    }
+}
+
+fn parse_control_cws_mode_with_source(
+    key: &'static str,
+    default: ControlCwsMode,
+    sources: &mut BTreeMap<&'static str, String>,
+) -> Result<ControlCwsMode, ConfigError> {
+    match env::var(key) {
+        Ok(value) => {
+            sources.insert(key, "env".to_string());
+            ControlCwsMode::parse(&value)
+        }
+        Err(_) => {
+            sources.insert(key, "default".to_string());
+            Ok(default)
         }
     }
 }
@@ -1196,13 +1446,80 @@ fn track_file_sources(file_cfg: &FileConfig, sources: &mut BTreeMap<&'static str
     );
     set_source(
         sources,
+        "control_path_pre_exit_recycle_enabled",
+        file_cfg.control_path_pre_exit_recycle_enabled.is_some(),
+    );
+    set_source(
+        sources,
         "control_path_recycle_timeout_ms",
         file_cfg.control_path_recycle_timeout_ms.is_some(),
     );
     set_source(
         sources,
+        "control_path_recycle_timeout_ms_exit",
+        file_cfg.control_path_recycle_timeout_ms_exit.is_some(),
+    );
+    set_source(
+        sources,
+        "control_path_post_recycle_exit_send_window_ms",
+        file_cfg
+            .control_path_post_recycle_exit_send_window_ms
+            .is_some(),
+    );
+    set_source(
+        sources,
         "control_path_hardening_log_only",
         file_cfg.control_path_hardening_log_only.is_some(),
+    );
+    set_source(
+        sources,
+        "control_cws_mode",
+        file_cfg.control_cws_mode.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_enable_create_limit",
+        file_cfg.action_scope_enable_create_limit.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_enable_delete_limit",
+        file_cfg.action_scope_enable_delete_limit.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_enable_replace_limit",
+        file_cfg.action_scope_enable_replace_limit.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_enable_exit",
+        file_cfg.action_scope_enable_exit.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_open_timeout_ms",
+        file_cfg.action_scope_open_timeout_ms.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_authorize_timeout_ms",
+        file_cfg.action_scope_authorize_timeout_ms.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_followup_window_ms",
+        file_cfg.action_scope_followup_window_ms.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_max_session_lifetime_ms",
+        file_cfg.action_scope_max_session_lifetime_ms.is_some(),
+    );
+    set_source(
+        sources,
+        "action_scope_close_timeout_ms",
+        file_cfg.action_scope_close_timeout_ms.is_some(),
     );
     sources.insert(
         "data_report_path",
@@ -1270,8 +1587,22 @@ pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>)
         bar_silence_resync_min_sec = cfg.bar_silence_resync_min_sec,
         control_path_stale_after_sec = cfg.control_path_stale_after_sec,
         control_path_pre_entry_recycle_enabled = cfg.control_path_pre_entry_recycle_enabled,
+        control_path_pre_exit_recycle_enabled = cfg.control_path_pre_exit_recycle_enabled,
         control_path_recycle_timeout_ms = cfg.control_path_recycle_timeout_ms,
+        control_path_recycle_timeout_ms_exit = cfg.control_path_recycle_timeout_ms_exit,
+        control_path_post_recycle_exit_send_window_ms =
+            cfg.control_path_post_recycle_exit_send_window_ms,
         control_path_hardening_log_only = cfg.control_path_hardening_log_only,
+        control_cws_mode = cfg.control_cws_mode.as_str(),
+        action_scope_enable_create_limit = cfg.action_scope_enable_create_limit,
+        action_scope_enable_delete_limit = cfg.action_scope_enable_delete_limit,
+        action_scope_enable_replace_limit = cfg.action_scope_enable_replace_limit,
+        action_scope_enable_exit = cfg.action_scope_enable_exit,
+        action_scope_open_timeout_ms = cfg.action_scope_open_timeout_ms,
+        action_scope_authorize_timeout_ms = cfg.action_scope_authorize_timeout_ms,
+        action_scope_followup_window_ms = cfg.action_scope_followup_window_ms,
+        action_scope_max_session_lifetime_ms = cfg.action_scope_max_session_lifetime_ms,
+        action_scope_close_timeout_ms = cfg.action_scope_close_timeout_ms,
         data_report_path = ?cfg.data_report_path,
         bar_dump_path = ?cfg.bar_dump_path,
         "Resolved config"

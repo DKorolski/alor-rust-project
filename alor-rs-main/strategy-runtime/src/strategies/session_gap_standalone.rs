@@ -1,6 +1,6 @@
 use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Timelike, Utc};
 
-use alor_protocol::{AckStatus, CommandAck, Side};
+use alor_protocol::{AckStatus, CommandAck, IntentClass, Side};
 use tracing::{info, warn};
 
 use crate::live_guard::GatewayPhase;
@@ -206,6 +206,7 @@ pub struct SessionGapStandaloneStrategy {
 
 impl SessionGapStandaloneStrategy {
     const MIN_ENTRY_RECOVERY_VERIFICATION_MS: u64 = 5_000;
+    const EXIT_RECOVERY_MAX_RETRIES: u32 = 1;
 
     pub fn new(config: SessionGapStandaloneConfig) -> Self {
         let test_hook = SessionGapTestHookState::from_env();
@@ -607,6 +608,56 @@ impl SessionGapStandaloneStrategy {
             && ack.broker_order_id.is_none()
     }
 
+    fn is_retryable_exit_recycle_failure(ack: &CommandAck) -> bool {
+        matches!(ack.status, AckStatus::Error)
+            && ack.error_code.as_deref() == Some("control_path_recycle_failed")
+            && ack.broker_order_id.is_none()
+    }
+
+    fn close_only_degraded_phase(
+        side: Side,
+        qty: f64,
+        baseline_qty: f64,
+        reason: impl Into<String>,
+        entered_ts_utc: i64,
+        retry_attempts_exhausted: u32,
+        last_error_code: Option<String>,
+        last_error_msg: Option<String>,
+    ) -> SessionGapLivePhase {
+        SessionGapLivePhase::CloseOnlyDegraded {
+            side,
+            qty,
+            baseline_qty,
+            reason: reason.into(),
+            entered_ts_utc,
+            retry_attempts_exhausted,
+            last_error_code,
+            last_error_msg,
+            operator_intervention_required: true,
+        }
+    }
+
+    fn exit_retry_request_id(ctx: &StrategyCtx, ts_utc: i64) -> uuid::Uuid {
+        crate::deterministic_request_id(
+            &ctx.strategy_id,
+            &ctx.portfolio,
+            &ctx.symbol,
+            "place",
+            ts_utc,
+            0,
+        )
+    }
+
+    fn build_live_exit_intent(price: f64, qty: f64, side: Side) -> Intent {
+        Intent::Place {
+            price,
+            qty,
+            side,
+            comment: None,
+        }
+        .with_class(IntentClass::Exit)
+    }
+
     fn log_entry_terminal_failure(ack: &CommandAck) {
         warn!(
             strategy = "session_gap_standalone",
@@ -660,6 +711,118 @@ impl SessionGapStandaloneStrategy {
             ts_utc,
             reason,
             "session gap entry recovered safely to flat"
+        );
+    }
+
+    fn log_exit_recovery_started(
+        request_id: uuid::Uuid,
+        retry_attempt: u32,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+        ts_utc: i64,
+    ) {
+        warn!(
+            strategy = "session_gap_standalone",
+            action = "exit_recovery_started",
+            request_id = %request_id,
+            retry_attempt,
+            ts_utc,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap exit recovery started"
+        );
+    }
+
+    fn log_exit_recycle_retry_started(
+        previous_request_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        retry_attempt: u32,
+        ts_utc: i64,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+    ) {
+        warn!(
+            strategy = "session_gap_standalone",
+            action = "exit_recycle_retry_started",
+            previous_request_id = %previous_request_id,
+            request_id = %request_id,
+            retry_attempt,
+            ts_utc,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap exit recycle retry started"
+        );
+    }
+
+    fn log_exit_recycle_retry_success(
+        request_id: uuid::Uuid,
+        retry_attempt: u32,
+        status: AckStatus,
+        broker_order_id: Option<i64>,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "exit_recycle_retry_success",
+            request_id = %request_id,
+            retry_attempt,
+            status = ?status,
+            broker_order_id,
+            "session gap exit recycle retry succeeded"
+        );
+    }
+
+    fn log_exit_recycle_retry_failed(
+        request_id: uuid::Uuid,
+        retry_attempt: u32,
+        status: AckStatus,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+    ) {
+        warn!(
+            strategy = "session_gap_standalone",
+            action = "exit_recycle_retry_failed",
+            request_id = %request_id,
+            retry_attempt,
+            status = ?status,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap exit recycle retry failed"
+        );
+    }
+
+    fn log_exit_close_only_degraded_entered(
+        reason: &str,
+        retry_attempts_exhausted: u32,
+        ts_utc: i64,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+    ) {
+        warn!(
+            strategy = "session_gap_standalone",
+            action = "exit_close_only_degraded_entered",
+            reason,
+            retry_attempts_exhausted,
+            ts_utc,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap entered close-only degraded state"
+        );
+    }
+
+    fn log_exit_operator_intervention_required(
+        reason: &str,
+        ts_utc: i64,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+    ) {
+        warn!(
+            strategy = "session_gap_standalone",
+            action = "exit_operator_intervention_required",
+            reason,
+            ts_utc,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap exit requires operator intervention"
         );
     }
 
@@ -749,7 +912,9 @@ impl SessionGapStandaloneStrategy {
                 }
             }
             SessionGapLivePhase::InPosition { baseline_qty, .. }
-            | SessionGapLivePhase::PendingExit { baseline_qty, .. } => {
+            | SessionGapLivePhase::PendingExit { baseline_qty, .. }
+            | SessionGapLivePhase::ExitRecoveryPending { baseline_qty, .. }
+            | SessionGapLivePhase::CloseOnlyDegraded { baseline_qty, .. } => {
                 if (snapshot_qty - baseline_qty).abs() <= f64::EPSILON {
                     Some(SessionGapLivePhase::Flat)
                 } else {
@@ -814,6 +979,8 @@ impl SessionGapStandaloneStrategy {
             }
             SessionGapLivePhase::InPosition { .. } => "InPosition",
             SessionGapLivePhase::PendingExit { .. } => "PendingExit",
+            SessionGapLivePhase::ExitRecoveryPending { .. } => "ExitRecoveryPending",
+            SessionGapLivePhase::CloseOnlyDegraded { .. } => "CloseOnlyDegraded",
             SessionGapLivePhase::Blocked { .. } => "Blocked",
         }
     }
@@ -1059,7 +1226,9 @@ impl Strategy for SessionGapStandaloneStrategy {
             {
                 SessionGapLivePhase::Flat
             }
-            SessionGapLivePhase::Blocked { .. } => phase,
+            SessionGapLivePhase::Blocked { .. } | SessionGapLivePhase::CloseOnlyDegraded { .. } => {
+                phase
+            }
             SessionGapLivePhase::PendingEntry { sent_ts, acked, .. } => {
                 let elapsed = ctx
                     .now_ts_utc()
@@ -1168,6 +1337,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         Side::Buy => Side::Sell,
                         Side::Sell => Side::Buy,
                     };
+                    let exit_price = self.live_marketable_price(exit_side, bar);
                     if reason == "test_hook_exit" {
                         self.test_hook.mark_exit_dispatched();
                     }
@@ -1179,16 +1349,12 @@ impl Strategy for SessionGapStandaloneStrategy {
                         ctx.event_ts_utc(),
                         0,
                     );
-                    intents.push(Intent::Place {
-                        price: self.live_marketable_price(exit_side, bar),
-                        qty,
-                        side: exit_side,
-                        comment: None,
-                    });
+                    intents.push(Self::build_live_exit_intent(exit_price, qty, exit_side));
                     SessionGapLivePhase::PendingExit {
                         request_id,
                         side: exit_side,
                         qty,
+                        price: exit_price,
                         baseline_qty,
                         reason: reason.to_string(),
                         sent_ts: ctx.now_ts_utc(),
@@ -1198,21 +1364,137 @@ impl Strategy for SessionGapStandaloneStrategy {
                     phase
                 }
             }
-            SessionGapLivePhase::PendingExit { sent_ts, acked, .. } => {
+            SessionGapLivePhase::PendingExit {
+                side,
+                qty,
+                baseline_qty,
+                ref reason,
+                sent_ts,
+                acked,
+                ..
+            } => {
                 let elapsed = ctx
                     .now_ts_utc()
                     .saturating_sub(sent_ts)
                     .saturating_mul(1000) as u64;
                 if !acked && elapsed > self.config.exit_ack_timeout_ms {
-                    SessionGapLivePhase::Blocked {
-                        reason: "exit_ack_timeout".to_string(),
-                        ts_utc: ctx.now_ts_utc(),
-                    }
+                    let phase = Self::close_only_degraded_phase(
+                        side,
+                        qty,
+                        baseline_qty,
+                        format!("exit_ack_timeout:{reason}"),
+                        ctx.now_ts_utc(),
+                        0,
+                        Some("exit_ack_timeout".to_string()),
+                        Some("exit ack timeout exceeded".to_string()),
+                    );
+                    Self::log_exit_close_only_degraded_entered(
+                        "exit_ack_timeout",
+                        0,
+                        ctx.now_ts_utc(),
+                        Some("exit_ack_timeout"),
+                        Some("exit ack timeout exceeded"),
+                    );
+                    Self::log_exit_operator_intervention_required(
+                        "exit_ack_timeout",
+                        ctx.now_ts_utc(),
+                        Some("exit_ack_timeout"),
+                        Some("exit ack timeout exceeded"),
+                    );
+                    phase
                 } else if acked && elapsed > self.config.exit_fill_timeout_ms {
-                    SessionGapLivePhase::Blocked {
-                        reason: "exit_fill_timeout".to_string(),
-                        ts_utc: ctx.now_ts_utc(),
-                    }
+                    let phase = Self::close_only_degraded_phase(
+                        side,
+                        qty,
+                        baseline_qty,
+                        format!("exit_fill_timeout:{reason}"),
+                        ctx.now_ts_utc(),
+                        0,
+                        Some("exit_fill_timeout".to_string()),
+                        Some("exit fill timeout exceeded".to_string()),
+                    );
+                    Self::log_exit_close_only_degraded_entered(
+                        "exit_fill_timeout",
+                        0,
+                        ctx.now_ts_utc(),
+                        Some("exit_fill_timeout"),
+                        Some("exit fill timeout exceeded"),
+                    );
+                    Self::log_exit_operator_intervention_required(
+                        "exit_fill_timeout",
+                        ctx.now_ts_utc(),
+                        Some("exit_fill_timeout"),
+                        Some("exit fill timeout exceeded"),
+                    );
+                    phase
+                } else {
+                    phase
+                }
+            }
+            SessionGapLivePhase::ExitRecoveryPending {
+                side,
+                qty,
+                baseline_qty,
+                ref reason,
+                sent_ts,
+                acked,
+                retry_attempt,
+                ..
+            } => {
+                let elapsed = ctx
+                    .now_ts_utc()
+                    .saturating_sub(sent_ts)
+                    .saturating_mul(1000) as u64;
+                if !acked && elapsed > self.config.exit_ack_timeout_ms {
+                    let phase = Self::close_only_degraded_phase(
+                        side,
+                        qty,
+                        baseline_qty,
+                        format!("exit_recovery_ack_timeout:{reason}"),
+                        ctx.now_ts_utc(),
+                        retry_attempt,
+                        Some("exit_recovery_ack_timeout".to_string()),
+                        Some("exit recovery ack timeout exceeded".to_string()),
+                    );
+                    Self::log_exit_close_only_degraded_entered(
+                        "exit_recovery_ack_timeout",
+                        retry_attempt,
+                        ctx.now_ts_utc(),
+                        Some("exit_recovery_ack_timeout"),
+                        Some("exit recovery ack timeout exceeded"),
+                    );
+                    Self::log_exit_operator_intervention_required(
+                        "exit_recovery_ack_timeout",
+                        ctx.now_ts_utc(),
+                        Some("exit_recovery_ack_timeout"),
+                        Some("exit recovery ack timeout exceeded"),
+                    );
+                    phase
+                } else if acked && elapsed > self.config.exit_fill_timeout_ms {
+                    let phase = Self::close_only_degraded_phase(
+                        side,
+                        qty,
+                        baseline_qty,
+                        format!("exit_recovery_fill_timeout:{reason}"),
+                        ctx.now_ts_utc(),
+                        retry_attempt,
+                        Some("exit_recovery_fill_timeout".to_string()),
+                        Some("exit recovery fill timeout exceeded".to_string()),
+                    );
+                    Self::log_exit_close_only_degraded_entered(
+                        "exit_recovery_fill_timeout",
+                        retry_attempt,
+                        ctx.now_ts_utc(),
+                        Some("exit_recovery_fill_timeout"),
+                        Some("exit recovery fill timeout exceeded"),
+                    );
+                    Self::log_exit_operator_intervention_required(
+                        "exit_recovery_fill_timeout",
+                        ctx.now_ts_utc(),
+                        Some("exit_recovery_fill_timeout"),
+                        Some("exit recovery fill timeout exceeded"),
+                    );
+                    phase
                 } else {
                     phase
                 }
@@ -1229,7 +1511,8 @@ impl Strategy for SessionGapStandaloneStrategy {
         intents
     }
 
-    fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
+    fn on_ack(&mut self, ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
+        let mut intents = Vec::new();
         let mut phase_to_persist: Option<SessionGapLivePhase> = None;
         if let StrategyState::SessionGapStandalone { phase, .. } = &mut self.state {
             let previous_phase = phase.clone();
@@ -1290,18 +1573,192 @@ impl Strategy for SessionGapStandaloneStrategy {
                     }
                 }
                 SessionGapLivePhase::PendingExit {
-                    request_id, acked, ..
+                    request_id,
+                    side,
+                    qty,
+                    price,
+                    baseline_qty,
+                    reason,
+                    acked,
+                    ..
                 } => {
                     if *request_id == ack.request_id {
                         match ack.status {
                             AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
                                 *acked = true;
                             }
+                            AckStatus::Rejected | AckStatus::Expired => {
+                                Self::log_exit_recycle_retry_failed(
+                                    *request_id,
+                                    0,
+                                    ack.status.clone(),
+                                    ack.error_code.as_deref(),
+                                    ack.error_msg.as_deref(),
+                                );
+                                *phase = Self::close_only_degraded_phase(
+                                    *side,
+                                    *qty,
+                                    *baseline_qty,
+                                    format!("ack_failed:{:?}:{reason}", ack.status),
+                                    ack.processed_ts_utc,
+                                    0,
+                                    ack.error_code.clone(),
+                                    ack.error_msg.clone(),
+                                );
+                                Self::log_exit_close_only_degraded_entered(
+                                    "exit_terminal_ack_failure",
+                                    0,
+                                    ack.processed_ts_utc,
+                                    ack.error_code.as_deref(),
+                                    ack.error_msg.as_deref(),
+                                );
+                                Self::log_exit_operator_intervention_required(
+                                    "exit_terminal_ack_failure",
+                                    ack.processed_ts_utc,
+                                    ack.error_code.as_deref(),
+                                    ack.error_msg.as_deref(),
+                                );
+                            }
+                            AckStatus::Error => {
+                                let current_request_id = *request_id;
+                                let current_side = *side;
+                                let current_qty = *qty;
+                                let current_price = *price;
+                                let current_baseline_qty = *baseline_qty;
+                                let current_reason = reason.clone();
+                                if Self::is_retryable_exit_recycle_failure(ack)
+                                    && Self::EXIT_RECOVERY_MAX_RETRIES > 0
+                                {
+                                    let next_retry_attempt = 1;
+                                    let next_request_id =
+                                        Self::exit_retry_request_id(ctx, ack.processed_ts_utc);
+                                    *phase = SessionGapLivePhase::ExitRecoveryPending {
+                                        request_id: next_request_id,
+                                        side: current_side,
+                                        qty: current_qty,
+                                        price: current_price,
+                                        baseline_qty: current_baseline_qty,
+                                        reason: current_reason.clone(),
+                                        sent_ts: ack.processed_ts_utc,
+                                        acked: false,
+                                        retry_attempt: next_retry_attempt,
+                                        last_error_code: ack.error_code.clone(),
+                                        last_error_msg: ack.error_msg.clone(),
+                                    };
+                                    Self::log_exit_recovery_started(
+                                        current_request_id,
+                                        next_retry_attempt,
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                        ack.processed_ts_utc,
+                                    );
+                                    Self::log_exit_recycle_retry_started(
+                                        current_request_id,
+                                        next_request_id,
+                                        next_retry_attempt,
+                                        ack.processed_ts_utc,
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                    intents.push(Self::build_live_exit_intent(
+                                        current_price,
+                                        current_qty,
+                                        current_side,
+                                    ));
+                                } else {
+                                    Self::log_exit_recycle_retry_failed(
+                                        current_request_id,
+                                        0,
+                                        ack.status.clone(),
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                    *phase = Self::close_only_degraded_phase(
+                                        current_side,
+                                        current_qty,
+                                        current_baseline_qty,
+                                        format!("ack_failed:{:?}:{current_reason}", ack.status),
+                                        ack.processed_ts_utc,
+                                        0,
+                                        ack.error_code.clone(),
+                                        ack.error_msg.clone(),
+                                    );
+                                    Self::log_exit_close_only_degraded_entered(
+                                        "exit_error_without_retry_lane",
+                                        0,
+                                        ack.processed_ts_utc,
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                    Self::log_exit_operator_intervention_required(
+                                        "exit_error_without_retry_lane",
+                                        ack.processed_ts_utc,
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                SessionGapLivePhase::ExitRecoveryPending {
+                    request_id,
+                    side,
+                    qty,
+                    baseline_qty,
+                    reason,
+                    retry_attempt,
+                    acked,
+                    ..
+                } => {
+                    if *request_id == ack.request_id {
+                        match ack.status {
+                            AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
+                                *acked = true;
+                                Self::log_exit_recycle_retry_success(
+                                    *request_id,
+                                    *retry_attempt,
+                                    ack.status.clone(),
+                                    ack.broker_order_id,
+                                );
+                            }
                             AckStatus::Rejected | AckStatus::Expired | AckStatus::Error => {
-                                *phase = SessionGapLivePhase::Blocked {
-                                    reason: format!("ack_failed:{:?}", ack.status),
-                                    ts_utc: ack.processed_ts_utc,
-                                };
+                                let current_request_id = *request_id;
+                                let current_retry_attempt = *retry_attempt;
+                                let current_side = *side;
+                                let current_qty = *qty;
+                                let current_baseline_qty = *baseline_qty;
+                                let current_reason = reason.clone();
+                                Self::log_exit_recycle_retry_failed(
+                                    current_request_id,
+                                    current_retry_attempt,
+                                    ack.status.clone(),
+                                    ack.error_code.as_deref(),
+                                    ack.error_msg.as_deref(),
+                                );
+                                *phase = Self::close_only_degraded_phase(
+                                    current_side,
+                                    current_qty,
+                                    current_baseline_qty,
+                                    format!("ack_failed:{:?}:{current_reason}", ack.status),
+                                    ack.processed_ts_utc,
+                                    current_retry_attempt,
+                                    ack.error_code.clone(),
+                                    ack.error_msg.clone(),
+                                );
+                                Self::log_exit_close_only_degraded_entered(
+                                    "exit_recovery_exhausted",
+                                    current_retry_attempt,
+                                    ack.processed_ts_utc,
+                                    ack.error_code.as_deref(),
+                                    ack.error_msg.as_deref(),
+                                );
+                                Self::log_exit_operator_intervention_required(
+                                    "exit_recovery_exhausted",
+                                    ack.processed_ts_utc,
+                                    ack.error_code.as_deref(),
+                                    ack.error_msg.as_deref(),
+                                );
                             }
                         }
                     }
@@ -1317,7 +1774,7 @@ impl Strategy for SessionGapStandaloneStrategy {
         if let Some(phase) = phase_to_persist {
             self.persist_state_with_existing_last_bar(phase);
         }
-        Vec::new()
+        intents
     }
 
     fn on_order(&mut self, _ctx: &StrategyCtx, ord: &crate::OrderEvent) -> Vec<Intent> {
@@ -1422,7 +1879,9 @@ impl Strategy for SessionGapStandaloneStrategy {
                     }
                 }
                 SessionGapLivePhase::InPosition { baseline_qty, .. }
-                | SessionGapLivePhase::PendingExit { baseline_qty, .. } => {
+                | SessionGapLivePhase::PendingExit { baseline_qty, .. }
+                | SessionGapLivePhase::ExitRecoveryPending { baseline_qty, .. }
+                | SessionGapLivePhase::CloseOnlyDegraded { baseline_qty, .. } => {
                     if (pos.qty - baseline_qty).abs() <= f64::EPSILON {
                         *phase = SessionGapLivePhase::Flat;
                     }
@@ -1710,6 +2169,18 @@ mod tests {
         }
     }
 
+    fn assert_exit_place_intent(intent: &Intent, side: Side, qty: f64) {
+        assert_eq!(intent.explicit_class(), Some(IntentClass::Exit));
+        assert!(matches!(
+            intent.base_intent(),
+            Intent::Place {
+                side: actual_side,
+                qty: actual_qty,
+                ..
+            } if *actual_side == side && (*actual_qty - qty).abs() < f64::EPSILON
+        ));
+    }
+
     #[test]
     fn live_test_hook_forces_entry_without_warmed_indicators() {
         let _env = TestHookEnvGuard::set(&[
@@ -1796,14 +2267,7 @@ mod tests {
         let intents = strategy.on_bar(&ctx, &next_bar);
 
         assert_eq!(intents.len(), 1);
-        assert!(matches!(
-            intents[0],
-            Intent::Place {
-                side: Side::Sell,
-                qty: 1.0,
-                ..
-            }
-        ));
+        assert_exit_place_intent(&intents[0], Side::Sell, 1.0);
         match &strategy.state {
             StrategyState::SessionGapStandalone {
                 phase: SessionGapLivePhase::PendingExit { reason, .. },
@@ -2085,14 +2549,7 @@ mod tests {
         let intents = strategy.on_bar(&ctx, &exit_bar);
 
         assert_eq!(intents.len(), 1);
-        assert!(matches!(
-            intents[0],
-            Intent::Place {
-                side: Side::Sell,
-                qty: 1.0,
-                ..
-            }
-        ));
+        assert_exit_place_intent(&intents[0], Side::Sell, 1.0);
 
         let closed = PositionEvent {
             symbol: "USDRUBF".into(),
@@ -2270,14 +2727,7 @@ mod tests {
         let intents = strategy.on_bar(&ctx, &exit_bar);
 
         assert_eq!(intents.len(), 1);
-        assert!(matches!(
-            intents[0],
-            Intent::Place {
-                side: Side::Sell,
-                qty: 1.0,
-                ..
-            }
-        ));
+        assert_exit_place_intent(&intents[0], Side::Sell, 1.0);
     }
 
     #[test]
@@ -3268,20 +3718,186 @@ mod tests {
         let intents = strategy.on_bar(&ctx, &exit_bar);
 
         assert_eq!(intents.len(), 1);
-        assert!(matches!(
-            intents[0],
-            Intent::Place {
-                side: Side::Sell,
-                qty: 1.0,
-                ..
-            }
-        ));
+        assert_exit_place_intent(&intents[0], Side::Sell, 1.0);
         match &strategy.state {
             StrategyState::SessionGapStandalone {
                 phase: SessionGapLivePhase::PendingExit { reason, .. },
                 ..
             } => assert_eq!(reason, "session_exit"),
             other => panic!("unexpected phase after forced session exit: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_recycle_failure_enters_exit_recovery_pending_and_retries_once() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::PendingExit {
+                request_id,
+                side: Side::Sell,
+                qty: 1.0,
+                price: 81.2,
+                baseline_qty: 0.0,
+                reason: "session_exit".into(),
+                sent_ts: 1_000,
+                acked: false,
+            },
+            phase_last_change_ts_utc: Some(1_000),
+            last_bar_ts: Some(1_000),
+        };
+
+        let mut ack = CommandAck::error(
+            request_id,
+            "control_path_recycle_failed",
+            "fresh cws session was not ready before recycle timeout",
+        );
+        ack.processed_ts_utc = 1_005;
+
+        let intents = strategy.on_ack(&ctx_live_at(1_005, Some(1_000), 1.0), &ack);
+
+        assert_eq!(intents.len(), 1);
+        assert_exit_place_intent(&intents[0], Side::Sell, 1.0);
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase:
+                    SessionGapLivePhase::ExitRecoveryPending {
+                        request_id: retry_request_id,
+                        side,
+                        qty,
+                        price,
+                        baseline_qty,
+                        reason,
+                        sent_ts,
+                        acked,
+                        retry_attempt,
+                        last_error_code,
+                        last_error_msg,
+                    },
+                phase_last_change_ts_utc,
+                ..
+            } => {
+                assert_ne!(*retry_request_id, request_id);
+                assert_eq!(*side, Side::Sell);
+                assert_eq!(*qty, 1.0);
+                assert_eq!(*price, 81.2);
+                assert_eq!(*baseline_qty, 0.0);
+                assert_eq!(reason, "session_exit");
+                assert_eq!(*sent_ts, 1_005);
+                assert!(!acked);
+                assert_eq!(*retry_attempt, 1);
+                assert_eq!(
+                    last_error_code.as_deref(),
+                    Some("control_path_recycle_failed")
+                );
+                assert_eq!(
+                    last_error_msg.as_deref(),
+                    Some("fresh cws session was not ready before recycle timeout")
+                );
+                assert_eq!(*phase_last_change_ts_utc, Some(1_005));
+            }
+            other => panic!("unexpected state after exit recycle failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_recovery_failure_enters_close_only_degraded_and_operator_required() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(100.0),
+            first_min_low: Some(90.0),
+            first_hour_price: Some(100.0),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::ExitRecoveryPending {
+                request_id,
+                side: Side::Sell,
+                qty: 1.0,
+                price: 81.2,
+                baseline_qty: 0.0,
+                reason: "session_exit".into(),
+                sent_ts: 1_005,
+                acked: false,
+                retry_attempt: 1,
+                last_error_code: Some("control_path_recycle_failed".into()),
+                last_error_msg: Some(
+                    "fresh cws session was not ready before recycle timeout".into(),
+                ),
+            },
+            phase_last_change_ts_utc: Some(1_005),
+            last_bar_ts: Some(1_000),
+        };
+
+        let mut ack = CommandAck::error(
+            request_id,
+            "control_path_recycle_failed",
+            "fresh cws session was not ready before recycle timeout",
+        );
+        ack.processed_ts_utc = 1_010;
+
+        let intents = strategy.on_ack(&ctx_live_at(1_010, Some(1_000), 1.0), &ack);
+
+        assert!(intents.is_empty());
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase:
+                    SessionGapLivePhase::CloseOnlyDegraded {
+                        side,
+                        qty,
+                        baseline_qty,
+                        reason,
+                        entered_ts_utc,
+                        retry_attempts_exhausted,
+                        last_error_code,
+                        last_error_msg,
+                        operator_intervention_required,
+                    },
+                phase_last_change_ts_utc,
+                ..
+            } => {
+                assert_eq!(*side, Side::Sell);
+                assert_eq!(*qty, 1.0);
+                assert_eq!(*baseline_qty, 0.0);
+                assert!(reason.contains("ack_failed:Error"));
+                assert!(reason.contains("session_exit"));
+                assert_eq!(*entered_ts_utc, 1_010);
+                assert_eq!(*retry_attempts_exhausted, 1);
+                assert_eq!(
+                    last_error_code.as_deref(),
+                    Some("control_path_recycle_failed")
+                );
+                assert_eq!(
+                    last_error_msg.as_deref(),
+                    Some("fresh cws session was not ready before recycle timeout")
+                );
+                assert!(*operator_intervention_required);
+                assert_eq!(*phase_last_change_ts_utc, Some(1_010));
+            }
+            other => panic!("unexpected state after exhausted exit recovery: {other:?}"),
         }
     }
 

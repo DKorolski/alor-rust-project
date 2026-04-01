@@ -380,6 +380,10 @@ impl StrategyRuntime {
             allow_live_orders: config.allow_live_orders,
             allow_paper_orders: config.allow_paper_orders,
             require_gateway_ready: config.require_gateway_ready,
+            exit_recovery_active: false,
+            close_only_degraded: false,
+            operator_intervention_required: false,
+            open_risk_position_unflattened: false,
             readiness: false,
         }));
 
@@ -472,10 +476,40 @@ impl StrategyRuntime {
         }));
     }
 
+    fn strategy_exit_risk_status(&self) -> (Option<String>, bool, bool, bool) {
+        let has_open_position = self
+            .state
+            .positions
+            .get(&self.config.strategy.symbol)
+            .map(|pos| pos.qty.abs() > f64::EPSILON)
+            .unwrap_or(false);
+        match &self.state.strategy_state {
+            StrategyState::SessionGapStandalone { phase, .. } => match phase {
+                crate::state::SessionGapLivePhase::ExitRecoveryPending { .. } => (
+                    Some("ExitRecoveryPending".to_string()),
+                    true,
+                    false,
+                    has_open_position,
+                ),
+                crate::state::SessionGapLivePhase::CloseOnlyDegraded {
+                    operator_intervention_required,
+                    ..
+                } => (
+                    Some("CloseOnlyDegraded".to_string()),
+                    false,
+                    *operator_intervention_required,
+                    has_open_position,
+                ),
+                _ => (None, false, false, false),
+            },
+            _ => (None, false, false, false),
+        }
+    }
+
     fn refresh_health_snapshot(&self) {
         let decision = self.evaluate_guard_decision();
         let now_ts = chrono::Utc::now().timestamp();
-        let runtime_phase = self
+        let mut runtime_phase = self
             .live_guard
             .health
             .as_ref()
@@ -498,6 +532,28 @@ impl StrategyRuntime {
 
         let gateway_health_last_ts_utc = self.live_guard.health.as_ref().map(|h| h.last_event_ts);
         let gateway_health_age_sec = gateway_health_last_ts_utc.map(|ts| now_ts.saturating_sub(ts));
+        let (
+            strategy_phase_override,
+            exit_recovery_active,
+            operator_intervention_required,
+            open_risk_position_unflattened,
+        ) = self.strategy_exit_risk_status();
+        if let Some(override_phase) = strategy_phase_override {
+            runtime_phase = override_phase;
+        }
+        let close_only_degraded = runtime_phase == "CloseOnlyDegraded";
+        let mut live_guard_reasons = decision.reasons;
+        if exit_recovery_active {
+            live_guard_reasons.push("strategy:exit_recovery_active".to_string());
+        }
+        if operator_intervention_required {
+            live_guard_reasons.push("strategy:operator_intervention_required".to_string());
+        }
+        if open_risk_position_unflattened {
+            live_guard_reasons.push("strategy:open_risk_position_unflattened".to_string());
+        }
+        let readiness =
+            decision.allowed && !exit_recovery_active && !operator_intervention_required;
 
         let mut guard = self.health_snapshot.write();
         guard.runtime_phase = runtime_phase;
@@ -507,8 +563,8 @@ impl StrategyRuntime {
             "BLOCKED"
         }
         .to_string();
-        guard.live_guard_reasons = decision.reasons;
-        guard.readiness = decision.allowed;
+        guard.live_guard_reasons = live_guard_reasons;
+        guard.readiness = readiness;
         guard.live_guard_last_change_ts_utc = now_ts;
         guard.gateway_health_last_ts_utc = gateway_health_last_ts_utc;
         guard.gateway_health_age_sec = gateway_health_age_sec;
@@ -525,6 +581,10 @@ impl StrategyRuntime {
         guard.scheduler_note = scheduler_note;
         guard.timezone_offset_hours = self.config.strategy.timezone_offset_hours;
         guard.last_bar_ts_utc = self.metrics.bars_last_seen_close_time_utc;
+        guard.exit_recovery_active = exit_recovery_active;
+        guard.close_only_degraded = close_only_degraded;
+        guard.operator_intervention_required = operator_intervention_required;
+        guard.open_risk_position_unflattened = open_risk_position_unflattened;
     }
 
     pub async fn flush_reports(&self) -> Result<()> {
@@ -1047,7 +1107,8 @@ impl StrategyRuntime {
             | StrategyState::MarketLivePendingExit { request_guid, .. } => vec![*request_guid],
             StrategyState::SessionGapStandalone { phase, .. } => match phase {
                 crate::state::SessionGapLivePhase::PendingEntry { request_id, .. }
-                | crate::state::SessionGapLivePhase::PendingExit { request_id, .. } => {
+                | crate::state::SessionGapLivePhase::PendingExit { request_id, .. }
+                | crate::state::SessionGapLivePhase::ExitRecoveryPending { request_id, .. } => {
                     vec![*request_id]
                 }
                 crate::state::SessionGapLivePhase::EntryRecoveryVerificationPending { .. } => {
@@ -1055,6 +1116,7 @@ impl StrategyRuntime {
                 }
                 crate::state::SessionGapLivePhase::Flat
                 | crate::state::SessionGapLivePhase::InPosition { .. }
+                | crate::state::SessionGapLivePhase::CloseOnlyDegraded { .. }
                 | crate::state::SessionGapLivePhase::Blocked { .. } => Vec::new(),
             },
             StrategyState::CancelSent {

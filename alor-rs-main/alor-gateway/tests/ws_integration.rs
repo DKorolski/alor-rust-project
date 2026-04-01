@@ -2,7 +2,7 @@ mod support;
 
 use std::time::Duration;
 
-use alor_gateway::config::AlorGatewayConfig;
+use alor_gateway::config::{AlorGatewayConfig, ControlCwsMode};
 use alor_gateway::models::BarEvent;
 use alor_gateway::supervisor::{GatewayHandle, Supervisor};
 use alor_types::{Action, StrategyBar, StrategyContext, StrategyCore};
@@ -508,8 +508,21 @@ fn test_config(
         bar_silence_resync_min_sec: 60,
         control_path_stale_after_sec: 900,
         control_path_pre_entry_recycle_enabled: true,
+        control_path_pre_exit_recycle_enabled: true,
         control_path_recycle_timeout_ms: 5_000,
+        control_path_recycle_timeout_ms_exit: 10_000,
+        control_path_post_recycle_exit_send_window_ms: 5_000,
         control_path_hardening_log_only: false,
+        control_cws_mode: ControlCwsMode::LegacyLongLived,
+        action_scope_enable_create_limit: false,
+        action_scope_enable_delete_limit: false,
+        action_scope_enable_replace_limit: false,
+        action_scope_enable_exit: false,
+        action_scope_open_timeout_ms: 5_000,
+        action_scope_authorize_timeout_ms: 5_000,
+        action_scope_followup_window_ms: 5_000,
+        action_scope_max_session_lifetime_ms: 15_000,
+        action_scope_close_timeout_ms: 2_000,
         data_report_path: Some(report_path),
         bar_dump_path: Some(bar_dump_path),
     }

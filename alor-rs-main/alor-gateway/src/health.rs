@@ -76,6 +76,7 @@ pub struct HealthState {
     pub cws_last_successful_ack_ts_utc: Option<i64>,
     pub cws_last_control_success_ts_utc: Option<i64>,
     pub cws_last_control_failure_ts_utc: Option<i64>,
+    pub cws_last_authorize_ts_utc: Option<i64>,
     pub cws_last_ping_ts_utc: Option<i64>,
     pub cws_last_pong_ts_utc: Option<i64>,
     pub cws_pending_count: u64,
@@ -88,6 +89,38 @@ pub struct HealthState {
     pub control_path_recycle_success_total: u64,
     pub control_path_recycle_failed_total: u64,
     pub control_path_stale_blocked_send_total: u64,
+    pub control_cws_mode: String,
+    pub last_action_scope_mode: Option<String>,
+    pub last_action_scope_open_ts_utc: Option<i64>,
+    pub last_action_scope_authorize_ts_utc: Option<i64>,
+    pub last_action_scope_send_ts_utc: Option<i64>,
+    pub last_action_scope_close_ts_utc: Option<i64>,
+    pub last_action_scope_error: Option<String>,
+    pub last_action_scope_conn_instance_id: Option<String>,
+    pub last_action_scope_primary_opcode: Option<String>,
+    pub last_action_scope_followup_opcode: Option<String>,
+    pub action_scope_open_total: u64,
+    pub action_scope_open_failed_total: u64,
+    pub action_scope_authorize_failed_total: u64,
+    pub action_scope_send_total: u64,
+    pub action_scope_send_failed_total: u64,
+    pub action_scope_followup_total: u64,
+    pub action_scope_followup_failed_total: u64,
+    pub action_scope_close_total: u64,
+    pub action_scope_close_failed_total: u64,
+    pub post_recycle_exit_send_armed: bool,
+    pub post_recycle_exit_send_used: bool,
+    pub post_recycle_exit_send_window_ms: Option<u64>,
+    pub post_recycle_exit_send_result: Option<String>,
+    pub fresh_cws_authorized_after_recycle: bool,
+    pub fresh_cws_conn_instance_id: Option<String>,
+    pub fresh_cws_authorize_ts_utc: Option<i64>,
+    pub stale_block_reason: Option<String>,
+    pub post_recycle_exit_send_armed_total: u64,
+    pub post_recycle_exit_send_attempt_total: u64,
+    pub post_recycle_exit_send_success_total: u64,
+    pub post_recycle_exit_send_failed_total: u64,
+    pub post_recycle_exit_send_blocked_total: u64,
     pub last_bar_ts: i64,
     pub last_bar_age_sec: u64,
     pub last_positions_ts: i64,
@@ -159,11 +192,19 @@ pub struct HealthState {
     #[serde(skip)]
     pub cws_last_control_failure_at: Option<Instant>,
     #[serde(skip)]
+    pub cws_last_authorize_at: Option<Instant>,
+    #[serde(skip)]
     pub cws_last_ping_at: Option<Instant>,
     #[serde(skip)]
     pub cws_last_pong_at: Option<Instant>,
     #[serde(skip)]
     pub cws_last_reconnect_at: Option<Instant>,
+    #[serde(skip)]
+    pub post_recycle_exit_send_armed_at: Option<Instant>,
+    #[serde(skip)]
+    pub post_recycle_exit_send_expected_conn_instance_id: Option<String>,
+    #[serde(skip)]
+    pub post_recycle_exit_send_request_id: Option<String>,
 }
 
 pub fn age_ms(value: Option<Instant>) -> Option<u64> {
@@ -180,9 +221,7 @@ pub fn min_age_ms(first: Option<Instant>, second: Option<Instant>) -> Option<u64
 }
 
 pub fn evaluate_control_path_stale(health: &HealthState) -> ControlPathStaleStatus {
-    let threshold_ms = health
-        .control_path_stale_after_sec
-        .saturating_mul(1_000);
+    let threshold_ms = health.control_path_stale_after_sec.saturating_mul(1_000);
     let last_rx_age_ms = age_ms(health.cws_last_rx_at);
     let last_tx_age_ms = age_ms(health.cws_last_tx_at);
     let last_control_success_age_ms = age_ms(health.cws_last_control_success_at);
@@ -276,6 +315,9 @@ mod tests {
 
         let stale = evaluate_control_path_stale(&state);
         assert!(stale.stale);
-        assert_eq!(stale.reason, Some("cws_last_control_success_age_ms_exceeded"));
+        assert_eq!(
+            stale.reason,
+            Some("cws_last_control_success_age_ms_exceeded")
+        );
     }
 }

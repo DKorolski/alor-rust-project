@@ -343,6 +343,10 @@ pub struct RuntimeHealthSnapshot {
     pub allow_live_orders: bool,
     pub allow_paper_orders: bool,
     pub require_gateway_ready: bool,
+    pub exit_recovery_active: bool,
+    pub close_only_degraded: bool,
+    pub operator_intervention_required: bool,
+    pub open_risk_position_unflattened: bool,
     pub readiness: bool,
 }
 
