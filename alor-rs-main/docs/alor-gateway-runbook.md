@@ -4,6 +4,7 @@
 
 ## Config file path
 - `./configs/gateway.sessiongap.live.7502MIW.toml` — gateway профиль для `session_gap`.
+- `./configs/gateway.sessiongap.live.7502MIW.action-scoped.toml` — Phase 1 candidate профиль для `session_gap` с `action_scoped` только для `create/delete`.
 - `./configs/gateway.hybrid.live.7502SN6.toml` — gateway профиль для `hybrid`.
 - `./configs/gateway.example.toml` — минимальный шаблон для первичной настройки.
 
@@ -13,6 +14,16 @@ ALOR_STACK_NAME=${ALOR_STACK_NAME:-sessiongap} \
 RUST_LOG=info,alor_gateway::services::command_consumer=debug,alor_gateway::transport_redis=debug \
 cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
   --config ./configs/gateway.sessiongap.live.7502MIW.toml \
+  --redis-url redis://127.0.0.1/
+```
+
+Для controlled candidate окна Phase 1 используйте отдельный config path, а не изменение базового live TOML:
+
+```bash
+ALOR_STACK_NAME=${ALOR_STACK_NAME:-sessiongap} \
+RUST_LOG=info,alor_gateway=debug \
+cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
+  --config ./configs/gateway.sessiongap.live.7502MIW.action-scoped.toml \
   --redis-url redis://127.0.0.1/
 ```
 
