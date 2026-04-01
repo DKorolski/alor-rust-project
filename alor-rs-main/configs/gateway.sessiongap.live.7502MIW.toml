@@ -39,6 +39,16 @@ control_path_stale_after_sec = 900
 control_path_pre_entry_recycle_enabled = true
 control_path_recycle_timeout_ms = 5000
 control_path_hardening_log_only = false
+control_cws_mode = "legacy_long_lived"
+action_scope_enable_create_limit = false
+action_scope_enable_delete_limit = false
+action_scope_enable_replace_limit = false
+action_scope_enable_exit = false
+action_scope_open_timeout_ms = 5000
+action_scope_authorize_timeout_ms = 5000
+action_scope_followup_window_ms = 5000
+action_scope_max_session_lifetime_ms = 15000
+action_scope_close_timeout_ms = 2000
 
 [trading_periods]
 session_start = "09:00:00"
