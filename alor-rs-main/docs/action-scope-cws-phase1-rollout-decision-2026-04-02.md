@@ -63,3 +63,8 @@ The first engineering step for Phase 2 is to make action-scoped routing explicit
 - `Entry` path remains opt-in and explicit
 - `Exit` path is gated independently
 - config and real behavior stay aligned during live validation
+
+That first engineering step is now complete in code, and the next operator-facing artifacts are:
+
+- `configs/gateway.sessiongap.live.7502MIW.action-scoped.phase2.toml`
+- `docs/action-scope-cws-phase2-entry-flatten-runbook-2026-04-02.md`

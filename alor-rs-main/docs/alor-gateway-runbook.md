@@ -5,6 +5,7 @@
 ## Config file path
 - `./configs/gateway.sessiongap.live.7502MIW.toml` — gateway профиль для `session_gap`.
 - `./configs/gateway.sessiongap.live.7502MIW.action-scoped.toml` — Phase 1 candidate профиль для `session_gap` с `action_scoped` только для `create/delete`.
+- `./configs/gateway.sessiongap.live.7502MIW.action-scoped.phase2.toml` — Phase 2 candidate профиль для `session_gap` с action-scoped `entry` и `flatten` через `IntentClass`.
 - `./configs/gateway.hybrid.live.7502SN6.toml` — gateway профиль для `hybrid`.
 - `./configs/gateway.example.toml` — минимальный шаблон для первичной настройки.
 
@@ -42,6 +43,8 @@ cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
 - `exit/flatten` по-прежнему вне scope и выключены
 - decision note по новой основной Phase 1 линии:
   - `./docs/action-scope-cws-phase1-rollout-decision-2026-04-02.md`
+- следующий операторский шаг для разработки:
+  - `./docs/action-scope-cws-phase2-entry-flatten-runbook-2026-04-02.md`
 
 Для сравнительной live-диагностики задавайте `ALOR_STACK_NAME` явно:
 
