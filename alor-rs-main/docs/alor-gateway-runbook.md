@@ -43,7 +43,11 @@ cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
 - `exit/flatten` по-прежнему вне scope и выключены
 - decision note по новой основной Phase 1 линии:
   - `./docs/action-scope-cws-phase1-rollout-decision-2026-04-02.md`
-- следующий операторский шаг для разработки:
+- первый controlled Phase 2 `entry -> flatten` lifecycle уже тоже прошёл:
+  - `./docs/action-scope-cws-phase2-entry-flatten-results-2026-04-02.md`
+- decision note по текущей основной Phase 2 линии:
+  - `./docs/action-scope-cws-phase2-rollout-decision-2026-04-02.md`
+- операторский runbook для следующей разработки:
   - `./docs/action-scope-cws-phase2-entry-flatten-runbook-2026-04-02.md`
 
 Для сравнительной live-диагностики задавайте `ALOR_STACK_NAME` явно:

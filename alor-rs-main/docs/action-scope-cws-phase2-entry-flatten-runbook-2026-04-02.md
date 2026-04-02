@@ -30,6 +30,27 @@ Key settings:
 - `action_scope_enable_replace_limit = false`
 - `action_scope_force_token_refresh_before_authorize = true`
 
+## Current Status
+
+The first same-day controlled Phase 2 live lifecycle has now already passed.
+
+Result note:
+
+- `docs/action-scope-cws-phase2-entry-flatten-results-2026-04-02.md`
+
+Observed outcome:
+
+- gateway candidate rollout succeeded
+- one manual `entry -> fill -> flatten` lifecycle completed successfully
+- entry used `Place + IntentClass::Entry`
+- flatten used `Place + IntentClass::Exit`
+- runtime returned to `Flat`
+- no orphan order or orphan position remained
+
+Current decision note:
+
+- `docs/action-scope-cws-phase2-rollout-decision-2026-04-02.md`
+
 ## Important Execution-Path Note
 
 For `session_gap`, the live flatten path that matters here is not a market order.

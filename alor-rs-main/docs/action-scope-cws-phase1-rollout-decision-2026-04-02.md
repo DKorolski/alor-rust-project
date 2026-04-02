@@ -68,3 +68,10 @@ That first engineering step is now complete in code, and the next operator-facin
 
 - `configs/gateway.sessiongap.live.7502MIW.action-scoped.phase2.toml`
 - `docs/action-scope-cws-phase2-entry-flatten-runbook-2026-04-02.md`
+
+The first same-day controlled Phase 2 live lifecycle has now also passed.
+
+See:
+
+- `docs/action-scope-cws-phase2-entry-flatten-results-2026-04-02.md`
+- `docs/action-scope-cws-phase2-rollout-decision-2026-04-02.md`
