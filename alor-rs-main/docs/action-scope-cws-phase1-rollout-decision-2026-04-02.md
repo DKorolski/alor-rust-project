@@ -21,6 +21,7 @@ Relevant result notes:
 - `docs/action-scope-cws-phase1-force-refresh-idle-gap-results-2026-04-02.md`
 - `docs/action-scope-cws-phase1-force-refresh-idle-gap-retest-results-2026-04-02.md`
 - `docs/action-scope-cws-phase1-force-refresh-long-gap-retest-results-2026-04-02.md`
+- `docs/trading-window-closed-blocked-observation-2026-04-02.md`
 
 Operational reading:
 
@@ -48,6 +49,7 @@ It does not yet imply:
 - completion of `replace:limit` migration
 - completion of `exit/flatten` validation
 - immediate merge to `main` without Phase 2 evidence
+- immediate broad production acceptance of the later runtime deferred-recovery patch without soak
 
 ## Phase 2 Start Point
 
@@ -75,3 +77,8 @@ See:
 
 - `docs/action-scope-cws-phase2-entry-flatten-results-2026-04-02.md`
 - `docs/action-scope-cws-phase2-rollout-decision-2026-04-02.md`
+
+Historical note:
+
+- the `trading_window_closed -> Blocked` runtime issue mentioned during the earlier Phase 1 decision was later addressed the same day in runtime code/tests
+- see `docs/trading-window-closed-blocked-observation-2026-04-02.md`

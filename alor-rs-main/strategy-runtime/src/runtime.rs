@@ -1115,7 +1115,9 @@ impl StrategyRuntime {
                     Vec::new()
                 }
                 crate::state::SessionGapLivePhase::Flat
+                | crate::state::SessionGapLivePhase::EntryDeferredWindowClosed { .. }
                 | crate::state::SessionGapLivePhase::InPosition { .. }
+                | crate::state::SessionGapLivePhase::ExitDeferredWindowClosed { .. }
                 | crate::state::SessionGapLivePhase::CloseOnlyDegraded { .. }
                 | crate::state::SessionGapLivePhase::Blocked { .. } => Vec::new(),
             },

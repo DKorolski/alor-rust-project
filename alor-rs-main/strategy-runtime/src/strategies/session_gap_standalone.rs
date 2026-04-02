@@ -608,6 +608,10 @@ impl SessionGapStandaloneStrategy {
             && ack.broker_order_id.is_none()
     }
 
+    fn is_window_closed_recoverable_reject(ack: &CommandAck) -> bool {
+        ack.error_code.as_deref() == Some("trading_window_closed") && ack.broker_order_id.is_none()
+    }
+
     fn is_retryable_exit_recycle_failure(ack: &CommandAck) -> bool {
         matches!(ack.status, AckStatus::Error)
             && ack.error_code.as_deref() == Some("control_path_recycle_failed")
@@ -703,6 +707,61 @@ impl SessionGapStandaloneStrategy {
         );
     }
 
+    fn log_entry_window_closed_deferred(
+        request_id: uuid::Uuid,
+        side: Side,
+        qty: f64,
+        ts_utc: i64,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "entry_deferred_window_closed",
+            request_id = %request_id,
+            side = ?side,
+            qty,
+            ts_utc,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap entry deferred until trading resumes"
+        );
+    }
+
+    fn log_entry_window_closed_reissued(
+        original_request_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        side: Side,
+        qty: f64,
+        ts_utc: i64,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "entry_reissued_after_window_closed",
+            original_request_id = %original_request_id,
+            request_id = %request_id,
+            side = ?side,
+            qty,
+            ts_utc,
+            "session gap entry reissued after trading resumed"
+        );
+    }
+
+    fn log_entry_window_closed_expired(
+        original_request_id: uuid::Uuid,
+        ts_utc: i64,
+        reason: &'static str,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "entry_deferred_window_closed_expired",
+            original_request_id = %original_request_id,
+            ts_utc,
+            reason,
+            "session gap deferred entry expired without reissue"
+        );
+    }
+
     fn log_entry_recovered_to_flat(request_id: uuid::Uuid, ts_utc: i64, reason: &'static str) {
         info!(
             strategy = "session_gap_standalone",
@@ -751,6 +810,54 @@ impl SessionGapStandaloneStrategy {
             error_code = ?error_code,
             error_msg = ?error_msg,
             "session gap exit recycle retry started"
+        );
+    }
+
+    fn log_exit_window_closed_deferred(
+        request_id: uuid::Uuid,
+        side: Side,
+        qty: f64,
+        baseline_qty: f64,
+        reason: &str,
+        ts_utc: i64,
+        error_code: Option<&str>,
+        error_msg: Option<&str>,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "exit_deferred_window_closed",
+            request_id = %request_id,
+            side = ?side,
+            qty,
+            baseline_qty,
+            reason,
+            ts_utc,
+            error_code = ?error_code,
+            error_msg = ?error_msg,
+            "session gap exit deferred until trading resumes"
+        );
+    }
+
+    fn log_exit_window_closed_reissued(
+        original_request_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        side: Side,
+        qty: f64,
+        baseline_qty: f64,
+        reason: &str,
+        ts_utc: i64,
+    ) {
+        info!(
+            strategy = "session_gap_standalone",
+            action = "exit_reissued_after_window_closed",
+            original_request_id = %original_request_id,
+            request_id = %request_id,
+            side = ?side,
+            qty,
+            baseline_qty,
+            reason,
+            ts_utc,
+            "session gap exit reissued after trading resumed"
         );
     }
 
@@ -911,8 +1018,10 @@ impl SessionGapStandaloneStrategy {
                     None
                 }
             }
+            SessionGapLivePhase::EntryDeferredWindowClosed { .. } => None,
             SessionGapLivePhase::InPosition { baseline_qty, .. }
             | SessionGapLivePhase::PendingExit { baseline_qty, .. }
+            | SessionGapLivePhase::ExitDeferredWindowClosed { baseline_qty, .. }
             | SessionGapLivePhase::ExitRecoveryPending { baseline_qty, .. }
             | SessionGapLivePhase::CloseOnlyDegraded { baseline_qty, .. } => {
                 if (snapshot_qty - baseline_qty).abs() <= f64::EPSILON {
@@ -974,11 +1083,13 @@ impl SessionGapStandaloneStrategy {
         match phase {
             SessionGapLivePhase::Flat => "Flat",
             SessionGapLivePhase::PendingEntry { .. } => "PendingEntry",
+            SessionGapLivePhase::EntryDeferredWindowClosed { .. } => "EntryDeferredWindowClosed",
             SessionGapLivePhase::EntryRecoveryVerificationPending { .. } => {
                 "EntryRecoveryVerificationPending"
             }
             SessionGapLivePhase::InPosition { .. } => "InPosition",
             SessionGapLivePhase::PendingExit { .. } => "PendingExit",
+            SessionGapLivePhase::ExitDeferredWindowClosed { .. } => "ExitDeferredWindowClosed",
             SessionGapLivePhase::ExitRecoveryPending { .. } => "ExitRecoveryPending",
             SessionGapLivePhase::CloseOnlyDegraded { .. } => "CloseOnlyDegraded",
             SessionGapLivePhase::Blocked { .. } => "Blocked",
@@ -1221,6 +1332,63 @@ impl Strategy for SessionGapStandaloneStrategy {
                     SessionGapLivePhase::Flat
                 }
             }
+            SessionGapLivePhase::EntryDeferredWindowClosed {
+                side,
+                qty,
+                original_request_id,
+                ..
+            } => {
+                let session_closed = self.session_end_dt.is_some_and(|end| bar_dt >= end);
+                if session_closed || bar_dt.hour() >= self.config.max_entry_hour {
+                    Self::log_entry_window_closed_expired(
+                        original_request_id,
+                        bar.close_time_utc,
+                        if session_closed {
+                            "session_closed_before_reissue"
+                        } else {
+                            "max_entry_hour_reached_before_reissue"
+                        },
+                    );
+                    SessionGapLivePhase::Flat
+                } else {
+                    let direction = match side {
+                        Side::Buy => Direction::Long,
+                        Side::Sell => Direction::Short,
+                    };
+                    let (tp, sl) = self.compute_tp_sl(direction, bar.o);
+                    let request_id = crate::deterministic_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &bar.symbol,
+                        "place",
+                        ctx.event_ts_utc(),
+                        0,
+                    );
+                    intents.push(Intent::Place {
+                        price: self.live_marketable_price(side, bar),
+                        qty,
+                        side,
+                        comment: None,
+                    });
+                    Self::log_entry_window_closed_reissued(
+                        original_request_id,
+                        request_id,
+                        side,
+                        qty,
+                        ctx.now_ts_utc(),
+                    );
+                    SessionGapLivePhase::PendingEntry {
+                        request_id,
+                        side,
+                        qty,
+                        baseline_qty: ctx.position_qty.unwrap_or(0.0),
+                        tp,
+                        sl,
+                        sent_ts: ctx.now_ts_utc(),
+                        acked: false,
+                    }
+                }
+            }
             SessionGapLivePhase::Blocked { reason, .. }
                 if reason == "indicators_not_warmed" && self.signals_warmed() =>
             {
@@ -1362,6 +1530,50 @@ impl Strategy for SessionGapStandaloneStrategy {
                     }
                 } else {
                     phase
+                }
+            }
+            SessionGapLivePhase::ExitDeferredWindowClosed {
+                baseline_qty,
+                ref reason,
+                original_request_id,
+                ..
+            } => {
+                let current_qty = ctx.position_qty.unwrap_or(baseline_qty);
+                let delta = current_qty - baseline_qty;
+                if delta.abs() <= f64::EPSILON {
+                    SessionGapLivePhase::Flat
+                } else {
+                    let side = if delta >= 0.0 { Side::Sell } else { Side::Buy };
+                    let qty = delta.abs();
+                    let exit_price = self.live_marketable_price(side, bar);
+                    let request_id = crate::deterministic_request_id(
+                        &ctx.strategy_id,
+                        &ctx.portfolio,
+                        &bar.symbol,
+                        "place",
+                        ctx.event_ts_utc(),
+                        0,
+                    );
+                    intents.push(Self::build_live_exit_intent(exit_price, qty, side));
+                    Self::log_exit_window_closed_reissued(
+                        original_request_id,
+                        request_id,
+                        side,
+                        qty,
+                        baseline_qty,
+                        reason,
+                        ctx.now_ts_utc(),
+                    );
+                    SessionGapLivePhase::PendingExit {
+                        request_id,
+                        side,
+                        qty,
+                        price: exit_price,
+                        baseline_qty,
+                        reason: reason.clone(),
+                        sent_ts: ctx.now_ts_utc(),
+                        acked: false,
+                    }
                 }
             }
             SessionGapLivePhase::PendingExit {
@@ -1528,45 +1740,66 @@ impl Strategy for SessionGapStandaloneStrategy {
                     ..
                 } => {
                     if *request_id == ack.request_id {
-                        match ack.status {
-                            AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
-                                *acked = true;
-                            }
-                            AckStatus::Rejected | AckStatus::Expired => {
-                                Self::log_entry_terminal_failure(ack);
-                                *phase = SessionGapLivePhase::Blocked {
-                                    reason: format!("ack_failed:{:?}", ack.status),
-                                    ts_utc: ack.processed_ts_utc,
-                                };
-                            }
-                            AckStatus::Error => {
-                                if Self::is_transient_entry_transport_error(ack) {
-                                    Self::log_entry_transport_failure(ack);
-                                    let request_id = *request_id;
-                                    *phase =
-                                        SessionGapLivePhase::EntryRecoveryVerificationPending {
-                                            request_id,
-                                            side: *side,
-                                            qty: *qty,
-                                            baseline_qty: *baseline_qty,
-                                            tp: *tp,
-                                            sl: *sl,
-                                            verification_started_ts: ack.processed_ts_utc,
-                                            transport_error_code: ack.error_code.clone(),
-                                            transport_error_msg: ack.error_msg.clone(),
-                                        };
-                                    Self::log_entry_recovery_pending(
-                                        request_id,
-                                        ack.processed_ts_utc,
-                                        ack.error_code.as_deref(),
-                                        ack.error_msg.as_deref(),
-                                    );
-                                } else {
+                        if Self::is_window_closed_recoverable_reject(ack) {
+                            Self::log_entry_window_closed_deferred(
+                                *request_id,
+                                *side,
+                                *qty,
+                                ack.processed_ts_utc,
+                                ack.error_code.as_deref(),
+                                ack.error_msg.as_deref(),
+                            );
+                            *phase = SessionGapLivePhase::EntryDeferredWindowClosed {
+                                side: *side,
+                                qty: *qty,
+                                deferred_ts_utc: ack.processed_ts_utc,
+                                original_request_id: *request_id,
+                                last_error_code: ack.error_code.clone(),
+                                last_error_msg: ack.error_msg.clone(),
+                            };
+                        } else {
+                            match ack.status {
+                                AckStatus::Accepted
+                                | AckStatus::Confirmed
+                                | AckStatus::Duplicate => {
+                                    *acked = true;
+                                }
+                                AckStatus::Rejected | AckStatus::Expired => {
                                     Self::log_entry_terminal_failure(ack);
                                     *phase = SessionGapLivePhase::Blocked {
                                         reason: format!("ack_failed:{:?}", ack.status),
                                         ts_utc: ack.processed_ts_utc,
                                     };
+                                }
+                                AckStatus::Error => {
+                                    if Self::is_transient_entry_transport_error(ack) {
+                                        Self::log_entry_transport_failure(ack);
+                                        let request_id = *request_id;
+                                        *phase =
+                                            SessionGapLivePhase::EntryRecoveryVerificationPending {
+                                                request_id,
+                                                side: *side,
+                                                qty: *qty,
+                                                baseline_qty: *baseline_qty,
+                                                tp: *tp,
+                                                sl: *sl,
+                                                verification_started_ts: ack.processed_ts_utc,
+                                                transport_error_code: ack.error_code.clone(),
+                                                transport_error_msg: ack.error_msg.clone(),
+                                            };
+                                        Self::log_entry_recovery_pending(
+                                            request_id,
+                                            ack.processed_ts_utc,
+                                            ack.error_code.as_deref(),
+                                            ack.error_msg.as_deref(),
+                                        );
+                                    } else {
+                                        Self::log_entry_terminal_failure(ack);
+                                        *phase = SessionGapLivePhase::Blocked {
+                                            reason: format!("ack_failed:{:?}", ack.status),
+                                            ts_utc: ack.processed_ts_utc,
+                                        };
+                                    }
                                 }
                             }
                         }
@@ -1583,119 +1816,144 @@ impl Strategy for SessionGapStandaloneStrategy {
                     ..
                 } => {
                     if *request_id == ack.request_id {
-                        match ack.status {
-                            AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
-                                *acked = true;
-                            }
-                            AckStatus::Rejected | AckStatus::Expired => {
-                                Self::log_exit_recycle_retry_failed(
-                                    *request_id,
-                                    0,
-                                    ack.status.clone(),
-                                    ack.error_code.as_deref(),
-                                    ack.error_msg.as_deref(),
-                                );
-                                *phase = Self::close_only_degraded_phase(
-                                    *side,
-                                    *qty,
-                                    *baseline_qty,
-                                    format!("ack_failed:{:?}:{reason}", ack.status),
-                                    ack.processed_ts_utc,
-                                    0,
-                                    ack.error_code.clone(),
-                                    ack.error_msg.clone(),
-                                );
-                                Self::log_exit_close_only_degraded_entered(
-                                    "exit_terminal_ack_failure",
-                                    0,
-                                    ack.processed_ts_utc,
-                                    ack.error_code.as_deref(),
-                                    ack.error_msg.as_deref(),
-                                );
-                                Self::log_exit_operator_intervention_required(
-                                    "exit_terminal_ack_failure",
-                                    ack.processed_ts_utc,
-                                    ack.error_code.as_deref(),
-                                    ack.error_msg.as_deref(),
-                                );
-                            }
-                            AckStatus::Error => {
-                                let current_request_id = *request_id;
-                                let current_side = *side;
-                                let current_qty = *qty;
-                                let current_price = *price;
-                                let current_baseline_qty = *baseline_qty;
-                                let current_reason = reason.clone();
-                                if Self::is_retryable_exit_recycle_failure(ack)
-                                    && Self::EXIT_RECOVERY_MAX_RETRIES > 0
-                                {
-                                    let next_retry_attempt = 1;
-                                    let next_request_id =
-                                        Self::exit_retry_request_id(ctx, ack.processed_ts_utc);
-                                    *phase = SessionGapLivePhase::ExitRecoveryPending {
-                                        request_id: next_request_id,
-                                        side: current_side,
-                                        qty: current_qty,
-                                        price: current_price,
-                                        baseline_qty: current_baseline_qty,
-                                        reason: current_reason.clone(),
-                                        sent_ts: ack.processed_ts_utc,
-                                        acked: false,
-                                        retry_attempt: next_retry_attempt,
-                                        last_error_code: ack.error_code.clone(),
-                                        last_error_msg: ack.error_msg.clone(),
-                                    };
-                                    Self::log_exit_recovery_started(
-                                        current_request_id,
-                                        next_retry_attempt,
-                                        ack.error_code.as_deref(),
-                                        ack.error_msg.as_deref(),
-                                        ack.processed_ts_utc,
-                                    );
-                                    Self::log_exit_recycle_retry_started(
-                                        current_request_id,
-                                        next_request_id,
-                                        next_retry_attempt,
-                                        ack.processed_ts_utc,
-                                        ack.error_code.as_deref(),
-                                        ack.error_msg.as_deref(),
-                                    );
-                                    intents.push(Self::build_live_exit_intent(
-                                        current_price,
-                                        current_qty,
-                                        current_side,
-                                    ));
-                                } else {
+                        if Self::is_window_closed_recoverable_reject(ack) {
+                            Self::log_exit_window_closed_deferred(
+                                *request_id,
+                                *side,
+                                *qty,
+                                *baseline_qty,
+                                reason,
+                                ack.processed_ts_utc,
+                                ack.error_code.as_deref(),
+                                ack.error_msg.as_deref(),
+                            );
+                            *phase = SessionGapLivePhase::ExitDeferredWindowClosed {
+                                side: *side,
+                                qty: *qty,
+                                baseline_qty: *baseline_qty,
+                                reason: reason.clone(),
+                                deferred_ts_utc: ack.processed_ts_utc,
+                                original_request_id: *request_id,
+                                last_error_code: ack.error_code.clone(),
+                                last_error_msg: ack.error_msg.clone(),
+                            };
+                        } else {
+                            match ack.status {
+                                AckStatus::Accepted
+                                | AckStatus::Confirmed
+                                | AckStatus::Duplicate => {
+                                    *acked = true;
+                                }
+                                AckStatus::Rejected | AckStatus::Expired => {
                                     Self::log_exit_recycle_retry_failed(
-                                        current_request_id,
+                                        *request_id,
                                         0,
                                         ack.status.clone(),
                                         ack.error_code.as_deref(),
                                         ack.error_msg.as_deref(),
                                     );
                                     *phase = Self::close_only_degraded_phase(
-                                        current_side,
-                                        current_qty,
-                                        current_baseline_qty,
-                                        format!("ack_failed:{:?}:{current_reason}", ack.status),
+                                        *side,
+                                        *qty,
+                                        *baseline_qty,
+                                        format!("ack_failed:{:?}:{reason}", ack.status),
                                         ack.processed_ts_utc,
                                         0,
                                         ack.error_code.clone(),
                                         ack.error_msg.clone(),
                                     );
                                     Self::log_exit_close_only_degraded_entered(
-                                        "exit_error_without_retry_lane",
+                                        "exit_terminal_ack_failure",
                                         0,
                                         ack.processed_ts_utc,
                                         ack.error_code.as_deref(),
                                         ack.error_msg.as_deref(),
                                     );
                                     Self::log_exit_operator_intervention_required(
-                                        "exit_error_without_retry_lane",
+                                        "exit_terminal_ack_failure",
                                         ack.processed_ts_utc,
                                         ack.error_code.as_deref(),
                                         ack.error_msg.as_deref(),
                                     );
+                                }
+                                AckStatus::Error => {
+                                    let current_request_id = *request_id;
+                                    let current_side = *side;
+                                    let current_qty = *qty;
+                                    let current_price = *price;
+                                    let current_baseline_qty = *baseline_qty;
+                                    let current_reason = reason.clone();
+                                    if Self::is_retryable_exit_recycle_failure(ack)
+                                        && Self::EXIT_RECOVERY_MAX_RETRIES > 0
+                                    {
+                                        let next_retry_attempt = 1;
+                                        let next_request_id =
+                                            Self::exit_retry_request_id(ctx, ack.processed_ts_utc);
+                                        *phase = SessionGapLivePhase::ExitRecoveryPending {
+                                            request_id: next_request_id,
+                                            side: current_side,
+                                            qty: current_qty,
+                                            price: current_price,
+                                            baseline_qty: current_baseline_qty,
+                                            reason: current_reason.clone(),
+                                            sent_ts: ack.processed_ts_utc,
+                                            acked: false,
+                                            retry_attempt: next_retry_attempt,
+                                            last_error_code: ack.error_code.clone(),
+                                            last_error_msg: ack.error_msg.clone(),
+                                        };
+                                        Self::log_exit_recovery_started(
+                                            current_request_id,
+                                            next_retry_attempt,
+                                            ack.error_code.as_deref(),
+                                            ack.error_msg.as_deref(),
+                                            ack.processed_ts_utc,
+                                        );
+                                        Self::log_exit_recycle_retry_started(
+                                            current_request_id,
+                                            next_request_id,
+                                            next_retry_attempt,
+                                            ack.processed_ts_utc,
+                                            ack.error_code.as_deref(),
+                                            ack.error_msg.as_deref(),
+                                        );
+                                        intents.push(Self::build_live_exit_intent(
+                                            current_price,
+                                            current_qty,
+                                            current_side,
+                                        ));
+                                    } else {
+                                        Self::log_exit_recycle_retry_failed(
+                                            current_request_id,
+                                            0,
+                                            ack.status.clone(),
+                                            ack.error_code.as_deref(),
+                                            ack.error_msg.as_deref(),
+                                        );
+                                        *phase = Self::close_only_degraded_phase(
+                                            current_side,
+                                            current_qty,
+                                            current_baseline_qty,
+                                            format!("ack_failed:{:?}:{current_reason}", ack.status),
+                                            ack.processed_ts_utc,
+                                            0,
+                                            ack.error_code.clone(),
+                                            ack.error_msg.clone(),
+                                        );
+                                        Self::log_exit_close_only_degraded_entered(
+                                            "exit_error_without_retry_lane",
+                                            0,
+                                            ack.processed_ts_utc,
+                                            ack.error_code.as_deref(),
+                                            ack.error_msg.as_deref(),
+                                        );
+                                        Self::log_exit_operator_intervention_required(
+                                            "exit_error_without_retry_lane",
+                                            ack.processed_ts_utc,
+                                            ack.error_code.as_deref(),
+                                            ack.error_msg.as_deref(),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1712,53 +1970,78 @@ impl Strategy for SessionGapStandaloneStrategy {
                     ..
                 } => {
                     if *request_id == ack.request_id {
-                        match ack.status {
-                            AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate => {
-                                *acked = true;
-                                Self::log_exit_recycle_retry_success(
-                                    *request_id,
-                                    *retry_attempt,
-                                    ack.status.clone(),
-                                    ack.broker_order_id,
-                                );
-                            }
-                            AckStatus::Rejected | AckStatus::Expired | AckStatus::Error => {
-                                let current_request_id = *request_id;
-                                let current_retry_attempt = *retry_attempt;
-                                let current_side = *side;
-                                let current_qty = *qty;
-                                let current_baseline_qty = *baseline_qty;
-                                let current_reason = reason.clone();
-                                Self::log_exit_recycle_retry_failed(
-                                    current_request_id,
-                                    current_retry_attempt,
-                                    ack.status.clone(),
-                                    ack.error_code.as_deref(),
-                                    ack.error_msg.as_deref(),
-                                );
-                                *phase = Self::close_only_degraded_phase(
-                                    current_side,
-                                    current_qty,
-                                    current_baseline_qty,
-                                    format!("ack_failed:{:?}:{current_reason}", ack.status),
-                                    ack.processed_ts_utc,
-                                    current_retry_attempt,
-                                    ack.error_code.clone(),
-                                    ack.error_msg.clone(),
-                                );
-                                Self::log_exit_close_only_degraded_entered(
-                                    "exit_recovery_exhausted",
-                                    current_retry_attempt,
-                                    ack.processed_ts_utc,
-                                    ack.error_code.as_deref(),
-                                    ack.error_msg.as_deref(),
-                                );
-                                Self::log_exit_operator_intervention_required(
-                                    "exit_recovery_exhausted",
-                                    ack.processed_ts_utc,
-                                    ack.error_code.as_deref(),
-                                    ack.error_msg.as_deref(),
-                                );
+                        if Self::is_window_closed_recoverable_reject(ack) {
+                            Self::log_exit_window_closed_deferred(
+                                *request_id,
+                                *side,
+                                *qty,
+                                *baseline_qty,
+                                reason,
+                                ack.processed_ts_utc,
+                                ack.error_code.as_deref(),
+                                ack.error_msg.as_deref(),
+                            );
+                            *phase = SessionGapLivePhase::ExitDeferredWindowClosed {
+                                side: *side,
+                                qty: *qty,
+                                baseline_qty: *baseline_qty,
+                                reason: reason.clone(),
+                                deferred_ts_utc: ack.processed_ts_utc,
+                                original_request_id: *request_id,
+                                last_error_code: ack.error_code.clone(),
+                                last_error_msg: ack.error_msg.clone(),
+                            };
+                        } else {
+                            match ack.status {
+                                AckStatus::Accepted
+                                | AckStatus::Confirmed
+                                | AckStatus::Duplicate => {
+                                    *acked = true;
+                                    Self::log_exit_recycle_retry_success(
+                                        *request_id,
+                                        *retry_attempt,
+                                        ack.status.clone(),
+                                        ack.broker_order_id,
+                                    );
+                                }
+                                AckStatus::Rejected | AckStatus::Expired | AckStatus::Error => {
+                                    let current_request_id = *request_id;
+                                    let current_retry_attempt = *retry_attempt;
+                                    let current_side = *side;
+                                    let current_qty = *qty;
+                                    let current_baseline_qty = *baseline_qty;
+                                    let current_reason = reason.clone();
+                                    Self::log_exit_recycle_retry_failed(
+                                        current_request_id,
+                                        current_retry_attempt,
+                                        ack.status.clone(),
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                    *phase = Self::close_only_degraded_phase(
+                                        current_side,
+                                        current_qty,
+                                        current_baseline_qty,
+                                        format!("ack_failed:{:?}:{current_reason}", ack.status),
+                                        ack.processed_ts_utc,
+                                        current_retry_attempt,
+                                        ack.error_code.clone(),
+                                        ack.error_msg.clone(),
+                                    );
+                                    Self::log_exit_close_only_degraded_entered(
+                                        "exit_recovery_exhausted",
+                                        current_retry_attempt,
+                                        ack.processed_ts_utc,
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                    Self::log_exit_operator_intervention_required(
+                                        "exit_recovery_exhausted",
+                                        ack.processed_ts_utc,
+                                        ack.error_code.as_deref(),
+                                        ack.error_msg.as_deref(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1859,6 +2142,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                         };
                     }
                 }
+                SessionGapLivePhase::EntryDeferredWindowClosed { .. } => {}
                 SessionGapLivePhase::EntryRecoveryVerificationPending {
                     baseline_qty,
                     tp,
@@ -1880,6 +2164,7 @@ impl Strategy for SessionGapStandaloneStrategy {
                 }
                 SessionGapLivePhase::InPosition { baseline_qty, .. }
                 | SessionGapLivePhase::PendingExit { baseline_qty, .. }
+                | SessionGapLivePhase::ExitDeferredWindowClosed { baseline_qty, .. }
                 | SessionGapLivePhase::ExitRecoveryPending { baseline_qty, .. }
                 | SessionGapLivePhase::CloseOnlyDegraded { baseline_qty, .. } => {
                     if (pos.qty - baseline_qty).abs() <= f64::EPSILON {
@@ -3286,6 +3571,274 @@ mod tests {
             } => {}
             other => panic!("business reject must block, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn trading_window_closed_entry_reject_enters_deferred_phase() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(1_000),
+            phase: SessionGapLivePhase::PendingEntry {
+                request_id,
+                side: Side::Buy,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                tp: Some(101.0),
+                sl: Some(99.0),
+                sent_ts: 1_000,
+                acked: false,
+            },
+            phase_last_change_ts_utc: Some(1_000),
+            last_bar_ts: Some(1_000),
+        };
+
+        let ack = CommandAck::rejected(request_id, "trading_window_closed", "validation failed");
+        let _ = strategy.on_ack(&ctx_live_at(1_005, Some(1_000), 0.0), &ack);
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase:
+                    SessionGapLivePhase::EntryDeferredWindowClosed {
+                        side,
+                        qty,
+                        original_request_id,
+                        last_error_code,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(*side, Side::Buy);
+                assert!((*qty - 1.0).abs() <= f64::EPSILON);
+                assert_eq!(*original_request_id, request_id);
+                assert_eq!(last_error_code.as_deref(), Some("trading_window_closed"));
+            }
+            other => panic!("expected deferred entry phase, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deferred_entry_reissues_after_trading_resumes() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let offset = FixedOffset::east_opt(3 * 3600).unwrap();
+        strategy.yesterday_close = Some(100.0);
+        strategy.yesterday_range = Some(2.0);
+        strategy.pre_prev_close = Some(99.0);
+        strategy.first_min_high = Some(101.0);
+        strategy.first_min_low = Some(98.0);
+        strategy.first_hour_price = Some(100.5);
+        strategy.session_start_dt = Some(
+            offset
+                .with_ymd_and_hms(2025, 12, 5, 10, 0, 0)
+                .single()
+                .unwrap(),
+        );
+        strategy.session_end_dt = Some(
+            offset
+                .with_ymd_and_hms(2025, 12, 5, 23, 49, 0)
+                .single()
+                .unwrap(),
+        );
+        strategy.traded_session = true;
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: Some(
+                strategy
+                    .session_start_dt
+                    .unwrap()
+                    .with_timezone(&Utc)
+                    .timestamp(),
+            ),
+            session_end_ts_utc: Some(
+                strategy
+                    .session_end_dt
+                    .unwrap()
+                    .with_timezone(&Utc)
+                    .timestamp(),
+            ),
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(1_000),
+            phase: SessionGapLivePhase::EntryDeferredWindowClosed {
+                side: Side::Buy,
+                qty: 1.0,
+                deferred_ts_utc: 1_005,
+                original_request_id: uuid::Uuid::new_v4(),
+                last_error_code: Some("trading_window_closed".into()),
+                last_error_msg: Some("validation failed".into()),
+            },
+            phase_last_change_ts_utc: Some(1_005),
+            last_bar_ts: Some(1_000),
+        };
+
+        let ctx = ctx_live(true, crate::live_guard::GatewayPhase::LiveReady);
+        let mut live_bar = bar(
+            offset
+                .with_ymd_and_hms(2025, 12, 5, 14, 6, 0)
+                .single()
+                .unwrap()
+                .with_timezone(&Utc)
+                .timestamp(),
+            101.0,
+            101.2,
+            100.9,
+            101.1,
+        );
+        live_bar.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &live_bar);
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            &intents[0],
+            Intent::Place {
+                side: Side::Buy,
+                qty,
+                ..
+            } if (*qty - 1.0).abs() <= f64::EPSILON
+        ));
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::PendingEntry {
+                    side: Side::Buy,
+                    qty,
+                    ..
+                },
+                ..
+            } if (qty - 1.0).abs() <= f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn trading_window_closed_exit_reject_enters_deferred_phase() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(1_000),
+            phase: SessionGapLivePhase::PendingExit {
+                request_id,
+                side: Side::Sell,
+                qty: 1.0,
+                price: 100.5,
+                baseline_qty: 0.0,
+                reason: "session_exit".into(),
+                sent_ts: 1_000,
+                acked: false,
+            },
+            phase_last_change_ts_utc: Some(1_000),
+            last_bar_ts: Some(1_000),
+        };
+
+        let ack = CommandAck::rejected(request_id, "trading_window_closed", "validation failed");
+        let _ = strategy.on_ack(&ctx_live_at(1_005, Some(1_000), 1.0), &ack);
+
+        match &strategy.state {
+            StrategyState::SessionGapStandalone {
+                phase:
+                    SessionGapLivePhase::ExitDeferredWindowClosed {
+                        side,
+                        qty,
+                        baseline_qty,
+                        reason,
+                        original_request_id,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(*side, Side::Sell);
+                assert!((*qty - 1.0).abs() <= f64::EPSILON);
+                assert!((*baseline_qty - 0.0).abs() <= f64::EPSILON);
+                assert_eq!(reason, "session_exit");
+                assert_eq!(*original_request_id, request_id);
+            }
+            other => panic!("expected deferred exit phase, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deferred_exit_reissues_after_trading_resumes_until_flat() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2025-12-05".into()),
+            traded_session: true,
+            prev_close: Some(100.0),
+            yesterday_range: Some(2.0),
+            pre_prev_close: Some(99.0),
+            first_min_high: Some(101.0),
+            first_min_low: Some(98.0),
+            first_hour_price: Some(100.5),
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: Some(102.0),
+            session_low: Some(97.0),
+            session_close: Some(100.0),
+            last_dt_ts_utc: Some(1_000),
+            phase: SessionGapLivePhase::ExitDeferredWindowClosed {
+                side: Side::Sell,
+                qty: 1.0,
+                baseline_qty: 0.0,
+                reason: "session_exit".into(),
+                deferred_ts_utc: 1_005,
+                original_request_id: uuid::Uuid::new_v4(),
+                last_error_code: Some("trading_window_closed".into()),
+                last_error_msg: Some("validation failed".into()),
+            },
+            phase_last_change_ts_utc: Some(1_005),
+            last_bar_ts: Some(1_000),
+        };
+
+        let ctx = ctx_live_at(1_010, Some(1_000), 1.0);
+        let mut live_bar = bar(1_010, 101.0, 101.2, 100.9, 101.1);
+        live_bar.origin = DataOrigin::Live;
+
+        let intents = strategy.on_bar(&ctx, &live_bar);
+        assert_eq!(intents.len(), 1);
+        assert_exit_place_intent(&intents[0], Side::Sell, 1.0);
+        assert!(matches!(
+            strategy.state,
+            StrategyState::SessionGapStandalone {
+                phase: SessionGapLivePhase::PendingExit {
+                    side: Side::Sell,
+                    qty,
+                    ..
+                },
+                ..
+            } if (qty - 1.0).abs() <= f64::EPSILON
+        ));
     }
 
     #[test]

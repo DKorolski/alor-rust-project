@@ -18,6 +18,7 @@ Relevant notes:
 
 - `docs/action-scope-cws-phase1-rollout-decision-2026-04-02.md`
 - `docs/action-scope-cws-phase2-entry-flatten-results-2026-04-02.md`
+- `docs/trading-window-closed-blocked-observation-2026-04-02.md`
 
 Operational reading:
 
@@ -35,8 +36,13 @@ For ongoing engineering work:
 
 - treat the Phase 2 candidate as the current `sessiongap` live-development line
 - continue feature work from the `action_scoped + forced token refresh + intent-aware exit gating` path
-- keep runtime unchanged unless a later phase explicitly requires runtime changes
 - use the dedicated Phase 2 config path for further validation windows
+
+Runtime note:
+
+- the later same-day runtime follow-up for `trading_window_closed` recovery has now landed
+- `sessiongap` and `hybrid` no longer need restart-only recovery for the closed-window reject class
+- see `docs/trading-window-closed-blocked-observation-2026-04-02.md`
 
 ## What We Are Intentionally Not Waiting For
 
@@ -58,6 +64,12 @@ It does not yet imply:
 - completion of `replace:limit` migration
 - unconditional mutation of every baseline live TOML
 - immediate merge to `main` before the next development slice is prepared and reviewed
+- blanket production acceptance without soak on the new runtime recovery semantics
+
+Operational note:
+
+- historical note: earlier on `2026-04-02`, clean restart was still the workaround for this reject class.
+- after the runtime follow-up patch, deferred recovery is the intended semantic fix path.
 
 ## Next Working Point
 

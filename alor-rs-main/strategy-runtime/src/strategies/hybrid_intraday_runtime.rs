@@ -5,7 +5,7 @@ use chrono::{
     Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime,
     TimeZone, Utc, Weekday,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::state::StrategyState;
@@ -46,9 +46,33 @@ struct PendingEntry {
     owner: Owner,
     side: Side,
     cycle_id: [u8; 10],
+    reason: crate::strategies::hybrid_intraday::ReasonCode,
     entry_style: EntryStyle,
     stop_price: Option<f64>,
     take_price: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingExit {
+    owner: Owner,
+    reason: crate::strategies::hybrid_intraday::ReasonCode,
+}
+
+#[derive(Debug, Clone)]
+struct DeferredEntry {
+    signal: crate::strategies::hybrid_intraday::EntrySignal,
+    cycle_id: [u8; 10],
+    deferred_ts_utc: i64,
+    original_request_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeferredExit {
+    owner: Owner,
+    reason: crate::strategies::hybrid_intraday::ReasonCode,
+    cycle_id: [u8; 10],
+    deferred_ts_utc: i64,
+    original_request_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
@@ -80,8 +104,11 @@ pub struct HybridIntradayRuntimeStrategy {
     pending_entry: Option<PendingEntry>,
     pending_entry_request_id: Option<Uuid>,
     pending_entry_created_ts_utc: Option<i64>,
+    deferred_entry: Option<DeferredEntry>,
+    pending_exit: Option<PendingExit>,
     pending_exit_request_id: Option<Uuid>,
     pending_exit_created_ts_utc: Option<i64>,
+    deferred_exit: Option<DeferredExit>,
     pending_tp_request_id: Option<Uuid>,
     pending_tp_created_ts_utc: Option<i64>,
     pending_sl_request_id: Option<Uuid>,
@@ -106,6 +133,7 @@ pub struct HybridIntradayRuntimeStrategy {
     current_day_low: Option<f64>,
     prev_day_range: Option<f64>,
     entry_ready: bool,
+    last_warmup_log: Option<bool>,
     working_orders: HashSet<i64>,
     working_stop_orders: HashSet<String>,
     startup_live_replay_boundary_ts_utc: Option<i64>,
@@ -153,8 +181,11 @@ impl HybridIntradayRuntimeStrategy {
             pending_entry: None,
             pending_entry_request_id: None,
             pending_entry_created_ts_utc: None,
+            deferred_entry: None,
+            pending_exit: None,
             pending_exit_request_id: None,
             pending_exit_created_ts_utc: None,
+            deferred_exit: None,
             pending_tp_request_id: None,
             pending_tp_created_ts_utc: None,
             pending_sl_request_id: None,
@@ -179,6 +210,7 @@ impl HybridIntradayRuntimeStrategy {
             current_day_low: None,
             prev_day_range: None,
             entry_ready: false,
+            last_warmup_log: None,
             working_orders: HashSet::new(),
             working_stop_orders: HashSet::new(),
             startup_live_replay_boundary_ts_utc: None,
@@ -747,8 +779,33 @@ impl HybridIntradayRuntimeStrategy {
                 .map(|v| Self::format_cycle_id(&v.cycle_id)),
             pending_entry_request_id: self.pending_entry_request_id,
             pending_entry_created_ts_utc: self.pending_entry_created_ts_utc,
+            deferred_entry_owner: self.deferred_entry.as_ref().map(|v| v.signal.owner),
+            deferred_entry_side: self.deferred_entry.as_ref().map(|v| v.signal.side),
+            deferred_entry_cycle_id: self
+                .deferred_entry
+                .as_ref()
+                .map(|v| Self::format_cycle_id(&v.cycle_id)),
+            deferred_entry_entry_style: self.deferred_entry.as_ref().map(|v| v.signal.entry_style),
+            deferred_entry_reason: self.deferred_entry.as_ref().map(|v| v.signal.reason),
+            deferred_entry_stop_price: self
+                .deferred_entry
+                .as_ref()
+                .and_then(|v| v.signal.stop_price),
+            deferred_entry_take_price: self
+                .deferred_entry
+                .as_ref()
+                .and_then(|v| v.signal.take_price),
+            deferred_entry_ts_utc: self.deferred_entry.as_ref().map(|v| v.deferred_ts_utc),
+            deferred_entry_request_id: self.deferred_entry.as_ref().map(|v| v.original_request_id),
             pending_exit_request_id: self.pending_exit_request_id,
             pending_exit_created_ts_utc: self.pending_exit_created_ts_utc,
+            deferred_exit_owner: self.deferred_exit.map(|v| v.owner),
+            deferred_exit_reason: self.deferred_exit.map(|v| v.reason),
+            deferred_exit_cycle_id: self
+                .deferred_exit
+                .map(|v| Self::format_cycle_id(&v.cycle_id)),
+            deferred_exit_ts_utc: self.deferred_exit.map(|v| v.deferred_ts_utc),
+            deferred_exit_request_id: self.deferred_exit.map(|v| v.original_request_id),
             pending_tp_request_id: self.pending_tp_request_id,
             pending_tp_created_ts_utc: self.pending_tp_created_ts_utc,
             pending_sl_request_id: self.pending_sl_request_id,
@@ -772,6 +829,129 @@ impl HybridIntradayRuntimeStrategy {
             current_day_low: self.current_day_low,
             prev_day_range: self.prev_day_range,
         };
+    }
+
+    fn is_window_closed_recoverable_reject(ack: &CommandAck) -> bool {
+        ack.error_code.as_deref() == Some("trading_window_closed") && ack.broker_order_id.is_none()
+    }
+
+    fn clear_deferred_entry(&mut self) {
+        self.deferred_entry = None;
+    }
+
+    fn clear_deferred_exit(&mut self) {
+        self.deferred_exit = None;
+    }
+
+    fn deferred_entry_expired(&self, deferred: &DeferredEntry, dt_local: NaiveDateTime) -> bool {
+        self.utc_to_local_naive(deferred.deferred_ts_utc)
+            .map(|deferred_local| dt_local.date() > deferred_local.date())
+            .unwrap_or(false)
+    }
+
+    fn maybe_reissue_deferred_entry(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        dt_local: NaiveDateTime,
+        can_emit: bool,
+        can_execute: bool,
+        reference_price: f64,
+    ) -> Option<Vec<Intent>> {
+        let deferred = self.deferred_entry.clone()?;
+        if ctx.position_qty.unwrap_or(0.0).abs() > f64::EPSILON {
+            self.clear_deferred_entry();
+            return None;
+        }
+        if self.deferred_entry_expired(&deferred, dt_local) {
+            info!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "deferred_entry_expired",
+                deferred_ts_utc = deferred.deferred_ts_utc,
+                owner = ?deferred.signal.owner,
+                side = ?deferred.signal.side,
+                cycle_id = %Self::format_cycle_id(&deferred.cycle_id),
+                original_request_id = %deferred.original_request_id,
+            );
+            self.clear_deferred_entry();
+            return None;
+        }
+        if !self.entry_ready
+            || self.safe_mode_close_only
+            || !can_emit
+            || !can_execute
+            || self.pending_entry_request_id.is_some()
+        {
+            return Some(Vec::new());
+        }
+        self.active_cycle_id = Some(deferred.cycle_id);
+        let intents = self.map_action_to_intents_with_reference(
+            ctx,
+            created_ts_utc,
+            can_emit,
+            can_execute,
+            reference_price,
+            Action::SubmitEntry(deferred.signal.clone()),
+        );
+        if self.pending_entry_request_id.is_some() {
+            info!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "deferred_entry_reissued",
+                deferred_ts_utc = deferred.deferred_ts_utc,
+                owner = ?deferred.signal.owner,
+                side = ?deferred.signal.side,
+                cycle_id = %Self::format_cycle_id(&deferred.cycle_id),
+                original_request_id = %deferred.original_request_id,
+                new_request_id = ?self.pending_entry_request_id,
+            );
+            self.clear_deferred_entry();
+        }
+        Some(intents)
+    }
+
+    fn maybe_reissue_deferred_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        can_emit: bool,
+        can_execute: bool,
+        reference_price: f64,
+    ) -> Option<Vec<Intent>> {
+        let deferred = self.deferred_exit?;
+        if ctx.position_qty.unwrap_or(0.0).abs() <= f64::EPSILON {
+            self.clear_deferred_exit();
+            return None;
+        }
+        if !can_emit || !can_execute || self.pending_exit_request_id.is_some() {
+            return Some(Vec::new());
+        }
+        self.active_cycle_id = Some(deferred.cycle_id);
+        self.current_owner = Some(deferred.owner);
+        let intents = self.map_action_to_intents_with_reference(
+            ctx,
+            created_ts_utc,
+            can_emit,
+            can_execute,
+            reference_price,
+            Action::SubmitExit {
+                owner: deferred.owner,
+                reason: deferred.reason,
+            },
+        );
+        if self.pending_exit_request_id.is_some() {
+            info!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "deferred_exit_reissued",
+                deferred_ts_utc = deferred.deferred_ts_utc,
+                owner = ?deferred.owner,
+                reason = ?deferred.reason,
+                cycle_id = %Self::format_cycle_id(&deferred.cycle_id),
+                original_request_id = %deferred.original_request_id,
+                new_request_id = ?self.pending_exit_request_id,
+            );
+            self.clear_deferred_exit();
+        }
+        Some(intents)
     }
 
     fn enter_safe_mode(&mut self, reason: impl Into<String>) {
@@ -849,6 +1029,42 @@ impl HybridIntradayRuntimeStrategy {
         self.entry_ready = self.prev_day_range.is_some();
     }
 
+    fn log_signal_warmup_status_if_changed(&mut self, dt_local: NaiveDateTime, last_bar_ts: i64) {
+        let warmed = self.entry_ready;
+        if self.last_warmup_log == Some(warmed) {
+            return;
+        }
+        self.last_warmup_log = Some(warmed);
+        if warmed {
+            info!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                strategy = "hybrid_intraday_runtime",
+                symbol = self.config.symbol,
+                local_day = %Self::format_local_day(dt_local.date()),
+                prev_day_range = self.prev_day_range,
+                current_day_high = self.current_day_high,
+                current_day_low = self.current_day_low,
+                entry_ready = true,
+                "signal warmup complete"
+            );
+        } else {
+            warn!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                strategy = "hybrid_intraday_runtime",
+                symbol = self.config.symbol,
+                local_day = %Self::format_local_day(dt_local.date()),
+                last_bar_ts,
+                prev_day_range = self.prev_day_range,
+                current_day_high = self.current_day_high,
+                current_day_low = self.current_day_low,
+                entry_ready = false,
+                action = "signal_warmup_incomplete",
+                reason = "prev_day_range_missing",
+                "signal warmup incomplete"
+            );
+        }
+    }
+
     fn map_action_to_intents(
         &mut self,
         ctx: &StrategyCtx,
@@ -891,6 +1107,7 @@ impl HybridIntradayRuntimeStrategy {
                         owner: entry.owner,
                         side: entry.side,
                         cycle_id,
+                        reason: entry.reason,
                         entry_style: entry.entry_style,
                         stop_price: entry.stop_price,
                         take_price: entry.take_price,
@@ -917,7 +1134,7 @@ impl HybridIntradayRuntimeStrategy {
                     )
                     .with_class(IntentClass::Entry)]
             }
-            Action::SubmitExit { owner, .. } => {
+            Action::SubmitExit { owner, reason } => {
                 if !can_emit {
                     return Vec::new();
                 }
@@ -950,6 +1167,7 @@ impl HybridIntradayRuntimeStrategy {
                 if can_execute {
                     self.active_cycle_id = Some(cycle_id);
                     self.current_owner = Some(owner);
+                    self.pending_exit = Some(PendingExit { owner, reason });
                     self.pending_exit_request_id =
                         Some(self.live_request_id(ctx, created_ts_utc, side));
                     self.pending_exit_created_ts_utc = Some(created_ts_utc);
@@ -1169,6 +1387,7 @@ impl HybridIntradayRuntimeStrategy {
                 self.pending_entry = None;
                 self.pending_entry_request_id = None;
                 self.pending_entry_created_ts_utc = None;
+                self.clear_deferred_entry();
                 if self.last_position_qty.abs() <= f64::EPSILON {
                     self.active_cycle_id = None;
                 }
@@ -1183,6 +1402,7 @@ impl HybridIntradayRuntimeStrategy {
         if let Some(req_id) = self.pending_exit_request_id {
             let created = self.pending_exit_created_ts_utc.unwrap_or(now_ts);
             if now_ts.saturating_sub(created) > timeout {
+                self.pending_exit = None;
                 self.pending_exit_request_id = None;
                 self.pending_exit_created_ts_utc = None;
                 tracing::info!(
@@ -1242,8 +1462,11 @@ impl HybridIntradayRuntimeStrategy {
         self.pending_entry = None;
         self.pending_entry_request_id = None;
         self.pending_entry_created_ts_utc = None;
+        self.clear_deferred_entry();
+        self.pending_exit = None;
         self.pending_exit_request_id = None;
         self.pending_exit_created_ts_utc = None;
+        self.clear_deferred_exit();
         self.pending_tp_request_id = None;
         self.pending_tp_created_ts_utc = None;
         self.pending_sl_request_id = None;
@@ -1499,6 +1722,27 @@ mod tests {
             },
             other => panic!("expected classified intent, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn warmup_status_flag_flips_when_prev_day_range_becomes_available() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+
+        let _ = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 4, 2, 10, 0, 0), 100.0, DataOrigin::History),
+        );
+        assert_eq!(strategy.last_warmup_log, Some(false));
+        assert!(!strategy.entry_ready);
+
+        let _ = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 4, 3, 10, 0, 0), 101.0, DataOrigin::History),
+        );
+        assert_eq!(strategy.last_warmup_log, Some(true));
+        assert!(strategy.entry_ready);
+        assert_eq!(strategy.prev_day_range, Some(0.0));
     }
 
     #[test]
@@ -1797,8 +2041,22 @@ mod tests {
             pending_entry_cycle_id: None,
             pending_entry_request_id: None,
             pending_entry_created_ts_utc: None,
+            deferred_entry_owner: None,
+            deferred_entry_side: None,
+            deferred_entry_cycle_id: None,
+            deferred_entry_entry_style: None,
+            deferred_entry_reason: None,
+            deferred_entry_stop_price: None,
+            deferred_entry_take_price: None,
+            deferred_entry_ts_utc: None,
+            deferred_entry_request_id: None,
             pending_exit_request_id: None,
             pending_exit_created_ts_utc: None,
+            deferred_exit_owner: None,
+            deferred_exit_reason: None,
+            deferred_exit_cycle_id: None,
+            deferred_exit_ts_utc: None,
+            deferred_exit_request_id: None,
             pending_tp_request_id: None,
             pending_tp_created_ts_utc: None,
             pending_sl_request_id: None,
@@ -2059,6 +2317,172 @@ mod tests {
         let _ = strategy.on_ack(&ctx, &CommandAck::rejected(matching, "x", "y"));
         assert!(strategy.pending_entry.is_none());
         assert!(strategy.pending_entry_request_id.is_none());
+    }
+
+    #[test]
+    fn trading_window_closed_entry_reject_enters_deferred_state() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+        strategy.entry_ready = true;
+        strategy.prev_day_range = Some(10.0);
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            ts_local(2026, 4, 2, 14, 4, 0),
+            true,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Bracket,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: Some(99.0),
+                take_price: Some(101.0),
+            }),
+        );
+        let req = strategy.pending_entry_request_id.expect("entry request id");
+
+        let _ = strategy.on_ack(
+            &ctx,
+            &CommandAck::rejected(req, "trading_window_closed", "validation failed"),
+        );
+
+        assert!(strategy.pending_entry_request_id.is_none());
+        assert!(strategy.pending_entry.is_none());
+        assert!(!strategy.safe_mode_close_only);
+        let deferred = strategy
+            .deferred_entry
+            .as_ref()
+            .expect("deferred entry must be present");
+        assert_eq!(deferred.signal.owner, Owner::MeanReversion);
+        assert_eq!(deferred.signal.side, Side::Long);
+        assert_eq!(
+            deferred.signal.reason,
+            crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong
+        );
+        assert_eq!(deferred.original_request_id, req);
+    }
+
+    #[test]
+    fn deferred_entry_reissues_only_after_live_ready_returns() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+        strategy.entry_ready = true;
+        strategy.prev_day_range = Some(10.0);
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            ts_local(2026, 4, 2, 14, 4, 0),
+            true,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::MeanReversion,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        let req = strategy.pending_entry_request_id.expect("entry request id");
+        let _ = strategy.on_ack(
+            &ctx,
+            &CommandAck::rejected(req, "trading_window_closed", "validation failed"),
+        );
+
+        let blocked_ctx =
+            test_ctx_with_phase(Some(0.0), crate::live_guard::GatewayPhase::SyncingHistory);
+        let blocked = strategy.on_bar(
+            &blocked_ctx,
+            &test_bar(ts_local(2026, 4, 2, 14, 5, 0), 100.0, DataOrigin::Live),
+        );
+        assert!(blocked.is_empty());
+        assert!(strategy.deferred_entry.is_some());
+        assert!(strategy.pending_entry_request_id.is_none());
+
+        let resumed = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 4, 2, 14, 6, 0), 100.5, DataOrigin::Live),
+        );
+        assert_eq!(resumed.len(), 1);
+        assert!(strategy.deferred_entry.is_none());
+        assert!(strategy.pending_entry_request_id.is_some());
+    }
+
+    #[test]
+    fn trading_window_closed_exit_reject_enters_deferred_state() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            ts_local(2026, 4, 2, 14, 4, 0),
+            true,
+            true,
+            Action::SubmitExit {
+                owner: Owner::MeanReversion,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+            },
+        );
+        let req = strategy.pending_exit_request_id.expect("exit request id");
+
+        let _ = strategy.on_ack(
+            &ctx,
+            &CommandAck::rejected(req, "trading_window_closed", "validation failed"),
+        );
+
+        assert!(strategy.pending_exit_request_id.is_none());
+        let deferred = strategy
+            .deferred_exit
+            .expect("deferred exit must be present");
+        assert_eq!(deferred.owner, Owner::MeanReversion);
+        assert_eq!(
+            deferred.reason,
+            crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff
+        );
+        assert_eq!(deferred.original_request_id, req);
+    }
+
+    #[test]
+    fn deferred_exit_reissues_after_live_ready_returns_until_flat() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            ts_local(2026, 4, 2, 14, 4, 0),
+            true,
+            true,
+            Action::SubmitExit {
+                owner: Owner::MeanReversion,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+            },
+        );
+        let req = strategy.pending_exit_request_id.expect("exit request id");
+        let _ = strategy.on_ack(
+            &ctx,
+            &CommandAck::rejected(req, "trading_window_closed", "validation failed"),
+        );
+
+        let blocked_ctx =
+            test_ctx_with_phase(Some(1.0), crate::live_guard::GatewayPhase::SyncingHistory);
+        let blocked = strategy.on_bar(
+            &blocked_ctx,
+            &test_bar(ts_local(2026, 4, 2, 14, 5, 0), 100.0, DataOrigin::Live),
+        );
+        assert!(blocked.is_empty());
+        assert!(strategy.deferred_exit.is_some());
+        assert!(strategy.pending_exit_request_id.is_none());
+
+        let resumed = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 4, 2, 14, 6, 0), 99.5, DataOrigin::Live),
+        );
+        assert_eq!(resumed.len(), 1);
+        assert!(strategy.deferred_exit.is_none());
+        assert!(strategy.pending_exit_request_id.is_some());
     }
 
     #[test]
@@ -2566,6 +2990,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             return Vec::new();
         };
         self.update_day_aggregates(dt_local, bar.h, bar.l);
+        self.log_signal_warmup_status_if_changed(dt_local, bar.close_time_utc);
 
         let close_prev = self.last_bar_close.unwrap_or(bar.close);
         let day_range_prev = self.prev_day_range.unwrap_or(0.0);
@@ -2580,18 +3005,42 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         ) {
             return Vec::new();
         }
-        let actions = self.orchestrator.on_bar(self.bar_input(
-            dt_local,
-            bar,
-            close_prev,
-            day_range_prev,
-            has_open_position,
-        ));
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.last_bar_close = Some(bar.close);
         self.clear_stale_pending_tail(bar.close_time_utc, ctx.position_qty.unwrap_or(0.0));
         let can_emit = self.can_emit_now(ctx, bar.origin == DataOrigin::Live);
         let can_execute = self.can_execute_now(ctx, bar.origin == DataOrigin::Live);
+        let reference_price = self.live_reference_price();
+        let bar_input =
+            self.bar_input(dt_local, bar, close_prev, day_range_prev, has_open_position);
+        if self.deferred_exit.is_some() {
+            self.orchestrator.warm_bar(bar_input);
+            if let Some(intents) = self.maybe_reissue_deferred_exit(
+                ctx,
+                bar.close_time_utc,
+                can_emit,
+                can_execute,
+                reference_price,
+            ) {
+                self.sync_state();
+                return intents;
+            }
+        }
+        if self.deferred_entry.is_some() {
+            self.orchestrator.warm_bar(bar_input);
+            if let Some(intents) = self.maybe_reissue_deferred_entry(
+                ctx,
+                bar.close_time_utc,
+                dt_local,
+                can_emit,
+                can_execute,
+                reference_price,
+            ) {
+                self.sync_state();
+                return intents;
+            }
+        }
+        let actions = self.orchestrator.on_bar(bar_input);
         if !actions.is_empty() {
             let action_labels = actions
                 .iter()
@@ -2651,14 +3100,44 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
             ) {
                 self.orchestrator.on_order_rejected("entry");
-                self.pending_entry = None;
+                if Self::is_window_closed_recoverable_reject(ack) {
+                    if let Some(entry) = self.pending_entry.take() {
+                        self.deferred_entry = Some(DeferredEntry {
+                            signal: crate::strategies::hybrid_intraday::EntrySignal {
+                                owner: entry.owner,
+                                side: entry.side,
+                                entry_style: entry.entry_style,
+                                reason: entry.reason,
+                                stop_price: entry.stop_price,
+                                take_price: entry.take_price,
+                            },
+                            cycle_id: entry.cycle_id,
+                            deferred_ts_utc: ack.processed_ts_utc,
+                            original_request_id: ack.request_id,
+                        });
+                        info!(
+                            target: "strategy_runtime::hybrid_intraday_runtime",
+                            action = "entry_deferred_trading_window_closed",
+                            owner = ?entry.owner,
+                            side = ?entry.side,
+                            cycle_id = %Self::format_cycle_id(&entry.cycle_id),
+                            request_id = %ack.request_id,
+                            error_code = ?ack.error_code,
+                            error_msg = ?ack.error_msg,
+                        );
+                    }
+                } else {
+                    self.pending_entry = None;
+                }
                 self.pending_entry_request_id = None;
                 self.pending_entry_created_ts_utc = None;
                 self.active_cycle_id = None;
                 self.tp_order_id = None;
                 self.sl_stop_order_id = None;
                 self.sl_exchange_order_id = None;
-                self.enter_safe_mode("entry_rejected");
+                if !Self::is_window_closed_recoverable_reject(ack) {
+                    self.enter_safe_mode("entry_rejected");
+                }
             } else if matches!(
                 ack.status,
                 AckStatus::Accepted | AckStatus::Confirmed | AckStatus::Duplicate
@@ -2674,6 +3153,31 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
             ) {
                 self.orchestrator.on_order_rejected("exit");
+                if Self::is_window_closed_recoverable_reject(ack) {
+                    let cycle_id = self
+                        .active_cycle_id
+                        .unwrap_or_else(|| self.next_cycle_id(ack.processed_ts_utc));
+                    self.deferred_exit = self.pending_exit.map(|pending| DeferredExit {
+                        owner: pending.owner,
+                        reason: pending.reason,
+                        cycle_id,
+                        deferred_ts_utc: ack.processed_ts_utc,
+                        original_request_id: ack.request_id,
+                    });
+                    if let Some(deferred) = self.deferred_exit {
+                        info!(
+                            target: "strategy_runtime::hybrid_intraday_runtime",
+                            action = "exit_deferred_trading_window_closed",
+                            owner = ?deferred.owner,
+                            reason = ?deferred.reason,
+                            cycle_id = %Self::format_cycle_id(&deferred.cycle_id),
+                            request_id = %ack.request_id,
+                            error_code = ?ack.error_code,
+                            error_msg = ?ack.error_msg,
+                        );
+                    }
+                }
+                self.pending_exit = None;
                 self.pending_exit_request_id = None;
                 self.pending_exit_created_ts_utc = None;
             }
@@ -2843,6 +3347,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let cur = pos.qty;
         if prev.abs() <= f64::EPSILON && cur.abs() > f64::EPSILON {
             let filled = self.pending_entry.take();
+            self.clear_deferred_entry();
             if let Some(entry) = filled {
                 self.current_owner = Some(entry.owner);
                 self.current_side = Some(entry.side);
@@ -2878,8 +3383,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.pending_entry = None;
             self.pending_entry_request_id = None;
             self.pending_entry_created_ts_utc = None;
+            self.clear_deferred_entry();
+            self.pending_exit = None;
             self.pending_exit_request_id = None;
             self.pending_exit_created_ts_utc = None;
+            self.clear_deferred_exit();
             self.active_cycle_id = None;
             self.safe_mode_close_only = false;
             self.safe_mode_reason = None;
@@ -2994,8 +3502,22 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             pending_entry_cycle_id,
             pending_entry_request_id,
             pending_entry_created_ts_utc,
+            deferred_entry_owner,
+            deferred_entry_side,
+            deferred_entry_cycle_id,
+            deferred_entry_entry_style,
+            deferred_entry_reason,
+            deferred_entry_stop_price,
+            deferred_entry_take_price,
+            deferred_entry_ts_utc,
+            deferred_entry_request_id,
             pending_exit_request_id,
             pending_exit_created_ts_utc,
+            deferred_exit_owner,
+            deferred_exit_reason,
+            deferred_exit_cycle_id,
+            deferred_exit_ts_utc,
+            deferred_exit_request_id,
             pending_tp_request_id,
             pending_tp_created_ts_utc,
             pending_sl_request_id,
@@ -3036,6 +3558,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     owner,
                     side,
                     cycle_id,
+                    reason:
+                        crate::strategies::hybrid_intraday::ReasonCode::MorningMeanReversionLong,
                     entry_style: EntryStyle::Market,
                     stop_price: None,
                     take_price: None,
@@ -3044,8 +3568,67 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             };
             self.pending_entry_request_id = *pending_entry_request_id;
             self.pending_entry_created_ts_utc = *pending_entry_created_ts_utc;
+            self.deferred_entry = match (
+                *deferred_entry_owner,
+                *deferred_entry_side,
+                deferred_entry_cycle_id
+                    .as_deref()
+                    .and_then(Self::parse_cycle_id),
+                *deferred_entry_entry_style,
+                *deferred_entry_reason,
+                *deferred_entry_ts_utc,
+                *deferred_entry_request_id,
+            ) {
+                (
+                    Some(owner),
+                    Some(side),
+                    Some(cycle_id),
+                    Some(entry_style),
+                    Some(reason),
+                    Some(deferred_ts_utc),
+                    Some(original_request_id),
+                ) => Some(DeferredEntry {
+                    signal: crate::strategies::hybrid_intraday::EntrySignal {
+                        owner,
+                        side,
+                        entry_style,
+                        reason,
+                        stop_price: *deferred_entry_stop_price,
+                        take_price: *deferred_entry_take_price,
+                    },
+                    cycle_id,
+                    deferred_ts_utc,
+                    original_request_id,
+                }),
+                _ => None,
+            };
+            self.pending_exit = None;
             self.pending_exit_request_id = *pending_exit_request_id;
             self.pending_exit_created_ts_utc = *pending_exit_created_ts_utc;
+            self.deferred_exit = match (
+                *deferred_exit_owner,
+                *deferred_exit_reason,
+                deferred_exit_cycle_id
+                    .as_deref()
+                    .and_then(Self::parse_cycle_id),
+                *deferred_exit_ts_utc,
+                *deferred_exit_request_id,
+            ) {
+                (
+                    Some(owner),
+                    Some(reason),
+                    Some(cycle_id),
+                    Some(deferred_ts_utc),
+                    Some(original_request_id),
+                ) => Some(DeferredExit {
+                    owner,
+                    reason,
+                    cycle_id,
+                    deferred_ts_utc,
+                    original_request_id,
+                }),
+                _ => None,
+            };
             self.pending_tp_request_id = *pending_tp_request_id;
             self.pending_tp_created_ts_utc = *pending_tp_created_ts_utc;
             self.pending_sl_request_id = *pending_sl_request_id;
@@ -3068,6 +3651,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.current_day_low = *current_day_low;
             self.prev_day_range = *prev_day_range;
             self.entry_ready = *entry_ready && self.prev_day_range.is_some();
+            self.last_warmup_log = Some(self.entry_ready);
             if *entry_ready && self.prev_day_range.is_none() {
                 needs_resync = true;
             }

@@ -19,6 +19,14 @@ pub enum SessionGapLivePhase {
         sent_ts: i64,
         acked: bool,
     },
+    EntryDeferredWindowClosed {
+        side: Side,
+        qty: f64,
+        deferred_ts_utc: i64,
+        original_request_id: Uuid,
+        last_error_code: Option<String>,
+        last_error_msg: Option<String>,
+    },
     EntryRecoveryVerificationPending {
         request_id: Uuid,
         side: Side,
@@ -48,6 +56,16 @@ pub enum SessionGapLivePhase {
         reason: String,
         sent_ts: i64,
         acked: bool,
+    },
+    ExitDeferredWindowClosed {
+        side: Side,
+        qty: f64,
+        baseline_qty: f64,
+        reason: String,
+        deferred_ts_utc: i64,
+        original_request_id: Uuid,
+        last_error_code: Option<String>,
+        last_error_msg: Option<String>,
     },
     ExitRecoveryPending {
         request_id: Uuid,
@@ -208,9 +226,37 @@ pub enum StrategyState {
         #[serde(default)]
         pending_entry_created_ts_utc: Option<i64>,
         #[serde(default)]
+        deferred_entry_owner: Option<crate::strategies::hybrid_intraday::Owner>,
+        #[serde(default)]
+        deferred_entry_side: Option<crate::strategies::hybrid_intraday::Side>,
+        #[serde(default)]
+        deferred_entry_cycle_id: Option<String>,
+        #[serde(default)]
+        deferred_entry_entry_style: Option<crate::strategies::hybrid_intraday::EntryStyle>,
+        #[serde(default)]
+        deferred_entry_reason: Option<crate::strategies::hybrid_intraday::ReasonCode>,
+        #[serde(default)]
+        deferred_entry_stop_price: Option<f64>,
+        #[serde(default)]
+        deferred_entry_take_price: Option<f64>,
+        #[serde(default)]
+        deferred_entry_ts_utc: Option<i64>,
+        #[serde(default)]
+        deferred_entry_request_id: Option<Uuid>,
+        #[serde(default)]
         pending_exit_request_id: Option<Uuid>,
         #[serde(default)]
         pending_exit_created_ts_utc: Option<i64>,
+        #[serde(default)]
+        deferred_exit_owner: Option<crate::strategies::hybrid_intraday::Owner>,
+        #[serde(default)]
+        deferred_exit_reason: Option<crate::strategies::hybrid_intraday::ReasonCode>,
+        #[serde(default)]
+        deferred_exit_cycle_id: Option<String>,
+        #[serde(default)]
+        deferred_exit_ts_utc: Option<i64>,
+        #[serde(default)]
+        deferred_exit_request_id: Option<Uuid>,
         #[serde(default)]
         pending_tp_request_id: Option<Uuid>,
         #[serde(default)]

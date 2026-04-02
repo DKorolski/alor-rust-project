@@ -243,3 +243,21 @@ cargo run -p alor-gateway --bin alor_gateway_runner -- --config ./configs/gatewa
    - `invalidated cached alor access token`
    - `refreshed alor access token consumer="action_scope_cws_authorize"`
    - `action_scope_authorize_ok ... access_token_source="refreshed"`
+
+## 8) Trading Window Reject Trap (`sessiongap`)
+
+Дополнительное наблюдение live-soak (`2026-04-02`):
+
+- если entry intent попадает в закрытое торговое окно и gateway возвращает `error_code=trading_window_closed`,
+- `sessiongap` может перейти `PendingEntry -> Blocked`,
+- после открытия окна стратегия сама не re-arm и не возобновляет entry без ручного вмешательства.
+
+Детали и таймстампы:
+
+- `docs/trading-window-closed-blocked-observation-2026-04-02.md`
+
+Операционный ответ до runtime-фикса:
+
+1. мониторить `command rejected ... trading_window_closed`,
+2. мониторить хвост runtime phase на `Blocked`,
+3. если позиция flat и нет working orders, выполнять controlled recycle runtime для re-arm.
