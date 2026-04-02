@@ -711,6 +711,9 @@ impl StrategyConfig {
         HybridIntradayRuntimeConfig {
             symbol: self.symbol.clone(),
             qty: self.qty.max(1.0),
+            live_order_style: self.live_order_style,
+            tick_size: self.tick_size,
+            marketable_limit_offset_ticks: self.marketable_limit_offset_ticks,
             timezone_offset_hours: self.timezone_offset_hours,
             session_close_hour,
             session_close_minute,

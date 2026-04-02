@@ -187,6 +187,11 @@ impl HybridOrchestrator {
         actions
     }
 
+    pub fn warm_bar(&mut self, bar: BarInput) {
+        self.intraday_breakout
+            .on_bar(bar.dt, bar.open, bar.high, bar.low, bar.close);
+    }
+
     pub fn on_order_filled(&mut self, role: &str, owner: Owner, side: Option<Side>) {
         if role == "entry" {
             self.state = HybridState::Open;
