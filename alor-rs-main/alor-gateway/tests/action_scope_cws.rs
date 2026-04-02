@@ -23,6 +23,7 @@ fn test_manager(cws_url: String, health: Arc<RwLock<HealthState>>) -> ActionScop
         ActionScopeCwsConfig {
             open_timeout: Duration::from_secs(2),
             authorize_timeout: Duration::from_secs(2),
+            force_token_refresh_before_authorize: false,
             followup_window: Duration::from_secs(2),
             max_session_lifetime: Duration::from_secs(5),
             close_timeout: Duration::from_secs(2),

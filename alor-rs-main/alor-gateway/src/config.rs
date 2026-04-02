@@ -90,6 +90,7 @@ pub struct AlorGatewayConfig {
     pub action_scope_enable_exit: bool,
     pub action_scope_open_timeout_ms: u64,
     pub action_scope_authorize_timeout_ms: u64,
+    pub action_scope_force_token_refresh_before_authorize: bool,
     pub action_scope_followup_window_ms: u64,
     pub action_scope_max_session_lifetime_ms: u64,
     pub action_scope_close_timeout_ms: u64,
@@ -234,6 +235,10 @@ impl AlorGatewayConfig {
                 "ALOR_ACTION_SCOPE_AUTHORIZE_TIMEOUT_MS",
                 5_000,
             )?,
+            action_scope_force_token_refresh_before_authorize: parse_bool(
+                "ALOR_ACTION_SCOPE_FORCE_TOKEN_REFRESH_BEFORE_AUTHORIZE",
+                false,
+            ),
             action_scope_followup_window_ms: parse_u64(
                 "ALOR_ACTION_SCOPE_FOLLOWUP_WINDOW_MS",
                 5_000,
@@ -452,6 +457,11 @@ impl AlorGatewayConfig {
                 5_000,
                 &mut sources,
             )?,
+            action_scope_force_token_refresh_before_authorize: parse_bool_with_source(
+                "ALOR_ACTION_SCOPE_FORCE_TOKEN_REFRESH_BEFORE_AUTHORIZE",
+                false,
+                &mut sources,
+            ),
             action_scope_followup_window_ms: parse_u64_with_source(
                 "ALOR_ACTION_SCOPE_FOLLOWUP_WINDOW_MS",
                 5_000,
@@ -657,6 +667,9 @@ impl AlorGatewayConfig {
             action_scope_authorize_timeout_ms: file_cfg
                 .action_scope_authorize_timeout_ms
                 .unwrap_or(5_000),
+            action_scope_force_token_refresh_before_authorize: file_cfg
+                .action_scope_force_token_refresh_before_authorize
+                .unwrap_or(false),
             action_scope_followup_window_ms: file_cfg
                 .action_scope_followup_window_ms
                 .unwrap_or(5_000),
@@ -888,6 +901,9 @@ impl AlorGatewayConfig {
             action_scope_authorize_timeout_ms: file_cfg
                 .action_scope_authorize_timeout_ms
                 .unwrap_or(5_000),
+            action_scope_force_token_refresh_before_authorize: file_cfg
+                .action_scope_force_token_refresh_before_authorize
+                .unwrap_or(false),
             action_scope_followup_window_ms: file_cfg
                 .action_scope_followup_window_ms
                 .unwrap_or(5_000),
@@ -1005,6 +1021,7 @@ struct FileConfig {
     action_scope_enable_exit: Option<bool>,
     action_scope_open_timeout_ms: Option<u64>,
     action_scope_authorize_timeout_ms: Option<u64>,
+    action_scope_force_token_refresh_before_authorize: Option<bool>,
     action_scope_followup_window_ms: Option<u64>,
     action_scope_max_session_lifetime_ms: Option<u64>,
     action_scope_close_timeout_ms: Option<u64>,
@@ -1508,6 +1525,13 @@ fn track_file_sources(file_cfg: &FileConfig, sources: &mut BTreeMap<&'static str
     );
     set_source(
         sources,
+        "action_scope_force_token_refresh_before_authorize",
+        file_cfg
+            .action_scope_force_token_refresh_before_authorize
+            .is_some(),
+    );
+    set_source(
+        sources,
         "action_scope_followup_window_ms",
         file_cfg.action_scope_followup_window_ms.is_some(),
     );
@@ -1600,6 +1624,8 @@ pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>)
         action_scope_enable_exit = cfg.action_scope_enable_exit,
         action_scope_open_timeout_ms = cfg.action_scope_open_timeout_ms,
         action_scope_authorize_timeout_ms = cfg.action_scope_authorize_timeout_ms,
+        action_scope_force_token_refresh_before_authorize =
+            cfg.action_scope_force_token_refresh_before_authorize,
         action_scope_followup_window_ms = cfg.action_scope_followup_window_ms,
         action_scope_max_session_lifetime_ms = cfg.action_scope_max_session_lifetime_ms,
         action_scope_close_timeout_ms = cfg.action_scope_close_timeout_ms,

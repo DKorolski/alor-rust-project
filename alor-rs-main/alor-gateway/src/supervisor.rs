@@ -489,6 +489,8 @@ impl Supervisor {
             ActionScopeCwsConfig {
                 open_timeout: Duration::from_millis(cfg.action_scope_open_timeout_ms),
                 authorize_timeout: Duration::from_millis(cfg.action_scope_authorize_timeout_ms),
+                force_token_refresh_before_authorize: cfg
+                    .action_scope_force_token_refresh_before_authorize,
                 followup_window: Duration::from_millis(cfg.action_scope_followup_window_ms),
                 max_session_lifetime: Duration::from_millis(
                     cfg.action_scope_max_session_lifetime_ms,

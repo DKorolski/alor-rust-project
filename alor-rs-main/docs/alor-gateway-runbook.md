@@ -27,6 +27,18 @@ cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
   --redis-url redis://127.0.0.1/
 ```
 
+Текущий статус Phase 1 candidate:
+
+- первый controlled live `create -> delete` на `sessiongap` action-scoped candidate уже прошёл успешно
+- результат зафиксирован в `./docs/action-scope-cws-phase1-create-delete-results-2026-04-02.md`
+- исходный canonical `~30m idle gap` на candidate со старым cached token state дал `FAIL`
+- повторный canonical `~30m idle gap` на force-refresh candidate уже дал `PASS`
+- результат зафиксирован в `./docs/action-scope-cws-phase1-force-refresh-idle-gap-results-2026-04-02.md`
+- ещё один force-refresh `~30m idle gap` confidence retest тоже дал `PASS`
+- результат зафиксирован в `./docs/action-scope-cws-phase1-force-refresh-idle-gap-retest-results-2026-04-02.md`
+- базовый live TOML при этом не менялся
+- `exit/flatten` по-прежнему вне scope и выключены
+
 Для сравнительной live-диагностики задавайте `ALOR_STACK_NAME` явно:
 
 - `sessiongap` для `sessiongap` gateway
@@ -190,3 +202,32 @@ cargo run -p alor-gateway --bin alor_gateway_runner -- --config ./configs/gatewa
 - [ ] Token/portfolio/symbols проверены.
 - [ ] Health endpoint доступен по `health_listen_addr`.
 - [ ] Readiness достигает `LiveReady` до разрешения live-ордеров в runtime.
+
+## 7) Phase 1 Controlled Candidate Checks
+
+Для Phase 1 `action_scoped` candidate на `sessiongap` безопасная live-последовательность сейчас такая:
+
+1. Убедиться, что gateway и runtime в `LiveReady`.
+2. Убедиться, что по `USDRUBF` нет открытой позиции и нет рабочего ордера.
+3. Отправить пассивный `create:limit` вне рынка.
+4. Дождаться `command_ack accepted` и статуса `working` с `filled=0.0`.
+5. Отправить `delete:limit` для того же `order_id`.
+6. Дождаться `command_ack accepted` и финального статуса `canceled` с `filled=0.0`.
+7. Снять `/readiness`, `cmd.acks.*`, `broker.orders.*`, `broker.positions.*`.
+
+Канонический следующий acceptance-case:
+
+1. после первого успешного bounded window не держать open CWS session
+2. выдержать около `30m` без control action
+3. повторить controlled passive `create -> delete`
+4. подтвердить, что второй send тоже идёт через fresh short-lived action-scoped session
+
+Текущий вывод по этому acceptance-case:
+
+1. на старом cached-token variant он уже падал
+2. на variant с `action_scope_force_token_refresh_before_authorize = true` он уже прошёл
+3. второй такой же force-refresh retest тоже уже прошёл
+3. при post-gap pass логи должны показывать:
+   - `invalidated cached alor access token`
+   - `refreshed alor access token consumer="action_scope_cws_authorize"`
+   - `action_scope_authorize_ok ... access_token_source="refreshed"`

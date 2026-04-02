@@ -33,6 +33,7 @@ const DIAG_CWS_REQUEST_ORDER_ID: &str = "_diag_cws_request_order_id";
 pub struct ActionScopeCwsConfig {
     pub open_timeout: Duration,
     pub authorize_timeout: Duration,
+    pub force_token_refresh_before_authorize: bool,
     pub followup_window: Duration,
     pub max_session_lifetime: Duration,
     pub close_timeout: Duration,
@@ -303,10 +304,20 @@ impl ActionScopeCwsManager {
 
 impl ActionScopeSession {
     async fn authorize(&mut self, manager: &ActionScopeCwsManager) -> Result<()> {
-        let token_snapshot = manager
-            .token_provider
-            .access_token_with_context("action_scope_cws_authorize")
-            .await?;
+        let token_snapshot = if manager.config.force_token_refresh_before_authorize {
+            manager
+                .token_provider
+                .force_refresh_access_token_with_context(
+                    "action_scope_cws_authorize",
+                    "action_scope_force_token_refresh_before_authorize",
+                )
+                .await?
+        } else {
+            manager
+                .token_provider
+                .access_token_with_context("action_scope_cws_authorize")
+                .await?
+        };
         let guid = Uuid::new_v4().to_string();
         let payload = json!({
             "opcode": "authorize",
@@ -344,6 +355,9 @@ impl ActionScopeSession {
             access_token_fingerprint = token_snapshot.fingerprint(),
             access_token_source = token_snapshot.source().as_str(),
             token_refresh_count = token_snapshot.refresh_count(),
+            force_token_refresh_before_authorize = manager
+                .config
+                .force_token_refresh_before_authorize,
             "action scope authorize ok"
         );
         Ok(())

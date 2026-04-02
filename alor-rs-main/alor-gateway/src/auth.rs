@@ -215,6 +215,15 @@ impl TokenProvider {
         Ok(snapshot)
     }
 
+    pub async fn force_refresh_access_token_with_context(
+        &self,
+        consumer: &str,
+        reason: &str,
+    ) -> anyhow::Result<AccessTokenSnapshot> {
+        let _ = self.invalidate(reason).await;
+        self.access_token_with_context(consumer).await
+    }
+
     pub async fn refresh_count(&self) -> u64 {
         self.state.read().await.refresh_count
     }

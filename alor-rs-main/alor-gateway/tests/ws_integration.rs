@@ -520,6 +520,7 @@ fn test_config(
         action_scope_enable_exit: false,
         action_scope_open_timeout_ms: 5_000,
         action_scope_authorize_timeout_ms: 5_000,
+        action_scope_force_token_refresh_before_authorize: false,
         action_scope_followup_window_ms: 5_000,
         action_scope_max_session_lifetime_ms: 15_000,
         action_scope_close_timeout_ms: 2_000,
