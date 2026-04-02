@@ -2,6 +2,8 @@ FROM rust:1.76 as builder
 
 WORKDIR /app
 
+ENV RUSTUP_TOOLCHAIN=1.76.0
+
 # Copy full workspace (simple, not highly optimized, but clear)
 COPY . .
 
@@ -24,4 +26,3 @@ ENV RUST_LOG=info,alor_gateway::supervisor=info
 
 # Configs are mounted read-only at /configs by docker-compose.
 CMD ["alor_gateway_transport_runner", "--config", "/configs/gateway.live.toml", "--redis-url", "redis://redis:6379/"]
-
