@@ -36,8 +36,12 @@ cargo run -p alor-gateway --bin alor_gateway_transport_runner -- \
 - результат зафиксирован в `./docs/action-scope-cws-phase1-force-refresh-idle-gap-results-2026-04-02.md`
 - ещё один force-refresh `~30m idle gap` confidence retest тоже дал `PASS`
 - результат зафиксирован в `./docs/action-scope-cws-phase1-force-refresh-idle-gap-retest-results-2026-04-02.md`
+- ещё один longer-gap confidence retest после `~50m` тоже дал `PASS`
+- результат зафиксирован в `./docs/action-scope-cws-phase1-force-refresh-long-gap-retest-results-2026-04-02.md`
 - базовый live TOML при этом не менялся
 - `exit/flatten` по-прежнему вне scope и выключены
+- decision note по новой основной Phase 1 линии:
+  - `./docs/action-scope-cws-phase1-rollout-decision-2026-04-02.md`
 
 Для сравнительной live-диагностики задавайте `ALOR_STACK_NAME` явно:
 
@@ -227,7 +231,8 @@ cargo run -p alor-gateway --bin alor_gateway_runner -- --config ./configs/gatewa
 1. на старом cached-token variant он уже падал
 2. на variant с `action_scope_force_token_refresh_before_authorize = true` он уже прошёл
 3. второй такой же force-refresh retest тоже уже прошёл
-3. при post-gap pass логи должны показывать:
+4. longer-gap retest после `~50m` тоже уже прошёл
+5. при post-gap pass логи должны показывать:
    - `invalidated cached alor access token`
    - `refreshed alor access token consumer="action_scope_cws_authorize"`
    - `action_scope_authorize_ok ... access_token_source="refreshed"`

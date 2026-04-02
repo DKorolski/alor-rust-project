@@ -231,6 +231,28 @@ Current reading:
 - two consecutive post-gap passes on the force-refresh candidate now exist
 - token freshness or process-lived auth state is now the strongest working discriminator
 
+An additional longer-gap confidence retest has now also been run:
+
+- `docs/action-scope-cws-phase1-force-refresh-long-gap-retest-results-2026-04-02.md`
+
+Observed outcome:
+
+- another passive `create -> delete` cycle passed after about `50m` with no control action
+- the same gateway process again logged:
+  - cached token invalidation
+  - fresh token refresh for `action_scope_cws_authorize`
+  - `action_scope_authorize_ok` with `access_token_source="refreshed"`
+
+Updated reading:
+
+- the force-refresh variant is now the strongest Phase 1 baseline candidate
+- `sessiongap` development should continue from `action_scoped + force refresh`
+- broader rollout should still wait for Phase 2 `entry/flatten` acceptance
+
+Decision note:
+
+- `docs/action-scope-cws-phase1-rollout-decision-2026-04-02.md`
+
 ## Out Of Scope For This Candidate
 
 - unattended live exit validation
