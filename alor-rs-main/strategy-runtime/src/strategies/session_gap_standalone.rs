@@ -2332,6 +2332,77 @@ impl Strategy for SessionGapStandaloneStrategy {
         Vec::new()
     }
 
+    fn warmup_from_history(&mut self, _ctx: &StrategyCtx, bars: &[BarEvent]) -> usize {
+        let mut warmup = SessionGapStandaloneStrategy::new(self.config.clone());
+        let mut processed = 0usize;
+        let mut last_bar_ts = None;
+
+        for bar in bars {
+            if bar.symbol != self.config.symbol {
+                continue;
+            }
+            let bar_dt = warmup.to_session_dt(bar.close_time_utc);
+            if !warmup.config.work_weekends && bar_dt.weekday().number_from_monday() >= 6 {
+                continue;
+            }
+            warmup.update_session(bar_dt, bar);
+            processed += 1;
+            last_bar_ts = Some(bar.close_time_utc);
+        }
+
+        let Some(last_bar_ts) = last_bar_ts else {
+            return 0;
+        };
+
+        self.yesterday_close = warmup.yesterday_close;
+        self.yesterday_range = warmup.yesterday_range;
+        self.pre_prev_close = warmup.pre_prev_close;
+        self.first_min_high = warmup.first_min_high;
+        self.first_min_low = warmup.first_min_low;
+        self.first_hour_price = warmup.first_hour_price;
+        self.session_start_dt = warmup.session_start_dt;
+        self.session_end_dt = warmup.session_end_dt;
+        self.session_high = warmup.session_high;
+        self.session_low = warmup.session_low;
+        self.session_close = warmup.session_close;
+        self.last_dt = warmup.last_dt;
+        self.last_warmup_log = None;
+
+        let previous_phase = self.persisted_phase_or_flat();
+        let next_phase = match &previous_phase {
+            SessionGapLivePhase::Blocked { reason, .. }
+                if reason == "indicators_not_warmed" && self.signals_warmed() =>
+            {
+                SessionGapLivePhase::Flat
+            }
+            _ => previous_phase.clone(),
+        };
+        if Self::phase_name(&previous_phase) != Self::phase_name(&next_phase) {
+            Self::log_phase_transition(&previous_phase, &next_phase, last_bar_ts);
+            self.phase_last_change_ts_utc = Some(last_bar_ts);
+        }
+        let session_date = self.session_date(self.to_session_dt(last_bar_ts));
+        self.persist_state_snapshot(session_date, next_phase, last_bar_ts);
+
+        info!(
+            strategy = "session_gap_standalone",
+            symbol = self.config.symbol,
+            processed,
+            prev_close = self.yesterday_close,
+            yesterday_range = self.yesterday_range,
+            pre_prev_close = self.pre_prev_close,
+            first_min_high = self.first_min_high,
+            first_min_low = self.first_min_low,
+            first_hour_price = self.first_hour_price,
+            session_high = self.session_high,
+            session_low = self.session_low,
+            session_close = self.session_close,
+            "session gap history warmup applied"
+        );
+
+        processed
+    }
+
     fn state(&self) -> &StrategyState {
         &self.state
     }
@@ -2464,6 +2535,55 @@ mod tests {
                 ..
             } if *actual_side == side && (*actual_qty - qty).abs() < f64::EPSILON
         ));
+    }
+
+    #[test]
+    fn history_warmup_rebuilds_indicators_and_clears_warmup_block() {
+        let mut strategy = SessionGapStandaloneStrategy::new(SessionGapStandaloneConfig::default());
+        strategy.state = StrategyState::SessionGapStandalone {
+            session_date: Some("2026-04-02".to_string()),
+            traded_session: false,
+            prev_close: None,
+            yesterday_range: None,
+            pre_prev_close: None,
+            first_min_high: None,
+            first_min_low: None,
+            first_hour_price: None,
+            session_start_ts_utc: None,
+            session_end_ts_utc: None,
+            session_high: None,
+            session_low: None,
+            session_close: None,
+            last_dt_ts_utc: None,
+            phase: SessionGapLivePhase::Blocked {
+                reason: "indicators_not_warmed".to_string(),
+                ts_utc: 1,
+            },
+            phase_last_change_ts_utc: Some(1),
+            last_bar_ts: Some(1),
+        };
+
+        let processed = strategy.warmup_from_history(
+            &ctx_live(false, crate::live_guard::GatewayPhase::LiveReady),
+            &[
+                bar(1_000, 100.0, 100.0, 100.0, 100.0),
+                bar(10_000, 101.0, 101.0, 101.0, 101.0),
+                bar(20_000, 102.0, 102.0, 102.0, 102.0),
+            ],
+        );
+
+        assert_eq!(processed, 3);
+        assert_eq!(strategy.yesterday_close, Some(101.0));
+        assert_eq!(strategy.pre_prev_close, Some(100.0));
+        assert_eq!(strategy.yesterday_range, Some(0.0));
+        assert_eq!(strategy.first_min_high, Some(102.0));
+        assert_eq!(strategy.first_min_low, Some(102.0));
+        match strategy.state() {
+            StrategyState::SessionGapStandalone { phase, .. } => {
+                assert!(matches!(phase, SessionGapLivePhase::Flat));
+            }
+            other => panic!("unexpected state: {other:?}"),
+        }
     }
 
     #[test]

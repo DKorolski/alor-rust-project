@@ -294,13 +294,29 @@ pub enum StrategyState {
         #[serde(default)]
         last_bar_close: Option<f64>,
         #[serde(default)]
+        prev_day_close: Option<f64>,
+        #[serde(default)]
         last_day_local: Option<String>,
         #[serde(default)]
         current_day_high: Option<f64>,
         #[serde(default)]
         current_day_low: Option<f64>,
         #[serde(default)]
+        current_day_close: Option<f64>,
+        #[serde(default)]
         prev_day_range: Option<f64>,
+        #[serde(default)]
+        prev_day_return: Option<f64>,
+        #[serde(default)]
+        day_before_close: Option<f64>,
+        #[serde(default)]
+        today_start_local: Option<String>,
+        #[serde(default)]
+        was_long_today: bool,
+        #[serde(default)]
+        was_short_today: bool,
+        #[serde(default)]
+        overnight_exit_armed_date: Option<String>,
     },
     CancelSent {
         cancel_request_id: Uuid,
@@ -378,6 +394,87 @@ mod tests {
                 assert_eq!(session_close, None);
                 assert_eq!(phase_last_change_ts_utc, None);
                 assert_eq!(last_bar_ts, None);
+            }
+            other => panic!("unexpected state: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hybrid_intraday_runtime_deserializes_with_missing_new_fields() {
+        let legacy_json = r#"{
+            "HybridIntradayRuntime": {
+                "active_cycle_id": null,
+                "next_cycle_seq": 0,
+                "last_position_qty": 0.0,
+                "current_owner": null,
+                "current_side": null,
+                "pending_entry_owner": null,
+                "pending_entry_side": null,
+                "pending_entry_cycle_id": null,
+                "pending_entry_request_id": null,
+                "pending_entry_created_ts_utc": null,
+                "deferred_entry_owner": null,
+                "deferred_entry_side": null,
+                "deferred_entry_cycle_id": null,
+                "deferred_entry_entry_style": null,
+                "deferred_entry_reason": null,
+                "deferred_entry_stop_price": null,
+                "deferred_entry_take_price": null,
+                "deferred_entry_ts_utc": null,
+                "deferred_entry_request_id": null,
+                "pending_exit_request_id": null,
+                "pending_exit_created_ts_utc": null,
+                "deferred_exit_owner": null,
+                "deferred_exit_reason": null,
+                "deferred_exit_cycle_id": null,
+                "deferred_exit_ts_utc": null,
+                "deferred_exit_request_id": null,
+                "pending_tp_request_id": null,
+                "pending_tp_created_ts_utc": null,
+                "pending_sl_request_id": null,
+                "pending_sl_created_ts_utc": null,
+                "tp_order_id": null,
+                "sl_stop_order_id": null,
+                "sl_exchange_order_id": null,
+                "sl_triggered_ts": null,
+                "mr_take_price": null,
+                "mr_stop_price": null,
+                "repair_deadline_ts": null,
+                "next_repair_at_ts": null,
+                "repair_backoff_level": 0,
+                "repair_attempts": 0,
+                "safe_mode_close_only": false,
+                "safe_mode_reason": null,
+                "entry_ready": false,
+                "last_bar_close": 101.5,
+                "last_day_local": "2026-03-08",
+                "current_day_high": 102.0,
+                "current_day_low": 100.5,
+                "prev_day_range": 12.5
+            }
+        }"#;
+        let state: StrategyState = serde_json::from_str(legacy_json).unwrap();
+
+        match state {
+            StrategyState::HybridIntradayRuntime {
+                prev_day_close,
+                current_day_close,
+                prev_day_return,
+                day_before_close,
+                today_start_local,
+                was_long_today,
+                was_short_today,
+                overnight_exit_armed_date,
+                ..
+            } => {
+                assert_eq!(prev_day_close, None);
+                assert_eq!(current_day_close, None);
+                assert_eq!(prev_day_return, None);
+                assert_eq!(day_before_close, None);
+                assert_eq!(today_start_local, None);
+                assert!(!was_long_today);
+                assert!(!was_short_today);
+                assert_eq!(overnight_exit_armed_date, None);
             }
             other => panic!("unexpected state: {other:?}"),
         }

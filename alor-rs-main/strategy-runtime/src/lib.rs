@@ -118,6 +118,9 @@ pub trait Strategy: Send + Sync {
     ) -> Vec<Intent> {
         Vec::new()
     }
+    fn warmup_from_history(&mut self, _ctx: &StrategyCtx, _bars: &[BarEvent]) -> usize {
+        0
+    }
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
 }

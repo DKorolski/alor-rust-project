@@ -741,11 +741,10 @@ impl StrategyRuntime {
     }
 
     async fn warmup_strategy_indicators_from_history(&mut self) -> Result<()> {
-        if self.config.strategy.strategy_kind != StrategyKind::SessionGapStandalone {
-            return Ok(());
-        }
         if self.config.reset_state_on_start {
             info!(
+                strategy = self.config.strategy.strategy_id,
+                symbol = self.config.strategy.symbol,
                 stream = self.config.streams.bars,
                 scan = WARMUP_BAR_SCAN_COUNT,
                 "bootstrap: warmup from history bars (reset_state_on_start=true)"
@@ -788,17 +787,14 @@ impl StrategyRuntime {
 
         let mut ctx = self.strategy_ctx();
         ctx.allow_live_orders = false;
-        let mut processed = 0usize;
-        for bar in bars {
-            if self.state.is_duplicate_bar(&bar.symbol, bar.close_time_utc) {
-                continue;
+        let processed = self.strategy.warmup_from_history(&ctx, &bars);
+        if processed > 0 {
+            if let Some(last_bar) = bars.last() {
+                self.state
+                    .update_last_bar_ts(&last_bar.symbol, last_bar.close_time_utc);
             }
-            self.state
-                .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
-            let _ = self.strategy.on_bar(&ctx, &bar);
-            self.state.strategy_state = self.strategy.state().clone();
-            processed += 1;
         }
+        self.state.strategy_state = self.strategy.state().clone();
         if processed > 0 {
             info!(
                 strategy = self.config.strategy.strategy_id,

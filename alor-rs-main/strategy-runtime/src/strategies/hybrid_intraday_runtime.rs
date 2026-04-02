@@ -128,6 +128,7 @@ pub struct HybridIntradayRuntimeStrategy {
     safe_mode_reason: Option<String>,
     next_cycle_seq: u32,
     last_bar_close: Option<f64>,
+    prev_day_close: Option<f64>,
     last_day_local: Option<NaiveDate>,
     current_day_high: Option<f64>,
     current_day_low: Option<f64>,
@@ -205,6 +206,7 @@ impl HybridIntradayRuntimeStrategy {
             safe_mode_reason: None,
             next_cycle_seq: 0,
             last_bar_close: None,
+            prev_day_close: None,
             last_day_local: None,
             current_day_high: None,
             current_day_low: None,
@@ -510,6 +512,28 @@ impl HybridIntradayRuntimeStrategy {
         NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()
     }
 
+    fn format_local_dt(dt: NaiveDateTime) -> String {
+        dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    }
+
+    fn parse_local_dt(raw: &str) -> Option<NaiveDateTime> {
+        NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S").ok()
+    }
+
+    fn breakout_snapshot(
+        &self,
+    ) -> crate::strategies::hybrid_intraday::intraday_breakout::IntradayBreakoutSnapshot {
+        self.orchestrator.intraday_breakout.snapshot()
+    }
+
+    fn prev_day_close(&self) -> Option<f64> {
+        self.prev_day_close
+    }
+
+    fn signals_warmed(&self) -> bool {
+        self.prev_day_range.is_some() && self.prev_day_close().is_some()
+    }
+
     fn next_cycle_id(&mut self, ts_utc: i64) -> [u8; 10] {
         let ts = (ts_utc.max(0) as u64) & 0xffff_ffff;
         let seq = self.next_cycle_seq & 0xff;
@@ -765,6 +789,8 @@ impl HybridIntradayRuntimeStrategy {
     }
 
     fn sync_state(&mut self) {
+        let breakout = self.breakout_snapshot();
+        let orchestrator = self.orchestrator.snapshot();
         self.state = StrategyState::HybridIntradayRuntime {
             active_cycle_id: self.active_cycle_id.map(|v| Self::format_cycle_id(&v)),
             next_cycle_seq: self.next_cycle_seq,
@@ -824,10 +850,20 @@ impl HybridIntradayRuntimeStrategy {
             safe_mode_reason: self.safe_mode_reason.clone(),
             entry_ready: self.entry_ready,
             last_bar_close: self.last_bar_close,
+            prev_day_close: self.prev_day_close,
             last_day_local: self.last_day_local.map(Self::format_local_day),
             current_day_high: self.current_day_high,
             current_day_low: self.current_day_low,
             prev_day_range: self.prev_day_range,
+            current_day_close: breakout.cur_day_close,
+            prev_day_return: breakout.yesterday_return,
+            day_before_close: breakout.day_before_close,
+            today_start_local: breakout.today_start.map(Self::format_local_dt),
+            was_long_today: breakout.was_long_today,
+            was_short_today: breakout.was_short_today,
+            overnight_exit_armed_date: orchestrator
+                .overnight_exit_armed_date
+                .map(Self::format_local_day),
         };
     }
 
@@ -1012,13 +1048,16 @@ impl HybridIntradayRuntimeStrategy {
                     computed_prev_day_range = Some((h - l).max(0.0));
                     self.prev_day_range = computed_prev_day_range;
                 }
+                self.prev_day_close = self.last_bar_close;
                 info!(
                     target: "strategy_runtime::hybrid_intraday_runtime",
                     prev_day = %Self::format_local_day(prev_day),
                     next_day = %Self::format_local_day(day),
+                    prev_day_close = self.prev_day_close,
                     prev_day_high = self.current_day_high,
                     prev_day_low = self.current_day_low,
                     prev_day_range = computed_prev_day_range,
+                    prev_day_return = self.breakout_snapshot().yesterday_return,
                     "hybrid day rollover: recalculated day features"
                 );
                 self.last_day_local = Some(day);
@@ -1026,11 +1065,12 @@ impl HybridIntradayRuntimeStrategy {
                 self.current_day_low = Some(low);
             }
         }
-        self.entry_ready = self.prev_day_range.is_some();
+        self.entry_ready = self.signals_warmed();
     }
 
     fn log_signal_warmup_status_if_changed(&mut self, dt_local: NaiveDateTime, last_bar_ts: i64) {
-        let warmed = self.entry_ready;
+        let breakout = self.breakout_snapshot();
+        let warmed = self.signals_warmed();
         if self.last_warmup_log == Some(warmed) {
             return;
         }
@@ -1041,9 +1081,15 @@ impl HybridIntradayRuntimeStrategy {
                 strategy = "hybrid_intraday_runtime",
                 symbol = self.config.symbol,
                 local_day = %Self::format_local_day(dt_local.date()),
+                prev_day_close = breakout.yesterday_close,
                 prev_day_range = self.prev_day_range,
+                prev_day_return = breakout.yesterday_return,
                 current_day_high = self.current_day_high,
                 current_day_low = self.current_day_low,
+                current_day_close = breakout.cur_day_close,
+                today_start_local = breakout.today_start.map(Self::format_local_dt),
+                was_long_today = breakout.was_long_today,
+                was_short_today = breakout.was_short_today,
                 entry_ready = true,
                 "signal warmup complete"
             );
@@ -1054,12 +1100,18 @@ impl HybridIntradayRuntimeStrategy {
                 symbol = self.config.symbol,
                 local_day = %Self::format_local_day(dt_local.date()),
                 last_bar_ts,
+                prev_day_close = breakout.yesterday_close,
                 prev_day_range = self.prev_day_range,
+                prev_day_return = breakout.yesterday_return,
                 current_day_high = self.current_day_high,
                 current_day_low = self.current_day_low,
+                current_day_close = breakout.cur_day_close,
+                today_start_local = breakout.today_start.map(Self::format_local_dt),
+                was_long_today = breakout.was_long_today,
+                was_short_today = breakout.was_short_today,
                 entry_ready = false,
                 action = "signal_warmup_incomplete",
-                reason = "prev_day_range_missing",
+                reason = "prev_day_features_missing",
                 "signal warmup incomplete"
             );
         }
@@ -1969,9 +2021,10 @@ mod tests {
         ctx.now_ts_utc = ts_local(2026, 1, 5, 10, 2, 0);
         ctx.last_bar_ts = Some(ts_local(2026, 1, 5, 9, 59, 0));
         strategy.entry_ready = true;
+        strategy.prev_day_close = Some(101.95);
         strategy.prev_day_range = Some(2.0);
         strategy.last_bar_close = Some(102.0);
-        strategy.last_day_local = chrono::NaiveDate::from_ymd_opt(2026, 1, 4);
+        strategy.last_day_local = chrono::NaiveDate::from_ymd_opt(2026, 1, 5);
 
         let _ = strategy.on_runtime_state_restored(
             &ctx,
@@ -2006,16 +2059,33 @@ mod tests {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.entry_ready = true;
         strategy.prev_day_range = None;
+        strategy.orchestrator.intraday_breakout.restore_snapshot(
+            crate::strategies::hybrid_intraday::intraday_breakout::IntradayBreakoutSnapshot {
+                cur_day_date: None,
+                cur_day_high: None,
+                cur_day_low: None,
+                cur_day_close: None,
+                yesterday_close: None,
+                yesterday_range: None,
+                yesterday_return: None,
+                day_before_close: None,
+                was_long_today: false,
+                was_short_today: false,
+                today_start: None,
+            },
+        );
         strategy.sync_state();
         let mut restored = strategy.state().clone();
         if let StrategyState::HybridIntradayRuntime {
             entry_ready,
             prev_day_range,
+            prev_day_close,
             ..
         } = &mut restored
         {
             *entry_ready = true;
             *prev_day_range = None;
+            *prev_day_close = None;
         } else {
             panic!("unexpected state variant");
         }
@@ -2075,14 +2145,23 @@ mod tests {
             safe_mode_reason: None,
             entry_ready: true,
             last_bar_close: Some(101.5),
+            prev_day_close: Some(100.0),
             last_day_local: Some("2026-03-08".to_string()),
             current_day_high: Some(102.0),
             current_day_low: Some(100.5),
+            current_day_close: Some(101.5),
             prev_day_range: Some(12.5),
+            prev_day_return: Some(0.02),
+            day_before_close: Some(98.0),
+            today_start_local: Some("2026-03-08T09:00:00".to_string()),
+            was_long_today: true,
+            was_short_today: false,
+            overnight_exit_armed_date: Some("2026-03-08".to_string()),
         };
         strategy.set_state(restored.clone());
         assert!(strategy.entry_ready);
         assert_eq!(strategy.last_bar_close, Some(101.5));
+        assert_eq!(strategy.prev_day_close(), Some(100.0));
         assert_eq!(strategy.current_day_high, Some(102.0));
         assert_eq!(strategy.current_day_low, Some(100.5));
         assert_eq!(strategy.prev_day_range, Some(12.5));
@@ -2090,19 +2169,115 @@ mod tests {
             strategy.last_day_local,
             Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap())
         );
+        let breakout = strategy.breakout_snapshot();
+        assert_eq!(breakout.cur_day_close, Some(101.5));
+        assert_eq!(breakout.yesterday_close, Some(100.0));
+        assert_eq!(breakout.yesterday_return, Some(0.02));
+        assert_eq!(breakout.day_before_close, Some(98.0));
+        assert_eq!(
+            breakout.today_start,
+            Some(
+                chrono::NaiveDate::from_ymd_opt(2026, 3, 8)
+                    .unwrap()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap()
+            )
+        );
+        assert!(breakout.was_long_today);
+        assert!(!breakout.was_short_today);
+        assert_eq!(
+            strategy.orchestrator.snapshot().overnight_exit_armed_date,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap())
+        );
 
         if let StrategyState::HybridIntradayRuntime {
             last_day_local,
             prev_day_range,
+            today_start_local,
             ..
         } = &mut restored
         {
             *last_day_local = Some("bad-date".to_string());
             *prev_day_range = Some(11.0);
+            *today_start_local = Some("bad-datetime".to_string());
         }
         strategy.set_state(restored);
         assert_eq!(strategy.last_day_local, None);
         assert_eq!(strategy.prev_day_range, Some(11.0));
+        assert_eq!(strategy.breakout_snapshot().today_start, None);
+    }
+
+    #[test]
+    fn mean_reversion_uses_previous_day_close_not_last_bar_close() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.set_state(StrategyState::HybridIntradayRuntime {
+            active_cycle_id: None,
+            next_cycle_seq: 0,
+            last_position_qty: 0.0,
+            current_owner: None,
+            current_side: None,
+            pending_entry_owner: None,
+            pending_entry_side: None,
+            pending_entry_cycle_id: None,
+            pending_entry_request_id: None,
+            pending_entry_created_ts_utc: None,
+            deferred_entry_owner: None,
+            deferred_entry_side: None,
+            deferred_entry_cycle_id: None,
+            deferred_entry_entry_style: None,
+            deferred_entry_reason: None,
+            deferred_entry_stop_price: None,
+            deferred_entry_take_price: None,
+            deferred_entry_ts_utc: None,
+            deferred_entry_request_id: None,
+            pending_exit_request_id: None,
+            pending_exit_created_ts_utc: None,
+            deferred_exit_owner: None,
+            deferred_exit_reason: None,
+            deferred_exit_cycle_id: None,
+            deferred_exit_ts_utc: None,
+            deferred_exit_request_id: None,
+            pending_tp_request_id: None,
+            pending_tp_created_ts_utc: None,
+            pending_sl_request_id: None,
+            pending_sl_created_ts_utc: None,
+            tp_order_id: None,
+            sl_stop_order_id: None,
+            sl_exchange_order_id: None,
+            sl_triggered_ts: None,
+            mr_take_price: None,
+            mr_stop_price: None,
+            repair_deadline_ts: None,
+            next_repair_at_ts: None,
+            repair_backoff_level: 0,
+            repair_attempts: 0,
+            safe_mode_close_only: false,
+            safe_mode_reason: None,
+            entry_ready: true,
+            last_bar_close: Some(99.90),
+            prev_day_close: Some(100.0),
+            last_day_local: Some("2026-03-08".to_string()),
+            current_day_high: Some(100.0),
+            current_day_low: Some(99.5),
+            current_day_close: Some(99.90),
+            prev_day_range: Some(2.0),
+            prev_day_return: Some(0.01),
+            day_before_close: Some(99.0),
+            today_start_local: Some("2026-03-08T09:00:00".to_string()),
+            was_long_today: false,
+            was_short_today: false,
+            overnight_exit_armed_date: None,
+        });
+        let ctx = test_ctx(Some(0.0));
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 3, 8, 10, 0, 0), 99.95, DataOrigin::Live),
+        );
+
+        assert_eq!(intents.len(), 1);
+        assert!(strategy.pending_entry.is_some());
+        assert_eq!(strategy.prev_day_close(), Some(100.0));
     }
 
     #[test]
@@ -2367,6 +2542,7 @@ mod tests {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let ctx = test_ctx(Some(0.0));
         strategy.entry_ready = true;
+        strategy.prev_day_close = Some(100.0);
         strategy.prev_day_range = Some(10.0);
         let _ = strategy.map_action_to_intents(
             &ctx,
@@ -2992,7 +3168,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.update_day_aggregates(dt_local, bar.h, bar.l);
         self.log_signal_warmup_status_if_changed(dt_local, bar.close_time_utc);
 
-        let close_prev = self.last_bar_close.unwrap_or(bar.close);
+        let close_prev = self.prev_day_close().unwrap_or(bar.close);
         let day_range_prev = self.prev_day_range.unwrap_or(0.0);
         let has_open_position = ctx.position_qty.unwrap_or(0.0).abs() > f64::EPSILON;
         if self.suppress_startup_replay_bar(
@@ -3485,6 +3661,66 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         Vec::new()
     }
 
+    fn warmup_from_history(&mut self, _ctx: &StrategyCtx, bars: &[BarEvent]) -> usize {
+        let mut warmup = HybridIntradayRuntimeStrategy::new(self.config.clone());
+        let mut processed = 0usize;
+
+        for bar in bars {
+            if bar.symbol != self.config.symbol {
+                continue;
+            }
+            let Some(dt_local) = warmup.utc_to_local_naive(bar.close_time_utc) else {
+                continue;
+            };
+            warmup.update_day_aggregates(dt_local, bar.h, bar.l);
+            warmup
+                .orchestrator
+                .intraday_breakout
+                .on_bar(dt_local, bar.o, bar.h, bar.l, bar.close);
+            warmup.last_bar_close = Some(bar.close);
+            warmup.last_processed_bar_ts = Some(bar.close_time_utc);
+            processed += 1;
+        }
+
+        if processed == 0 {
+            return 0;
+        }
+
+        let breakout = warmup.breakout_snapshot();
+        self.last_bar_close = warmup.last_bar_close;
+        self.prev_day_close = warmup.prev_day_close;
+        self.last_day_local = warmup.last_day_local;
+        self.current_day_high = warmup.current_day_high;
+        self.current_day_low = warmup.current_day_low;
+        self.prev_day_range = warmup.prev_day_range;
+        self.orchestrator
+            .intraday_breakout
+            .restore_snapshot(breakout.clone());
+        self.entry_ready = self.signals_warmed();
+        self.last_warmup_log = None;
+        self.sync_state();
+
+        info!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            strategy = "hybrid_intraday_runtime",
+            symbol = self.config.symbol,
+            processed,
+            prev_day_close = self.prev_day_close,
+            prev_day_range = self.prev_day_range,
+            prev_day_return = breakout.yesterday_return,
+            current_day_high = self.current_day_high,
+            current_day_low = self.current_day_low,
+            current_day_close = breakout.cur_day_close,
+            today_start_local = breakout.today_start.map(Self::format_local_dt),
+            was_long_today = breakout.was_long_today,
+            was_short_today = breakout.was_short_today,
+            last_bar_close = self.last_bar_close,
+            "hybrid history warmup applied"
+        );
+
+        processed
+    }
+
     fn state(&self) -> &StrategyState {
         &self.state
     }
@@ -3536,10 +3772,18 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             safe_mode_reason,
             entry_ready,
             last_bar_close,
+            prev_day_close,
             last_day_local,
             current_day_high,
             current_day_low,
             prev_day_range,
+            current_day_close,
+            prev_day_return,
+            day_before_close,
+            today_start_local,
+            was_long_today,
+            was_short_today,
+            overnight_exit_armed_date,
         } = &state
         {
             self.active_cycle_id = active_cycle_id.as_deref().and_then(Self::parse_cycle_id);
@@ -3646,13 +3890,51 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.safe_mode_close_only = *safe_mode_close_only;
             self.safe_mode_reason = safe_mode_reason.clone();
             self.last_bar_close = *last_bar_close;
+            self.prev_day_close = *prev_day_close;
             self.last_day_local = last_day_local.as_deref().and_then(Self::parse_local_day);
             self.current_day_high = *current_day_high;
             self.current_day_low = *current_day_low;
             self.prev_day_range = *prev_day_range;
-            self.entry_ready = *entry_ready && self.prev_day_range.is_some();
+            self.orchestrator.restore(
+                crate::strategies::hybrid_intraday::orchestrator::HybridSnapshot {
+                    state: if self.pending_entry.is_some()
+                        || self.pending_entry_request_id.is_some()
+                    {
+                        crate::strategies::hybrid_intraday::HybridState::Pending
+                    } else if self.last_position_qty.abs() > f64::EPSILON
+                        && self.current_owner.is_some()
+                        && self.current_side.is_some()
+                    {
+                        crate::strategies::hybrid_intraday::HybridState::Open
+                    } else {
+                        crate::strategies::hybrid_intraday::HybridState::Flat
+                    },
+                    current_owner: self.current_owner,
+                    current_side: self.current_side,
+                    has_pending_entry: self.pending_entry.is_some(),
+                    overnight_exit_armed_date: overnight_exit_armed_date
+                        .as_deref()
+                        .and_then(Self::parse_local_day),
+                },
+            );
+            self.orchestrator.intraday_breakout.restore_snapshot(
+                crate::strategies::hybrid_intraday::intraday_breakout::IntradayBreakoutSnapshot {
+                    cur_day_date: self.last_day_local,
+                    cur_day_high: self.current_day_high,
+                    cur_day_low: self.current_day_low,
+                    cur_day_close: *current_day_close,
+                    yesterday_close: *prev_day_close,
+                    yesterday_range: *prev_day_range,
+                    yesterday_return: *prev_day_return,
+                    day_before_close: *day_before_close,
+                    was_long_today: *was_long_today,
+                    was_short_today: *was_short_today,
+                    today_start: today_start_local.as_deref().and_then(Self::parse_local_dt),
+                },
+            );
+            self.entry_ready = *entry_ready && self.signals_warmed();
             self.last_warmup_log = Some(self.entry_ready);
-            if *entry_ready && self.prev_day_range.is_none() {
+            if *entry_ready && !self.signals_warmed() {
                 needs_resync = true;
             }
         }

@@ -52,6 +52,21 @@ pub struct IntradayBreakoutEngine {
     today_start: Option<NaiveDateTime>,
 }
 
+#[derive(Debug, Clone)]
+pub struct IntradayBreakoutSnapshot {
+    pub cur_day_date: Option<NaiveDate>,
+    pub cur_day_high: Option<f64>,
+    pub cur_day_low: Option<f64>,
+    pub cur_day_close: Option<f64>,
+    pub yesterday_close: Option<f64>,
+    pub yesterday_range: Option<f64>,
+    pub yesterday_return: Option<f64>,
+    pub day_before_close: Option<f64>,
+    pub was_long_today: bool,
+    pub was_short_today: bool,
+    pub today_start: Option<NaiveDateTime>,
+}
+
 impl IntradayBreakoutEngine {
     pub fn new(config: IntradayBreakoutConfig) -> Self {
         Self {
@@ -88,6 +103,36 @@ impl IntradayBreakoutEngine {
             Side::Long => self.was_long_today = true,
             Side::Short => self.was_short_today = true,
         }
+    }
+
+    pub fn snapshot(&self) -> IntradayBreakoutSnapshot {
+        IntradayBreakoutSnapshot {
+            cur_day_date: self.cur_day_date,
+            cur_day_high: self.cur_day_high,
+            cur_day_low: self.cur_day_low,
+            cur_day_close: self.cur_day_close,
+            yesterday_close: self.yesterday_close,
+            yesterday_range: self.yesterday_range,
+            yesterday_return: self.yesterday_return,
+            day_before_close: self.day_before_close,
+            was_long_today: self.was_long_today,
+            was_short_today: self.was_short_today,
+            today_start: self.today_start,
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: IntradayBreakoutSnapshot) {
+        self.cur_day_date = snapshot.cur_day_date;
+        self.cur_day_high = snapshot.cur_day_high;
+        self.cur_day_low = snapshot.cur_day_low;
+        self.cur_day_close = snapshot.cur_day_close;
+        self.yesterday_close = snapshot.yesterday_close;
+        self.yesterday_range = snapshot.yesterday_range;
+        self.yesterday_return = snapshot.yesterday_return;
+        self.day_before_close = snapshot.day_before_close;
+        self.was_long_today = snapshot.was_long_today;
+        self.was_short_today = snapshot.was_short_today;
+        self.today_start = snapshot.today_start;
     }
 
     pub fn evaluate_entry(&self, dt: NaiveDateTime, close: f64) -> Option<EntrySignal> {
