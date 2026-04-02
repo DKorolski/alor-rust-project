@@ -815,11 +815,16 @@ fn execution_path_for_command(
         return CommandExecutionPath::LegacyLongLived;
     }
 
-    match command.action {
-        CommandAction::Place(_) if config.action_scope_enable_create_limit => {
+    match (&command.action, command.effective_intent_class()) {
+        (&CommandAction::Place(_), IntentClass::Entry)
+            if config.action_scope_enable_create_limit =>
+        {
             CommandExecutionPath::ActionScoped
         }
-        CommandAction::Cancel(_) if config.action_scope_enable_delete_limit => {
+        (&CommandAction::Place(_), IntentClass::Exit) if config.action_scope_enable_exit => {
+            CommandExecutionPath::ActionScoped
+        }
+        (&CommandAction::Cancel(_), _) if config.action_scope_enable_delete_limit => {
             CommandExecutionPath::ActionScoped
         }
         _ => CommandExecutionPath::LegacyLongLived,
@@ -1507,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_path_uses_action_scoped_only_for_enabled_phase1_ops() {
+    fn execution_path_respects_phase_flags_for_entry_exit_and_cancel() {
         let mut config = CommandConsumerConfig {
             control_cws_mode: ControlCwsMode::ActionScoped,
             action_scope_enable_create_limit: true,
@@ -1524,6 +1529,19 @@ mod tests {
         });
         assert_eq!(
             execution_path_for_command(&place, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
+        let mut exit_place = place.clone();
+        exit_place.intent_class = Some(IntentClass::Exit);
+        assert_eq!(
+            execution_path_for_command(&exit_place, &config),
+            CommandExecutionPath::LegacyLongLived
+        );
+
+        config.action_scope_enable_exit = true;
+        assert_eq!(
+            execution_path_for_command(&exit_place, &config),
             CommandExecutionPath::ActionScoped
         );
 
