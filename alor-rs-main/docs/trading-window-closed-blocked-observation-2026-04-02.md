@@ -158,3 +158,36 @@ Expected result after implementation:
 3. strategy does not remain terminally blocked,
 4. on first open-window eligible live bar under `ALLOWED + LiveReady`, strategy can emit a fresh command without restart,
 5. for open positions, a deferred close obligation remains active until `Flat`.
+
+## Post-Fix Validation
+
+On `2026-04-02`, a follow-up clean rollout with:
+
+- runtime commit `0b605ac`,
+- runtime image `dev-0b605ac-indwarm-20260402-213111`,
+- full `restart from zero` for both `sessiongap` and `hybrid`,
+
+validated that the adjacent warmup/state issues were also addressed.
+
+Observed result:
+
+1. both gateways reached `LiveReady` after cold backfill,
+2. both runtimes moved from temporary bootstrap block to `ALLOWED`,
+3. `sessiongap` runtime state contained reconstructed:
+   - `prev_close`
+   - `yesterday_range`
+   - `pre_prev_close`
+4. `hybrid` runtime state contained reconstructed:
+   - `prev_day_close`
+   - `prev_day_range`
+   - `prev_day_return`
+   - `entry_ready=true`
+
+This matters because a clean restart is now a usable operational recovery tool:
+
+- it no longer leaves both strategies stuck in signal-warmup-null state,
+- and it preserves the deferred-intent policy baseline introduced for `trading_window_closed`.
+
+Detailed evidence was recorded separately in:
+
+- `docs/restart-from-zero-indicator-warmup-validation-2026-04-02.md`
