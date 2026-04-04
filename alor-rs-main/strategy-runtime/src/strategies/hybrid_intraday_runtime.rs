@@ -258,6 +258,10 @@ impl HybridIntradayRuntimeStrategy {
         }
     }
 
+    fn suppress_weekend_signal_generation(&self, dt_local: NaiveDateTime) -> bool {
+        self.config.weekends_off && matches!(dt_local.weekday(), Weekday::Sat | Weekday::Sun)
+    }
+
     fn startup_live_replay_tolerance_sec(&self) -> i64 {
         self.pending_timeout_sec().max(60)
     }
@@ -2257,14 +2261,14 @@ mod tests {
             entry_ready: true,
             last_bar_close: Some(99.90),
             prev_day_close: Some(100.0),
-            last_day_local: Some("2026-03-08".to_string()),
+            last_day_local: Some("2026-03-09".to_string()),
             current_day_high: Some(100.0),
             current_day_low: Some(99.5),
             current_day_close: Some(99.90),
             prev_day_range: Some(2.0),
             prev_day_return: Some(0.01),
             day_before_close: Some(99.0),
-            today_start_local: Some("2026-03-08T09:00:00".to_string()),
+            today_start_local: Some("2026-03-09T09:00:00".to_string()),
             was_long_today: false,
             was_short_today: false,
             overnight_exit_armed_date: None,
@@ -2273,12 +2277,91 @@ mod tests {
 
         let intents = strategy.on_bar(
             &ctx,
-            &test_bar(ts_local(2026, 3, 8, 10, 0, 0), 99.95, DataOrigin::Live),
+            &test_bar(ts_local(2026, 3, 9, 10, 0, 0), 99.95, DataOrigin::Live),
         );
 
         assert_eq!(intents.len(), 1);
         assert!(strategy.pending_entry.is_some());
         assert_eq!(strategy.prev_day_close(), Some(100.0));
+    }
+
+    #[test]
+    fn weekend_bar_updates_state_but_does_not_emit_intents() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.set_state(StrategyState::HybridIntradayRuntime {
+            active_cycle_id: None,
+            next_cycle_seq: 0,
+            last_position_qty: 0.0,
+            current_owner: None,
+            current_side: None,
+            pending_entry_owner: None,
+            pending_entry_side: None,
+            pending_entry_cycle_id: None,
+            pending_entry_request_id: None,
+            pending_entry_created_ts_utc: None,
+            deferred_entry_owner: None,
+            deferred_entry_side: None,
+            deferred_entry_cycle_id: None,
+            deferred_entry_entry_style: None,
+            deferred_entry_reason: None,
+            deferred_entry_stop_price: None,
+            deferred_entry_take_price: None,
+            deferred_entry_ts_utc: None,
+            deferred_entry_request_id: None,
+            pending_exit_request_id: None,
+            pending_exit_created_ts_utc: None,
+            deferred_exit_owner: None,
+            deferred_exit_reason: None,
+            deferred_exit_cycle_id: None,
+            deferred_exit_ts_utc: None,
+            deferred_exit_request_id: None,
+            pending_tp_request_id: None,
+            pending_tp_created_ts_utc: None,
+            pending_sl_request_id: None,
+            pending_sl_created_ts_utc: None,
+            tp_order_id: None,
+            sl_stop_order_id: None,
+            sl_exchange_order_id: None,
+            sl_triggered_ts: None,
+            mr_take_price: None,
+            mr_stop_price: None,
+            repair_deadline_ts: None,
+            next_repair_at_ts: None,
+            repair_backoff_level: 0,
+            repair_attempts: 0,
+            safe_mode_close_only: false,
+            safe_mode_reason: None,
+            entry_ready: true,
+            last_bar_close: Some(99.90),
+            prev_day_close: Some(100.0),
+            last_day_local: Some("2026-03-06".to_string()),
+            current_day_high: Some(100.0),
+            current_day_low: Some(99.5),
+            current_day_close: Some(99.90),
+            prev_day_range: Some(2.0),
+            prev_day_return: Some(0.01),
+            day_before_close: Some(99.0),
+            today_start_local: Some("2026-03-06T09:00:00".to_string()),
+            was_long_today: false,
+            was_short_today: false,
+            overnight_exit_armed_date: None,
+        });
+        let ctx = test_ctx(Some(0.0));
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 3, 7, 10, 0, 0), 99.95, DataOrigin::Live),
+        );
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
+        assert_eq!(strategy.last_bar_close, Some(99.95));
+        assert_eq!(
+            strategy.last_day_local,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap())
+        );
+        assert_eq!(strategy.current_day_high, Some(99.95));
+        assert_eq!(strategy.current_day_low, Some(99.95));
     }
 
     #[test]
@@ -3216,6 +3299,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.sync_state();
                 return intents;
             }
+        }
+        if self.suppress_weekend_signal_generation(dt_local) {
+            self.orchestrator.warm_bar(bar_input);
+            self.sync_state();
+            return Vec::new();
         }
         let actions = self.orchestrator.on_bar(bar_input);
         if !actions.is_empty() {
