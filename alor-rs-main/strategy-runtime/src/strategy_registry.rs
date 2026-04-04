@@ -12,11 +12,20 @@ use crate::{StrategyConfig, StrategyKind};
 pub(crate) type BoxedStrategy = Box<dyn Strategy + Send + Sync>;
 type StrategyFactoryFn = fn(&StrategyConfig) -> BoxedStrategy;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StrategyCapabilities {
+    pub uses_bootstrap_snapshot: bool,
+    pub uses_runtime_state_restore: bool,
+    pub uses_history_warmup: bool,
+    pub uses_stop_orders: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StrategyDescriptor {
     pub kind: StrategyKind,
     pub display_name: &'static str,
     pub factory: StrategyFactoryFn,
+    pub capabilities: StrategyCapabilities,
 }
 
 #[derive(Debug)]
@@ -31,31 +40,47 @@ impl StrategyRegistry {
                 kind: StrategyKind::LimitCancel,
                 display_name: "LimitCancel",
                 factory: create_limit_cancel,
+                capabilities: StrategyCapabilities::default(),
             },
             StrategyDescriptor {
                 kind: StrategyKind::MarketBuyAndClose,
                 display_name: "MarketBuyAndClose",
                 factory: create_market_buy_and_close,
+                capabilities: StrategyCapabilities::default(),
             },
             StrategyDescriptor {
                 kind: StrategyKind::ToySessionTiming,
                 display_name: "ToySessionTiming",
                 factory: create_toy_session_timing,
+                capabilities: StrategyCapabilities::default(),
             },
             StrategyDescriptor {
                 kind: StrategyKind::SessionGapStandalone,
                 display_name: "SessionGapStandalone",
                 factory: create_session_gap_standalone,
+                capabilities: StrategyCapabilities {
+                    uses_bootstrap_snapshot: true,
+                    uses_runtime_state_restore: true,
+                    uses_history_warmup: true,
+                    uses_stop_orders: false,
+                },
             },
             StrategyDescriptor {
                 kind: StrategyKind::MockLiveProbe,
                 display_name: "MockLiveProbe",
                 factory: create_mock_live_probe,
+                capabilities: StrategyCapabilities::default(),
             },
             StrategyDescriptor {
                 kind: StrategyKind::HybridIntraday,
                 display_name: "HybridIntraday",
                 factory: create_hybrid_intraday,
+                capabilities: StrategyCapabilities {
+                    uses_bootstrap_snapshot: true,
+                    uses_runtime_state_restore: true,
+                    uses_history_warmup: true,
+                    uses_stop_orders: true,
+                },
             },
         ])
     }
@@ -144,7 +169,7 @@ fn create_hybrid_intraday(config: &StrategyConfig) -> BoxedStrategy {
 
 #[cfg(test)]
 mod tests {
-    use super::{StrategyDescriptor, StrategyRegistry};
+    use super::{StrategyCapabilities, StrategyDescriptor, StrategyRegistry};
     use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
     use crate::{CloseTrigger, HybridIntradaySettings, StrategyConfig, StrategyKind};
 
@@ -218,11 +243,13 @@ mod tests {
                 kind: StrategyKind::LimitCancel,
                 display_name: "LimitCancel",
                 factory: super::create_limit_cancel,
+                capabilities: StrategyCapabilities::default(),
             },
             StrategyDescriptor {
                 kind: StrategyKind::LimitCancel,
                 display_name: "LimitCancelDuplicate",
                 factory: super::create_limit_cancel,
+                capabilities: StrategyCapabilities::default(),
             },
         ])
         .err()
@@ -239,6 +266,7 @@ mod tests {
             kind: StrategyKind::LimitCancel,
             display_name: "LimitCancel",
             factory: super::create_limit_cancel,
+            capabilities: StrategyCapabilities::default(),
         }])
         .expect("registry");
 
@@ -268,5 +296,41 @@ mod tests {
                 .create(&sample_strategy_config(kind))
                 .expect("strategy must be created");
         }
+    }
+
+    #[test]
+    fn builtin_registry_exposes_minimal_runtime_capabilities() {
+        let registry = StrategyRegistry::builtin().expect("builtin registry");
+
+        let limit_cancel = registry
+            .descriptor(StrategyKind::LimitCancel)
+            .expect("limit cancel descriptor");
+        assert_eq!(limit_cancel.capabilities, StrategyCapabilities::default());
+
+        let session_gap = registry
+            .descriptor(StrategyKind::SessionGapStandalone)
+            .expect("session gap descriptor");
+        assert_eq!(
+            session_gap.capabilities,
+            StrategyCapabilities {
+                uses_bootstrap_snapshot: true,
+                uses_runtime_state_restore: true,
+                uses_history_warmup: true,
+                uses_stop_orders: false,
+            }
+        );
+
+        let hybrid = registry
+            .descriptor(StrategyKind::HybridIntraday)
+            .expect("hybrid descriptor");
+        assert_eq!(
+            hybrid.capabilities,
+            StrategyCapabilities {
+                uses_bootstrap_snapshot: true,
+                uses_runtime_state_restore: true,
+                uses_history_warmup: true,
+                uses_stop_orders: true,
+            }
+        );
     }
 }

@@ -25,7 +25,7 @@ use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
     RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
 };
-use crate::strategy_registry::StrategyRegistry;
+use crate::strategy_registry::{StrategyCapabilities, StrategyRegistry};
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, PaperConfig, PaperExecutionMode, PaperOutput, RuntimeConfig,
@@ -178,6 +178,7 @@ pub struct StrategyRuntime {
     bootstrap_state: BootstrapState,
     metrics: RuntimeMetrics,
     ledger: TradeLedger,
+    strategy_capabilities: StrategyCapabilities,
     our_request_ids: HashSet<uuid::Uuid>,
     our_order_ids: HashSet<i64>,
     bootstrap_snapshot: Option<BootstrapSnapshot>,
@@ -333,7 +334,17 @@ impl StrategyRuntime {
 
     pub async fn new(config: RuntimeConfig) -> Result<Self> {
         let transport = RedisRuntimeTransport::new(config.clone())?;
-        let strategy = StrategyRegistry::builtin()?.create(&config.strategy)?;
+        let registry = StrategyRegistry::builtin()?;
+        let descriptor = registry
+            .descriptor(config.strategy.strategy_kind)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no strategy descriptor registered for kind {:?}",
+                    config.strategy.strategy_kind
+                )
+            })?;
+        let strategy = registry.create(&config.strategy)?;
         let now = chrono::Utc::now().timestamp();
         let health_snapshot = Arc::new(parking_lot::RwLock::new(RuntimeHealthSnapshot {
             uptime_start: std::time::Instant::now(),
@@ -374,6 +385,7 @@ impl StrategyRuntime {
             bootstrap_state: BootstrapState::default(),
             metrics: RuntimeMetrics::default(),
             ledger: TradeLedger::default(),
+            strategy_capabilities: descriptor.capabilities,
             our_request_ids: HashSet::new(),
             our_order_ids: HashSet::new(),
             bootstrap_snapshot: None,
@@ -719,6 +731,9 @@ impl StrategyRuntime {
     }
 
     async fn warmup_strategy_indicators_from_history(&mut self) -> Result<()> {
+        if !self.strategy_capabilities.uses_history_warmup {
+            return Ok(());
+        }
         if self.config.reset_state_on_start {
             info!(
                 strategy = self.config.strategy.strategy_id,
@@ -1499,6 +1514,13 @@ impl StrategyRuntime {
             return Ok(());
         }
         if stop_order.symbol != self.config.strategy.symbol {
+            self.transport.xack(&stream, &message_id).await?;
+            return Ok(());
+        }
+        if !self.strategy_capabilities.uses_stop_orders {
+            self.state
+                .stop_orders
+                .insert(stop_order.stop_order_id.clone(), stop_order);
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
@@ -2585,6 +2607,9 @@ impl StrategyRuntime {
     }
 
     async fn notify_bootstrap_snapshot(&mut self) -> Result<()> {
+        if !self.strategy_capabilities.uses_bootstrap_snapshot {
+            return Ok(());
+        }
         let snapshot = match &self.bootstrap_snapshot {
             Some(snapshot) => snapshot.clone(),
             None => return Ok(()),
@@ -2605,6 +2630,9 @@ impl StrategyRuntime {
     }
 
     async fn notify_runtime_state_restored(&mut self) -> Result<()> {
+        if !self.strategy_capabilities.uses_runtime_state_restore {
+            return Ok(());
+        }
         let last_bar_ts = self
             .state
             .last_processed_bar_ts
@@ -3599,6 +3627,34 @@ mod tests {
             .unwrap()
             .block_on(StrategyRuntime::new(config))
             .unwrap()
+    }
+
+    #[test]
+    fn runtime_loads_minimal_strategy_capabilities_from_registry() {
+        let limit_runtime = test_runtime(TradeMode::Live);
+        assert_eq!(
+            limit_runtime.strategy_capabilities,
+            StrategyCapabilities::default()
+        );
+
+        let mut hybrid_config = limit_runtime.config.clone();
+        hybrid_config.strategy.strategy_kind = StrategyKind::HybridIntraday;
+        hybrid_config.strategy.strategy_id = "hybrid_intraday".to_string();
+
+        let hybrid_runtime = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(StrategyRuntime::new(hybrid_config))
+            .unwrap();
+
+        assert_eq!(
+            hybrid_runtime.strategy_capabilities,
+            StrategyCapabilities {
+                uses_bootstrap_snapshot: true,
+                uses_runtime_state_restore: true,
+                uses_history_warmup: true,
+                uses_stop_orders: true,
+            }
+        );
     }
 
     #[test]
