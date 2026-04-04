@@ -1666,7 +1666,14 @@ impl StrategyRuntime {
         if self.config.trade_mode != TradeMode::Live {
             // In paper/backtest, position lifecycle is driven by synthetic fills.
             // Ignore broker positions stream to avoid external-state contamination.
-            self.transport.xack(&stream, &message_id).await?;
+            if let Err(error) = self.transport.xack(&stream, &message_id).await {
+                warn!(
+                    stream = %stream,
+                    message_id = %message_id,
+                    ?error,
+                    "paper mode: failed to ack ignored external position event"
+                );
+            }
             return Ok(());
         }
         if position.symbol != self.config.strategy.symbol {
