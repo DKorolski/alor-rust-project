@@ -340,7 +340,7 @@ impl HybridIntradayRuntimeStrategy {
             .filter(|price| *price > 0.0)
             .or_else(|| self.mr_take_price.filter(|price| *price > 0.0))
             .or_else(|| self.mr_stop_price.filter(|price| *price > 0.0))
-            .unwrap_or_else(|| {
+            .unwrap_or({
                 if self.config.tick_size > 0.0 {
                     self.config.tick_size
                 } else {
@@ -1539,6 +1539,7 @@ impl HybridIntradayRuntimeStrategy {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::{StrategyCtx, TradeMode};

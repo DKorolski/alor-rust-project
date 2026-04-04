@@ -2072,7 +2072,7 @@ impl StrategyRuntime {
                         });
                         self.ledger.record_order(OrderRecord {
                             order_id,
-                            symbol: symbol,
+                            symbol,
                             side,
                             qty: effective_qty,
                             filled: 0.0,
@@ -2876,7 +2876,7 @@ impl StrategyRuntime {
             TradeMode::Live => {
                 let mut accepted = Vec::new();
                 for intent in intents {
-                    let intent_class = self.resolve_intent_class(ctx, &intent);
+                    let intent_class = Self::resolve_intent_class(ctx, &intent);
                     if !self.trading_window_allows_order(ctx, created_ts_utc, intent_class) {
                         info!(
                             action = self.intent_action_name(&intent),
@@ -3181,11 +3181,7 @@ impl StrategyRuntime {
         Some(comment.chars().filter(|c| c.is_ascii()).take(100).collect())
     }
 
-    fn resolve_intent_class(
-        &self,
-        ctx: &StrategyCtx,
-        intent: &Intent,
-    ) -> alor_protocol::IntentClass {
+    fn resolve_intent_class(ctx: &StrategyCtx, intent: &Intent) -> alor_protocol::IntentClass {
         if let Some(explicit) = intent.explicit_class() {
             return explicit;
         }
@@ -3205,7 +3201,7 @@ impl StrategyRuntime {
                     alor_protocol::IntentClass::Entry
                 }
             }
-            Intent::Classified { intent, .. } => self.resolve_intent_class(ctx, intent),
+            Intent::Classified { intent, .. } => Self::resolve_intent_class(ctx, intent),
         }
     }
 
@@ -3772,7 +3768,7 @@ mod tests {
             comment: None,
         };
         assert_eq!(
-            runtime.resolve_intent_class(&ctx, &intent),
+            StrategyRuntime::resolve_intent_class(&ctx, &intent),
             alor_protocol::IntentClass::Exit
         );
     }
@@ -3788,14 +3784,14 @@ mod tests {
             new_qty: 1.0,
         };
         assert_eq!(
-            runtime.resolve_intent_class(&ctx, &legacy_replace),
+            StrategyRuntime::resolve_intent_class(&ctx, &legacy_replace),
             alor_protocol::IntentClass::Entry
         );
 
         let protective_replace =
             legacy_replace.with_class(alor_protocol::IntentClass::ProtectiveRepair);
         assert_eq!(
-            runtime.resolve_intent_class(&ctx, &protective_replace),
+            StrategyRuntime::resolve_intent_class(&ctx, &protective_replace),
             alor_protocol::IntentClass::ProtectiveRepair
         );
     }

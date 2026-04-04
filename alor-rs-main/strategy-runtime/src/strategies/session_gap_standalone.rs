@@ -618,6 +618,7 @@ impl SessionGapStandaloneStrategy {
             && ack.broker_order_id.is_none()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn close_only_degraded_phase(
         side: Side,
         qty: f64,
@@ -813,6 +814,7 @@ impl SessionGapStandaloneStrategy {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn log_exit_window_closed_deferred(
         request_id: uuid::Uuid,
         side: Side,

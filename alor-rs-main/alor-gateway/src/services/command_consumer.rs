@@ -463,11 +463,12 @@ pub async fn run_command_consumer(
                     }
                 }
                 }
-                if post_recycle_exit_send_active {
-                    if let Err(error) = cws.begin_post_recycle_exit_send(
+                if post_recycle_exit_send_active
+                    && let Err(error) = cws.begin_post_recycle_exit_send(
                         request_id,
                         post_recycle_exit_send_conn_id.as_deref(),
-                    ) {
+                    )
+                {
                         increment_counter(&health, |h| {
                             h.cws_errors_total = h.cws_errors_total.saturating_add(1)
                         });
@@ -502,7 +503,6 @@ pub async fn run_command_consumer(
                             source.ack(message_id).await?;
                         }
                         continue;
-                    }
                 }
 
                 match execute_command(

@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
         )
         .await
         .context("create:stopLimit failed")?;
-    println!("create response: {}", create_resp);
+    println!("create response: {create_resp}");
 
     let stop_order_id = extract_order_id_str(&create_resp)
         .or_else(|| extract_order_id_num(&create_resp).map(|v| v.to_string()))
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
         )
         .await
         .context("delete:stopLimit failed")?;
-    println!("delete response: {}", delete_resp);
+    println!("delete response: {delete_resp}");
     println!("smoke result: PASS stop_order_id={stop_order_id}");
     Ok(())
 }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde_json::json;
 
 pub fn ack_for_guid(guid: &str) -> String {

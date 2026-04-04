@@ -7,17 +7,12 @@ use crate::live_guard::GatewayPhase;
 use crate::state::StrategyState;
 use crate::{BarEvent, CloseTrigger, Intent, PositionEvent, Strategy, StrategyCtx, TradeMode};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MarketBuyAndCloseLiveOrderStyle {
+    #[default]
     Market,
     MarketableLimit,
-}
-
-impl Default for MarketBuyAndCloseLiveOrderStyle {
-    fn default() -> Self {
-        Self::Market
-    }
 }
 
 impl MarketBuyAndCloseLiveOrderStyle {

@@ -419,6 +419,7 @@ impl CwsClient {
 }
 
 impl CwsHandle {
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_limit(
         &self,
         portfolio: &str,
@@ -485,6 +486,7 @@ impl CwsHandle {
         self.send_command(payload, request_id, Some(symbol)).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_market(
         &self,
         portfolio: &str,
@@ -1383,6 +1385,7 @@ fn record_frame(frames: &mut Vec<CwsFrameTraceEntry>, entry: CwsFrameTraceEntry)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_outbound_frame(
     health: &Arc<RwLock<HealthState>>,
     connection_instance_id: &str,
@@ -2350,6 +2353,7 @@ fn inspect_inbound_cws_message(value: &Value) -> InboundCwsMessageMeta {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attach_diag_trace_fields(
     value: &mut Value,
     meta: &InboundCwsMessageMeta,

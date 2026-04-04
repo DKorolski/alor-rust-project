@@ -525,7 +525,7 @@ impl Session {
             .and_then(Value::as_bool)
             .unwrap_or(status_ok);
         if !status_ok || !cws_authorized {
-            bail!("authorize failed: {}", authorize_response);
+            bail!("authorize failed: {authorize_response}");
         }
         session.authorize_ts_utc = Some(Utc::now().timestamp());
         artifacts.log_event(
@@ -600,6 +600,7 @@ impl Session {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_create_limit(
         &mut self,
         cfg: &AlorGatewayConfig,

@@ -1122,7 +1122,7 @@ fn verify_checksums(bundle_dir: &Path) -> Result<()> {
         let bytes = fs::read(&p).with_context(|| format!("read {}", p.display()))?;
         let actual = sha256_hex(&bytes);
         if actual != expected {
-            bail!("checksum mismatch for {}: {} != {}", name, actual, expected);
+            bail!("checksum mismatch for {name}: {actual} != {expected}");
         }
     }
     Ok(())
@@ -1133,7 +1133,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let out = hasher.finalize();
-    out.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    out.iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
 
 fn parse_ts(value: &str) -> Result<NaiveDateTime> {

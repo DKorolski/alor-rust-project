@@ -83,6 +83,7 @@ impl ActionScopeCwsManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_limit(
         &self,
         portfolio: &str,
@@ -120,6 +121,7 @@ impl ActionScopeCwsManager {
     }
 
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_then_cancel(
         &self,
         portfolio: &str,
@@ -667,6 +669,7 @@ impl ActionScopeSession {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_create_limit_payload(
     portfolio: &str,
     exchange: &str,
@@ -778,6 +781,7 @@ fn value_to_string(value: &Value) -> Option<String> {
     None
 }
 
+#[allow(clippy::type_complexity)]
 fn describe_inbound(
     value: &Value,
 ) -> (
@@ -833,6 +837,7 @@ fn describe_inbound(
     (opcode, guid, request_guid, order_id, symbol, message_class)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attach_diag_fields(
     value: &mut Value,
     conn_instance_id: &str,

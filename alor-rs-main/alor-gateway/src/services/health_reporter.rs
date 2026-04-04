@@ -10,18 +10,33 @@ use crate::state::positions_manager::PositionsManagerHandle;
 use crate::state::stop_orders_manager::StopOrdersManagerHandle;
 use crate::transport::EventMessage;
 
+pub struct HealthReporterDeps {
+    pub publisher: EventPublisherHandle,
+    pub health: Arc<parking_lot::RwLock<HealthState>>,
+    pub orders: OrdersManagerHandle,
+    pub stop_orders: StopOrdersManagerHandle,
+    pub positions: PositionsManagerHandle,
+}
+
+pub struct HealthReporterSchedule {
+    pub health_interval: Duration,
+    pub snapshot_interval: Duration,
+}
+
 pub async fn run_health_reporter(
-    publisher: EventPublisherHandle,
-    health: Arc<parking_lot::RwLock<HealthState>>,
-    orders: OrdersManagerHandle,
-    stop_orders: StopOrdersManagerHandle,
-    positions: PositionsManagerHandle,
+    deps: HealthReporterDeps,
     mut shutdown_rx: watch::Receiver<bool>,
-    health_interval: Duration,
-    snapshot_interval: Duration,
+    schedule: HealthReporterSchedule,
 ) {
-    let mut health_tick = tokio::time::interval(health_interval);
-    let mut snapshot_tick = tokio::time::interval(snapshot_interval);
+    let HealthReporterDeps {
+        publisher,
+        health,
+        orders,
+        stop_orders,
+        positions,
+    } = deps;
+    let mut health_tick = tokio::time::interval(schedule.health_interval);
+    let mut snapshot_tick = tokio::time::interval(schedule.snapshot_interval);
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {

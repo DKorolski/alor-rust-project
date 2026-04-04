@@ -706,14 +706,18 @@ impl Supervisor {
             let shutdown_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
                 run_health_reporter(
-                    publisher,
-                    health,
-                    orders_manager,
-                    stop_orders_manager,
-                    positions_manager,
+                    crate::services::health_reporter::HealthReporterDeps {
+                        publisher,
+                        health,
+                        orders: orders_manager,
+                        stop_orders: stop_orders_manager,
+                        positions: positions_manager,
+                    },
                     shutdown_rx,
-                    Duration::from_secs(5),
-                    Duration::from_secs(30),
+                    crate::services::health_reporter::HealthReporterSchedule {
+                        health_interval: Duration::from_secs(5),
+                        snapshot_interval: Duration::from_secs(30),
+                    },
                 )
                 .await;
             });

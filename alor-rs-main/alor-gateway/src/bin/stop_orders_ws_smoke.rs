@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         )
         .await
         .context("create:stopLimit failed")?;
-    println!("create response: {}", create_resp);
+    println!("create response: {create_resp}");
 
     let stop_order_id = extract_order_id_str(&create_resp)
         .or_else(|| extract_order_id_num(&create_resp).map(|v| v.to_string()))
@@ -130,10 +130,7 @@ async fn main() -> Result<()> {
     )
     .await
     .with_context(|| format!("no ws status after create for stop_order_id={stop_order_id}"))?;
-    println!(
-        "ws event after create: PASS stop_order_id={} status={}",
-        stop_order_id, created_status
-    );
+    println!("ws event after create: PASS stop_order_id={stop_order_id} status={created_status}");
 
     let delete_resp = cws
         .delete_stop_limit(
@@ -146,7 +143,7 @@ async fn main() -> Result<()> {
         )
         .await
         .context("delete:stopLimit failed")?;
-    println!("delete response: {}", delete_resp);
+    println!("delete response: {delete_resp}");
 
     let deleted_status = wait_for_stop_order_status(
         &mut ws_stream,
@@ -158,18 +155,14 @@ async fn main() -> Result<()> {
     .with_context(|| {
         format!("no ws terminal status after delete for stop_order_id={stop_order_id}")
     })?;
-    println!(
-        "ws event after delete: PASS stop_order_id={} status={}",
-        stop_order_id, deleted_status
-    );
+    println!("ws event after delete: PASS stop_order_id={stop_order_id} status={deleted_status}");
 
     let unsubscribe_msg = build_unsubscribe(&stop_guid, &access_token);
     let _ = ws_stream.send(Message::Text(unsubscribe_msg.into())).await;
     let _ = ws_stream.close(None).await;
 
     println!(
-        "smoke result: PASS stop_order_id={} create_status={} delete_status={}",
-        stop_order_id, created_status, deleted_status
+        "smoke result: PASS stop_order_id={stop_order_id} create_status={created_status} delete_status={deleted_status}"
     );
     Ok(())
 }
