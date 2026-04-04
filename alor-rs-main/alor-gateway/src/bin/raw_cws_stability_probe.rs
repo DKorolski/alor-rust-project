@@ -564,12 +564,12 @@ impl Session {
             if now >= deadline {
                 break;
             }
-            if let (Some(interval), Some(next_ping)) = (ping_interval, next_ping_at) {
-                if now >= next_ping {
-                    self.send_ping(artifacts, phase).await?;
-                    next_ping_at = Some(now + interval);
-                    continue;
-                }
+            if let (Some(interval), Some(next_ping)) = (ping_interval, next_ping_at)
+                && now >= next_ping
+            {
+                self.send_ping(artifacts, phase).await?;
+                next_ping_at = Some(now + interval);
+                continue;
             }
             let mut wait_for = deadline.saturating_duration_since(now);
             if let Some(next_ping) = next_ping_at {
