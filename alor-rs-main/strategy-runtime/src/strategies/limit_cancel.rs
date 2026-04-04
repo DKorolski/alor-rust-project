@@ -2,7 +2,8 @@ use alor_protocol::{AckStatus, CommandAck, Side};
 
 use crate::live_guard::GatewayPhase;
 use crate::state::StrategyState;
-use crate::{BarEvent, Intent, OrderEvent, Strategy, StrategyCtx, TradeMode};
+use crate::strategy_host::{BarEvent, Intent, OrderEvent, Strategy, StrategyCtx};
+use crate::TradeMode;
 
 #[derive(Debug, Clone)]
 pub struct LimitCancelConfig {

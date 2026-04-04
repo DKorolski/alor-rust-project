@@ -2,7 +2,8 @@ use alor_protocol::{CommandAck, Side};
 use chrono::{TimeZone, Timelike, Utc};
 
 use crate::state::StrategyState;
-use crate::{BarEvent, Intent, PositionEvent, Strategy, StrategyCtx, TradeMode};
+use crate::strategy_host::{BarEvent, Intent, PositionEvent, Strategy, StrategyCtx};
+use crate::TradeMode;
 
 #[derive(Debug, Clone)]
 pub struct ToySessionTimingConfig {

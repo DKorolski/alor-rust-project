@@ -14,7 +14,7 @@ use crate::strategies::hybrid_intraday::{
     IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine, Owner, Side,
 };
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
-use crate::{
+use crate::strategy_host::{
     BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, StopOrderEvent, Strategy, StrategyCtx,
 };
 

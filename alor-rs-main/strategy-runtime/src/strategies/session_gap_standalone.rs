@@ -5,7 +5,8 @@ use tracing::{info, warn};
 
 use crate::live_guard::GatewayPhase;
 use crate::state::{SessionGapLivePhase, StrategyState};
-use crate::{BarEvent, Intent, PositionEvent, Strategy, StrategyCtx, TradeMode};
+use crate::strategy_host::{BarEvent, Intent, PositionEvent, Strategy, StrategyCtx};
+use crate::TradeMode;
 
 #[derive(Debug, Clone)]
 pub struct SessionGapStandaloneConfig {

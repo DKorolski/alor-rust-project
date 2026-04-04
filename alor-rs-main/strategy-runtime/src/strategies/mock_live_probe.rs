@@ -4,9 +4,10 @@ use uuid::Uuid;
 
 use crate::live_guard::GatewayPhase;
 use crate::state::StrategyState;
-use crate::{
-    BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, Strategy, StrategyCtx, TradeMode,
+use crate::strategy_host::{
+    BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, Strategy, StrategyCtx,
 };
+use crate::TradeMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockLiveProbeMode {

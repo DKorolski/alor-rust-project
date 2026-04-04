@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, SCHEMA_VERSION};
 
-use crate::{BarEvent, OrderEvent, PositionEvent, RuntimeConfig, TradeEvent};
+use crate::strategy_host::{BarEvent, OrderEvent, PositionEvent, TradeEvent};
+use crate::RuntimeConfig;
 
 const PAYLOAD_FIELD: &str = "payload";
 

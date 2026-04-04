@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::live_guard::GatewayPhase;
 use crate::state::StrategyState;
-use crate::{BarEvent, CloseTrigger, Intent, PositionEvent, Strategy, StrategyCtx, TradeMode};
+use crate::strategy_host::{BarEvent, Intent, PositionEvent, Strategy, StrategyCtx};
+use crate::{CloseTrigger, TradeMode};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

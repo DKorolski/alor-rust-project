@@ -4,7 +4,7 @@ use alor_protocol::Side;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{OrderEvent, PositionEvent, StopOrderEvent};
+use crate::strategy_host::{OrderEvent, PositionEvent, StopOrderEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionGapLivePhase {
