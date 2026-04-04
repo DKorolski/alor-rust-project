@@ -117,11 +117,25 @@ So the preferred order is:
 - first extract an internal `strategy_api` / `strategy_host` module,
 - consider a crate split only after the internal seams become stable.
 
+Acceptance criterion for PR2:
+
+- internal host/api module extraction is mechanical and does not change runtime semantics,
+- no premature crate split is introduced,
+- imports and ownership are not reorganized in a way that effectively forces a crate split early,
+- runtime lifecycle, recovery, and live behavior remain unchanged.
+
 ### 2. Registry/factory for all strategy kinds
 
 The new registry/factory path must cover all existing strategy kinds, not only the production two.
 
 This is a hard requirement because otherwise the refactor would only relocate special cases instead of removing them.
+
+Acceptance criteria for PR3:
+
+- unknown `strategy_kind` is treated as a hard error,
+- every existing `StrategyKind` is present in the registry,
+- runtime strategy creation no longer depends on a giant manual `match` inside `Runtime::new()`,
+- tests explicitly cover missing/unknown registration cases.
 
 ### 3. Minimal capabilities only
 
@@ -250,6 +264,16 @@ To minimize live contour risk, the recommended sequence is:
 8. lifecycle standardization + strategy adapters
 9. structured strategy audit logging
 10. fully wired third strategy skeleton + regression pass
+
+## Frozen Compatibility Checklist
+
+Use the short checklist in:
+
+- `docs/strategy-runtime-refactor/02-compatibility-checklist.md`
+
+This checklist is meant to stay small and operational. It should be reviewed in
+every config/state-heavy PR from the later phase of the refactor, especially PR4
+through PR6.
 
 ## Definition Of Done
 
