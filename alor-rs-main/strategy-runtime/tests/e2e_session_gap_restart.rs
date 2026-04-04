@@ -13,9 +13,9 @@ use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, Side};
 use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
-    BacktestConfig, BarEvent, DataOrigin, HybridIntradaySettings, OrderEvent, PaperConfig,
-    PaperExecutionMode, PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig,
-    StrategyConfig, StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperExecutionMode,
+    PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
+    StreamNames, TradeMode, TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -31,6 +31,17 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
     let portfolio = "demo".to_string();
     let strategy_id = "session_gap_standalone".to_string();
     let symbol = "IMOEXF".to_string();
+    let mut strategy =
+        StrategyConfig::defaults_for_kind(strategy_runtime::StrategyKind::SessionGapStandalone);
+    strategy.strategy_id = strategy_id.clone();
+    strategy.symbol = symbol;
+    strategy.side = Side::Buy;
+    strategy.session_open_hour = 16;
+    strategy.session_close_hour = 23;
+    strategy.session_close_minute = 49;
+    if let Some(settings) = strategy.session_gap_standalone_mut() {
+        settings.place_offset_ticks = 50;
+    }
 
     RuntimeConfig {
         redis_url,
@@ -80,51 +91,7 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             health: 1_000,
             runtime_state: 1_000,
         },
-        strategy: StrategyConfig {
-            strategy_id,
-            strategy_kind: strategy_runtime::StrategyKind::SessionGapStandalone,
-            symbol,
-            qty: 1.0,
-            side: Side::Buy,
-            live_order_style:
-                strategy_runtime::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle::Market,
-            marketable_limit_offset_ticks: 0,
-            place_offset_ticks: 50,
-            tick_size: 0.01,
-            max_wait_bars_for_ack: 3,
-            close_trigger: strategy_runtime::CloseTrigger::NextBar,
-            entry_ack_timeout_ms: 15_000,
-            entry_fill_timeout_ms: 60_000,
-            exit_ack_timeout_ms: 15_000,
-            exit_fill_timeout_ms: 60_000,
-            session_open_hour: 16,
-            session_open_minute: 0,
-            session_close_hour: 23,
-            session_close_minute: 49,
-            entry_after_open_min: 59,
-            exit_before_close_min: 20,
-            timezone_offset_hours: 3,
-            trading_periods: None,
-            max_silence_bars_sec: 0,
-            session_gap_k_long: 0.5,
-            session_gap_k_short: 0.46,
-            session_gap_wait_hours: 2,
-            session_gap_k_tp_short: 0.28,
-            session_gap_k_sl_short: 0.65,
-            session_gap_long_ex_pct: 2.2,
-            session_gap_short_ex_pct: 2.2,
-            session_gap_close_hour: 23,
-            session_gap_close_minute: 49,
-            session_gap_min: 60.0,
-            session_gap_exit_offset_min: 20,
-            session_gap_work_weekends: false,
-            session_gap_k_tp_long: 0.28,
-            session_gap_k_sl_long: 0.68,
-            session_gap_start_cash: 30_000.0,
-            session_gap_cash_factor: 0.9,
-            session_gap_max_entry_hour: 19,
-            hybrid_intraday: HybridIntradaySettings::default(),
-        },
+        strategy,
         paper: PaperConfig {
             enabled: false,
             output: PaperOutput::Stdout,

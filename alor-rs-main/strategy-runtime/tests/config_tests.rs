@@ -355,6 +355,113 @@ strict_dedup = false
 }
 
 #[test]
+fn loads_split_market_buy_and_close_strategy_sections() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_KIND",
+        "LIVE_ORDER_STYLE",
+        "MARKETABLE_LIMIT_OFFSET_TICKS",
+        "ENTRY_ACK_TIMEOUT_MS",
+        "EXIT_FILL_TIMEOUT_MS",
+    ]);
+
+    let path = write_temp_config(
+        r#"
+[strategy.common]
+strategy_id = "market_buy_and_close"
+strategy_kind = "market_buy_and_close"
+symbol = "USDRUBF"
+qty = 2.0
+side = "buy"
+
+[strategy.market_buy_and_close]
+live_order_style = "marketable_limit"
+marketable_limit_offset_ticks = 4
+close_trigger = "position_update"
+entry_ack_timeout_ms = 1111
+exit_fill_timeout_ms = 2222
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .market_buy_and_close()
+        .expect("market buy and close settings");
+
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::MarketBuyAndClose
+    );
+    assert_eq!(resolved.config.strategy.symbol, "USDRUBF");
+    assert_eq!(resolved.config.strategy.qty, 2.0);
+    assert_eq!(
+        settings.live_order_style,
+        strategy_runtime::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle::MarketableLimit
+    );
+    assert_eq!(settings.marketable_limit_offset_ticks, 4);
+    assert_eq!(
+        settings.close_trigger,
+        strategy_runtime::CloseTrigger::PositionUpdate
+    );
+    assert_eq!(settings.entry_ack_timeout_ms, 1111);
+    assert_eq!(settings.exit_fill_timeout_ms, 2222);
+    assert_eq!(resolved.sources.strategy.live_order_style, strategy_runtime::config::ConfigSource::File);
+    assert_eq!(
+        resolved.sources.strategy.marketable_limit_offset_ticks,
+        strategy_runtime::config::ConfigSource::File
+    );
+}
+
+#[test]
+fn loads_split_session_gap_sections_with_specific_runtime_fields() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_KIND",
+        "PLACE_OFFSET_TICKS",
+        "ENTRY_ACK_TIMEOUT_MS",
+        "EXIT_FILL_TIMEOUT_MS",
+    ]);
+
+    let path = write_temp_config(
+        r#"
+[strategy.common]
+strategy_id = "session_gap_standalone"
+strategy_kind = "session_gap_standalone"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+
+[strategy.session_gap]
+place_offset_ticks = 7
+entry_ack_timeout_ms = 1234
+exit_fill_timeout_ms = 5678
+k_long = 0.81
+close_hour = 21
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .session_gap_standalone()
+        .expect("session gap settings");
+
+    assert_eq!(settings.place_offset_ticks, 7);
+    assert_eq!(settings.entry_ack_timeout_ms, 1234);
+    assert_eq!(settings.exit_fill_timeout_ms, 5678);
+    assert_eq!(settings.k_long, 0.81);
+    assert_eq!(settings.close_hour, 21);
+    assert_eq!(resolved.sources.strategy.place_offset_ticks, strategy_runtime::config::ConfigSource::File);
+    assert_eq!(
+        resolved.sources.strategy.entry_ack_timeout_ms,
+        strategy_runtime::config::ConfigSource::File
+    );
+}
+
+#[test]
 fn replay_env_overrides_take_precedence() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&[
@@ -439,24 +546,29 @@ work_weekends = true
     );
 
     let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .session_gap_standalone()
+        .expect("session gap settings");
 
-    assert_eq!(resolved.config.strategy.session_gap_k_long, 0.77);
-    assert_eq!(resolved.config.strategy.session_gap_k_short, 0.55);
-    assert_eq!(resolved.config.strategy.session_gap_wait_hours, 4);
-    assert_eq!(resolved.config.strategy.session_gap_k_tp_long, 0.33);
-    assert_eq!(resolved.config.strategy.session_gap_k_sl_long, 0.88);
-    assert_eq!(resolved.config.strategy.session_gap_k_tp_short, 0.21);
-    assert_eq!(resolved.config.strategy.session_gap_k_sl_short, 0.74);
-    assert_eq!(resolved.config.strategy.session_gap_long_ex_pct, 3.2);
-    assert_eq!(resolved.config.strategy.session_gap_short_ex_pct, 1.8);
-    assert_eq!(resolved.config.strategy.session_gap_start_cash, 12345.0);
-    assert_eq!(resolved.config.strategy.session_gap_cash_factor, 0.42);
-    assert_eq!(resolved.config.strategy.session_gap_max_entry_hour, 17);
-    assert_eq!(resolved.config.strategy.session_gap_close_hour, 22);
-    assert_eq!(resolved.config.strategy.session_gap_close_minute, 40);
-    assert_eq!(resolved.config.strategy.session_gap_min, 45.0);
-    assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 12);
-    assert!(resolved.config.strategy.session_gap_work_weekends);
+    assert_eq!(settings.k_long, 0.77);
+    assert_eq!(settings.k_short, 0.55);
+    assert_eq!(settings.wait_hours, 4);
+    assert_eq!(settings.k_tp_long, 0.33);
+    assert_eq!(settings.k_sl_long, 0.88);
+    assert_eq!(settings.k_tp_short, 0.21);
+    assert_eq!(settings.k_sl_short, 0.74);
+    assert_eq!(settings.long_ex_pct, 3.2);
+    assert_eq!(settings.short_ex_pct, 1.8);
+    assert_eq!(settings.start_cash, 12345.0);
+    assert_eq!(settings.cash_factor, 0.42);
+    assert_eq!(settings.max_entry_hour, 17);
+    assert_eq!(settings.close_hour, 22);
+    assert_eq!(settings.close_minute, 40);
+    assert_eq!(settings.session_gap_min, 45.0);
+    assert_eq!(settings.exit_offset_min, 12);
+    assert!(settings.work_weekends);
 }
 
 #[test]
@@ -491,13 +603,18 @@ strategy_kind = "session_gap_standalone"
     );
 
     let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .session_gap_standalone()
+        .expect("session gap settings");
 
-    assert_eq!(resolved.config.strategy.session_gap_k_long, 0.5);
-    assert_eq!(resolved.config.strategy.session_gap_wait_hours, 2);
-    assert_eq!(resolved.config.strategy.session_gap_k_tp_long, 0.28);
-    assert_eq!(resolved.config.strategy.session_gap_min, 60.0);
-    assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 20);
-    assert!(!resolved.config.strategy.session_gap_work_weekends);
+    assert_eq!(settings.k_long, 0.5);
+    assert_eq!(settings.wait_hours, 2);
+    assert_eq!(settings.k_tp_long, 0.28);
+    assert_eq!(settings.session_gap_min, 60.0);
+    assert_eq!(settings.exit_offset_min, 20);
+    assert!(!settings.work_weekends);
 }
 
 #[test]
@@ -537,15 +654,20 @@ work_weekends = true
     );
 
     let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .session_gap_standalone()
+        .expect("session gap settings");
 
-    assert_eq!(resolved.config.strategy.session_gap_k_long, 0.77);
-    assert_eq!(resolved.config.strategy.session_gap_close_hour, 22);
-    assert!(resolved.config.strategy.session_gap_work_weekends);
+    assert_eq!(settings.k_long, 0.77);
+    assert_eq!(settings.close_hour, 22);
+    assert!(settings.work_weekends);
 
-    assert_eq!(resolved.config.strategy.session_gap_wait_hours, 2);
-    assert_eq!(resolved.config.strategy.session_gap_k_tp_long, 0.28);
-    assert_eq!(resolved.config.strategy.session_gap_min, 60.0);
-    assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 20);
+    assert_eq!(settings.wait_hours, 2);
+    assert_eq!(settings.k_tp_long, 0.28);
+    assert_eq!(settings.session_gap_min, 60.0);
+    assert_eq!(settings.exit_offset_min, 20);
 }
 
 #[test]

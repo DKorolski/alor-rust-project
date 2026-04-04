@@ -9,56 +9,16 @@ use serde::Deserialize;
 
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 use crate::{
-    BacktestConfig, CloseTrigger, HealthServerConfig, HybridIntradaySettings, PaperConfig,
-    PaperExecutionMode, PaperOutput, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
-    StrategyKind, StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperExecutionMode,
+    PaperOutput, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind,
+    StreamNames, TradeMode, TrimConfig,
 };
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
-const DEFAULT_STRATEGY_ID: &str = "limit_cancel";
 const DEFAULT_STRATEGY_KIND: StrategyKind = StrategyKind::LimitCancel;
 const DEFAULT_PORTFOLIO: &str = "demo";
 const DEFAULT_EXCHANGE: &str = "alor";
 const DEFAULT_SOURCE: &str = "strategy-runtime";
-const DEFAULT_SYMBOL: &str = "SBER";
-const DEFAULT_SIDE: &str = "buy";
-const DEFAULT_LIVE_ORDER_STYLE: MarketBuyAndCloseLiveOrderStyle =
-    MarketBuyAndCloseLiveOrderStyle::Market;
-const DEFAULT_MARKETABLE_LIMIT_OFFSET_TICKS: i64 = 0;
-const DEFAULT_PLACE_OFFSET_TICKS: i64 = 1;
-const DEFAULT_QTY: f64 = 1.0;
-const DEFAULT_TICK_SIZE: f64 = 0.01;
-const DEFAULT_MAX_WAIT_BARS_FOR_ACK: u32 = 3;
-const DEFAULT_CLOSE_TRIGGER: CloseTrigger = CloseTrigger::NextBar;
-const DEFAULT_ENTRY_ACK_TIMEOUT_MS: u64 = 15_000;
-const DEFAULT_ENTRY_FILL_TIMEOUT_MS: u64 = 60_000;
-const DEFAULT_EXIT_ACK_TIMEOUT_MS: u64 = 15_000;
-const DEFAULT_EXIT_FILL_TIMEOUT_MS: u64 = 60_000;
-const DEFAULT_SESSION_OPEN_HOUR: u32 = 10;
-const DEFAULT_SESSION_OPEN_MINUTE: u32 = 0;
-const DEFAULT_SESSION_CLOSE_HOUR: u32 = 23;
-const DEFAULT_SESSION_CLOSE_MINUTE: u32 = 50;
-const DEFAULT_ENTRY_AFTER_OPEN_MIN: u32 = 59;
-const DEFAULT_EXIT_BEFORE_CLOSE_MIN: u32 = 20;
-const DEFAULT_TIMEZONE_OFFSET_HOURS: i32 = 3;
-const DEFAULT_MAX_SILENCE_BARS_SEC: u64 = 0;
-const DEFAULT_SESSION_GAP_K_LONG: f64 = 0.5;
-const DEFAULT_SESSION_GAP_K_SHORT: f64 = 0.46;
-const DEFAULT_SESSION_GAP_WAIT_HOURS: i64 = 2;
-const DEFAULT_SESSION_GAP_K_TP_LONG: f64 = 0.28;
-const DEFAULT_SESSION_GAP_K_SL_LONG: f64 = 0.68;
-const DEFAULT_SESSION_GAP_K_TP_SHORT: f64 = 0.28;
-const DEFAULT_SESSION_GAP_K_SL_SHORT: f64 = 0.65;
-const DEFAULT_SESSION_GAP_LONG_EX_PCT: f64 = 2.2;
-const DEFAULT_SESSION_GAP_SHORT_EX_PCT: f64 = 2.2;
-const DEFAULT_SESSION_GAP_START_CASH: f64 = 30_000.0;
-const DEFAULT_SESSION_GAP_CASH_FACTOR: f64 = 0.9;
-const DEFAULT_SESSION_GAP_MAX_ENTRY_HOUR: u32 = 19;
-const DEFAULT_SESSION_GAP_CLOSE_HOUR: u32 = 23;
-const DEFAULT_SESSION_GAP_CLOSE_MINUTE: u32 = 49;
-const DEFAULT_SESSION_GAP_MIN: f64 = 60.0;
-const DEFAULT_SESSION_GAP_EXIT_OFFSET_MIN: i64 = 20;
-const DEFAULT_SESSION_GAP_WORK_WEEKENDS: bool = false;
 const DEFAULT_CONSUMER_GROUP: &str = "strategy-runtime";
 const DEFAULT_CONSUMER_NAME: &str = "auto";
 const DEFAULT_HEALTH_STREAM: &str = "events.health";
@@ -524,21 +484,26 @@ struct TrimConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 struct StrategyConfigFile {
+    #[serde(flatten)]
+    common_legacy: StrategyCommonConfigFile,
+    #[serde(flatten)]
+    legacy_specific: StrategyLegacySpecificConfigFile,
+    common: Option<StrategyCommonConfigFile>,
+    limit_cancel: Option<LimitCancelConfigFile>,
+    market_buy_and_close: Option<MarketBuyAndCloseConfigFile>,
+    mock_live_probe: Option<MockLiveProbeConfigFile>,
+    session_gap: Option<SessionGapConfigFile>,
+    hybrid_intraday: Option<HybridIntradayConfigFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StrategyCommonConfigFile {
     strategy_id: Option<String>,
     strategy_kind: Option<String>,
     symbol: Option<String>,
     qty: Option<f64>,
     side: Option<String>,
-    live_order_style: Option<String>,
-    marketable_limit_offset_ticks: Option<i64>,
-    place_offset_ticks: Option<i64>,
     tick_size: Option<f64>,
-    max_wait_bars_for_ack: Option<u32>,
-    close_trigger: Option<String>,
-    entry_ack_timeout_ms: Option<u64>,
-    entry_fill_timeout_ms: Option<u64>,
-    exit_ack_timeout_ms: Option<u64>,
-    exit_fill_timeout_ms: Option<u64>,
     session_open_hour: Option<u32>,
     session_open_minute: Option<u32>,
     session_close_hour: Option<u32>,
@@ -548,12 +513,48 @@ struct StrategyConfigFile {
     timezone_offset_hours: Option<i32>,
     trading_periods: Option<TradingPeriods>,
     max_silence_bars_sec: Option<u64>,
-    session_gap: Option<SessionGapConfigFile>,
-    hybrid_intraday: Option<HybridIntradayConfigFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StrategyLegacySpecificConfigFile {
+    live_order_style: Option<String>,
+    marketable_limit_offset_ticks: Option<i64>,
+    place_offset_ticks: Option<i64>,
+    max_wait_bars_for_ack: Option<u32>,
+    close_trigger: Option<String>,
+    entry_ack_timeout_ms: Option<u64>,
+    entry_fill_timeout_ms: Option<u64>,
+    exit_ack_timeout_ms: Option<u64>,
+    exit_fill_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LimitCancelConfigFile {
+    place_offset_ticks: Option<i64>,
+    max_wait_bars_for_ack: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MarketBuyAndCloseConfigFile {
+    live_order_style: Option<String>,
+    marketable_limit_offset_ticks: Option<i64>,
+    close_trigger: Option<String>,
+    entry_ack_timeout_ms: Option<u64>,
+    entry_fill_timeout_ms: Option<u64>,
+    exit_ack_timeout_ms: Option<u64>,
+    exit_fill_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MockLiveProbeConfigFile {
+    place_offset_ticks: Option<i64>,
+    max_wait_bars_for_ack: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct HybridIntradayConfigFile {
+    live_order_style: Option<String>,
+    marketable_limit_offset_ticks: Option<i64>,
     mr_min_range_long: Option<f64>,
     mr_max_range_long: Option<f64>,
     mr_k_long: Option<f64>,
@@ -587,6 +588,11 @@ struct HybridIntradayConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 struct SessionGapConfigFile {
+    place_offset_ticks: Option<i64>,
+    entry_ack_timeout_ms: Option<u64>,
+    entry_fill_timeout_ms: Option<u64>,
+    exit_ack_timeout_ms: Option<u64>,
+    exit_fill_timeout_ms: Option<u64>,
     k_long: Option<f64>,
     k_short: Option<f64>,
     wait_hours: Option<i64>,
@@ -636,6 +642,564 @@ struct ReplayConfigFile {
     strict_dedup: Option<bool>,
 }
 
+fn apply_strategy_common_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    common_file: &StrategyCommonConfigFile,
+    source: ConfigSource,
+    kind_context: &str,
+) -> Result<()> {
+    if let Some(value) = &common_file.strategy_id {
+        strategy.strategy_id = value.clone();
+        sources.strategy_id = source;
+    }
+    if let Some(value) = &common_file.strategy_kind {
+        strategy.set_kind(
+            parse_strategy_kind(value)
+                .with_context(|| format!("invalid {kind_context}: {value}"))?,
+        );
+        sources.strategy_kind = source;
+    }
+    if let Some(value) = &common_file.symbol {
+        strategy.symbol = value.clone();
+        sources.symbol = source;
+    }
+    if let Some(value) = common_file.qty {
+        strategy.qty = value;
+        sources.qty = source;
+    }
+    if let Some(value) = &common_file.side {
+        strategy.side = parse_side(value);
+        sources.side = source;
+    }
+    if let Some(value) = common_file.tick_size {
+        strategy.tick_size = value;
+        sources.tick_size = source;
+    }
+    if let Some(value) = common_file.session_open_hour {
+        strategy.session_open_hour = value;
+        sources.session_open_hour = source;
+    }
+    if let Some(value) = common_file.session_open_minute {
+        strategy.session_open_minute = value;
+        sources.session_open_minute = source;
+    }
+    if let Some(value) = common_file.session_close_hour {
+        strategy.session_close_hour = value;
+        sources.session_close_hour = source;
+    }
+    if let Some(value) = common_file.session_close_minute {
+        strategy.session_close_minute = value;
+        sources.session_close_minute = source;
+    }
+    if let Some(value) = common_file.entry_after_open_min {
+        strategy.entry_after_open_min = value;
+        sources.entry_after_open_min = source;
+    }
+    if let Some(value) = common_file.exit_before_close_min {
+        strategy.exit_before_close_min = value;
+        sources.exit_before_close_min = source;
+    }
+    if let Some(value) = common_file.timezone_offset_hours {
+        strategy.timezone_offset_hours = value;
+        sources.timezone_offset_hours = source;
+    }
+    if let Some(value) = &common_file.trading_periods {
+        strategy.trading_periods = Some(value.clone());
+        sources.trading_periods = source;
+    }
+    if let Some(value) = common_file.max_silence_bars_sec {
+        strategy.max_silence_bars_sec = value;
+        sources.max_silence_bars_sec = source;
+    }
+    Ok(())
+}
+
+fn apply_live_order_style(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: MarketBuyAndCloseLiveOrderStyle,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::MarketBuyAndClose => {
+            if let Some(settings) = strategy.market_buy_and_close_mut() {
+                settings.live_order_style = value;
+            }
+        }
+        StrategyKind::HybridIntraday => {
+            if let Some(settings) = strategy.hybrid_intraday_mut() {
+                settings.live_order_style = value;
+            }
+        }
+        _ => {}
+    }
+    sources.live_order_style = source;
+}
+
+fn apply_marketable_limit_offset_ticks(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: i64,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::MarketBuyAndClose => {
+            if let Some(settings) = strategy.market_buy_and_close_mut() {
+                settings.marketable_limit_offset_ticks = value;
+            }
+        }
+        StrategyKind::HybridIntraday => {
+            if let Some(settings) = strategy.hybrid_intraday_mut() {
+                settings.marketable_limit_offset_ticks = value;
+            }
+        }
+        _ => {}
+    }
+    sources.marketable_limit_offset_ticks = source;
+}
+
+fn apply_place_offset_ticks(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: i64,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::LimitCancel => {
+            if let Some(settings) = strategy.limit_cancel_mut() {
+                settings.place_offset_ticks = value;
+            }
+        }
+        StrategyKind::MockLiveProbe => {
+            if let Some(settings) = strategy.mock_live_probe_mut() {
+                settings.place_offset_ticks = value;
+            }
+        }
+        StrategyKind::SessionGapStandalone => {
+            if let Some(settings) = strategy.session_gap_standalone_mut() {
+                settings.place_offset_ticks = value;
+            }
+        }
+        _ => {}
+    }
+    sources.place_offset_ticks = source;
+}
+
+fn apply_max_wait_bars_for_ack(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: u32,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::LimitCancel => {
+            if let Some(settings) = strategy.limit_cancel_mut() {
+                settings.max_wait_bars_for_ack = value;
+            }
+        }
+        StrategyKind::MockLiveProbe => {
+            if let Some(settings) = strategy.mock_live_probe_mut() {
+                settings.max_wait_bars_for_ack = value;
+            }
+        }
+        _ => {}
+    }
+    sources.max_wait_bars_for_ack = source;
+}
+
+fn apply_close_trigger(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: CloseTrigger,
+    source: ConfigSource,
+) {
+    if let Some(settings) = strategy.market_buy_and_close_mut() {
+        settings.close_trigger = value;
+    }
+    sources.close_trigger = source;
+}
+
+fn apply_entry_ack_timeout_ms(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: u64,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::MarketBuyAndClose => {
+            if let Some(settings) = strategy.market_buy_and_close_mut() {
+                settings.entry_ack_timeout_ms = value;
+            }
+        }
+        StrategyKind::SessionGapStandalone => {
+            if let Some(settings) = strategy.session_gap_standalone_mut() {
+                settings.entry_ack_timeout_ms = value;
+            }
+        }
+        _ => {}
+    }
+    sources.entry_ack_timeout_ms = source;
+}
+
+fn apply_entry_fill_timeout_ms(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: u64,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::MarketBuyAndClose => {
+            if let Some(settings) = strategy.market_buy_and_close_mut() {
+                settings.entry_fill_timeout_ms = value;
+            }
+        }
+        StrategyKind::SessionGapStandalone => {
+            if let Some(settings) = strategy.session_gap_standalone_mut() {
+                settings.entry_fill_timeout_ms = value;
+            }
+        }
+        _ => {}
+    }
+    sources.entry_fill_timeout_ms = source;
+}
+
+fn apply_exit_ack_timeout_ms(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: u64,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::MarketBuyAndClose => {
+            if let Some(settings) = strategy.market_buy_and_close_mut() {
+                settings.exit_ack_timeout_ms = value;
+            }
+        }
+        StrategyKind::SessionGapStandalone => {
+            if let Some(settings) = strategy.session_gap_standalone_mut() {
+                settings.exit_ack_timeout_ms = value;
+            }
+        }
+        _ => {}
+    }
+    sources.exit_ack_timeout_ms = source;
+}
+
+fn apply_exit_fill_timeout_ms(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    value: u64,
+    source: ConfigSource,
+) {
+    match strategy.strategy_kind {
+        StrategyKind::MarketBuyAndClose => {
+            if let Some(settings) = strategy.market_buy_and_close_mut() {
+                settings.exit_fill_timeout_ms = value;
+            }
+        }
+        StrategyKind::SessionGapStandalone => {
+            if let Some(settings) = strategy.session_gap_standalone_mut() {
+                settings.exit_fill_timeout_ms = value;
+            }
+        }
+        _ => {}
+    }
+    sources.exit_fill_timeout_ms = source;
+}
+
+fn apply_legacy_specific_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    specific_file: &StrategyLegacySpecificConfigFile,
+    source: ConfigSource,
+) {
+    if let Some(value) = &specific_file.live_order_style {
+        apply_live_order_style(strategy, sources, parse_live_order_style(value), source);
+    }
+    if let Some(value) = specific_file.marketable_limit_offset_ticks {
+        apply_marketable_limit_offset_ticks(strategy, sources, value, source);
+    }
+    if let Some(value) = specific_file.place_offset_ticks {
+        apply_place_offset_ticks(strategy, sources, value, source);
+    }
+    if let Some(value) = specific_file.max_wait_bars_for_ack {
+        apply_max_wait_bars_for_ack(strategy, sources, value, source);
+    }
+    if let Some(value) = &specific_file.close_trigger {
+        apply_close_trigger(strategy, sources, parse_close_trigger(value), source);
+    }
+    if let Some(value) = specific_file.entry_ack_timeout_ms {
+        apply_entry_ack_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = specific_file.entry_fill_timeout_ms {
+        apply_entry_fill_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = specific_file.exit_ack_timeout_ms {
+        apply_exit_ack_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = specific_file.exit_fill_timeout_ms {
+        apply_exit_fill_timeout_ms(strategy, sources, value, source);
+    }
+}
+
+fn apply_limit_cancel_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    limit_cancel_file: &LimitCancelConfigFile,
+    source: ConfigSource,
+) {
+    if let Some(value) = limit_cancel_file.place_offset_ticks {
+        apply_place_offset_ticks(strategy, sources, value, source);
+    }
+    if let Some(value) = limit_cancel_file.max_wait_bars_for_ack {
+        apply_max_wait_bars_for_ack(strategy, sources, value, source);
+    }
+}
+
+fn apply_market_buy_and_close_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    market_buy_and_close_file: &MarketBuyAndCloseConfigFile,
+    source: ConfigSource,
+) {
+    if let Some(value) = &market_buy_and_close_file.live_order_style {
+        apply_live_order_style(strategy, sources, parse_live_order_style(value), source);
+    }
+    if let Some(value) = market_buy_and_close_file.marketable_limit_offset_ticks {
+        apply_marketable_limit_offset_ticks(strategy, sources, value, source);
+    }
+    if let Some(value) = &market_buy_and_close_file.close_trigger {
+        apply_close_trigger(strategy, sources, parse_close_trigger(value), source);
+    }
+    if let Some(value) = market_buy_and_close_file.entry_ack_timeout_ms {
+        apply_entry_ack_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = market_buy_and_close_file.entry_fill_timeout_ms {
+        apply_entry_fill_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = market_buy_and_close_file.exit_ack_timeout_ms {
+        apply_exit_ack_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = market_buy_and_close_file.exit_fill_timeout_ms {
+        apply_exit_fill_timeout_ms(strategy, sources, value, source);
+    }
+}
+
+fn apply_mock_live_probe_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    mock_live_probe_file: &MockLiveProbeConfigFile,
+    source: ConfigSource,
+) {
+    if let Some(value) = mock_live_probe_file.place_offset_ticks {
+        apply_place_offset_ticks(strategy, sources, value, source);
+    }
+    if let Some(value) = mock_live_probe_file.max_wait_bars_for_ack {
+        apply_max_wait_bars_for_ack(strategy, sources, value, source);
+    }
+}
+
+fn apply_session_gap_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    session_gap_file: &SessionGapConfigFile,
+    source: ConfigSource,
+) {
+    if let Some(value) = session_gap_file.place_offset_ticks {
+        apply_place_offset_ticks(strategy, sources, value, source);
+    }
+    if let Some(value) = session_gap_file.entry_ack_timeout_ms {
+        apply_entry_ack_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = session_gap_file.entry_fill_timeout_ms {
+        apply_entry_fill_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = session_gap_file.exit_ack_timeout_ms {
+        apply_exit_ack_timeout_ms(strategy, sources, value, source);
+    }
+    if let Some(value) = session_gap_file.exit_fill_timeout_ms {
+        apply_exit_fill_timeout_ms(strategy, sources, value, source);
+    }
+
+    if let Some(settings) = strategy.session_gap_standalone_mut() {
+        if let Some(value) = session_gap_file.k_long {
+            settings.k_long = value;
+            sources.session_gap_k_long = source;
+        }
+        if let Some(value) = session_gap_file.k_short {
+            settings.k_short = value;
+            sources.session_gap_k_short = source;
+        }
+        if let Some(value) = session_gap_file.wait_hours {
+            settings.wait_hours = value;
+            sources.session_gap_wait_hours = source;
+        }
+        if let Some(value) = session_gap_file.k_tp_long {
+            settings.k_tp_long = value;
+            sources.session_gap_k_tp_long = source;
+        }
+        if let Some(value) = session_gap_file.k_sl_long {
+            settings.k_sl_long = value;
+            sources.session_gap_k_sl_long = source;
+        }
+        if let Some(value) = session_gap_file.k_tp_short {
+            settings.k_tp_short = value;
+            sources.session_gap_k_tp_short = source;
+        }
+        if let Some(value) = session_gap_file.k_sl_short {
+            settings.k_sl_short = value;
+            sources.session_gap_k_sl_short = source;
+        }
+        if let Some(value) = session_gap_file.long_ex_pct {
+            settings.long_ex_pct = value;
+            sources.session_gap_long_ex_pct = source;
+        }
+        if let Some(value) = session_gap_file.short_ex_pct {
+            settings.short_ex_pct = value;
+            sources.session_gap_short_ex_pct = source;
+        }
+        if let Some(value) = session_gap_file.start_cash {
+            settings.start_cash = value;
+            sources.session_gap_start_cash = source;
+        }
+        if let Some(value) = session_gap_file.cash_factor {
+            settings.cash_factor = value;
+            sources.session_gap_cash_factor = source;
+        }
+        if let Some(value) = session_gap_file.max_entry_hour {
+            settings.max_entry_hour = value;
+            sources.session_gap_max_entry_hour = source;
+        }
+        if let Some(value) = session_gap_file.close_hour {
+            settings.close_hour = value;
+            sources.session_gap_close_hour = source;
+        }
+        if let Some(value) = session_gap_file.close_minute {
+            settings.close_minute = value;
+            sources.session_gap_close_minute = source;
+        }
+        if let Some(value) = session_gap_file.session_gap_min {
+            settings.session_gap_min = value;
+            sources.session_gap_min = source;
+        }
+        if let Some(value) = session_gap_file.exit_offset_min {
+            settings.exit_offset_min = value;
+            sources.session_gap_exit_offset_min = source;
+        }
+        if let Some(value) = session_gap_file.work_weekends {
+            settings.work_weekends = value;
+            sources.session_gap_work_weekends = source;
+        }
+    }
+}
+
+fn apply_hybrid_intraday_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    hybrid_file: &HybridIntradayConfigFile,
+    source: ConfigSource,
+) {
+    if let Some(value) = &hybrid_file.live_order_style {
+        apply_live_order_style(strategy, sources, parse_live_order_style(value), source);
+    }
+    if let Some(value) = hybrid_file.marketable_limit_offset_ticks {
+        apply_marketable_limit_offset_ticks(strategy, sources, value, source);
+    }
+
+    if let Some(settings) = strategy.hybrid_intraday_mut() {
+        sources.hybrid_intraday = source;
+        let strategy = &mut settings.strategy;
+        if let Some(value) = hybrid_file.mr_min_range_long {
+            strategy.mr_min_range_long = value;
+        }
+        if let Some(value) = hybrid_file.mr_max_range_long {
+            strategy.mr_max_range_long = value;
+        }
+        if let Some(value) = hybrid_file.mr_k_long {
+            strategy.mr_k_long = value;
+        }
+        if let Some(value) = hybrid_file.mr_take_k_long {
+            strategy.mr_take_k_long = value;
+        }
+        if let Some(value) = hybrid_file.mr_stop_k_long {
+            strategy.mr_stop_k_long = value;
+        }
+        if let Some(value) = hybrid_file.mr_min_range_short {
+            strategy.mr_min_range_short = value;
+        }
+        if let Some(value) = hybrid_file.mr_max_range_short {
+            strategy.mr_max_range_short = value;
+        }
+        if let Some(value) = hybrid_file.mr_k_short {
+            strategy.mr_k_short = value;
+        }
+        if let Some(value) = hybrid_file.mr_take_k_short {
+            strategy.mr_take_k_short = value;
+        }
+        if let Some(value) = hybrid_file.mr_stop_k_short {
+            strategy.mr_stop_k_short = value;
+        }
+        if let Some(value) = &hybrid_file.mr_session_end_time {
+            strategy.mr_session_end_time = value.clone();
+        }
+        if let Some(value) = hybrid_file.mr_exit_offset_min {
+            strategy.mr_exit_offset_min = value;
+        }
+        if let Some(value) = hybrid_file.bo_k {
+            strategy.bo_k = value;
+        }
+        if let Some(value) = hybrid_file.bo_stop1_range {
+            strategy.bo_stop1_range = value;
+        }
+        if let Some(value) = hybrid_file.bo_stop2_range {
+            strategy.bo_stop2_range = value;
+        }
+        if let Some(value) = hybrid_file.bo_big_move_threshold {
+            strategy.bo_big_move_threshold = value;
+        }
+        if let Some(value) = hybrid_file.bo_min_range {
+            strategy.bo_min_range = value;
+        }
+        if let Some(value) = &hybrid_file.bo_min_range_mode {
+            strategy.bo_min_range_mode = value.clone();
+        }
+        if let Some(value) = hybrid_file.bo_exclude_weekends {
+            strategy.bo_exclude_weekends = value;
+        }
+        if let Some(value) = hybrid_file.bo_wait_hours {
+            strategy.bo_wait_hours = value;
+        }
+        if let Some(value) = &hybrid_file.orchestrator_breakout_eod_mode {
+            strategy.orchestrator_breakout_eod_mode = value.clone();
+        }
+        if let Some(value) = &hybrid_file.orchestrator_breakout_overnight_exit_time {
+            strategy.orchestrator_breakout_overnight_exit_time = value.clone();
+        }
+        if let Some(value) = hybrid_file.repair_deadline_sec {
+            strategy.repair_deadline_sec = value;
+        }
+        if let Some(value) = hybrid_file.sl_escalate_timeout_sec {
+            strategy.sl_escalate_timeout_sec = value;
+        }
+        if let Some(value) = hybrid_file.max_repair_retries {
+            strategy.max_repair_retries = value;
+        }
+        if let Some(value) = hybrid_file.repair_backoff_base_sec {
+            strategy.repair_backoff_base_sec = value;
+        }
+        if let Some(value) = hybrid_file.repair_backoff_max_sec {
+            strategy.repair_backoff_max_sec = value;
+        }
+        if let Some(value) = hybrid_file.pending_timeout_sec {
+            strategy.pending_timeout_sec = value;
+        }
+        if let Some(value) = hybrid_file.stop_end_buffer_sec {
+            strategy.stop_end_buffer_sec = value;
+        }
+    }
+}
+
 pub fn load_runtime_config(
     config_path: PathBuf,
     allow_missing: bool,
@@ -651,50 +1215,7 @@ pub fn load_runtime_config(
     let mut consumer_group = DEFAULT_CONSUMER_GROUP.to_string();
     let mut consumer_name = DEFAULT_CONSUMER_NAME.to_string();
 
-    let mut strategy = StrategyConfig {
-        strategy_id: DEFAULT_STRATEGY_ID.to_string(),
-        strategy_kind: DEFAULT_STRATEGY_KIND,
-        symbol: DEFAULT_SYMBOL.to_string(),
-        qty: DEFAULT_QTY,
-        side: parse_side(DEFAULT_SIDE),
-        live_order_style: DEFAULT_LIVE_ORDER_STYLE,
-        marketable_limit_offset_ticks: DEFAULT_MARKETABLE_LIMIT_OFFSET_TICKS,
-        place_offset_ticks: DEFAULT_PLACE_OFFSET_TICKS,
-        tick_size: DEFAULT_TICK_SIZE,
-        max_wait_bars_for_ack: DEFAULT_MAX_WAIT_BARS_FOR_ACK,
-        close_trigger: DEFAULT_CLOSE_TRIGGER,
-        entry_ack_timeout_ms: DEFAULT_ENTRY_ACK_TIMEOUT_MS,
-        entry_fill_timeout_ms: DEFAULT_ENTRY_FILL_TIMEOUT_MS,
-        exit_ack_timeout_ms: DEFAULT_EXIT_ACK_TIMEOUT_MS,
-        exit_fill_timeout_ms: DEFAULT_EXIT_FILL_TIMEOUT_MS,
-        session_open_hour: DEFAULT_SESSION_OPEN_HOUR,
-        session_open_minute: DEFAULT_SESSION_OPEN_MINUTE,
-        session_close_hour: DEFAULT_SESSION_CLOSE_HOUR,
-        session_close_minute: DEFAULT_SESSION_CLOSE_MINUTE,
-        entry_after_open_min: DEFAULT_ENTRY_AFTER_OPEN_MIN,
-        exit_before_close_min: DEFAULT_EXIT_BEFORE_CLOSE_MIN,
-        timezone_offset_hours: DEFAULT_TIMEZONE_OFFSET_HOURS,
-        trading_periods: None,
-        max_silence_bars_sec: DEFAULT_MAX_SILENCE_BARS_SEC,
-        session_gap_k_long: DEFAULT_SESSION_GAP_K_LONG,
-        session_gap_k_short: DEFAULT_SESSION_GAP_K_SHORT,
-        session_gap_wait_hours: DEFAULT_SESSION_GAP_WAIT_HOURS,
-        session_gap_k_tp_long: DEFAULT_SESSION_GAP_K_TP_LONG,
-        session_gap_k_sl_long: DEFAULT_SESSION_GAP_K_SL_LONG,
-        session_gap_k_tp_short: DEFAULT_SESSION_GAP_K_TP_SHORT,
-        session_gap_k_sl_short: DEFAULT_SESSION_GAP_K_SL_SHORT,
-        session_gap_long_ex_pct: DEFAULT_SESSION_GAP_LONG_EX_PCT,
-        session_gap_short_ex_pct: DEFAULT_SESSION_GAP_SHORT_EX_PCT,
-        session_gap_start_cash: DEFAULT_SESSION_GAP_START_CASH,
-        session_gap_cash_factor: DEFAULT_SESSION_GAP_CASH_FACTOR,
-        session_gap_max_entry_hour: DEFAULT_SESSION_GAP_MAX_ENTRY_HOUR,
-        session_gap_close_hour: DEFAULT_SESSION_GAP_CLOSE_HOUR,
-        session_gap_close_minute: DEFAULT_SESSION_GAP_CLOSE_MINUTE,
-        session_gap_min: DEFAULT_SESSION_GAP_MIN,
-        session_gap_exit_offset_min: DEFAULT_SESSION_GAP_EXIT_OFFSET_MIN,
-        session_gap_work_weekends: DEFAULT_SESSION_GAP_WORK_WEEKENDS,
-        hybrid_intraday: HybridIntradaySettings::default(),
-    };
+    let mut strategy = StrategyConfig::defaults_for_kind(DEFAULT_STRATEGY_KIND);
 
     let mut read = ReadConfig {
         block_ms: DEFAULT_BLOCK_MS,
@@ -833,98 +1354,21 @@ pub fn load_runtime_config(
             }
         }
         if let Some(strategy_file) = &file_config.strategy {
-            if let Some(value) = &strategy_file.strategy_id {
-                strategy.strategy_id = value.clone();
-                sources.strategy.strategy_id = ConfigSource::File;
-            }
-            if let Some(value) = &strategy_file.strategy_kind {
-                strategy.strategy_kind = parse_strategy_kind(value)
-                    .with_context(|| format!("invalid strategy.strategy_kind: {value}"))?;
-                sources.strategy.strategy_kind = ConfigSource::File;
-            }
-            if let Some(value) = &strategy_file.symbol {
-                strategy.symbol = value.clone();
-                sources.strategy.symbol = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.qty {
-                strategy.qty = value;
-                sources.strategy.qty = ConfigSource::File;
-            }
-            if let Some(value) = &strategy_file.side {
-                strategy.side = parse_side(value);
-                sources.strategy.side = ConfigSource::File;
-            }
-            if let Some(value) = &strategy_file.live_order_style {
-                strategy.live_order_style = parse_live_order_style(value);
-                sources.strategy.live_order_style = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.marketable_limit_offset_ticks {
-                strategy.marketable_limit_offset_ticks = value;
-                sources.strategy.marketable_limit_offset_ticks = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.place_offset_ticks {
-                strategy.place_offset_ticks = value;
-                sources.strategy.place_offset_ticks = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.tick_size {
-                strategy.tick_size = value;
-                sources.strategy.tick_size = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.max_wait_bars_for_ack {
-                strategy.max_wait_bars_for_ack = value;
-                sources.strategy.max_wait_bars_for_ack = ConfigSource::File;
-            }
-            if let Some(value) = &strategy_file.close_trigger {
-                strategy.close_trigger = parse_close_trigger(value);
-                sources.strategy.close_trigger = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.entry_ack_timeout_ms {
-                strategy.entry_ack_timeout_ms = value;
-                sources.strategy.entry_ack_timeout_ms = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.entry_fill_timeout_ms {
-                strategy.entry_fill_timeout_ms = value;
-                sources.strategy.entry_fill_timeout_ms = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.exit_ack_timeout_ms {
-                strategy.exit_ack_timeout_ms = value;
-                sources.strategy.exit_ack_timeout_ms = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.exit_fill_timeout_ms {
-                strategy.exit_fill_timeout_ms = value;
-                sources.strategy.exit_fill_timeout_ms = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.session_open_hour {
-                strategy.session_open_hour = value;
-                sources.strategy.session_open_hour = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.session_open_minute {
-                strategy.session_open_minute = value;
-                sources.strategy.session_open_minute = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.session_close_hour {
-                strategy.session_close_hour = value;
-                sources.strategy.session_close_hour = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.session_close_minute {
-                strategy.session_close_minute = value;
-                sources.strategy.session_close_minute = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.entry_after_open_min {
-                strategy.entry_after_open_min = value;
-                sources.strategy.entry_after_open_min = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.exit_before_close_min {
-                strategy.exit_before_close_min = value;
-                sources.strategy.exit_before_close_min = ConfigSource::File;
-            }
-            if let Some(value) = strategy_file.timezone_offset_hours {
-                strategy.timezone_offset_hours = value;
-                sources.strategy.timezone_offset_hours = ConfigSource::File;
-            }
-            if let Some(value) = &strategy_file.trading_periods {
-                strategy.trading_periods = Some(value.clone());
-                sources.strategy.trading_periods = ConfigSource::File;
+            apply_strategy_common_config_file(
+                &mut strategy,
+                &mut sources.strategy,
+                &strategy_file.common_legacy,
+                ConfigSource::File,
+                "strategy.strategy_kind",
+            )?;
+            if let Some(common_file) = &strategy_file.common {
+                apply_strategy_common_config_file(
+                    &mut strategy,
+                    &mut sources.strategy,
+                    common_file,
+                    ConfigSource::File,
+                    "strategy.common.strategy_kind",
+                )?;
             }
             if strategy.trading_periods.is_none() {
                 if let Some(value) = &file_config.trading_periods {
@@ -932,171 +1376,51 @@ pub fn load_runtime_config(
                     sources.strategy.trading_periods = ConfigSource::File;
                 }
             }
-            if let Some(value) = strategy_file.max_silence_bars_sec {
-                strategy.max_silence_bars_sec = value;
-                sources.strategy.max_silence_bars_sec = ConfigSource::File;
+            apply_legacy_specific_config_file(
+                &mut strategy,
+                &mut sources.strategy,
+                &strategy_file.legacy_specific,
+                ConfigSource::File,
+            );
+            if let Some(limit_cancel_file) = &strategy_file.limit_cancel {
+                apply_limit_cancel_config_file(
+                    &mut strategy,
+                    &mut sources.strategy,
+                    limit_cancel_file,
+                    ConfigSource::File,
+                );
+            }
+            if let Some(market_buy_and_close_file) = &strategy_file.market_buy_and_close {
+                apply_market_buy_and_close_config_file(
+                    &mut strategy,
+                    &mut sources.strategy,
+                    market_buy_and_close_file,
+                    ConfigSource::File,
+                );
+            }
+            if let Some(mock_live_probe_file) = &strategy_file.mock_live_probe {
+                apply_mock_live_probe_config_file(
+                    &mut strategy,
+                    &mut sources.strategy,
+                    mock_live_probe_file,
+                    ConfigSource::File,
+                );
             }
             if let Some(session_gap_file) = &strategy_file.session_gap {
-                if let Some(value) = session_gap_file.k_long {
-                    strategy.session_gap_k_long = value;
-                    sources.strategy.session_gap_k_long = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.k_short {
-                    strategy.session_gap_k_short = value;
-                    sources.strategy.session_gap_k_short = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.wait_hours {
-                    strategy.session_gap_wait_hours = value;
-                    sources.strategy.session_gap_wait_hours = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.k_tp_long {
-                    strategy.session_gap_k_tp_long = value;
-                    sources.strategy.session_gap_k_tp_long = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.k_sl_long {
-                    strategy.session_gap_k_sl_long = value;
-                    sources.strategy.session_gap_k_sl_long = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.k_tp_short {
-                    strategy.session_gap_k_tp_short = value;
-                    sources.strategy.session_gap_k_tp_short = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.k_sl_short {
-                    strategy.session_gap_k_sl_short = value;
-                    sources.strategy.session_gap_k_sl_short = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.long_ex_pct {
-                    strategy.session_gap_long_ex_pct = value;
-                    sources.strategy.session_gap_long_ex_pct = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.short_ex_pct {
-                    strategy.session_gap_short_ex_pct = value;
-                    sources.strategy.session_gap_short_ex_pct = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.start_cash {
-                    strategy.session_gap_start_cash = value;
-                    sources.strategy.session_gap_start_cash = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.cash_factor {
-                    strategy.session_gap_cash_factor = value;
-                    sources.strategy.session_gap_cash_factor = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.max_entry_hour {
-                    strategy.session_gap_max_entry_hour = value;
-                    sources.strategy.session_gap_max_entry_hour = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.close_hour {
-                    strategy.session_gap_close_hour = value;
-                    sources.strategy.session_gap_close_hour = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.close_minute {
-                    strategy.session_gap_close_minute = value;
-                    sources.strategy.session_gap_close_minute = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.session_gap_min {
-                    strategy.session_gap_min = value;
-                    sources.strategy.session_gap_min = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.exit_offset_min {
-                    strategy.session_gap_exit_offset_min = value;
-                    sources.strategy.session_gap_exit_offset_min = ConfigSource::File;
-                }
-                if let Some(value) = session_gap_file.work_weekends {
-                    strategy.session_gap_work_weekends = value;
-                    sources.strategy.session_gap_work_weekends = ConfigSource::File;
-                }
+                apply_session_gap_config_file(
+                    &mut strategy,
+                    &mut sources.strategy,
+                    session_gap_file,
+                    ConfigSource::File,
+                );
             }
             if let Some(hybrid_file) = &strategy_file.hybrid_intraday {
-                sources.strategy.hybrid_intraday = ConfigSource::File;
-                if let Some(value) = hybrid_file.mr_min_range_long {
-                    strategy.hybrid_intraday.mr_min_range_long = value;
-                }
-                if let Some(value) = hybrid_file.mr_max_range_long {
-                    strategy.hybrid_intraday.mr_max_range_long = value;
-                }
-                if let Some(value) = hybrid_file.mr_k_long {
-                    strategy.hybrid_intraday.mr_k_long = value;
-                }
-                if let Some(value) = hybrid_file.mr_take_k_long {
-                    strategy.hybrid_intraday.mr_take_k_long = value;
-                }
-                if let Some(value) = hybrid_file.mr_stop_k_long {
-                    strategy.hybrid_intraday.mr_stop_k_long = value;
-                }
-                if let Some(value) = hybrid_file.mr_min_range_short {
-                    strategy.hybrid_intraday.mr_min_range_short = value;
-                }
-                if let Some(value) = hybrid_file.mr_max_range_short {
-                    strategy.hybrid_intraday.mr_max_range_short = value;
-                }
-                if let Some(value) = hybrid_file.mr_k_short {
-                    strategy.hybrid_intraday.mr_k_short = value;
-                }
-                if let Some(value) = hybrid_file.mr_take_k_short {
-                    strategy.hybrid_intraday.mr_take_k_short = value;
-                }
-                if let Some(value) = hybrid_file.mr_stop_k_short {
-                    strategy.hybrid_intraday.mr_stop_k_short = value;
-                }
-                if let Some(value) = &hybrid_file.mr_session_end_time {
-                    strategy.hybrid_intraday.mr_session_end_time = value.clone();
-                }
-                if let Some(value) = hybrid_file.mr_exit_offset_min {
-                    strategy.hybrid_intraday.mr_exit_offset_min = value;
-                }
-                if let Some(value) = hybrid_file.bo_k {
-                    strategy.hybrid_intraday.bo_k = value;
-                }
-                if let Some(value) = hybrid_file.bo_stop1_range {
-                    strategy.hybrid_intraday.bo_stop1_range = value;
-                }
-                if let Some(value) = hybrid_file.bo_stop2_range {
-                    strategy.hybrid_intraday.bo_stop2_range = value;
-                }
-                if let Some(value) = hybrid_file.bo_big_move_threshold {
-                    strategy.hybrid_intraday.bo_big_move_threshold = value;
-                }
-                if let Some(value) = hybrid_file.bo_min_range {
-                    strategy.hybrid_intraday.bo_min_range = value;
-                }
-                if let Some(value) = &hybrid_file.bo_min_range_mode {
-                    strategy.hybrid_intraday.bo_min_range_mode = value.clone();
-                }
-                if let Some(value) = hybrid_file.bo_exclude_weekends {
-                    strategy.hybrid_intraday.bo_exclude_weekends = value;
-                }
-                if let Some(value) = hybrid_file.bo_wait_hours {
-                    strategy.hybrid_intraday.bo_wait_hours = value;
-                }
-                if let Some(value) = &hybrid_file.orchestrator_breakout_eod_mode {
-                    strategy.hybrid_intraday.orchestrator_breakout_eod_mode = value.clone();
-                }
-                if let Some(value) = &hybrid_file.orchestrator_breakout_overnight_exit_time {
-                    strategy
-                        .hybrid_intraday
-                        .orchestrator_breakout_overnight_exit_time = value.clone();
-                }
-                if let Some(value) = hybrid_file.repair_deadline_sec {
-                    strategy.hybrid_intraday.repair_deadline_sec = value;
-                }
-                if let Some(value) = hybrid_file.sl_escalate_timeout_sec {
-                    strategy.hybrid_intraday.sl_escalate_timeout_sec = value;
-                }
-                if let Some(value) = hybrid_file.max_repair_retries {
-                    strategy.hybrid_intraday.max_repair_retries = value;
-                }
-                if let Some(value) = hybrid_file.repair_backoff_base_sec {
-                    strategy.hybrid_intraday.repair_backoff_base_sec = value;
-                }
-                if let Some(value) = hybrid_file.repair_backoff_max_sec {
-                    strategy.hybrid_intraday.repair_backoff_max_sec = value;
-                }
-                if let Some(value) = hybrid_file.pending_timeout_sec {
-                    strategy.hybrid_intraday.pending_timeout_sec = value;
-                }
-                if let Some(value) = hybrid_file.stop_end_buffer_sec {
-                    strategy.hybrid_intraday.stop_end_buffer_sec = value;
-                }
+                apply_hybrid_intraday_config_file(
+                    &mut strategy,
+                    &mut sources.strategy,
+                    hybrid_file,
+                    ConfigSource::File,
+                );
             }
         }
         if let Some(runtime_file) = &file_config.runtime {
@@ -1308,8 +1632,9 @@ pub fn load_runtime_config(
         sources.strategy.strategy_id = ConfigSource::Env;
     }
     if let Ok(value) = env::var("STRATEGY_KIND") {
-        strategy.strategy_kind = parse_strategy_kind(&value)
-            .with_context(|| format!("invalid STRATEGY_KIND: {value}"))?;
+        strategy.set_kind(
+            parse_strategy_kind(&value).with_context(|| format!("invalid STRATEGY_KIND: {value}"))?,
+        );
         sources.strategy.strategy_kind = ConfigSource::Env;
     }
     if let Ok(value) = env::var("SYMBOL") {
@@ -1325,44 +1650,75 @@ pub fn load_runtime_config(
         sources.strategy.side = ConfigSource::Env;
     }
     if let Ok(value) = env::var("LIVE_ORDER_STYLE") {
-        strategy.live_order_style = parse_live_order_style(&value);
-        sources.strategy.live_order_style = ConfigSource::Env;
+        apply_live_order_style(
+            &mut strategy,
+            &mut sources.strategy,
+            parse_live_order_style(&value),
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("MARKETABLE_LIMIT_OFFSET_TICKS") {
-        strategy.marketable_limit_offset_ticks = value;
-        sources.strategy.marketable_limit_offset_ticks = ConfigSource::Env;
+        apply_marketable_limit_offset_ticks(
+            &mut strategy,
+            &mut sources.strategy,
+            value,
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("PLACE_OFFSET_TICKS") {
-        strategy.place_offset_ticks = value;
-        sources.strategy.place_offset_ticks = ConfigSource::Env;
+        apply_place_offset_ticks(&mut strategy, &mut sources.strategy, value, ConfigSource::Env);
     }
     if let Some(value) = env_parse("TICK_SIZE") {
         strategy.tick_size = value;
         sources.strategy.tick_size = ConfigSource::Env;
     }
     if let Some(value) = env_parse("MAX_WAIT_BARS_FOR_ACK") {
-        strategy.max_wait_bars_for_ack = value;
-        sources.strategy.max_wait_bars_for_ack = ConfigSource::Env;
+        apply_max_wait_bars_for_ack(
+            &mut strategy,
+            &mut sources.strategy,
+            value,
+            ConfigSource::Env,
+        );
     }
     if let Ok(value) = env::var("CLOSE_TRIGGER") {
-        strategy.close_trigger = parse_close_trigger(&value);
-        sources.strategy.close_trigger = ConfigSource::Env;
+        apply_close_trigger(
+            &mut strategy,
+            &mut sources.strategy,
+            parse_close_trigger(&value),
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("ENTRY_ACK_TIMEOUT_MS") {
-        strategy.entry_ack_timeout_ms = value;
-        sources.strategy.entry_ack_timeout_ms = ConfigSource::Env;
+        apply_entry_ack_timeout_ms(
+            &mut strategy,
+            &mut sources.strategy,
+            value,
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("ENTRY_FILL_TIMEOUT_MS") {
-        strategy.entry_fill_timeout_ms = value;
-        sources.strategy.entry_fill_timeout_ms = ConfigSource::Env;
+        apply_entry_fill_timeout_ms(
+            &mut strategy,
+            &mut sources.strategy,
+            value,
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("EXIT_ACK_TIMEOUT_MS") {
-        strategy.exit_ack_timeout_ms = value;
-        sources.strategy.exit_ack_timeout_ms = ConfigSource::Env;
+        apply_exit_ack_timeout_ms(
+            &mut strategy,
+            &mut sources.strategy,
+            value,
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("EXIT_FILL_TIMEOUT_MS") {
-        strategy.exit_fill_timeout_ms = value;
-        sources.strategy.exit_fill_timeout_ms = ConfigSource::Env;
+        apply_exit_fill_timeout_ms(
+            &mut strategy,
+            &mut sources.strategy,
+            value,
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("SESSION_OPEN_HOUR") {
         strategy.session_open_hour = value;
@@ -1818,7 +2174,12 @@ timezone_offset_hours = 3
         );
 
         let resolved = load_runtime_config(path.clone(), false).expect("load config");
-        let periods = resolved.config.strategy.trading_periods.expect("periods");
+        let periods = resolved
+            .config
+            .strategy
+            .trading_periods
+            .clone()
+            .expect("periods");
         assert_eq!(periods.timezone_offset_hours, 3);
         assert_eq!(
             resolved.sources.strategy.trading_periods,
@@ -1848,11 +2209,16 @@ marketable_limit_offset_ticks = 2
         );
 
         let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        let strategy = resolved
+            .config
+            .strategy
+            .market_buy_and_close()
+            .expect("market buy and close settings");
         assert_eq!(
-            resolved.config.strategy.live_order_style,
+            strategy.live_order_style,
             MarketBuyAndCloseLiveOrderStyle::Market
         );
-        assert_eq!(resolved.config.strategy.marketable_limit_offset_ticks, 2);
+        assert_eq!(strategy.marketable_limit_offset_ticks, 2);
         assert_eq!(
             resolved.sources.strategy.live_order_style,
             ConfigSource::File
@@ -1885,11 +2251,16 @@ marketable_limit_offset_ticks = 3
         );
 
         let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        let strategy = resolved
+            .config
+            .strategy
+            .market_buy_and_close()
+            .expect("market buy and close settings");
         assert_eq!(
-            resolved.config.strategy.live_order_style,
+            strategy.live_order_style,
             MarketBuyAndCloseLiveOrderStyle::MarketableLimit
         );
-        assert_eq!(resolved.config.strategy.marketable_limit_offset_ticks, 3);
+        assert_eq!(strategy.marketable_limit_offset_ticks, 3);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1912,14 +2283,16 @@ side = "buy"
         );
 
         let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        let strategy = resolved
+            .config
+            .strategy
+            .market_buy_and_close()
+            .expect("market buy and close settings");
         assert_eq!(
-            resolved.config.strategy.live_order_style,
+            strategy.live_order_style,
             MarketBuyAndCloseLiveOrderStyle::Market
         );
-        assert_eq!(
-            resolved.config.strategy.marketable_limit_offset_ticks,
-            DEFAULT_MARKETABLE_LIMIT_OFFSET_TICKS
-        );
+        assert_eq!(strategy.marketable_limit_offset_ticks, 0);
         assert_eq!(
             resolved.sources.strategy.live_order_style,
             ConfigSource::Default

@@ -10,26 +10,16 @@ pub mod strategy_registry;
 pub mod trade_ledger;
 
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 
 use alor_protocol::{CommandAction, IntentClass, OrderCommand, PlaceOrder, Side};
 use alor_types::TradingPeriods;
-use chrono::{Duration, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::strategies::hybrid_intraday::{
-    BreakoutEodMode, HybridOrchestratorConfig, IntradayBreakoutConfig, MeanReversionConfig,
-    MinRangeMode,
-};
-use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeConfig;
 use crate::strategies::limit_cancel::LimitCancelConfig;
-use crate::strategies::market_buy_and_close::{
-    MarketBuyAndCloseConfig, MarketBuyAndCloseLiveOrderStyle,
-};
-use crate::strategies::mock_live_probe::{MockLiveProbeConfig, MockLiveProbeMode};
-use crate::strategies::session_gap_standalone::SessionGapStandaloneConfig;
-use crate::strategies::toy_session_timing::ToySessionTimingConfig;
+use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 pub use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
     RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
@@ -136,23 +126,18 @@ pub struct TrimConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrategyConfig {
+    pub common: StrategyCommonConfig,
+    pub specific: StrategySpecificConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StrategyCommonConfig {
     pub strategy_id: String,
     pub strategy_kind: StrategyKind,
     pub symbol: String,
     pub qty: f64,
     pub side: Side,
-    #[serde(default)]
-    pub live_order_style: MarketBuyAndCloseLiveOrderStyle,
-    #[serde(default)]
-    pub marketable_limit_offset_ticks: i64,
-    pub place_offset_ticks: i64,
     pub tick_size: f64,
-    pub max_wait_bars_for_ack: u32,
-    pub close_trigger: CloseTrigger,
-    pub entry_ack_timeout_ms: u64,
-    pub entry_fill_timeout_ms: u64,
-    pub exit_ack_timeout_ms: u64,
-    pub exit_fill_timeout_ms: u64,
     pub session_open_hour: u32,
     pub session_open_minute: u32,
     pub session_close_hour: u32,
@@ -164,25 +149,76 @@ pub struct StrategyConfig {
     pub trading_periods: Option<TradingPeriods>,
     #[serde(default)]
     pub max_silence_bars_sec: u64,
-    pub session_gap_k_long: f64,
-    pub session_gap_k_short: f64,
-    pub session_gap_wait_hours: i64,
-    pub session_gap_k_tp_long: f64,
-    pub session_gap_k_sl_long: f64,
-    pub session_gap_k_tp_short: f64,
-    pub session_gap_k_sl_short: f64,
-    pub session_gap_long_ex_pct: f64,
-    pub session_gap_short_ex_pct: f64,
-    pub session_gap_start_cash: f64,
-    pub session_gap_cash_factor: f64,
-    pub session_gap_max_entry_hour: u32,
-    pub session_gap_close_hour: u32,
-    pub session_gap_close_minute: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LimitCancelSettings {
+    pub place_offset_ticks: i64,
+    pub max_wait_bars_for_ack: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MarketBuyAndCloseSettings {
+    pub live_order_style: MarketBuyAndCloseLiveOrderStyle,
+    pub marketable_limit_offset_ticks: i64,
+    pub close_trigger: CloseTrigger,
+    pub entry_ack_timeout_ms: u64,
+    pub entry_fill_timeout_ms: u64,
+    pub exit_ack_timeout_ms: u64,
+    pub exit_fill_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ToySessionTimingSettings;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MockLiveProbeSettings {
+    pub place_offset_ticks: i64,
+    pub max_wait_bars_for_ack: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionGapStandaloneSettings {
+    pub place_offset_ticks: i64,
+    pub entry_ack_timeout_ms: u64,
+    pub entry_fill_timeout_ms: u64,
+    pub exit_ack_timeout_ms: u64,
+    pub exit_fill_timeout_ms: u64,
+    pub k_long: f64,
+    pub k_short: f64,
+    pub wait_hours: i64,
+    pub k_tp_long: f64,
+    pub k_sl_long: f64,
+    pub k_tp_short: f64,
+    pub k_sl_short: f64,
+    pub long_ex_pct: f64,
+    pub short_ex_pct: f64,
+    pub start_cash: f64,
+    pub cash_factor: f64,
+    pub max_entry_hour: u32,
+    pub close_hour: u32,
+    pub close_minute: u32,
     pub session_gap_min: f64,
-    pub session_gap_exit_offset_min: i64,
-    pub session_gap_work_weekends: bool,
+    pub exit_offset_min: i64,
+    pub work_weekends: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HybridIntradayStrategySettings {
+    pub live_order_style: MarketBuyAndCloseLiveOrderStyle,
+    pub marketable_limit_offset_ticks: i64,
     #[serde(default)]
-    pub hybrid_intraday: HybridIntradaySettings,
+    pub strategy: HybridIntradaySettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum StrategySpecificConfig {
+    LimitCancel(LimitCancelSettings),
+    MarketBuyAndClose(MarketBuyAndCloseSettings),
+    ToySessionTiming(ToySessionTimingSettings),
+    SessionGapStandalone(SessionGapStandaloneSettings),
+    MockLiveProbe(MockLiveProbeSettings),
+    HybridIntraday(HybridIntradayStrategySettings),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -250,6 +286,129 @@ impl Default for HybridIntradaySettings {
             repair_backoff_max_sec: 60,
             pending_timeout_sec: 60,
             stop_end_buffer_sec: 60,
+        }
+    }
+}
+
+impl Default for StrategyCommonConfig {
+    fn default() -> Self {
+        Self {
+            strategy_id: "limit_cancel".to_string(),
+            strategy_kind: StrategyKind::LimitCancel,
+            symbol: "SBER".to_string(),
+            qty: 1.0,
+            side: Side::Buy,
+            tick_size: 0.01,
+            session_open_hour: 10,
+            session_open_minute: 0,
+            session_close_hour: 23,
+            session_close_minute: 50,
+            entry_after_open_min: 59,
+            exit_before_close_min: 20,
+            timezone_offset_hours: 3,
+            trading_periods: None,
+            max_silence_bars_sec: 0,
+        }
+    }
+}
+
+impl Default for LimitCancelSettings {
+    fn default() -> Self {
+        Self {
+            place_offset_ticks: 1,
+            max_wait_bars_for_ack: 3,
+        }
+    }
+}
+
+impl Default for MarketBuyAndCloseSettings {
+    fn default() -> Self {
+        Self {
+            live_order_style: MarketBuyAndCloseLiveOrderStyle::Market,
+            marketable_limit_offset_ticks: 0,
+            close_trigger: CloseTrigger::NextBar,
+            entry_ack_timeout_ms: 15_000,
+            entry_fill_timeout_ms: 60_000,
+            exit_ack_timeout_ms: 15_000,
+            exit_fill_timeout_ms: 60_000,
+        }
+    }
+}
+
+impl Default for MockLiveProbeSettings {
+    fn default() -> Self {
+        Self {
+            place_offset_ticks: 1,
+            max_wait_bars_for_ack: 3,
+        }
+    }
+}
+
+impl Default for SessionGapStandaloneSettings {
+    fn default() -> Self {
+        Self {
+            place_offset_ticks: 1,
+            entry_ack_timeout_ms: 15_000,
+            entry_fill_timeout_ms: 60_000,
+            exit_ack_timeout_ms: 15_000,
+            exit_fill_timeout_ms: 60_000,
+            k_long: 0.5,
+            k_short: 0.46,
+            wait_hours: 2,
+            k_tp_long: 0.28,
+            k_sl_long: 0.68,
+            k_tp_short: 0.28,
+            k_sl_short: 0.65,
+            long_ex_pct: 2.2,
+            short_ex_pct: 2.2,
+            start_cash: 30_000.0,
+            cash_factor: 0.9,
+            max_entry_hour: 19,
+            close_hour: 23,
+            close_minute: 49,
+            session_gap_min: 60.0,
+            exit_offset_min: 20,
+            work_weekends: false,
+        }
+    }
+}
+
+impl Default for HybridIntradayStrategySettings {
+    fn default() -> Self {
+        Self {
+            live_order_style: MarketBuyAndCloseLiveOrderStyle::Market,
+            marketable_limit_offset_ticks: 0,
+            strategy: HybridIntradaySettings::default(),
+        }
+    }
+}
+
+impl StrategySpecificConfig {
+    pub fn default_for_kind(kind: StrategyKind) -> Self {
+        match kind {
+            StrategyKind::LimitCancel => Self::LimitCancel(LimitCancelSettings::default()),
+            StrategyKind::MarketBuyAndClose => {
+                Self::MarketBuyAndClose(MarketBuyAndCloseSettings::default())
+            }
+            StrategyKind::ToySessionTiming => Self::ToySessionTiming(ToySessionTimingSettings),
+            StrategyKind::SessionGapStandalone => {
+                Self::SessionGapStandalone(SessionGapStandaloneSettings::default())
+            }
+            StrategyKind::MockLiveProbe => Self::MockLiveProbe(MockLiveProbeSettings::default()),
+            StrategyKind::HybridIntraday => {
+                Self::HybridIntraday(HybridIntradayStrategySettings::default())
+            }
+        }
+    }
+
+    pub fn kind(&self) -> StrategyKind {
+        match self {
+            StrategySpecificConfig::LimitCancel(_) => StrategyKind::LimitCancel,
+            StrategySpecificConfig::MarketBuyAndClose(_) => StrategyKind::MarketBuyAndClose,
+            StrategySpecificConfig::ToySessionTiming(_) => StrategyKind::ToySessionTiming,
+            StrategySpecificConfig::SessionGapStandalone(_) => StrategyKind::SessionGapStandalone,
+            StrategySpecificConfig::MockLiveProbe(_) => StrategyKind::MockLiveProbe,
+            StrategySpecificConfig::HybridIntraday(_) => StrategyKind::HybridIntraday,
         }
     }
 }
@@ -325,174 +484,126 @@ pub struct BacktestConfig {
 }
 
 impl StrategyConfig {
-    pub fn to_limit_cancel_config(&self) -> LimitCancelConfig {
-        LimitCancelConfig {
-            symbol: self.symbol.clone(),
-            tick_size: self.tick_size,
-            offset_ticks: self.place_offset_ticks,
-            qty: self.qty,
-            side: self.side,
-            max_wait_bars_for_ack: self.max_wait_bars_for_ack,
-        }
-    }
-
-    pub fn to_market_buy_and_close_config(&self) -> MarketBuyAndCloseConfig {
-        MarketBuyAndCloseConfig {
-            symbol: self.symbol.clone(),
-            qty: self.qty,
-            side: self.side,
-            live_order_style: self.live_order_style,
-            tick_size: self.tick_size,
-            marketable_limit_offset_ticks: self.marketable_limit_offset_ticks,
-            close_trigger: self.close_trigger,
-            entry_ack_timeout_ms: self.entry_ack_timeout_ms,
-            entry_fill_timeout_ms: self.entry_fill_timeout_ms,
-            exit_ack_timeout_ms: self.exit_ack_timeout_ms,
-            exit_fill_timeout_ms: self.exit_fill_timeout_ms,
-        }
-    }
-
-    pub fn to_toy_session_timing_config(&self) -> ToySessionTimingConfig {
-        ToySessionTimingConfig {
-            symbol: self.symbol.clone(),
-            qty: self.qty,
-            entry_side: self.side,
-            session_open_hour: self.session_open_hour,
-            session_open_minute: self.session_open_minute,
-            session_close_hour: self.session_close_hour,
-            session_close_minute: self.session_close_minute,
-            entry_after_open_min: self.entry_after_open_min,
-            exit_before_close_min: self.exit_before_close_min,
-            timezone_offset_hours: self.timezone_offset_hours,
-        }
-    }
-
-    pub fn to_mock_live_probe_config(&self) -> MockLiveProbeConfig {
-        MockLiveProbeConfig {
-            symbol: self.symbol.clone(),
-            qty: self.qty,
-            side: self.side,
-            tick_size: self.tick_size,
-            offset_ticks: self.place_offset_ticks,
-            trigger_after_live_bars: self.max_wait_bars_for_ack.max(1),
-            mode: MockLiveProbeMode::parse(&self.strategy_id),
-        }
-    }
-
-    pub fn to_session_gap_standalone_config(&self) -> SessionGapStandaloneConfig {
-        SessionGapStandaloneConfig {
-            symbol: self.symbol.clone(),
-            timezone_offset_hours: self.timezone_offset_hours,
-            place_offset_ticks: self.place_offset_ticks,
-            tick_size: self.tick_size,
-            close_hour: self.session_gap_close_hour,
-            close_minute: self.session_gap_close_minute,
-            entry_ack_timeout_ms: self.entry_ack_timeout_ms,
-            entry_fill_timeout_ms: self.entry_fill_timeout_ms,
-            exit_ack_timeout_ms: self.exit_ack_timeout_ms,
-            exit_fill_timeout_ms: self.exit_fill_timeout_ms,
-            k_long: self.session_gap_k_long,
-            k_short: self.session_gap_k_short,
-            wait_hours: self.session_gap_wait_hours,
-            k_tp_long: self.session_gap_k_tp_long,
-            k_sl_long: self.session_gap_k_sl_long,
-            k_tp_short: self.session_gap_k_tp_short,
-            k_sl_short: self.session_gap_k_sl_short,
-            long_ex_pct: self.session_gap_long_ex_pct,
-            short_ex_pct: self.session_gap_short_ex_pct,
-            session_gap_min: self.session_gap_min,
-            exit_offset_min: self.session_gap_exit_offset_min,
-            work_weekends: self.session_gap_work_weekends,
-            cash_factor: self.session_gap_cash_factor,
-            start_cash: self.session_gap_start_cash,
-            max_entry_hour: self.session_gap_max_entry_hour,
-        }
-    }
-
-    pub fn to_hybrid_intraday_runtime_config(&self) -> HybridIntradayRuntimeConfig {
-        let (session_close_hour, session_close_minute, weekends_off) = self
-            .trading_periods
-            .as_ref()
-            .map(|p| (p.session_end.hour(), p.session_end.minute(), p.weekends_off))
-            .unwrap_or((self.session_close_hour, self.session_close_minute, false));
-        let mr_session_end_time =
-            NaiveTime::parse_from_str(&self.hybrid_intraday.mr_session_end_time, "%H:%M:%S")
-                .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 59, 0).unwrap_or(NaiveTime::MIN));
-        let bo_min_range_mode = match self
-            .hybrid_intraday
-            .bo_min_range_mode
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "disabled" => MinRangeMode::Disabled,
-            "relative_prev_close" | "relativeprevclose" => MinRangeMode::RelativePrevClose,
-            _ => MinRangeMode::Absolute,
-        };
-        let breakout_eod_mode = match self
-            .hybrid_intraday
-            .orchestrator_breakout_eod_mode
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "overnight" => BreakoutEodMode::Overnight,
-            _ => BreakoutEodMode::SameDay,
-        };
-        let breakout_overnight_exit_time = NaiveTime::parse_from_str(
-            &self
-                .hybrid_intraday
-                .orchestrator_breakout_overnight_exit_time,
-            "%H:%M:%S",
-        )
-        .unwrap_or_else(|_| NaiveTime::from_hms_opt(9, 30, 0).unwrap_or(NaiveTime::MIN));
-        HybridIntradayRuntimeConfig {
-            symbol: self.symbol.clone(),
-            qty: self.qty.max(1.0),
-            live_order_style: self.live_order_style,
-            tick_size: self.tick_size,
-            marketable_limit_offset_ticks: self.marketable_limit_offset_ticks,
-            timezone_offset_hours: self.timezone_offset_hours,
-            session_close_hour,
-            session_close_minute,
-            weekends_off,
-            stop_end_buffer_sec: self.hybrid_intraday.stop_end_buffer_sec.max(1),
-            repair_deadline_sec: self.hybrid_intraday.repair_deadline_sec.max(1),
-            sl_escalate_timeout_sec: self.hybrid_intraday.sl_escalate_timeout_sec.max(1),
-            max_repair_retries: self.hybrid_intraday.max_repair_retries.max(1),
-            repair_backoff_base_sec: self.hybrid_intraday.repair_backoff_base_sec.max(1),
-            repair_backoff_max_sec: self
-                .hybrid_intraday
-                .repair_backoff_max_sec
-                .max(self.hybrid_intraday.repair_backoff_base_sec.max(1)),
-            pending_timeout_sec: self.hybrid_intraday.pending_timeout_sec.max(1),
-            mr_config: MeanReversionConfig {
-                min_range_long: self.hybrid_intraday.mr_min_range_long,
-                max_range_long: self.hybrid_intraday.mr_max_range_long,
-                k_long: self.hybrid_intraday.mr_k_long,
-                take_k_long: self.hybrid_intraday.mr_take_k_long,
-                stop_k_long: self.hybrid_intraday.mr_stop_k_long,
-                min_range_short: self.hybrid_intraday.mr_min_range_short,
-                max_range_short: self.hybrid_intraday.mr_max_range_short,
-                k_short: self.hybrid_intraday.mr_k_short,
-                take_k_short: self.hybrid_intraday.mr_take_k_short,
-                stop_k_short: self.hybrid_intraday.mr_stop_k_short,
-                tick_size: self.tick_size,
-                session_end_time: mr_session_end_time,
-                exit_offset: Duration::minutes(self.hybrid_intraday.mr_exit_offset_min.max(0)),
+    pub fn defaults_for_kind(kind: StrategyKind) -> Self {
+        Self {
+            common: StrategyCommonConfig {
+                strategy_kind: kind,
+                strategy_id: kind.default_strategy_id().to_string(),
+                ..StrategyCommonConfig::default()
             },
-            breakout_config: IntradayBreakoutConfig {
-                k: self.hybrid_intraday.bo_k,
-                stop1_range: self.hybrid_intraday.bo_stop1_range,
-                stop2_range: self.hybrid_intraday.bo_stop2_range,
-                big_move_threshold: self.hybrid_intraday.bo_big_move_threshold,
-                min_range: self.hybrid_intraday.bo_min_range,
-                min_range_mode: bo_min_range_mode,
-                exclude_weekends: self.hybrid_intraday.bo_exclude_weekends,
-                wait_hours: self.hybrid_intraday.bo_wait_hours,
-            },
-            orchestrator_config: HybridOrchestratorConfig {
-                breakout_eod_mode,
-                breakout_overnight_exit_time,
-            },
+            specific: StrategySpecificConfig::default_for_kind(kind),
+        }
+    }
+
+    pub fn set_kind(&mut self, kind: StrategyKind) {
+        self.common.strategy_kind = kind;
+        if self.specific.kind() != kind {
+            self.specific = StrategySpecificConfig::default_for_kind(kind);
+        }
+    }
+
+    pub fn specific(&self) -> &StrategySpecificConfig {
+        &self.specific
+    }
+
+    pub fn specific_mut(&mut self) -> &mut StrategySpecificConfig {
+        &mut self.specific
+    }
+
+    pub fn limit_cancel(&self) -> Option<&LimitCancelSettings> {
+        match &self.specific {
+            StrategySpecificConfig::LimitCancel(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn limit_cancel_mut(&mut self) -> Option<&mut LimitCancelSettings> {
+        match &mut self.specific {
+            StrategySpecificConfig::LimitCancel(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn market_buy_and_close(&self) -> Option<&MarketBuyAndCloseSettings> {
+        match &self.specific {
+            StrategySpecificConfig::MarketBuyAndClose(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn market_buy_and_close_mut(&mut self) -> Option<&mut MarketBuyAndCloseSettings> {
+        match &mut self.specific {
+            StrategySpecificConfig::MarketBuyAndClose(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn mock_live_probe(&self) -> Option<&MockLiveProbeSettings> {
+        match &self.specific {
+            StrategySpecificConfig::MockLiveProbe(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn mock_live_probe_mut(&mut self) -> Option<&mut MockLiveProbeSettings> {
+        match &mut self.specific {
+            StrategySpecificConfig::MockLiveProbe(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn session_gap_standalone(&self) -> Option<&SessionGapStandaloneSettings> {
+        match &self.specific {
+            StrategySpecificConfig::SessionGapStandalone(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn session_gap_standalone_mut(&mut self) -> Option<&mut SessionGapStandaloneSettings> {
+        match &mut self.specific {
+            StrategySpecificConfig::SessionGapStandalone(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn hybrid_intraday(&self) -> Option<&HybridIntradayStrategySettings> {
+        match &self.specific {
+            StrategySpecificConfig::HybridIntraday(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn hybrid_intraday_mut(&mut self) -> Option<&mut HybridIntradayStrategySettings> {
+        match &mut self.specific {
+            StrategySpecificConfig::HybridIntraday(settings) => Some(settings),
+            _ => None,
+        }
+    }
+}
+
+impl Deref for StrategyConfig {
+    type Target = StrategyCommonConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl DerefMut for StrategyConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.common
+    }
+}
+
+impl StrategyKind {
+    pub fn default_strategy_id(self) -> &'static str {
+        match self {
+            StrategyKind::LimitCancel => "limit_cancel",
+            StrategyKind::MarketBuyAndClose => "market_buy_and_close",
+            StrategyKind::ToySessionTiming => "toy_session_timing",
+            StrategyKind::SessionGapStandalone => "session_gap_standalone",
+            StrategyKind::MockLiveProbe => "mock_live_probe",
+            StrategyKind::HybridIntraday => "hybrid_intraday",
         }
     }
 }
