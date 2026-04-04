@@ -549,7 +549,7 @@ impl Session {
             .and_then(Value::as_bool)
             .unwrap_or(status_ok);
         if !status_ok || !cws_authorized {
-            bail!("authorize failed: {}", authorize_response);
+            bail!("authorize failed: {authorize_response}");
         }
         session.authorize_ts_utc = Some(Utc::now().timestamp());
         artifacts.log_event(
@@ -588,12 +588,12 @@ impl Session {
             if now >= deadline {
                 break;
             }
-            if let (Some(interval), Some(next_ping)) = (ping_interval, next_ping_at) {
-                if now >= next_ping {
-                    self.send_ping(artifacts, phase).await?;
-                    next_ping_at = Some(now + interval);
-                    continue;
-                }
+            if let (Some(interval), Some(next_ping)) = (ping_interval, next_ping_at)
+                && now >= next_ping
+            {
+                self.send_ping(artifacts, phase).await?;
+                next_ping_at = Some(now + interval);
+                continue;
             }
             let mut wait_for = deadline.saturating_duration_since(now);
             if let Some(next_ping) = next_ping_at {
@@ -624,6 +624,7 @@ impl Session {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_create_limit(
         &mut self,
         cfg: &ProbeConfig,
