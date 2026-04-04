@@ -363,7 +363,7 @@ pub enum Side {
 }
 
 pub fn infer_intent_class(explicit: Option<IntentClass>, action: &CommandAction) -> IntentClass {
-    explicit.unwrap_or_else(|| match action {
+    explicit.unwrap_or(match action {
         CommandAction::Cancel(_) | CommandAction::DeleteStopLimit(_) => IntentClass::CancelCleanup,
         CommandAction::Market(_) => IntentClass::Entry,
         CommandAction::Place(_) => IntentClass::Entry,
