@@ -3629,6 +3629,78 @@ mod tests {
             .unwrap()
     }
 
+    #[derive(Default)]
+    struct CallbackSpyStrategy {
+        state: StrategyState,
+    }
+
+    impl Strategy for CallbackSpyStrategy {
+        fn on_bar(&mut self, _ctx: &StrategyCtx, _bar: &BarEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_ack(
+            &mut self,
+            _ctx: &StrategyCtx,
+            _ack: &alor_protocol::CommandAck,
+        ) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_order(&mut self, _ctx: &StrategyCtx, _ord: &OrderEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_stop_order(&mut self, _ctx: &StrategyCtx, ord: &StopOrderEvent) -> Vec<Intent> {
+            self.state = StrategyState::Blocked {
+                reason: format!("spy_stop_order:{}", ord.stop_order_id),
+                last_bar_ts: ord.ts_utc,
+            };
+            Vec::new()
+        }
+
+        fn on_position(&mut self, _ctx: &StrategyCtx, _pos: &PositionEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_bootstrap_snapshot(
+            &mut self,
+            _ctx: &StrategyCtx,
+            snapshot: &BootstrapSnapshot,
+        ) -> Vec<Intent> {
+            let ts = snapshot.snapshot_ts_utc.unwrap_or_default();
+            self.state = StrategyState::Blocked {
+                reason: "spy_bootstrap_snapshot".to_string(),
+                last_bar_ts: ts,
+            };
+            Vec::new()
+        }
+
+        fn on_runtime_state_restored(
+            &mut self,
+            ctx: &StrategyCtx,
+            state: &RuntimeStateRestored,
+        ) -> Vec<Intent> {
+            self.state = StrategyState::Blocked {
+                reason: format!(
+                    "spy_runtime_state_restored:{}:{}",
+                    state.known_order_ids.len(),
+                    state.pending_requests.len()
+                ),
+                last_bar_ts: ctx.last_bar_ts().unwrap_or_default(),
+            };
+            Vec::new()
+        }
+
+        fn state(&self) -> &StrategyState {
+            &self.state
+        }
+
+        fn set_state(&mut self, state: StrategyState) {
+            self.state = state;
+        }
+    }
+
     #[test]
     fn runtime_loads_minimal_strategy_capabilities_from_registry() {
         let limit_runtime = test_runtime(TradeMode::Live);
@@ -3655,6 +3727,128 @@ mod tests {
                 uses_stop_orders: true,
             }
         );
+    }
+
+    #[test]
+    fn bootstrap_snapshot_callback_is_skipped_without_capability() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        let symbol = runtime.config.strategy.symbol.clone();
+        let snapshot_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        runtime.strategy = Box::new(CallbackSpyStrategy::default());
+        runtime.state.strategy_state = StrategyState::Idle;
+        runtime
+            .state
+            .last_processed_bar_ts
+            .insert(symbol, snapshot_ts - 60);
+        runtime.bootstrap_snapshot = Some(BootstrapSnapshot {
+            positions_strategy: HashMap::new(),
+            working_orders_strategy: HashMap::new(),
+            working_stop_orders_strategy: HashMap::new(),
+            snapshot_ts_utc: Some(snapshot_ts),
+        });
+        runtime.strategy_capabilities = StrategyCapabilities::default();
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.notify_bootstrap_snapshot())
+            .unwrap();
+        assert!(matches!(runtime.state.strategy_state, StrategyState::Idle));
+
+        runtime.strategy_capabilities.uses_bootstrap_snapshot = true;
+        let _ = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.notify_bootstrap_snapshot());
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::Blocked { reason, last_bar_ts }
+                if reason == "spy_bootstrap_snapshot" && *last_bar_ts == snapshot_ts
+        ));
+    }
+
+    #[test]
+    fn runtime_state_restore_callback_is_skipped_without_capability() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        let symbol = runtime.config.strategy.symbol.clone();
+        let last_bar_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 1, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        runtime.strategy = Box::new(CallbackSpyStrategy::default());
+        runtime.state.strategy_state = StrategyState::Idle;
+        runtime
+            .state
+            .last_processed_bar_ts
+            .insert(symbol, last_bar_ts);
+        runtime.our_order_ids.insert(42);
+        runtime.our_request_ids.insert(uuid::Uuid::nil());
+        runtime.strategy_capabilities = StrategyCapabilities::default();
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.notify_runtime_state_restored())
+            .unwrap();
+        assert!(matches!(runtime.state.strategy_state, StrategyState::Idle));
+
+        runtime.strategy_capabilities.uses_runtime_state_restore = true;
+        let _ = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.notify_runtime_state_restored());
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::Blocked { reason, last_bar_ts: state_last_bar_ts }
+                if reason == "spy_runtime_state_restored:1:1"
+                    && *state_last_bar_ts == last_bar_ts
+        ));
+    }
+
+    #[test]
+    fn stop_order_is_persisted_without_stop_order_callback_capability() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.strategy = Box::new(CallbackSpyStrategy::default());
+        runtime.state.strategy_state = StrategyState::Idle;
+        runtime.strategy_capabilities = StrategyCapabilities::default();
+
+        let stop_order = StopOrderEvent {
+            stop_order_id: "spy-stop-1".to_string(),
+            exchange_order_id: Some(10),
+            symbol: runtime.config.strategy.symbol.clone(),
+            status: "working".to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            filled: 0.0,
+            stop_price: 123.45,
+            price: 123.40,
+            existing: false,
+            comment: Some("test".to_string()),
+            end_time: None,
+            ts_utc: chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+                .unwrap()
+                .and_hms_opt(10, 2, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp(),
+        };
+
+        let _ = tokio::runtime::Runtime::new().unwrap().block_on(
+            runtime.handle_stop_order(
+                "stop-orders".to_string(),
+                "1-0".to_string(),
+                stop_order.clone(),
+            ),
+        );
+
+        assert_eq!(
+            runtime.state.stop_orders.get(&stop_order.stop_order_id),
+            Some(&stop_order)
+        );
+        assert!(matches!(runtime.state.strategy_state, StrategyState::Idle));
     }
 
     #[test]
