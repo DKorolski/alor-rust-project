@@ -6,6 +6,7 @@ pub mod runtime;
 pub mod state;
 pub mod strategies;
 pub mod strategy_host;
+pub mod strategy_registry;
 pub mod trade_ledger;
 
 use std::collections::HashMap;

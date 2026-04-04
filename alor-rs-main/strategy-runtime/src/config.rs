@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use alor_types::TradingPeriods;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
@@ -838,7 +838,8 @@ pub fn load_runtime_config(
                 sources.strategy.strategy_id = ConfigSource::File;
             }
             if let Some(value) = &strategy_file.strategy_kind {
-                strategy.strategy_kind = parse_strategy_kind(value);
+                strategy.strategy_kind = parse_strategy_kind(value)
+                    .with_context(|| format!("invalid strategy.strategy_kind: {value}"))?;
                 sources.strategy.strategy_kind = ConfigSource::File;
             }
             if let Some(value) = &strategy_file.symbol {
@@ -1307,7 +1308,8 @@ pub fn load_runtime_config(
         sources.strategy.strategy_id = ConfigSource::Env;
     }
     if let Ok(value) = env::var("STRATEGY_KIND") {
-        strategy.strategy_kind = parse_strategy_kind(&value);
+        strategy.strategy_kind = parse_strategy_kind(&value)
+            .with_context(|| format!("invalid STRATEGY_KIND: {value}"))?;
         sources.strategy.strategy_kind = ConfigSource::Env;
     }
     if let Ok(value) = env::var("SYMBOL") {
@@ -1688,14 +1690,15 @@ fn parse_trade_mode(value: &str) -> TradeMode {
     }
 }
 
-fn parse_strategy_kind(value: &str) -> StrategyKind {
+fn parse_strategy_kind(value: &str) -> Result<StrategyKind> {
     match value.to_lowercase().as_str() {
-        "market_buy_and_close" | "marketbuyandclose" => StrategyKind::MarketBuyAndClose,
-        "mock_live_probe" | "mockliveprobe" => StrategyKind::MockLiveProbe,
-        "toy_session_timing" | "toysessiontiming" => StrategyKind::ToySessionTiming,
-        "session_gap_standalone" | "sessiongapstandalone" => StrategyKind::SessionGapStandalone,
-        "hybrid_intraday" | "hybridintraday" | "hybrid" => StrategyKind::HybridIntraday,
-        _ => StrategyKind::LimitCancel,
+        "limit_cancel" | "limitcancel" => Ok(StrategyKind::LimitCancel),
+        "market_buy_and_close" | "marketbuyandclose" => Ok(StrategyKind::MarketBuyAndClose),
+        "mock_live_probe" | "mockliveprobe" => Ok(StrategyKind::MockLiveProbe),
+        "toy_session_timing" | "toysessiontiming" => Ok(StrategyKind::ToySessionTiming),
+        "session_gap_standalone" | "sessiongapstandalone" => Ok(StrategyKind::SessionGapStandalone),
+        "hybrid_intraday" | "hybridintraday" | "hybrid" => Ok(StrategyKind::HybridIntraday),
+        _ => Err(anyhow!("unknown strategy_kind: {value}")),
     }
 }
 

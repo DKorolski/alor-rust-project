@@ -21,16 +21,11 @@ use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::state::{RuntimeState, StrategyState};
-use crate::strategies::hybrid_intraday_runtime::HybridIntradayRuntimeStrategy;
-use crate::strategies::limit_cancel::LimitCancelStrategy;
-use crate::strategies::market_buy_and_close::MarketBuyAndCloseStrategy;
-use crate::strategies::mock_live_probe::MockLiveProbeStrategy;
-use crate::strategies::session_gap_standalone::SessionGapStandaloneStrategy;
-use crate::strategies::toy_session_timing::ToySessionTimingStrategy;
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
     RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
 };
+use crate::strategy_registry::StrategyRegistry;
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, PaperConfig, PaperExecutionMode, PaperOutput, RuntimeConfig,
@@ -338,26 +333,7 @@ impl StrategyRuntime {
 
     pub async fn new(config: RuntimeConfig) -> Result<Self> {
         let transport = RedisRuntimeTransport::new(config.clone())?;
-        let strategy: Box<dyn Strategy + Send + Sync> = match config.strategy.strategy_kind {
-            StrategyKind::LimitCancel => Box::new(LimitCancelStrategy::new(
-                config.strategy.to_limit_cancel_config(),
-            )),
-            StrategyKind::MarketBuyAndClose => Box::new(MarketBuyAndCloseStrategy::new(
-                config.strategy.to_market_buy_and_close_config(),
-            )),
-            StrategyKind::ToySessionTiming => Box::new(ToySessionTimingStrategy::new(
-                config.strategy.to_toy_session_timing_config(),
-            )),
-            StrategyKind::SessionGapStandalone => Box::new(SessionGapStandaloneStrategy::new(
-                config.strategy.to_session_gap_standalone_config(),
-            )),
-            StrategyKind::MockLiveProbe => Box::new(MockLiveProbeStrategy::new(
-                config.strategy.to_mock_live_probe_config(),
-            )),
-            StrategyKind::HybridIntraday => Box::new(HybridIntradayRuntimeStrategy::new(
-                config.strategy.to_hybrid_intraday_runtime_config(),
-            )),
-        };
+        let strategy = StrategyRegistry::builtin()?.create(&config.strategy)?;
         let now = chrono::Utc::now().timestamp();
         let health_snapshot = Arc::new(parking_lot::RwLock::new(RuntimeHealthSnapshot {
             uptime_start: std::time::Instant::now(),

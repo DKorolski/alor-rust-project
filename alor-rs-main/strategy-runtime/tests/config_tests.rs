@@ -547,3 +547,35 @@ work_weekends = true
     assert_eq!(resolved.config.strategy.session_gap_min, 60.0);
     assert_eq!(resolved.config.strategy.session_gap_exit_offset_min, 20);
 }
+
+#[test]
+fn rejects_unknown_strategy_kind_from_file() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND"]);
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_kind = "unknown_future_strategy"
+"#,
+    );
+
+    let err = load_runtime_config(path, false).expect_err("unknown strategy_kind must fail");
+
+    assert!(err
+        .to_string()
+        .contains("invalid strategy.strategy_kind: unknown_future_strategy"));
+}
+
+#[test]
+fn rejects_unknown_strategy_kind_from_env() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND"]);
+    let _kind_guard = set_env_var("STRATEGY_KIND", "unknown_env_strategy");
+    let path = write_temp_config("redis_url = \"redis://example/\"\n");
+
+    let err = load_runtime_config(path, false).expect_err("unknown STRATEGY_KIND must fail");
+
+    assert!(err
+        .to_string()
+        .contains("invalid STRATEGY_KIND: unknown_env_strategy"));
+}
