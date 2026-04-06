@@ -20,7 +20,7 @@ use alor_types::{MarketState, Scheduler};
 use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
-use crate::state::{RuntimeState, StrategyState};
+use crate::state::{RuntimeState, StrategyState, StrategyStateEnvelopeCompat};
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
     RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
@@ -29,7 +29,7 @@ use crate::strategy_registry::{StrategyCapabilities, StrategyRegistry};
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
 use crate::{
     BacktestConfig, PaperConfig, PaperExecutionMode, PaperOutput, RuntimeConfig,
-    RuntimeHealthSnapshot, StrategyKind, TradeMode,
+    RuntimeHealthSnapshot, TradeMode,
 };
 
 const MAX_PENDING_LOOPS: usize = 10;
@@ -58,7 +58,7 @@ const NON_WORKING_STOP_ORDER_STATUSES: [&str; 9] = [
 struct RuntimeStateSnapshot {
     pub ts_utc: i64,
     pub last_processed_bar_ts: std::collections::HashMap<String, i64>,
-    pub strategy_state: StrategyState,
+    pub strategy_state: StrategyStateEnvelopeCompat,
     #[serde(default)]
     pub last_trade_ts: Option<i64>,
     #[serde(default)]
@@ -1060,12 +1060,22 @@ impl StrategyRuntime {
         {
             match serde_json::from_str::<RuntimeStateSnapshot>(&payload) {
                 Ok(snapshot) => {
+                    if let Some(saved_kind) = snapshot.strategy_state.strategy_kind() {
+                        if saved_kind != self.config.strategy.strategy_kind {
+                            warn!(
+                                saved_strategy_kind = ?saved_kind,
+                                configured_strategy_kind = ?self.config.strategy.strategy_kind,
+                                "runtime state envelope strategy kind differs from current config"
+                            );
+                        }
+                    }
+                    let strategy_state = snapshot.strategy_state.into_payload();
                     self.state.last_processed_bar_ts = snapshot.last_processed_bar_ts;
-                    self.state.strategy_state = snapshot.strategy_state.clone();
+                    self.state.strategy_state = strategy_state.clone();
                     self.state.last_trade_ts = snapshot.last_trade_ts;
                     self.state.last_trade_id = snapshot.last_trade_id;
                     self.state.seen_trade_ids = snapshot.seen_trade_ids;
-                    self.strategy.set_state(snapshot.strategy_state);
+                    self.strategy.set_state(strategy_state);
                     self.restore_pending_requests();
                     info!("runtime state restored");
                     self.log_runtime_state_dump();
@@ -1746,7 +1756,10 @@ impl StrategyRuntime {
         let snapshot = RuntimeStateSnapshot {
             ts_utc: Utc::now().timestamp(),
             last_processed_bar_ts: self.state.last_processed_bar_ts.clone(),
-            strategy_state: self.state.strategy_state.clone(),
+            strategy_state: StrategyStateEnvelopeCompat::from_strategy_state(
+                self.config.strategy.strategy_kind,
+                self.state.strategy_state.clone(),
+            ),
             last_trade_ts: self.state.last_trade_ts,
             last_trade_id: self.state.last_trade_id.clone(),
             seen_trade_ids: self.state.seen_trade_ids.clone(),
@@ -2742,7 +2755,7 @@ impl StrategyRuntime {
             return;
         }
         let pending_request_ids = self.pending_request_ids();
-        let strategy_state_order_ids = self.strategy_state_order_ids();
+        let strategy_state_order_ids = self.strategy.tracked_order_ids();
         let mut our_request_ids: Vec<_> = self.our_request_ids.iter().copied().collect();
         our_request_ids.sort();
         let mut known_order_ids = self.our_order_ids.clone();
@@ -2771,23 +2784,6 @@ impl StrategyRuntime {
             our_request_ids_len = our_request_ids.len(),
             "state_dump"
         );
-    }
-
-    fn strategy_state_order_ids(&self) -> Vec<i64> {
-        let mut order_ids = Vec::new();
-        match &self.state.strategy_state {
-            StrategyState::Placed {
-                order_id: Some(order_id),
-                ..
-            }
-            | StrategyState::CancelSent { order_id, .. } => {
-                order_ids.push(*order_id);
-            }
-            _ => {}
-        }
-        order_ids.sort();
-        order_ids.dedup();
-        order_ids
     }
 
     fn trading_window_allows_order(
@@ -3011,7 +3007,9 @@ impl StrategyRuntime {
         intent: Intent,
         intent_class: alor_protocol::IntentClass,
     ) -> alor_protocol::OrderCommand {
-        let fallback_comment = self.intent_comment_tag(ctx, created_ts_utc, intent_class);
+        let fallback_comment = self
+            .strategy
+            .intent_comment_tag(ctx, created_ts_utc, intent_class);
         let (action, seq, action_name) = match intent {
             Intent::Classified { intent, .. } => {
                 return self.intent_to_command(ctx, created_ts_utc, *intent, intent_class);
@@ -3168,30 +3166,6 @@ impl StrategyRuntime {
             return None;
         }
         Some(comment)
-    }
-
-    fn intent_comment_tag(
-        &self,
-        ctx: &StrategyCtx,
-        created_ts_utc: i64,
-        intent_class: alor_protocol::IntentClass,
-    ) -> Option<String> {
-        if !matches!(
-            self.config.strategy.strategy_kind,
-            StrategyKind::HybridIntraday
-        ) {
-            return None;
-        }
-        let sid = ctx.strategy_id.as_str();
-        let cycle = format!("{:08x}", created_ts_utc.max(0));
-        let role = match intent_class {
-            alor_protocol::IntentClass::Entry => "ENTRY",
-            alor_protocol::IntentClass::Exit => "EXIT",
-            alor_protocol::IntentClass::CancelCleanup => "CANCEL",
-            alor_protocol::IntentClass::ProtectiveRepair => "REPAIR",
-        };
-        let comment = format!("HYB|sid={sid}|c={cycle}|r={role}");
-        Some(comment.chars().filter(|c| c.is_ascii()).take(100).collect())
     }
 
     fn resolve_intent_class(ctx: &StrategyCtx, intent: &Intent) -> alor_protocol::IntentClass {
@@ -3497,7 +3471,7 @@ fn bars_tf_seconds(stream: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ReadConfig, ReplayConfig, StrategyConfig, StreamNames, TrimConfig};
+    use crate::{ReadConfig, ReplayConfig, StrategyConfig, StrategyKind, StreamNames, TrimConfig};
     use alor_types::TradingPeriods;
 
     fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {

@@ -341,6 +341,49 @@ pub struct RuntimeState {
     pub seen_trade_ids: Vec<String>,
 }
 
+const fn default_strategy_state_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyStateEnvelope {
+    pub strategy_kind: crate::StrategyKind,
+    #[serde(default = "default_strategy_state_version")]
+    pub state_version: u32,
+    pub payload: StrategyState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StrategyStateEnvelopeCompat {
+    Legacy(StrategyState),
+    Envelope(StrategyStateEnvelope),
+}
+
+impl StrategyStateEnvelopeCompat {
+    pub fn from_strategy_state(strategy_kind: crate::StrategyKind, payload: StrategyState) -> Self {
+        Self::Envelope(StrategyStateEnvelope {
+            strategy_kind,
+            state_version: default_strategy_state_version(),
+            payload,
+        })
+    }
+
+    pub fn into_payload(self) -> StrategyState {
+        match self {
+            Self::Legacy(payload) => payload,
+            Self::Envelope(envelope) => envelope.payload,
+        }
+    }
+
+    pub fn strategy_kind(&self) -> Option<crate::StrategyKind> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Envelope(envelope) => Some(envelope.strategy_kind),
+        }
+    }
+}
+
 impl RuntimeState {
     pub fn is_duplicate_bar(&self, symbol: &str, bar_ts: i64) -> bool {
         self.last_processed_bar_ts
@@ -356,7 +399,10 @@ impl RuntimeState {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionGapLivePhase, StrategyState};
+    use super::{
+        SessionGapLivePhase, StrategyState, StrategyStateEnvelope, StrategyStateEnvelopeCompat,
+    };
+    use crate::StrategyKind;
 
     #[test]
     fn session_gap_standalone_deserializes_with_missing_new_fields() {
@@ -478,5 +524,55 @@ mod tests {
             }
             other => panic!("unexpected state: {other:?}"),
         }
+    }
+
+    #[test]
+    fn strategy_state_envelope_compat_deserializes_legacy_shape() {
+        let legacy_json = r#"{
+            "SessionGapStandalone": {
+                "phase": "Flat"
+            }
+        }"#;
+
+        let compat: StrategyStateEnvelopeCompat = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(compat.strategy_kind(), None);
+        assert!(matches!(
+            compat.into_payload(),
+            StrategyState::SessionGapStandalone { .. }
+        ));
+    }
+
+    #[test]
+    fn strategy_state_envelope_deserializes_new_shape() {
+        let envelope_json = r#"{
+            "strategy_kind": "session_gap_standalone",
+            "state_version": 1,
+            "payload": {
+                "SessionGapStandalone": {
+                    "phase": "Flat"
+                }
+            }
+        }"#;
+
+        let envelope: StrategyStateEnvelope = serde_json::from_str(envelope_json).unwrap();
+        assert_eq!(envelope.strategy_kind, StrategyKind::SessionGapStandalone);
+        assert_eq!(envelope.state_version, 1);
+        assert!(matches!(
+            envelope.payload,
+            StrategyState::SessionGapStandalone { .. }
+        ));
+    }
+
+    #[test]
+    fn strategy_state_envelope_defaults_state_version_when_missing() {
+        let envelope_json = r#"{
+            "strategy_kind": "hybrid_intraday",
+            "payload": "Idle"
+        }"#;
+
+        let envelope: StrategyStateEnvelope = serde_json::from_str(envelope_json).unwrap();
+        assert_eq!(envelope.strategy_kind, StrategyKind::HybridIntraday);
+        assert_eq!(envelope.state_version, 1);
+        assert!(matches!(envelope.payload, StrategyState::Idle));
     }
 }

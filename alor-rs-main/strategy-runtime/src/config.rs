@@ -1200,6 +1200,39 @@ fn apply_hybrid_intraday_config_file(
     }
 }
 
+fn validate_matching_strategy_specific_sections(
+    strategy_file: &StrategyConfigFile,
+    kind: StrategyKind,
+) -> Result<()> {
+    let mut mismatches = Vec::new();
+
+    if strategy_file.limit_cancel.is_some() && kind != StrategyKind::LimitCancel {
+        mismatches.push("strategy.limit_cancel");
+    }
+    if strategy_file.market_buy_and_close.is_some() && kind != StrategyKind::MarketBuyAndClose {
+        mismatches.push("strategy.market_buy_and_close");
+    }
+    if strategy_file.mock_live_probe.is_some() && kind != StrategyKind::MockLiveProbe {
+        mismatches.push("strategy.mock_live_probe");
+    }
+    if strategy_file.session_gap.is_some() && kind != StrategyKind::SessionGapStandalone {
+        mismatches.push("strategy.session_gap");
+    }
+    if strategy_file.hybrid_intraday.is_some() && kind != StrategyKind::HybridIntraday {
+        mismatches.push("strategy.hybrid_intraday");
+    }
+
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "non-matching strategy specific section(s) for strategy_kind={:?}: {}",
+        kind,
+        mismatches.join(", ")
+    );
+}
+
 pub fn load_runtime_config(
     config_path: PathBuf,
     allow_missing: bool,
@@ -1376,6 +1409,7 @@ pub fn load_runtime_config(
                     sources.strategy.trading_periods = ConfigSource::File;
                 }
             }
+            validate_matching_strategy_specific_sections(strategy_file, strategy.strategy_kind)?;
             apply_legacy_specific_config_file(
                 &mut strategy,
                 &mut sources.strategy,

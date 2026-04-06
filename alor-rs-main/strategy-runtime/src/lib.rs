@@ -496,7 +496,12 @@ impl StrategyConfig {
     }
 
     pub fn set_kind(&mut self, kind: StrategyKind) {
+        let previous_kind = self.common.strategy_kind;
+        let previous_default_id = previous_kind.default_strategy_id();
         self.common.strategy_kind = kind;
+        if self.common.strategy_id == previous_default_id {
+            self.common.strategy_id = kind.default_strategy_id().to_string();
+        }
         if self.specific.kind() != kind {
             self.specific = StrategySpecificConfig::default_for_kind(kind);
         }

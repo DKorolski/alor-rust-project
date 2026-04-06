@@ -275,6 +275,69 @@ This checklist is meant to stay small and operational. It should be reviewed in
 every config/state-heavy PR from the later phase of the refactor, especially PR4
 through PR6.
 
+## Stage Log
+
+### 2026-04-06 - PR5 follow-up: strategy_id default alignment
+
+Completed a config hardening follow-up for the PR5 config split stage:
+
+- `StrategyConfig::set_kind()` now keeps `strategy_id` aligned with the selected
+  `strategy_kind` default when `strategy_id` was still the previous kind default.
+- Added config tests for both file and env paths where only `strategy_kind` is
+  provided and `strategy_id` is omitted.
+- Updated compatibility checklist with an explicit `strategy_id`/`strategy_kind`
+  alignment invariant.
+
+### 2026-04-06 - PR5 follow-up: reject non-matching split specific sections
+
+Completed a second config hardening follow-up for the PR5 stage:
+
+- Added parser validation that rejects non-matching split sections such as
+  `[strategy.market_buy_and_close]` when `strategy_kind` is
+  `session_gap_standalone`.
+- Added config test coverage for the reject path.
+- Updated compatibility checklist to require explicit rejection instead of silent
+  ignore.
+
+### 2026-04-06 - PR6 step 1: state envelope scaffolding
+
+Started PR6 with a compatibility-first scaffold:
+
+- Added `StrategyStateEnvelope` (`strategy_kind`, `state_version`, `payload`) and
+  a compatibility wrapper that can deserialize both legacy enum-shaped state and
+  envelope-shaped state.
+- Added state tests covering:
+  - legacy state shape compatibility,
+  - new envelope shape deserialization,
+  - default `state_version` behavior when omitted.
+- Kept runtime persistence format unchanged at this step to avoid restart/e2e
+  contract drift while migration wiring is still in progress.
+
+### 2026-04-06 - PR6 step 2: runtime snapshot wiring (legacy + envelope)
+
+Connected the envelope layer to runtime state persistence and restore:
+
+- `RuntimeStateSnapshot` now persists `strategy_state` as envelope-shaped payload.
+- Restore path accepts both legacy enum-shaped and envelope-shaped
+  `strategy_state` using compatibility decoding.
+- Added a warning when envelope `strategy_kind` differs from configured runtime
+  `strategy_kind`.
+- Updated restart e2e test assertions to accept both legacy and envelope payload
+  shapes for migration-safe verification.
+
+### 2026-04-06 - PR7 step 1: strategy-owned hooks for comment tag and tracked order ids
+
+Started runtime special-case removal through host seams:
+
+- Added strategy-owned host hooks:
+  - `intent_comment_tag(ctx, created_ts_utc, intent_class)`
+  - `tracked_order_ids()`
+- Runtime now consumes these hooks instead of hardcoding:
+  - hybrid-only fallback comment tagging logic
+  - `strategy_state` order id extraction logic for state dumps
+- Implemented hybrid fallback comment-tag hook with the previous runtime tag
+  format to preserve operational behavior.
+
 ## Definition Of Done
 
 The work is done only when all of the following are true:

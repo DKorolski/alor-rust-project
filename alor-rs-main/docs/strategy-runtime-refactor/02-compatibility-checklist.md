@@ -8,6 +8,18 @@ config/state-heavy changes.
 ## Checklist
 
 - legacy config parse still works, or an explicit migration path exists
+- when `strategy_kind` is overridden and `strategy_id` is omitted, `strategy_id`
+  resolves to `strategy_kind.default_strategy_id()`
+- split specific sections reject non-matching `strategy_kind` instead of being
+  silently ignored
+- state transition layer can deserialize both legacy enum-shaped `strategy_state`
+  and envelope-shaped `strategy_state` payloads during migration
+- runtime-state persistence writes envelope-shaped `strategy_state` while restore
+  still accepts legacy snapshots
+- runtime core no longer hardcodes hybrid-only fallback comment tags; comment tag
+  fallback comes from strategy-owned hook
+- runtime core no longer hardcodes `strategy_state` order id extraction; tracked
+  order ids come from strategy-owned hook
 - legacy snapshot load still works
 - legacy runtime state load still works
 - legacy JSON shape used in restart e2e is still readable

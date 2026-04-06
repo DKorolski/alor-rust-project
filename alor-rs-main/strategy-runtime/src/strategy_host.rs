@@ -99,6 +99,30 @@ pub trait Strategy: Send + Sync {
     fn warmup_from_history(&mut self, _ctx: &StrategyCtx, _bars: &[BarEvent]) -> usize {
         0
     }
+    fn tracked_order_ids(&self) -> Vec<i64> {
+        let mut order_ids = Vec::new();
+        match self.state() {
+            crate::state::StrategyState::Placed {
+                order_id: Some(order_id),
+                ..
+            }
+            | crate::state::StrategyState::CancelSent { order_id, .. } => {
+                order_ids.push(*order_id);
+            }
+            _ => {}
+        }
+        order_ids.sort();
+        order_ids.dedup();
+        order_ids
+    }
+    fn intent_comment_tag(
+        &self,
+        _ctx: &StrategyCtx,
+        _created_ts_utc: i64,
+        _intent_class: IntentClass,
+    ) -> Option<String> {
+        None
+    }
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
 }

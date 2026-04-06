@@ -701,3 +701,65 @@ fn rejects_unknown_strategy_kind_from_env() {
         .to_string()
         .contains("invalid STRATEGY_KIND: unknown_env_strategy"));
 }
+
+#[test]
+fn strategy_id_defaults_follow_strategy_kind_when_id_omitted_in_file() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_kind = "session_gap_standalone"
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::SessionGapStandalone
+    );
+    assert_eq!(
+        resolved.config.strategy.strategy_id,
+        strategy_runtime::StrategyKind::SessionGapStandalone.default_strategy_id()
+    );
+}
+
+#[test]
+fn strategy_id_defaults_follow_strategy_kind_when_id_omitted_in_env() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+    let _kind_guard = set_env_var("STRATEGY_KIND", "hybrid_intraday");
+    let path = write_temp_config("redis_url = \"redis://example/\"\n");
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::HybridIntraday
+    );
+    assert_eq!(
+        resolved.config.strategy.strategy_id,
+        strategy_runtime::StrategyKind::HybridIntraday.default_strategy_id()
+    );
+}
+
+#[test]
+fn rejects_non_matching_split_specific_section() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+    let path = write_temp_config(
+        r#"
+[strategy.common]
+strategy_kind = "session_gap_standalone"
+
+[strategy.market_buy_and_close]
+live_order_style = "market"
+"#,
+    );
+
+    let err = load_runtime_config(path, false).expect_err("non-matching section must fail");
+    let message = err.to_string();
+    assert!(message.contains("non-matching strategy specific section"));
+    assert!(message.contains("strategy.market_buy_and_close"));
+}

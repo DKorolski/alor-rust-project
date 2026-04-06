@@ -3810,6 +3810,23 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         processed
     }
 
+    fn intent_comment_tag(
+        &self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent_class: IntentClass,
+    ) -> Option<String> {
+        let cycle = format!("{:08x}", created_ts_utc.max(0));
+        let role = match intent_class {
+            IntentClass::Entry => "ENTRY",
+            IntentClass::Exit => "EXIT",
+            IntentClass::CancelCleanup => "CANCEL",
+            IntentClass::ProtectiveRepair => "REPAIR",
+        };
+        let comment = format!("HYB|sid={}|c={cycle}|r={role}", ctx.strategy_id);
+        Some(comment.chars().filter(|c| c.is_ascii()).take(100).collect())
+    }
+
     fn state(&self) -> &StrategyState {
         &self.state
     }

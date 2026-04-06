@@ -421,6 +421,16 @@ async fn read_latest_runtime_state_payload(
     Ok(value)
 }
 
+fn session_gap_state_from_runtime_payload(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+    let strategy_state = &payload["strategy_state"];
+    if strategy_state.is_null() {
+        return None;
+    }
+    strategy_state
+        .get("SessionGapStandalone")
+        .or_else(|| strategy_state.get("payload").and_then(|p| p.get("SessionGapStandalone")))
+}
+
 async fn publish_entry_bars(redis_url: &str, config: &RuntimeConfig) -> Result<()> {
     let stream = &config.streams.bars;
     let symbol = &config.strategy.symbol;
@@ -769,7 +779,8 @@ async fn warmup_from_history_without_runtime_state_restores_indicators() -> Resu
 
     let payload =
         read_latest_runtime_state_payload(&redis_url, &config.streams.runtime_state).await?;
-    let state = &payload["strategy_state"]["SessionGapStandalone"];
+    let state = session_gap_state_from_runtime_payload(&payload)
+        .ok_or_else(|| anyhow::anyhow!("missing SessionGapStandalone state payload"))?;
     assert!(state["prev_close"].is_number());
     assert!(state["pre_prev_close"].is_number());
     assert!(state["yesterday_range"].is_number());
@@ -846,7 +857,8 @@ async fn insufficient_history_keeps_strategy_blocked_with_indicator_reason() -> 
 
     let payload =
         read_latest_runtime_state_payload(&redis_url, &config.streams.runtime_state).await?;
-    let state = &payload["strategy_state"]["SessionGapStandalone"];
+    let state = session_gap_state_from_runtime_payload(&payload)
+        .ok_or_else(|| anyhow::anyhow!("missing SessionGapStandalone state payload"))?;
     assert!(state["prev_close"].is_null());
     assert!(state["pre_prev_close"].is_null());
     assert!(state["yesterday_range"].is_null());
