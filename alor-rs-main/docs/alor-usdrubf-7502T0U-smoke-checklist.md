@@ -52,6 +52,15 @@ Guard semantics to verify in logs:
 - `configs/runtime.alor_usdrubf.paper.7502T0U.toml`
 - `configs/runtime.alor_usdrubf.live.7502T0U.toml`
 
+Gateway control contour must be aligned with active `sessiongap/hybrid` live stacks:
+
+- `control_cws_mode = "action_scoped"`
+- `action_scope_enable_create_limit = true`
+- `action_scope_enable_delete_limit = true`
+- `action_scope_enable_replace_limit = false`
+- `action_scope_enable_exit = true`
+- `action_scope_force_token_refresh_before_authorize = true`
+
 ## Safety Invariants
 
 - quantity semantics in runtime: `size` means contracts count
@@ -64,6 +73,7 @@ Guard semantics to verify in logs:
 - run gateway with `gateway.alor_usdrubf.live.7502T0U.toml`
 - run runtime with `runtime.alor_usdrubf.paper.7502T0U.toml`
 - verify:
+  - gateway `Resolved config` confirms `control_cws_mode="action_scoped"`
   - health endpoint is ready
   - bars stream is consumed
   - strategy emits intents only in paper mode

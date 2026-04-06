@@ -204,3 +204,25 @@ Startup support declaration for current revision:
 
 - supported profile: clean-start only,
 - non-flat restart/working-orders/stop-orders scenarios: not yet proven and treated as follow-up hardening scope.
+
+## VPS Addendum (2026-04-07)
+
+`trading-alor-usdrubf` gateway control mode was aligned with active live stacks (`trading-sessiongap`, `trading-hybrid`) to remove contour mismatch during shared rollout monitoring.
+
+Applied config in `configs/gateway.alor_usdrubf.live.7502T0U.toml`:
+
+- `control_cws_mode = "action_scoped"`
+- `action_scope_enable_create_limit = true`
+- `action_scope_enable_delete_limit = true`
+- `action_scope_enable_replace_limit = false`
+- `action_scope_enable_exit = true`
+- `action_scope_force_token_refresh_before_authorize = true`
+
+Verification evidence:
+
+- `docker logs alorusdrubf-alor-gateway-1` shows `Resolved config ... control_cws_mode="action_scoped"`,
+- same resolved payload confirms `create/delete/exit=true`, `replace=false`, `force_token_refresh_before_authorize=true`.
+
+Operational note:
+
+- after this change, overnight runtime readiness remains expectedly `BLOCKED` outside session until first fresh live bar.
