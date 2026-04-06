@@ -123,6 +123,71 @@ pub trait Strategy: Send + Sync {
     ) -> Option<String> {
         None
     }
+    fn pending_request_ids(&self) -> Vec<Uuid> {
+        match self.state() {
+            crate::state::StrategyState::Placed {
+                place_request_id, ..
+            } => vec![*place_request_id],
+            crate::state::StrategyState::MarketBuyPending { buy_request_id, .. }
+            | crate::state::StrategyState::MarketBuySent { buy_request_id, .. } => {
+                vec![*buy_request_id]
+            }
+            crate::state::StrategyState::MarketCloseSent {
+                close_request_id, ..
+            } => vec![*close_request_id],
+            crate::state::StrategyState::MarketLivePendingEntry { request_guid, .. }
+            | crate::state::StrategyState::MarketLivePendingExit { request_guid, .. } => {
+                vec![*request_guid]
+            }
+            crate::state::StrategyState::SessionGapStandalone { phase, .. } => match phase {
+                crate::state::SessionGapLivePhase::PendingEntry { request_id, .. }
+                | crate::state::SessionGapLivePhase::PendingExit { request_id, .. }
+                | crate::state::SessionGapLivePhase::ExitRecoveryPending { request_id, .. } => {
+                    vec![*request_id]
+                }
+                crate::state::SessionGapLivePhase::EntryRecoveryVerificationPending { .. }
+                | crate::state::SessionGapLivePhase::Flat
+                | crate::state::SessionGapLivePhase::EntryDeferredWindowClosed { .. }
+                | crate::state::SessionGapLivePhase::InPosition { .. }
+                | crate::state::SessionGapLivePhase::ExitDeferredWindowClosed { .. }
+                | crate::state::SessionGapLivePhase::CloseOnlyDegraded { .. }
+                | crate::state::SessionGapLivePhase::Blocked { .. } => Vec::new(),
+            },
+            crate::state::StrategyState::CancelSent {
+                cancel_request_id, ..
+            } => vec![*cancel_request_id],
+            crate::state::StrategyState::Idle
+            | crate::state::StrategyState::Done { .. }
+            | crate::state::StrategyState::MarketLiveInPosition { .. }
+            | crate::state::StrategyState::Blocked { .. }
+            | crate::state::StrategyState::HybridIntradayRuntime { .. } => Vec::new(),
+        }
+    }
+    fn exit_risk_status(&self, has_open_position: bool) -> StrategyExitRiskStatus {
+        match self.state() {
+            crate::state::StrategyState::SessionGapStandalone { phase, .. } => match phase {
+                crate::state::SessionGapLivePhase::ExitRecoveryPending { .. } => {
+                    StrategyExitRiskStatus {
+                        phase_override: Some("ExitRecoveryPending".to_string()),
+                        exit_recovery_active: true,
+                        operator_intervention_required: false,
+                        open_risk_position_unflattened: has_open_position,
+                    }
+                }
+                crate::state::SessionGapLivePhase::CloseOnlyDegraded {
+                    operator_intervention_required,
+                    ..
+                } => StrategyExitRiskStatus {
+                    phase_override: Some("CloseOnlyDegraded".to_string()),
+                    exit_recovery_active: false,
+                    operator_intervention_required: *operator_intervention_required,
+                    open_risk_position_unflattened: has_open_position,
+                },
+                _ => StrategyExitRiskStatus::default(),
+            },
+            _ => StrategyExitRiskStatus::default(),
+        }
+    }
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
 }
@@ -302,4 +367,12 @@ pub struct BootstrapSnapshot {
 pub struct RuntimeStateRestored {
     pub known_order_ids: Vec<i64>,
     pub pending_requests: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StrategyExitRiskStatus {
+    pub phase_override: Option<String>,
+    pub exit_recovery_active: bool,
+    pub operator_intervention_required: bool,
+    pub open_risk_position_unflattened: bool,
 }

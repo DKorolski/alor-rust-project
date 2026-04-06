@@ -338,6 +338,21 @@ Started runtime special-case removal through host seams:
 - Implemented hybrid fallback comment-tag hook with the previous runtime tag
   format to preserve operational behavior.
 
+### 2026-04-06 - PR7 step 2: strategy-owned hooks for pending requests and exit risk
+
+Continued runtime special-case removal through strategy hooks:
+
+- Added strategy-owned hooks:
+  - `pending_request_ids()`
+  - `exit_risk_status(has_open_position)`
+- Runtime now uses these hooks in:
+  - pending request restore path,
+  - runtime-state diagnostics dump,
+  - health/readiness risk projection path.
+- Added focused runtime tests to lock hook wiring:
+  - pending request hook is used by restore path,
+  - comment tag hook is used by command emission fallback path.
+
 ## Definition Of Done
 
 The work is done only when all of the following are true:

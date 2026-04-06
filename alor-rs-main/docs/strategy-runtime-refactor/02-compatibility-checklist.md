@@ -20,6 +20,10 @@ config/state-heavy changes.
   fallback comes from strategy-owned hook
 - runtime core no longer hardcodes `strategy_state` order id extraction; tracked
   order ids come from strategy-owned hook
+- runtime core no longer hardcodes pending request extraction; pending request
+  ids are sourced via strategy-owned hook
+- runtime core no longer hardcodes session-gap exit risk projection; runtime
+  health uses strategy-owned exit risk hook
 - legacy snapshot load still works
 - legacy runtime state load still works
 - legacy JSON shape used in restart e2e is still readable

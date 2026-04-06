@@ -466,36 +466,6 @@ impl StrategyRuntime {
         }));
     }
 
-    fn strategy_exit_risk_status(&self) -> (Option<String>, bool, bool, bool) {
-        let has_open_position = self
-            .state
-            .positions
-            .get(&self.config.strategy.symbol)
-            .map(|pos| pos.qty.abs() > f64::EPSILON)
-            .unwrap_or(false);
-        match &self.state.strategy_state {
-            StrategyState::SessionGapStandalone { phase, .. } => match phase {
-                crate::state::SessionGapLivePhase::ExitRecoveryPending { .. } => (
-                    Some("ExitRecoveryPending".to_string()),
-                    true,
-                    false,
-                    has_open_position,
-                ),
-                crate::state::SessionGapLivePhase::CloseOnlyDegraded {
-                    operator_intervention_required,
-                    ..
-                } => (
-                    Some("CloseOnlyDegraded".to_string()),
-                    false,
-                    *operator_intervention_required,
-                    has_open_position,
-                ),
-                _ => (None, false, false, false),
-            },
-            _ => (None, false, false, false),
-        }
-    }
-
     fn refresh_health_snapshot(&self) {
         let decision = self.evaluate_guard_decision();
         let now_ts = chrono::Utc::now().timestamp();
@@ -522,28 +492,30 @@ impl StrategyRuntime {
 
         let gateway_health_last_ts_utc = self.live_guard.health.as_ref().map(|h| h.last_event_ts);
         let gateway_health_age_sec = gateway_health_last_ts_utc.map(|ts| now_ts.saturating_sub(ts));
-        let (
-            strategy_phase_override,
-            exit_recovery_active,
-            operator_intervention_required,
-            open_risk_position_unflattened,
-        ) = self.strategy_exit_risk_status();
-        if let Some(override_phase) = strategy_phase_override {
+        let has_open_position = self
+            .state
+            .positions
+            .get(&self.config.strategy.symbol)
+            .map(|pos| pos.qty.abs() > f64::EPSILON)
+            .unwrap_or(false);
+        let strategy_risk = self.strategy.exit_risk_status(has_open_position);
+        if let Some(override_phase) = strategy_risk.phase_override.clone() {
             runtime_phase = override_phase;
         }
         let close_only_degraded = runtime_phase == "CloseOnlyDegraded";
         let mut live_guard_reasons = decision.reasons;
-        if exit_recovery_active {
+        if strategy_risk.exit_recovery_active {
             live_guard_reasons.push("strategy:exit_recovery_active".to_string());
         }
-        if operator_intervention_required {
+        if strategy_risk.operator_intervention_required {
             live_guard_reasons.push("strategy:operator_intervention_required".to_string());
         }
-        if open_risk_position_unflattened {
+        if strategy_risk.open_risk_position_unflattened {
             live_guard_reasons.push("strategy:open_risk_position_unflattened".to_string());
         }
-        let readiness =
-            decision.allowed && !exit_recovery_active && !operator_intervention_required;
+        let readiness = decision.allowed
+            && !strategy_risk.exit_recovery_active
+            && !strategy_risk.operator_intervention_required;
 
         let mut guard = self.health_snapshot.write();
         guard.runtime_phase = runtime_phase;
@@ -571,10 +543,10 @@ impl StrategyRuntime {
         guard.scheduler_note = scheduler_note;
         guard.timezone_offset_hours = self.config.strategy.timezone_offset_hours;
         guard.last_bar_ts_utc = self.metrics.bars_last_seen_close_time_utc;
-        guard.exit_recovery_active = exit_recovery_active;
+        guard.exit_recovery_active = strategy_risk.exit_recovery_active;
         guard.close_only_degraded = close_only_degraded;
-        guard.operator_intervention_required = operator_intervention_required;
-        guard.open_risk_position_unflattened = open_risk_position_unflattened;
+        guard.operator_intervention_required = strategy_risk.operator_intervention_required;
+        guard.open_risk_position_unflattened = strategy_risk.open_risk_position_unflattened;
     }
 
     pub async fn flush_reports(&self) -> Result<()> {
@@ -1089,46 +1061,7 @@ impl StrategyRuntime {
     }
 
     fn restore_pending_requests(&mut self) {
-        self.our_request_ids.extend(self.pending_request_ids());
-    }
-
-    fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
-        match &self.state.strategy_state {
-            StrategyState::Placed {
-                place_request_id, ..
-            } => vec![*place_request_id],
-            StrategyState::MarketBuyPending { buy_request_id, .. }
-            | StrategyState::MarketBuySent { buy_request_id, .. } => vec![*buy_request_id],
-            StrategyState::MarketCloseSent {
-                close_request_id, ..
-            } => vec![*close_request_id],
-            StrategyState::MarketLivePendingEntry { request_guid, .. }
-            | StrategyState::MarketLivePendingExit { request_guid, .. } => vec![*request_guid],
-            StrategyState::SessionGapStandalone { phase, .. } => match phase {
-                crate::state::SessionGapLivePhase::PendingEntry { request_id, .. }
-                | crate::state::SessionGapLivePhase::PendingExit { request_id, .. }
-                | crate::state::SessionGapLivePhase::ExitRecoveryPending { request_id, .. } => {
-                    vec![*request_id]
-                }
-                crate::state::SessionGapLivePhase::EntryRecoveryVerificationPending { .. } => {
-                    Vec::new()
-                }
-                crate::state::SessionGapLivePhase::Flat
-                | crate::state::SessionGapLivePhase::EntryDeferredWindowClosed { .. }
-                | crate::state::SessionGapLivePhase::InPosition { .. }
-                | crate::state::SessionGapLivePhase::ExitDeferredWindowClosed { .. }
-                | crate::state::SessionGapLivePhase::CloseOnlyDegraded { .. }
-                | crate::state::SessionGapLivePhase::Blocked { .. } => Vec::new(),
-            },
-            StrategyState::CancelSent {
-                cancel_request_id, ..
-            } => vec![*cancel_request_id],
-            StrategyState::Idle
-            | StrategyState::Done { .. }
-            | StrategyState::MarketLiveInPosition { .. }
-            | StrategyState::Blocked { .. }
-            | StrategyState::HybridIntradayRuntime { .. } => Vec::new(),
-        }
+        self.our_request_ids.extend(self.strategy.pending_request_ids());
     }
 
     async fn recover_pending(
@@ -2754,7 +2687,7 @@ impl StrategyRuntime {
         if !self.config.bootstrap_dump {
             return;
         }
-        let pending_request_ids = self.pending_request_ids();
+        let pending_request_ids = self.strategy.pending_request_ids();
         let strategy_state_order_ids = self.strategy.tracked_order_ids();
         let mut our_request_ids: Vec<_> = self.our_request_ids.iter().copied().collect();
         our_request_ids.sort();
@@ -3632,6 +3565,99 @@ mod tests {
 
         fn set_state(&mut self, state: StrategyState) {
             self.state = state;
+        }
+    }
+
+    #[derive(Default)]
+    struct HookSpyStrategy {
+        state: StrategyState,
+        pending_requests: Vec<uuid::Uuid>,
+        tag: Option<String>,
+    }
+
+    impl Strategy for HookSpyStrategy {
+        fn on_bar(&mut self, _ctx: &StrategyCtx, _bar: &BarEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_ack(
+            &mut self,
+            _ctx: &StrategyCtx,
+            _ack: &alor_protocol::CommandAck,
+        ) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_order(&mut self, _ctx: &StrategyCtx, _ord: &OrderEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_position(&mut self, _ctx: &StrategyCtx, _pos: &PositionEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
+            self.pending_requests.clone()
+        }
+
+        fn intent_comment_tag(
+            &self,
+            _ctx: &StrategyCtx,
+            _created_ts_utc: i64,
+            _intent_class: alor_protocol::IntentClass,
+        ) -> Option<String> {
+            self.tag.clone()
+        }
+
+        fn state(&self) -> &StrategyState {
+            &self.state
+        }
+
+        fn set_state(&mut self, state: StrategyState) {
+            self.state = state;
+        }
+    }
+
+    #[test]
+    fn restore_pending_requests_uses_strategy_hook() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        let request_id = uuid::Uuid::new_v4();
+        runtime.strategy = Box::new(HookSpyStrategy {
+            pending_requests: vec![request_id],
+            ..HookSpyStrategy::default()
+        });
+        runtime.our_request_ids.clear();
+
+        runtime.restore_pending_requests();
+
+        assert!(runtime.our_request_ids.contains(&request_id));
+    }
+
+    #[test]
+    fn intent_to_command_uses_strategy_comment_tag_hook() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.strategy = Box::new(HookSpyStrategy {
+            tag: Some("hook-tag".to_string()),
+            ..HookSpyStrategy::default()
+        });
+        let ctx = runtime.strategy_ctx();
+        let command = runtime.intent_to_command(
+            &ctx,
+            1_700_000_000,
+            Intent::Market {
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                fill_price: None,
+                comment: None,
+            },
+            alor_protocol::IntentClass::Entry,
+        );
+
+        match command.action {
+            alor_protocol::CommandAction::Market(order) => {
+                assert_eq!(order.comment.as_deref(), Some("hook-tag"));
+            }
+            other => panic!("unexpected action: {other:?}"),
         }
     }
 
