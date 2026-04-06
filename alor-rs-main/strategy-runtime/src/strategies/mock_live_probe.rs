@@ -404,6 +404,34 @@ impl Strategy for MockLiveProbeStrategy {
         &self.state
     }
 
+    fn tracked_order_ids(&self) -> Vec<i64> {
+        let mut order_ids = Vec::new();
+        match self.state() {
+            StrategyState::Placed {
+                order_id: Some(order_id),
+                ..
+            }
+            | StrategyState::CancelSent { order_id, .. } => order_ids.push(*order_id),
+            _ => {}
+        }
+        order_ids.sort();
+        order_ids.dedup();
+        order_ids
+    }
+
+    fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
+        match self.state() {
+            StrategyState::Placed {
+                place_request_id, ..
+            } => vec![*place_request_id],
+            StrategyState::MarketLivePendingEntry { request_guid, .. } => vec![*request_guid],
+            StrategyState::CancelSent {
+                cancel_request_id, ..
+            } => vec![*cancel_request_id],
+            _ => Vec::new(),
+        }
+    }
+
     fn set_state(&mut self, state: StrategyState) {
         self.state = state;
         self.phase = match self.state {

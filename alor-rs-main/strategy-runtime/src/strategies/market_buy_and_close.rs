@@ -605,6 +605,19 @@ impl Strategy for MarketBuyAndCloseStrategy {
         &self.state
     }
 
+    fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
+        match self.state() {
+            StrategyState::MarketBuyPending { buy_request_id, .. }
+            | StrategyState::MarketBuySent { buy_request_id, .. } => vec![*buy_request_id],
+            StrategyState::MarketCloseSent {
+                close_request_id, ..
+            } => vec![*close_request_id],
+            StrategyState::MarketLivePendingEntry { request_guid, .. }
+            | StrategyState::MarketLivePendingExit { request_guid, .. } => vec![*request_guid],
+            _ => Vec::new(),
+        }
+    }
+
     fn set_state(&mut self, state: StrategyState) {
         self.state = state;
     }

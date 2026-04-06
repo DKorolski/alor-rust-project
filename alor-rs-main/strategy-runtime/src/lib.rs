@@ -4,6 +4,7 @@ pub mod live_guard;
 pub mod redis_transport;
 pub mod runtime;
 pub mod state;
+pub mod strategy_adapters;
 pub mod strategies;
 pub mod strategy_host;
 pub mod strategy_registry;
@@ -211,6 +212,9 @@ pub struct HybridIntradayStrategySettings {
     pub strategy: HybridIntradaySettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AlorSkeletonSettings;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StrategySpecificConfig {
     LimitCancel(LimitCancelSettings),
@@ -219,6 +223,7 @@ pub enum StrategySpecificConfig {
     SessionGapStandalone(SessionGapStandaloneSettings),
     MockLiveProbe(MockLiveProbeSettings),
     HybridIntraday(HybridIntradayStrategySettings),
+    AlorSkeleton(AlorSkeletonSettings),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -398,6 +403,7 @@ impl StrategySpecificConfig {
             StrategyKind::HybridIntraday => {
                 Self::HybridIntraday(HybridIntradayStrategySettings::default())
             }
+            StrategyKind::AlorSkeleton => Self::AlorSkeleton(AlorSkeletonSettings),
         }
     }
 
@@ -409,6 +415,7 @@ impl StrategySpecificConfig {
             StrategySpecificConfig::SessionGapStandalone(_) => StrategyKind::SessionGapStandalone,
             StrategySpecificConfig::MockLiveProbe(_) => StrategyKind::MockLiveProbe,
             StrategySpecificConfig::HybridIntraday(_) => StrategyKind::HybridIntraday,
+            StrategySpecificConfig::AlorSkeleton(_) => StrategyKind::AlorSkeleton,
         }
     }
 }
@@ -430,6 +437,7 @@ pub enum StrategyKind {
     SessionGapStandalone,
     MockLiveProbe,
     HybridIntraday,
+    AlorSkeleton,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -584,6 +592,20 @@ impl StrategyConfig {
             _ => None,
         }
     }
+
+    pub fn alor_skeleton(&self) -> Option<&AlorSkeletonSettings> {
+        match &self.specific {
+            StrategySpecificConfig::AlorSkeleton(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn alor_skeleton_mut(&mut self) -> Option<&mut AlorSkeletonSettings> {
+        match &mut self.specific {
+            StrategySpecificConfig::AlorSkeleton(settings) => Some(settings),
+            _ => None,
+        }
+    }
 }
 
 impl Deref for StrategyConfig {
@@ -609,6 +631,7 @@ impl StrategyKind {
             StrategyKind::SessionGapStandalone => "session_gap_standalone",
             StrategyKind::MockLiveProbe => "mock_live_probe",
             StrategyKind::HybridIntraday => "hybrid_intraday",
+            StrategyKind::AlorSkeleton => "alor_skeleton",
         }
     }
 }

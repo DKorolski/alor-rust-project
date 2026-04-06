@@ -246,6 +246,14 @@ enum SimOrderType {
     Limit,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum StrategyLifecycleHook {
+    BootstrapSnapshot,
+    RuntimeStateRestore,
+    HistoryWarmup,
+    StopOrder,
+}
+
 impl Default for RuntimeMetrics {
     fn default() -> Self {
         Self {
@@ -271,6 +279,76 @@ impl Default for RuntimeMetrics {
 }
 
 impl StrategyRuntime {
+    fn lifecycle_hook_enabled(&self, hook: StrategyLifecycleHook) -> bool {
+        match hook {
+            StrategyLifecycleHook::BootstrapSnapshot => {
+                self.strategy_capabilities.uses_bootstrap_snapshot
+            }
+            StrategyLifecycleHook::RuntimeStateRestore => {
+                self.strategy_capabilities.uses_runtime_state_restore
+            }
+            StrategyLifecycleHook::HistoryWarmup => self.strategy_capabilities.uses_history_warmup,
+            StrategyLifecycleHook::StopOrder => self.strategy_capabilities.uses_stop_orders,
+        }
+    }
+
+    fn invoke_strategy_callback<F>(
+        &mut self,
+        ctx: &StrategyCtx,
+        callback_name: &'static str,
+        callback: F,
+    ) -> (Vec<Intent>, StrategyState)
+    where
+        F: FnOnce(&mut (dyn Strategy + Send + Sync), &StrategyCtx) -> Vec<Intent>,
+    {
+        let previous_strategy_state = self.state.strategy_state.clone();
+        let intents = callback(self.strategy.as_mut(), ctx);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.audit_event(
+            if intents.is_empty() {
+                "signal_not_generated"
+            } else {
+                "signal_generated"
+            },
+            json!({
+                "callback": callback_name,
+                "event_ts_utc": ctx.event_ts_utc(),
+                "intents_count": intents.len(),
+            }),
+        );
+        (intents, previous_strategy_state)
+    }
+
+    async fn invoke_and_apply_strategy_callback<F>(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        callback_name: &'static str,
+        callback: F,
+    ) -> Result<usize>
+    where
+        F: FnOnce(&mut (dyn Strategy + Send + Sync), &StrategyCtx) -> Vec<Intent>,
+    {
+        let (intents, previous_strategy_state) =
+            self.invoke_strategy_callback(ctx, callback_name, callback);
+        let intents_count = intents.len();
+        self.apply_intents(ctx, created_ts_utc, intents, previous_strategy_state)
+            .await?;
+        Ok(intents_count)
+    }
+
+    fn audit_event(&self, event: &'static str, details: serde_json::Value) {
+        info!(
+            target: "strategy_runtime::audit",
+            strategy_id = %self.config.strategy.strategy_id,
+            strategy_kind = ?self.config.strategy.strategy_kind,
+            symbol = %self.config.strategy.symbol,
+            event,
+            details = %details,
+            "strategy_audit"
+        );
+    }
+
     fn can_advance_paper_execution(&self, origin: DataOrigin) -> bool {
         if self.config.trade_mode != TradeMode::Paper {
             return true;
@@ -634,9 +712,10 @@ impl StrategyRuntime {
 
         let prev_bar_ts = self.state.last_processed_bar_ts.get(&bar.symbol).copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, bar.close_time_utc);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_bar(&ctx, &bar);
-        self.state.strategy_state = self.strategy.state().clone();
+        let (intents, previous_strategy_state) =
+            self.invoke_strategy_callback(&ctx, "on_bar_replay", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &bar)
+            });
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
 
         if self.config.trade_mode != TradeMode::Live {
@@ -685,16 +764,60 @@ impl StrategyRuntime {
         let trim_positions = self.config.trim.positions;
         let trim_bars = self.config.trim.bars;
 
+        self.audit_event(
+            "pending_recovery_started",
+            json!({"stream": streams.acks.clone(), "message_type": "CommandAck"}),
+        );
         self.recover_pending(&streams.acks, MessageType::CommandAck, trim_acks)
             .await?;
+        self.audit_event(
+            "pending_recovery_finished",
+            json!({"stream": streams.acks.clone(), "message_type": "CommandAck"}),
+        );
+
+        self.audit_event(
+            "pending_recovery_started",
+            json!({"stream": streams.orders.clone(), "message_type": "Order/StopOrder"}),
+        );
         self.recover_pending_orders_stream(&streams.orders, trim_orders)
             .await?;
+        self.audit_event(
+            "pending_recovery_finished",
+            json!({"stream": streams.orders.clone(), "message_type": "Order/StopOrder"}),
+        );
+
+        self.audit_event(
+            "pending_recovery_started",
+            json!({"stream": streams.trades.clone(), "message_type": "Trade"}),
+        );
         self.recover_pending(&streams.trades, MessageType::Trade, trim_trades)
             .await?;
+        self.audit_event(
+            "pending_recovery_finished",
+            json!({"stream": streams.trades.clone(), "message_type": "Trade"}),
+        );
+
+        self.audit_event(
+            "pending_recovery_started",
+            json!({"stream": streams.positions.clone(), "message_type": "Position"}),
+        );
         self.recover_pending(&streams.positions, MessageType::Position, trim_positions)
             .await?;
+        self.audit_event(
+            "pending_recovery_finished",
+            json!({"stream": streams.positions.clone(), "message_type": "Position"}),
+        );
+
+        self.audit_event(
+            "pending_recovery_started",
+            json!({"stream": streams.bars.clone(), "message_type": "Bar"}),
+        );
         self.recover_pending(&streams.bars, MessageType::Bar, trim_bars)
             .await?;
+        self.audit_event(
+            "pending_recovery_finished",
+            json!({"stream": streams.bars.clone(), "message_type": "Bar"}),
+        );
 
         self.refresh_health_if_due().await?;
         self.log_live_guard_status_if_due().await?;
@@ -703,7 +826,7 @@ impl StrategyRuntime {
     }
 
     async fn warmup_strategy_indicators_from_history(&mut self) -> Result<()> {
-        if !self.strategy_capabilities.uses_history_warmup {
+        if !self.lifecycle_hook_enabled(StrategyLifecycleHook::HistoryWarmup) {
             return Ok(());
         }
         if self.config.reset_state_on_start {
@@ -1050,6 +1173,14 @@ impl StrategyRuntime {
                     self.strategy.set_state(strategy_state);
                     self.restore_pending_requests();
                     info!("runtime state restored");
+                    self.audit_event(
+                        "runtime_state_snapshot_loaded",
+                        json!({
+                            "last_trade_ts": self.state.last_trade_ts,
+                            "seen_trade_ids_count": self.state.seen_trade_ids.len(),
+                            "pending_requests_count": self.our_request_ids.len(),
+                        }),
+                    );
                     self.log_runtime_state_dump();
                 }
                 Err(error) => {
@@ -1404,11 +1535,23 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, ack.processed_ts_utc);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_ack(&ctx, &ack);
-        self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+        let intents_count = self
+            .invoke_and_apply_strategy_callback(
+                &ctx,
+                event_ts,
+                "on_ack",
+                |strategy, strategy_ctx| strategy.on_ack(strategy_ctx, &ack),
+            )
             .await?;
+        self.audit_event(
+            "order_acknowledged_by_strategy",
+            json!({
+                "callback": "on_ack",
+                "event_ts_utc": event_ts,
+                "request_id": ack.request_id.to_string(),
+                "intents_count": intents_count,
+            }),
+        );
         self.transport.xack(&stream, &message_id).await?;
         self.health_snapshot.write().last_ack_ts_utc = Some(event_ts);
         Ok(())
@@ -1435,11 +1578,24 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, order.ts_utc);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_order(&ctx, &order);
-        self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+        let intents_count = self
+            .invoke_and_apply_strategy_callback(
+                &ctx,
+                event_ts,
+                "on_order",
+                |strategy, strategy_ctx| strategy.on_order(strategy_ctx, &order),
+            )
             .await?;
+        self.audit_event(
+            "order_acknowledged_by_strategy",
+            json!({
+                "callback": "on_order",
+                "event_ts_utc": event_ts,
+                "order_id": order.order_id,
+                "status": order.status.clone(),
+                "intents_count": intents_count,
+            }),
+        );
         self.update_ledger_from_order(&order)?;
         self.state.orders.insert(order.order_id, order);
         self.transport.xack(&stream, &message_id).await?;
@@ -1460,7 +1616,7 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if !self.strategy_capabilities.uses_stop_orders {
+        if !self.lifecycle_hook_enabled(StrategyLifecycleHook::StopOrder) {
             self.state
                 .stop_orders
                 .insert(stop_order.stop_order_id.clone(), stop_order);
@@ -1474,11 +1630,23 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, stop_order.ts_utc);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_stop_order(&ctx, &stop_order);
-        self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+        let intents_count = self
+            .invoke_and_apply_strategy_callback(
+                &ctx,
+                event_ts,
+                "on_stop_order",
+                |strategy, strategy_ctx| strategy.on_stop_order(strategy_ctx, &stop_order),
+            )
             .await?;
+        self.audit_event(
+            "stop_order_acknowledged_by_strategy",
+            json!({
+                "event_ts_utc": event_ts,
+                "stop_order_id": stop_order.stop_order_id.clone(),
+                "status": stop_order.status.clone(),
+                "intents_count": intents_count,
+            }),
+        );
         self.state
             .stop_orders
             .insert(stop_order.stop_order_id.clone(), stop_order);
@@ -1630,11 +1798,23 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, position.ts_utc);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_position(&ctx, &position);
-        self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+        let intents_count = self
+            .invoke_and_apply_strategy_callback(
+                &ctx,
+                event_ts,
+                "on_position",
+                |strategy, strategy_ctx| strategy.on_position(strategy_ctx, &position),
+            )
             .await?;
+        self.audit_event(
+            "position_acknowledged_by_strategy",
+            json!({
+                "event_ts_utc": event_ts,
+                "symbol": position.symbol.clone(),
+                "qty": position.qty,
+                "intents_count": intents_count,
+            }),
+        );
         self.state
             .positions
             .insert(position.symbol.clone(), position);
@@ -1659,9 +1839,10 @@ impl StrategyRuntime {
             self.bootstrap_state.seen_live_bar = true;
         }
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, event_ts);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_bar(&ctx, &bar);
-        self.state.strategy_state = self.strategy.state().clone();
+        let (intents, previous_strategy_state) =
+            self.invoke_strategy_callback(&ctx, "on_bar", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &bar)
+            });
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         if self.config.trade_mode != TradeMode::Live {
             self.record_non_live_intents(event_ts, &intents, self.config.trade_mode)
@@ -1942,6 +2123,18 @@ impl StrategyRuntime {
                                 drop_reason = "flat_position",
                                 "paper_exit_dropped"
                             );
+                            self.audit_event(
+                                "intent_blocked",
+                                json!({
+                                    "mode": "paper",
+                                    "reason": "flat_position",
+                                    "action": "market",
+                                    "class": "Exit",
+                                    "symbol": symbol.clone(),
+                                    "requested_qty": qty,
+                                    "current_position_qty": current_pos_qty,
+                                }),
+                            );
                             continue;
                         }
                         let wrong_side = (side == alor_protocol::Side::Sell
@@ -1959,6 +2152,18 @@ impl StrategyRuntime {
                                 drop_reason = "wrong_side_for_exit",
                                 "paper_exit_dropped"
                             );
+                            self.audit_event(
+                                "intent_blocked",
+                                json!({
+                                    "mode": "paper",
+                                    "reason": "wrong_side_for_exit",
+                                    "action": "market",
+                                    "class": "Exit",
+                                    "symbol": symbol.clone(),
+                                    "requested_qty": qty,
+                                    "current_position_qty": current_pos_qty,
+                                }),
+                            );
                             continue;
                         }
                         effective_qty = effective_qty.min(pos_abs);
@@ -1973,6 +2178,18 @@ impl StrategyRuntime {
                                 current_position_qty = current_pos_qty,
                                 drop_reason = "effective_qty_zero",
                                 "paper_exit_dropped"
+                            );
+                            self.audit_event(
+                                "intent_blocked",
+                                json!({
+                                    "mode": "paper",
+                                    "reason": "effective_qty_zero",
+                                    "action": "market",
+                                    "class": "Exit",
+                                    "symbol": symbol.clone(),
+                                    "requested_qty": qty,
+                                    "current_position_qty": current_pos_qty,
+                                }),
                             );
                             continue;
                         }
@@ -2141,6 +2358,18 @@ impl StrategyRuntime {
                             fill_drop_reason = "flat_position",
                             "paper_exit_fill_dropped"
                         );
+                        self.audit_event(
+                            "intent_blocked",
+                            json!({
+                                "mode": "paper",
+                                "reason": "flat_position",
+                                "action": "simulated_fill",
+                                "class": "Exit",
+                                "symbol": order.symbol.clone(),
+                                "requested_qty": order.qty,
+                                "current_position_qty_before_fill": current_pos_qty,
+                            }),
+                        );
                         self.ledger.record_order(OrderRecord {
                             order_id: order.order_id,
                             symbol: order.symbol.clone(),
@@ -2169,6 +2398,18 @@ impl StrategyRuntime {
                             fill_drop_reason = "wrong_side_for_exit",
                             "paper_exit_fill_dropped"
                         );
+                        self.audit_event(
+                            "intent_blocked",
+                            json!({
+                                "mode": "paper",
+                                "reason": "wrong_side_for_exit",
+                                "action": "simulated_fill",
+                                "class": "Exit",
+                                "symbol": order.symbol.clone(),
+                                "requested_qty": order.qty,
+                                "current_position_qty_before_fill": current_pos_qty,
+                            }),
+                        );
                         self.ledger.record_order(OrderRecord {
                             order_id: order.order_id,
                             symbol: order.symbol.clone(),
@@ -2194,6 +2435,18 @@ impl StrategyRuntime {
                             effective_qty_after_recalc = effective_qty,
                             fill_drop_reason = "effective_qty_zero",
                             "paper_exit_fill_dropped"
+                        );
+                        self.audit_event(
+                            "intent_blocked",
+                            json!({
+                                "mode": "paper",
+                                "reason": "effective_qty_zero",
+                                "action": "simulated_fill",
+                                "class": "Exit",
+                                "symbol": order.symbol.clone(),
+                                "requested_qty": order.qty,
+                                "current_position_qty_before_fill": current_pos_qty,
+                            }),
                         );
                         self.ledger.record_order(OrderRecord {
                             order_id: order.order_id,
@@ -2553,7 +2806,7 @@ impl StrategyRuntime {
     }
 
     async fn notify_bootstrap_snapshot(&mut self) -> Result<()> {
-        if !self.strategy_capabilities.uses_bootstrap_snapshot {
+        if !self.lifecycle_hook_enabled(StrategyLifecycleHook::BootstrapSnapshot) {
             return Ok(());
         }
         let snapshot = match &self.bootstrap_snapshot {
@@ -2567,16 +2820,26 @@ impl StrategyRuntime {
             .get(&self.config.strategy.symbol)
             .copied();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_bootstrap_snapshot(&ctx, &snapshot);
-        self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents, previous_strategy_state)
+        let intents_count = self
+            .invoke_and_apply_strategy_callback(
+                &ctx,
+                created_ts,
+                "on_bootstrap_snapshot",
+                |strategy, strategy_ctx| strategy.on_bootstrap_snapshot(strategy_ctx, &snapshot),
+            )
             .await?;
+        self.audit_event(
+            "bootstrap_processed",
+            json!({
+                "created_ts_utc": created_ts,
+                "intents_count": intents_count,
+            }),
+        );
         Ok(())
     }
 
     async fn notify_runtime_state_restored(&mut self) -> Result<()> {
-        if !self.strategy_capabilities.uses_runtime_state_restore {
+        if !self.lifecycle_hook_enabled(StrategyLifecycleHook::RuntimeStateRestore) {
             return Ok(());
         }
         let last_bar_ts = self
@@ -2590,11 +2853,23 @@ impl StrategyRuntime {
         };
         let created_ts = self.normalize_event_ts(last_bar_ts.unwrap_or(0));
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts);
-        let previous_strategy_state = self.state.strategy_state.clone();
-        let intents = self.strategy.on_runtime_state_restored(&ctx, &restored);
-        self.state.strategy_state = self.strategy.state().clone();
-        self.apply_intents(&ctx, created_ts, intents, previous_strategy_state)
+        let intents_count = self
+            .invoke_and_apply_strategy_callback(
+                &ctx,
+                created_ts,
+                "on_runtime_state_restored",
+                |strategy, strategy_ctx| strategy.on_runtime_state_restored(strategy_ctx, &restored),
+            )
             .await?;
+        self.audit_event(
+            "runtime_state_restored",
+            json!({
+                "created_ts_utc": created_ts,
+                "known_order_ids_count": restored.known_order_ids.len(),
+                "pending_requests_count": restored.pending_requests.len(),
+                "intents_count": intents_count,
+            }),
+        );
         Ok(())
     }
 
@@ -2798,6 +3073,13 @@ impl StrategyRuntime {
             reason,
             "strategy_state_transition_reverted"
         );
+        self.audit_event(
+            "intent_blocked",
+            json!({
+                "reason": reason,
+                "action": "batch",
+            }),
+        );
         self.strategy.set_state(previous_state.clone());
         self.state.strategy_state = previous_state;
     }
@@ -2820,10 +3102,20 @@ impl StrategyRuntime {
                 for intent in intents {
                     let intent_class = Self::resolve_intent_class(ctx, &intent);
                     if !self.trading_window_allows_order(ctx, created_ts_utc, intent_class) {
+                        let action = self.intent_action_name(&intent);
                         info!(
-                            action = self.intent_action_name(&intent),
+                            action,
                             class = ?intent_class,
                             "intent_dropped_by_trading_window"
+                        );
+                        self.audit_event(
+                            "intent_blocked",
+                            json!({
+                                "reason": "trading_window",
+                                "action": action,
+                                "class": format!("{intent_class:?}"),
+                                "created_ts_utc": created_ts_utc,
+                            }),
                         );
                         continue;
                     }
@@ -2846,11 +3138,22 @@ impl StrategyRuntime {
                         if self.guard_allows_intent_when_blocked(intent_class, has_open_position) {
                             passthrough.push((intent, intent_class));
                         } else {
+                            let action = self.intent_action_name(&intent);
                             info!(
-                                action = self.intent_action_name(&intent),
+                                action,
                                 class = ?intent_class,
                                 reasons = ?decision.reasons,
                                 "intent_dropped_by_guard"
+                            );
+                            self.audit_event(
+                                "intent_blocked",
+                                json!({
+                                    "reason": "live_guard",
+                                    "action": action,
+                                    "class": format!("{intent_class:?}"),
+                                    "guard_reasons": decision.reasons.clone(),
+                                    "created_ts_utc": created_ts_utc,
+                                }),
                             );
                         }
                     }
@@ -2873,6 +3176,16 @@ impl StrategyRuntime {
                             reasons = ?decision.reasons,
                             "intent_emitted_guard_close_only_path"
                         );
+                        self.audit_event(
+                            "intent_emitted",
+                            json!({
+                                "path": "guard_close_only",
+                                "action": action,
+                                "class": format!("{intent_class:?}"),
+                                "request_id": command.request_id.to_string(),
+                                "created_ts_utc": created_ts_utc,
+                            }),
+                        );
                         self.persist_state(Some(&command)).await?;
                         self.our_request_ids.insert(command.request_id);
                     }
@@ -2885,6 +3198,16 @@ impl StrategyRuntime {
                         action,
                         request_id = %command.request_id,
                         "intent_emitted"
+                    );
+                    self.audit_event(
+                        "intent_emitted",
+                        json!({
+                            "path": "normal",
+                            "action": action,
+                            "class": format!("{intent_class:?}"),
+                            "request_id": command.request_id.to_string(),
+                            "created_ts_utc": created_ts_utc,
+                        }),
                     );
                     let test_delay_ms = Self::test_delay_before_publish_ms();
                     if test_delay_ms > 0 {
@@ -2900,6 +3223,15 @@ impl StrategyRuntime {
                 }
             }
             TradeMode::Paper => {
+                self.audit_event(
+                    "intent_emitted",
+                    json!({
+                        "path": "virtual",
+                        "mode": "paper",
+                        "intents_count": intents.len(),
+                        "created_ts_utc": created_ts_utc,
+                    }),
+                );
                 let config = self.config.clone();
                 let paper = self.config.paper.clone();
                 let backtest = self.config.backtest.clone();
@@ -2915,6 +3247,15 @@ impl StrategyRuntime {
                 self.persist_state(None).await?;
             }
             TradeMode::Backtest => {
+                self.audit_event(
+                    "intent_emitted",
+                    json!({
+                        "path": "virtual",
+                        "mode": "backtest",
+                        "intents_count": intents.len(),
+                        "created_ts_utc": created_ts_utc,
+                    }),
+                );
                 let config = self.config.clone();
                 let paper = self.config.paper.clone();
                 let backtest = self.config.backtest.clone();
@@ -3728,6 +4069,117 @@ mod tests {
                 uses_stop_orders: true,
             }
         );
+
+        let mut alor_config = limit_runtime.config.clone();
+        alor_config.strategy.set_kind(StrategyKind::AlorSkeleton);
+        alor_config.strategy.strategy_id = "alor_skeleton".to_string();
+
+        let alor_runtime = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(StrategyRuntime::new(alor_config))
+            .unwrap();
+
+        assert_eq!(
+            alor_runtime.strategy_capabilities,
+            StrategyCapabilities {
+                uses_bootstrap_snapshot: true,
+                uses_runtime_state_restore: true,
+                uses_history_warmup: false,
+                uses_stop_orders: true,
+            }
+        );
+    }
+
+    #[test]
+    fn alor_skeleton_lifecycle_callbacks_are_wired_in_runtime() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy.set_kind(StrategyKind::AlorSkeleton);
+        runtime.config.strategy.strategy_id = "alor_skeleton".to_string();
+        runtime.strategy = Box::new(
+            crate::strategies::alor_skeleton::AlorSkeletonStrategy::new(
+                crate::strategies::alor_skeleton::AlorSkeletonConfig {
+                    symbol: runtime.config.strategy.symbol.clone(),
+                },
+            ),
+        );
+        runtime.strategy_capabilities = StrategyCapabilities {
+            uses_bootstrap_snapshot: true,
+            uses_runtime_state_restore: true,
+            uses_history_warmup: false,
+            uses_stop_orders: true,
+        };
+
+        let snapshot_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        runtime.bootstrap_snapshot = Some(BootstrapSnapshot {
+            positions_strategy: HashMap::new(),
+            working_orders_strategy: HashMap::new(),
+            working_stop_orders_strategy: HashMap::new(),
+            snapshot_ts_utc: Some(snapshot_ts),
+        });
+        runtime
+            .state
+            .last_processed_bar_ts
+            .insert(runtime.config.strategy.symbol.clone(), snapshot_ts);
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.notify_bootstrap_snapshot())
+            .unwrap();
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::AlorSkeleton {
+                lifecycle_stage,
+                bootstrap_seen,
+                ..
+            } if lifecycle_stage == "bootstrapped" && *bootstrap_seen
+        ));
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.notify_runtime_state_restored())
+            .unwrap();
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::AlorSkeleton {
+                lifecycle_stage,
+                runtime_state_restored,
+                ..
+            } if lifecycle_stage == "runtime_state_restored" && *runtime_state_restored
+        ));
+
+        let stop_order = StopOrderEvent {
+            stop_order_id: "alor-stop-1".to_string(),
+            exchange_order_id: Some(1),
+            symbol: runtime.config.strategy.symbol.clone(),
+            status: "working".to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            filled: 0.0,
+            stop_price: 100.0,
+            price: 99.9,
+            existing: false,
+            comment: None,
+            end_time: None,
+            ts_utc: snapshot_ts + 1,
+        };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.handle_stop_order(
+                "orders".to_string(),
+                "1-0".to_string(),
+                stop_order,
+            ))
+            .unwrap();
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::AlorSkeleton { lifecycle_stage, .. }
+                if lifecycle_stage == "stop_order_observed"
+        ));
     }
 
     #[test]

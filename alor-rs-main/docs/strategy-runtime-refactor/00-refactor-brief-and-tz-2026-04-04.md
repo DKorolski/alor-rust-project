@@ -365,6 +365,145 @@ Started reducing legacy-aware default hook knowledge in the host layer:
 - Kept host default implementations intact for migration compatibility while
   introducing first concrete strategy-owned overrides.
 
+### 2026-04-06 - PR7 step 4: neutral host defaults + explicit legacy strategy hooks
+
+Continued PR7 toward strategy-native ownership of runtime-facing projections:
+
+- Simplified host default hook implementations to neutral fallbacks:
+  - `tracked_order_ids() -> []`
+  - `pending_request_ids() -> []`
+  - `exit_risk_status(...) -> default`
+- Added explicit strategy-owned overrides for legacy request/order tracking:
+  - `LimitCancelStrategy`: tracked order ids + pending request ids
+  - `MarketBuyAndCloseStrategy`: pending request ids
+  - `MockLiveProbeStrategy`: tracked order ids + pending request ids
+  - `ToySessionTimingStrategy`: pending request ids
+- Preserved `SessionGapStandaloneStrategy` strategy-owned risk/pending overrides
+  from step 3 and validated the new seam ownership with targeted runtime and
+  strategy test suites (green).
+
+### 2026-04-06 - PR8 step 1: strategy adapters for SessionGap and Hybrid
+
+Started PR8 adapter standardization without runtime contour changes:
+
+- Added a dedicated `strategy_adapters` module and introduced explicit adapters:
+  - `SessionGapStandaloneAdapter`
+  - `HybridIntradayAdapter`
+- Moved `StrategyConfig -> concrete strategy runtime config` mapping for those
+  two strategies out of `strategy_registry` factories into adapter code.
+- Updated registry factories to consume adapter entrypoints, keeping descriptor
+  wiring and capabilities unchanged.
+- Added focused adapter mismatch tests and re-ran impacted runtime/strategy test
+  suites (`strategy_registry`, `strategy_adapters`, `session_gap_standalone`,
+  `hybrid_intraday_runtime`) — green.
+
+### 2026-04-06 - PR8 step 2: lifecycle dispatch standardization in runtime host
+
+Continued PR8 by consolidating runtime lifecycle callback dispatch:
+
+- Added explicit lifecycle hook selector in runtime host
+  (`BootstrapSnapshot`, `RuntimeStateRestore`, `HistoryWarmup`, `StopOrder`) and
+  centralized capability checks through one helper path.
+- Introduced shared callback dispatch helpers that unify:
+  - strategy callback invocation,
+  - strategy-state refresh after callback,
+  - intent application path.
+- Switched runtime event/callback paths (`on_bar`, `on_ack`, `on_order`,
+  `on_position`, `on_stop_order`, bootstrap/restored notifications) to this
+  shared dispatch flow without semantic changes.
+- Re-ran runtime + adapter + `SessionGapStandalone` + `HybridIntraday` suites —
+  green.
+- Noted intentional nuance: warmup remains a distinct lifecycle form (returns
+  `usize` and no intents), so standardization is centralized by
+  gating/host-control, not by the callback+apply-intents flow.
+
+### 2026-04-06 - PR9 step 1: structured strategy audit logging (no new stream)
+
+Started PR9 with a runtime-local structured audit trail via logs (no additional
+Redis audit stream):
+
+- Added a unified `strategy_audit` log path in runtime host carrying strategy
+  identity and JSON details per event.
+- Added structured audit events for:
+  - `signal_generated` (strategy callback emitted intents),
+  - `intent_emitted`,
+  - `intent_blocked`,
+  - `bootstrap_processed`,
+  - `runtime_state_snapshot_loaded` / `runtime_state_restored`,
+  - `pending_recovery_started` / `pending_recovery_finished`,
+  - `order_acknowledged_by_strategy` / `position_acknowledged_by_strategy`.
+- Kept operational behavior unchanged: this step adds observability only.
+- Re-ran runtime test suite after wiring — green.
+
+### 2026-04-06 - PR9 step 2: non-live audit coverage and block-reason detail
+
+Extended PR9 audit coverage into paper/backtest execution flows:
+
+- Added structured `intent_emitted` audit events for virtual (non-live) intent
+  paths in both `Paper` and `Backtest` modes.
+- Added explicit `intent_blocked` audit events for paper-mode exit protection
+  drops:
+  - flat position,
+  - wrong side for exit,
+  - effective qty zero,
+  both on initial intent simulation and delayed fill simulation paths.
+- Kept runtime behavior unchanged; only observability metadata expanded.
+- Re-ran runtime test suite after the additions — green.
+
+### 2026-04-06 - PR10 step 1: fully wired third strategy skeleton + audit follow-ups
+
+Started PR10 with an infrastructure-complete third strategy skeleton (`Alor`)
+and included the two non-blocking PR9 follow-up recommendations:
+
+- Added fully wired third strategy kind:
+  - `StrategyKind::AlorSkeleton` with default id `alor_skeleton`,
+  - typed payload `StrategySpecificConfig::AlorSkeleton`,
+  - dedicated strategy module `strategies/alor_skeleton.rs`,
+  - state payload branch `StrategyState::AlorSkeleton`,
+  - adapter wiring `AlorSkeletonAdapter`,
+  - registry descriptor/factory/capabilities wiring.
+- Added config wiring for the new skeleton:
+  - strict `strategy_kind` parsing aliases (`alor_skeleton`, `alor`),
+  - split section support/validation for `[strategy.alor_skeleton]`.
+- Added targeted coverage:
+  - config integration test for split alor section loading,
+  - adapter mismatch test,
+  - registry coverage updated for the new kind.
+- Applied PR9 follow-up observability recommendations:
+  - added explicit `stop_order_acknowledged_by_strategy` audit event on
+    `on_stop_order` callback path,
+  - added `signal_not_generated` diagnostic audit event for callback invocations
+    that produce zero intents.
+- Re-ran config + adapter + runtime suites — green.
+
+### 2026-04-06 - PR10 step 2: lifecycle regression pass for third strategy wiring
+
+Completed a focused regression pass to prove runtime lifecycle wiring for the new
+third strategy skeleton:
+
+- Added runtime test coverage that exercises `AlorSkeleton` through host callback
+  flow:
+  - bootstrap snapshot callback,
+  - runtime-state-restored callback,
+  - stop-order callback dispatch path.
+- Extended runtime capability regression test to assert descriptor capabilities
+  for `StrategyKind::AlorSkeleton`.
+- Ran full `strategy-runtime` test suite after wiring updates (unit + integration
+  + e2e-in-repo tests) — green.
+
+### 2026-04-06 - PR10 step 3: closing pass and DoD checkpoint
+
+Finalized PR10 with a focused closing checkpoint:
+
+- Confirmed third strategy skeleton is wired across all required host surfaces:
+  kind, config split/validation, state payload branch, adapter, registry/factory,
+  capabilities, and lifecycle callback dispatch.
+- Confirmed PR9 follow-up recommendations are integrated into the same phase:
+  - explicit stop-order strategy acknowledgement audit event,
+  - diagnostic callback-without-signal audit event.
+- Re-ran full `strategy-runtime` test matrix to close the phase with regression
+  confidence and no lint drift.
+
 ## Definition Of Done
 
 The work is done only when all of the following are true:

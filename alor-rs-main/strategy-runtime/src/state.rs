@@ -318,6 +318,16 @@ pub enum StrategyState {
         #[serde(default)]
         overnight_exit_armed_date: Option<String>,
     },
+    AlorSkeleton {
+        #[serde(default)]
+        lifecycle_stage: String,
+        #[serde(default)]
+        last_bar_ts: Option<i64>,
+        #[serde(default)]
+        bootstrap_seen: bool,
+        #[serde(default)]
+        runtime_state_restored: bool,
+    },
     CancelSent {
         cancel_request_id: Uuid,
         order_id: i64,

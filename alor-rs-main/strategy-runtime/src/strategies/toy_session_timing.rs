@@ -160,6 +160,13 @@ impl Strategy for ToySessionTimingStrategy {
         &self.state
     }
 
+    fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
+        match self.state() {
+            StrategyState::MarketBuySent { buy_request_id, .. } => vec![*buy_request_id],
+            _ => Vec::new(),
+        }
+    }
+
     fn set_state(&mut self, state: StrategyState) {
         self.state = state;
     }

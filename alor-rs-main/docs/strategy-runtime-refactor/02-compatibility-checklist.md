@@ -26,6 +26,30 @@ config/state-heavy changes.
   health uses strategy-owned exit risk hook
 - at least one concrete strategy (`SessionGapStandalone`) provides explicit
   overrides for pending/exit-risk hooks to reduce host default legacy knowledge
+- host default hook implementations stay neutral (empty/default), and legacy
+  request/order tracking behavior is provided by explicit concrete strategy
+  overrides (`LimitCancel`, `MarketBuyAndClose`, `MockLiveProbe`,
+  `ToySessionTiming`, `SessionGapStandalone`)
+- `SessionGapStandalone` and `HybridIntraday` both use explicit strategy-adapter
+  mapping path from host `StrategyConfig` to concrete runtime config
+- lifecycle callbacks (`bootstrap snapshot`, `runtime state restored`,
+  `history warmup`, `stop-order hook`) are gated by one standardized
+  capability-dispatch path in runtime host
+- structured strategy audit logging exists (log-based, no additional Redis
+  stream) and covers at least signal generation, intent emitted/blocked,
+  bootstrap/runtime-restore processing, pending recovery start/finish, and
+  strategy-side order/position acknowledgements
+- non-live (`Paper`/`Backtest`) intent paths are also represented in audit logs,
+  including explicit block reasons for paper exit-protection drops
+- stop-order callback path has dedicated strategy-side audit acknowledgement
+  event, and callback invocations with zero intents emit a diagnostic
+  `signal_not_generated` audit event
+- third strategy skeleton (`AlorSkeleton`) is fully wired end-to-end:
+  strategy kind, typed payload, config split section parsing/validation,
+  state envelope payload branch, adapter, registry/factory/capabilities, and
+  lifecycle callback integration
+- runtime regression tests explicitly verify `AlorSkeleton` lifecycle callback
+  wiring (`bootstrap`, `runtime-state-restored`, `stop-order`)
 - legacy snapshot load still works
 - legacy runtime state load still works
 - legacy JSON shape used in restart e2e is still readable

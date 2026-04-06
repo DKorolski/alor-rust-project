@@ -494,6 +494,7 @@ struct StrategyConfigFile {
     mock_live_probe: Option<MockLiveProbeConfigFile>,
     session_gap: Option<SessionGapConfigFile>,
     hybrid_intraday: Option<HybridIntradayConfigFile>,
+    alor_skeleton: Option<AlorSkeletonConfigFile>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -611,6 +612,9 @@ struct SessionGapConfigFile {
     exit_offset_min: Option<i64>,
     work_weekends: Option<bool>,
 }
+
+#[derive(Debug, Default, Deserialize)]
+struct AlorSkeletonConfigFile {}
 
 #[derive(Debug, Default, Deserialize)]
 struct PaperConfigFile {
@@ -1220,6 +1224,9 @@ fn validate_matching_strategy_specific_sections(
     }
     if strategy_file.hybrid_intraday.is_some() && kind != StrategyKind::HybridIntraday {
         mismatches.push("strategy.hybrid_intraday");
+    }
+    if strategy_file.alor_skeleton.is_some() && kind != StrategyKind::AlorSkeleton {
+        mismatches.push("strategy.alor_skeleton");
     }
 
     if mismatches.is_empty() {
@@ -2088,6 +2095,7 @@ fn parse_strategy_kind(value: &str) -> Result<StrategyKind> {
         "toy_session_timing" | "toysessiontiming" => Ok(StrategyKind::ToySessionTiming),
         "session_gap_standalone" | "sessiongapstandalone" => Ok(StrategyKind::SessionGapStandalone),
         "hybrid_intraday" | "hybridintraday" | "hybrid" => Ok(StrategyKind::HybridIntraday),
+        "alor_skeleton" | "alorskeleton" | "alor" => Ok(StrategyKind::AlorSkeleton),
         _ => Err(anyhow!("unknown strategy_kind: {value}")),
     }
 }

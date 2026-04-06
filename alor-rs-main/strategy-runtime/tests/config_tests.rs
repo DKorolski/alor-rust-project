@@ -462,6 +462,36 @@ close_hour = 21
 }
 
 #[test]
+fn loads_split_alor_skeleton_sections() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let path = write_temp_config(
+        r#"
+[strategy.common]
+strategy_kind = "alor"
+symbol = "ALRS"
+qty = 3.0
+side = "sell"
+
+[strategy.alor_skeleton]
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::AlorSkeleton
+    );
+    assert_eq!(resolved.config.strategy.strategy_id, "alor_skeleton");
+    assert_eq!(resolved.config.strategy.symbol, "ALRS");
+    assert_eq!(resolved.config.strategy.qty, 3.0);
+    assert_eq!(resolved.config.strategy.side, alor_protocol::Side::Sell);
+    assert!(resolved.config.strategy.alor_skeleton().is_some());
+}
+
+#[test]
 fn replay_env_overrides_take_precedence() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&[
