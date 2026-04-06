@@ -353,6 +353,18 @@ Continued runtime special-case removal through strategy hooks:
   - pending request hook is used by restore path,
   - comment tag hook is used by command emission fallback path.
 
+### 2026-04-06 - PR7 step 3: first strategy-specific override extraction
+
+Started reducing legacy-aware default hook knowledge in the host layer:
+
+- Added `SessionGapStandaloneStrategy` overrides for:
+  - `pending_request_ids()`
+  - `exit_risk_status(has_open_position)`
+- Added focused runtime test coverage for `exit_risk_status` hook path to ensure
+  runtime health/readiness projection uses strategy hook output.
+- Kept host default implementations intact for migration compatibility while
+  introducing first concrete strategy-owned overrides.
+
 ## Definition Of Done
 
 The work is done only when all of the following are true:

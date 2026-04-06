@@ -2410,6 +2410,41 @@ impl Strategy for SessionGapStandaloneStrategy {
         &self.state
     }
 
+    fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
+        match self.persisted_phase_or_flat() {
+            SessionGapLivePhase::PendingEntry { request_id, .. }
+            | SessionGapLivePhase::PendingExit { request_id, .. }
+            | SessionGapLivePhase::ExitRecoveryPending { request_id, .. } => vec![request_id],
+            _ => Vec::new(),
+        }
+    }
+
+    fn exit_risk_status(
+        &self,
+        has_open_position: bool,
+    ) -> crate::strategy_host::StrategyExitRiskStatus {
+        match self.persisted_phase_or_flat() {
+            SessionGapLivePhase::ExitRecoveryPending { .. } => {
+                crate::strategy_host::StrategyExitRiskStatus {
+                    phase_override: Some("ExitRecoveryPending".to_string()),
+                    exit_recovery_active: true,
+                    operator_intervention_required: false,
+                    open_risk_position_unflattened: has_open_position,
+                }
+            }
+            SessionGapLivePhase::CloseOnlyDegraded {
+                operator_intervention_required,
+                ..
+            } => crate::strategy_host::StrategyExitRiskStatus {
+                phase_override: Some("CloseOnlyDegraded".to_string()),
+                exit_recovery_active: false,
+                operator_intervention_required,
+                open_risk_position_unflattened: has_open_position,
+            },
+            _ => crate::strategy_host::StrategyExitRiskStatus::default(),
+        }
+    }
+
     fn set_state(&mut self, state: StrategyState) {
         self.state = state;
     }

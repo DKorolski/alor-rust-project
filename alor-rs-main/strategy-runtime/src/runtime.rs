@@ -3573,6 +3573,7 @@ mod tests {
         state: StrategyState,
         pending_requests: Vec<uuid::Uuid>,
         tag: Option<String>,
+        risk: crate::strategy_host::StrategyExitRiskStatus,
     }
 
     impl Strategy for HookSpyStrategy {
@@ -3607,6 +3608,13 @@ mod tests {
             _intent_class: alor_protocol::IntentClass,
         ) -> Option<String> {
             self.tag.clone()
+        }
+
+        fn exit_risk_status(
+            &self,
+            _has_open_position: bool,
+        ) -> crate::strategy_host::StrategyExitRiskStatus {
+            self.risk.clone()
         }
 
         fn state(&self) -> &StrategyState {
@@ -3659,6 +3667,39 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn refresh_health_snapshot_uses_strategy_exit_risk_hook() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.strategy = Box::new(HookSpyStrategy {
+            risk: crate::strategy_host::StrategyExitRiskStatus {
+                phase_override: Some("RiskOverride".to_string()),
+                exit_recovery_active: true,
+                operator_intervention_required: true,
+                open_risk_position_unflattened: true,
+            },
+            ..HookSpyStrategy::default()
+        });
+        runtime
+            .state
+            .positions
+            .insert(runtime.config.strategy.symbol.clone(), PositionEvent {
+                symbol: runtime.config.strategy.symbol.clone(),
+                qty: 1.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_000,
+            });
+
+        runtime.refresh_health_snapshot();
+        let snapshot = runtime.health_snapshot.read();
+
+        assert_eq!(snapshot.runtime_phase, "RiskOverride");
+        assert!(snapshot.exit_recovery_active);
+        assert!(snapshot.operator_intervention_required);
+        assert!(snapshot.open_risk_position_unflattened);
+        assert!(!snapshot.readiness);
     }
 
     #[test]
