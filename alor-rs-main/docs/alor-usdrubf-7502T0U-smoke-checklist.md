@@ -11,6 +11,7 @@ This checklist is for controlled rollout of `alor_usdrubf_hybrid_v1` on `USDRUBF
 - `docs/alor-usdrubf-development-observations-2026-04-06.md`
 - `docs/alor-usdrubf-local-bringup-report-2026-04-06.md`
 - `docs/alor-usdrubf-live-hardening-tz-2026-04-06.md`
+- `docs/alor-usdrubf-followup-review-memo-2026-04-06.md`
 
 ## Preflight (Before Smoke/Soak)
 

@@ -58,7 +58,13 @@ Reach controlled live-prep maturity without widening architecture scope:
 
 - `T10` Bootstrap adoption with non-flat snapshot.
 - `T11` Fresh recovered-origin bar does not clear `live_ready`.
-- `T12` (recommended) capability descriptor consistency check.
+- `T12` Restart with non-flat snapshot preserves conservative owner/reconcile semantics.
+- `T13` Terminal reject after entry intent.
+- `T14` Terminal reject after exit intent.
+
+Recommended:
+
+- capability descriptor consistency check in registry tests.
 
 ### Follow-up implementation progress
 
@@ -72,9 +78,33 @@ Implemented in current iteration:
   - pending entry is cleared on non-flat adoption to avoid blind duplicate entry.
   - symbol working orders are tracked at bootstrap and block unsafe blind entry until reconcile.
   - verified by `bootstrap_adoption_with_non_flat_snapshot_prevents_blind_entry` (`T10`).
+- `PR2.1`: bootstrap owner refinement added.
+  - when owner cannot be inferred confidently during bootstrap non-flat adoption, strategy marks lifecycle as conservative owner mode.
+  - owner trust is restored only after first live `on_position` confirmation.
+  - verified by `restart_with_non_flat_snapshot_keeps_owner_conservative_until_live_confirmation` (`T12`).
+- `PR2.2`: reject policy hardening added.
+  - entry reject policy: clear inflight + defer retry to next bar (`entry_reject_deferred_retry`),
+  - exit reject policy: keep open risk state + clear inflight + defer retry (`exit_reject_deferred_retry`).
+  - verified by:
+    - `terminal_reject_after_entry_intent_clears_inflight_and_defers_retry` (`T13`),
+    - `terminal_reject_after_exit_intent_preserves_open_risk_state` (`T14`).
 - `PR3`: capability descriptor reviewed.
   - `uses_stop_orders` for `AlorUsdrubfHybrid` downgraded to `false` (callback existed but no mature stop-order ownership semantics yet).
   - registry capability expectation tests updated and green.
+
+### Reconcile precedence policy (locked)
+
+For startup and restart semantics, precedence is explicit:
+
+1. live broker truth callbacks (`on_position` / `on_order` / `on_ack`) have highest precedence,
+2. bootstrap snapshot adoption has second precedence,
+3. restored runtime state is a lower-priority seed and may be overridden during bootstrap/live reconcile.
+
+Operational interpretation:
+
+- runtime state is used to restore continuity hints,
+- bootstrap snapshot sets initial broker-facing startup picture for this run,
+- live broker events remain final authority for execution-sensitive transitions.
 
 ### Practical PR order for this follow-up
 
@@ -94,6 +124,22 @@ All must be true simultaneously:
 5. `T10` and `T11` are green,
 6. next-run protocol is reproducible and isolated from stale tails,
 7. final readiness statement is honest: `Go` vs `Conditional-Go` vs `Not yet equivalent`.
+
+## Final anti-regression gate status (legacy strategies)
+
+Mandatory anti-regression suite for `session_gap_standalone` and `hybrid_intraday_runtime` is green:
+
+- unit subsets for both strategies: PASS,
+- required integration/e2e set:
+  - `e2e_session_gap_restart`: PASS,
+  - `e2e_reconnect_blocks`: PASS,
+  - `e2e_hybrid_golden`: PASS,
+  - `e2e_smoke`: PASS,
+  - `live_guard_tests`: PASS,
+  - `config_tests`: PASS,
+  - `ledger_reports`: PASS,
+- aggregate regression run:
+  - `cargo test -p strategy-runtime`: PASS.
 
 ## Status and Engineering Verdict
 

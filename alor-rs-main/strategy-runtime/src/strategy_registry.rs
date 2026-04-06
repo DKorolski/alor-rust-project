@@ -396,4 +396,17 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn alor_usdrubf_capabilities_match_followup_hardening_profile() {
+        let registry = StrategyRegistry::builtin().expect("builtin registry");
+        let alor = registry
+            .descriptor(StrategyKind::AlorUsdrubfHybrid)
+            .expect("alor descriptor");
+
+        assert!(alor.capabilities.uses_bootstrap_snapshot);
+        assert!(alor.capabilities.uses_runtime_state_restore);
+        assert!(alor.capabilities.uses_history_warmup);
+        assert!(!alor.capabilities.uses_stop_orders);
+    }
 }

@@ -162,8 +162,11 @@ pub struct AlorUsdrubfHybridStrategy {
     pending_request_ids: BTreeSet<Uuid>,
     tracked_order_ids: BTreeSet<i64>,
     entry_intent_inflight: bool,
+    entry_reject_deferred_until_bar_ts: Option<i64>,
     open_position: Option<OpenPosition>,
     exit_intent_inflight: bool,
+    exit_reject_deferred_until_bar_ts: Option<i64>,
+    owner_confirmed_by_live_event: bool,
     cash: f64,
     bo_was_long_today: bool,
     bo_was_short_today: bool,
@@ -230,8 +233,11 @@ impl AlorUsdrubfHybridStrategy {
             pending_request_ids: BTreeSet::new(),
             tracked_order_ids: BTreeSet::new(),
             entry_intent_inflight: false,
+            entry_reject_deferred_until_bar_ts: None,
             open_position: None,
             exit_intent_inflight: false,
+            exit_reject_deferred_until_bar_ts: None,
+            owner_confirmed_by_live_event: true,
             cash: 0.0,
             bo_was_long_today: false,
             bo_was_short_today: false,
@@ -331,6 +337,13 @@ impl AlorUsdrubfHybridStrategy {
             .map(|position| position.owner)
             .or_else(|| self.pending_entry.as_ref().map(|pending| pending.owner))
             .unwrap_or(Owner::Breakout)
+    }
+
+    fn infer_owner_from_existing_state(&self) -> Option<Owner> {
+        self.open_position
+            .as_ref()
+            .map(|position| position.owner)
+            .or_else(|| self.pending_entry.as_ref().map(|pending| pending.owner))
     }
 
     fn update_session_metrics(&mut self, bar: &BarEvent, local_dt: NaiveDateTime) {
@@ -474,6 +487,12 @@ impl AlorUsdrubfHybridStrategy {
         let Some(pending) = self.pending_entry.clone() else {
             return;
         };
+        if self
+            .entry_reject_deferred_until_bar_ts
+            .is_some_and(|ts| ts == bar.close_time_utc)
+        {
+            return;
+        }
         if self.entry_intent_inflight || self.open_position.is_some() {
             return;
         }
@@ -489,10 +508,22 @@ impl AlorUsdrubfHybridStrategy {
         self.lifecycle_stage = "live_entry_intent_emitted".to_string();
     }
 
-    fn maybe_emit_live_exit_intent(&mut self, reason: String, exit_price: f64, intents: &mut Vec<Intent>) {
+    fn maybe_emit_live_exit_intent(
+        &mut self,
+        reason: String,
+        exit_price: f64,
+        bar_ts_utc: i64,
+        intents: &mut Vec<Intent>,
+    ) {
         let Some(pos) = self.open_position.as_ref() else {
             return;
         };
+        if self
+            .exit_reject_deferred_until_bar_ts
+            .is_some_and(|ts| ts == bar_ts_utc)
+        {
+            return;
+        }
         if self.exit_intent_inflight {
             return;
         }
@@ -596,6 +627,10 @@ impl AlorUsdrubfHybridStrategy {
 
     fn evaluate_exit_research(&self, rs: &ResearchSnapshot) -> Option<(String, f64)> {
         let pos = self.open_position.as_ref()?;
+        if !self.owner_confirmed_by_live_event {
+            // Conservative bootstrap mode: avoid owner-dependent exits until live broker truth confirms position context.
+            return None;
+        }
         if pos.owner == Owner::MeanRev {
             let stop_price = pos.stop_price?;
             let take_price = pos.take_price?;
@@ -748,8 +783,20 @@ impl Strategy for AlorUsdrubfHybridStrategy {
 
         let mut intents = Vec::new();
         if matches!(ctx.trade_mode, crate::TradeMode::Live) {
+            if self
+                .entry_reject_deferred_until_bar_ts
+                .is_some_and(|ts| bar.close_time_utc > ts)
+            {
+                self.entry_reject_deferred_until_bar_ts = None;
+            }
+            if self
+                .exit_reject_deferred_until_bar_ts
+                .is_some_and(|ts| bar.close_time_utc > ts)
+            {
+                self.exit_reject_deferred_until_bar_ts = None;
+            }
             if let Some((reason, exit_price)) = self.evaluate_exit_research(&research) {
-                self.maybe_emit_live_exit_intent(reason, exit_price, &mut intents);
+                self.maybe_emit_live_exit_intent(reason, exit_price, bar.close_time_utc, &mut intents);
                 self.last_processed_bar_ts = Some(bar.close_time_utc);
                 self.sync_state();
                 return intents;
@@ -796,9 +843,22 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             ack.status,
             AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
         ) {
-            self.entry_intent_inflight = false;
-            self.exit_intent_inflight = false;
-            self.lifecycle_stage = "broker_ack_rejected".to_string();
+            let reject_ts = self.last_bar_ts.unwrap_or(0);
+            if self.exit_intent_inflight && self.open_position.is_some() {
+                self.entry_intent_inflight = false;
+                self.exit_intent_inflight = false;
+                self.exit_reject_deferred_until_bar_ts = Some(reject_ts);
+                self.lifecycle_stage = "exit_reject_deferred_retry".to_string();
+            } else if self.entry_intent_inflight && self.pending_entry.is_some() {
+                self.entry_intent_inflight = false;
+                self.exit_intent_inflight = false;
+                self.entry_reject_deferred_until_bar_ts = Some(reject_ts);
+                self.lifecycle_stage = "entry_reject_deferred_retry".to_string();
+            } else {
+                self.entry_intent_inflight = false;
+                self.exit_intent_inflight = false;
+                self.lifecycle_stage = "broker_ack_rejected".to_string();
+            }
             info!(
                 request_id = %ack.request_id,
                 status = ?ack.status,
@@ -847,6 +907,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         }
         if pos.qty.abs() < 1e-9 {
             self.open_position = None;
+            self.owner_confirmed_by_live_event = true;
             self.exit_intent_inflight = false;
             self.tracked_order_ids.clear();
             self.hybrid_state = if self.pending_entry.is_some() {
@@ -912,6 +973,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         }
         self.entry_intent_inflight = false;
         self.exit_intent_inflight = false;
+        self.owner_confirmed_by_live_event = true;
         self.hybrid_state = HybridState::Open;
         self.lifecycle_stage = "broker_position_open".to_string();
         info!(
@@ -939,6 +1001,8 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.live_ready = false;
         self.entry_intent_inflight = false;
         self.exit_intent_inflight = false;
+        self.entry_reject_deferred_until_bar_ts = None;
+        self.exit_reject_deferred_until_bar_ts = None;
         self.pending_request_ids.clear();
         self.tracked_order_ids.clear();
         let symbol = self.config.symbol.as_str();
@@ -957,7 +1021,8 @@ impl Strategy for AlorUsdrubfHybridStrategy {
 
         if let Some(position) = snapshot_position {
             if position.qty.abs() >= 1e-9 {
-                let owner = self.snapshot_owner_fallback();
+                let inferred_owner = self.infer_owner_from_existing_state();
+                let owner = inferred_owner.unwrap_or_else(|| self.snapshot_owner_fallback());
                 let side = Self::snapshot_position_side(position.qty);
                 let size = position.qty.abs().floor().max(1.0) as i64;
                 let entry_price = if position.avg_price > 0.0 {
@@ -983,9 +1048,16 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                     stop2: None,
                 });
                 self.hybrid_state = HybridState::Open;
-                self.lifecycle_stage = "bootstrap_non_flat_adopted".to_string();
+                if inferred_owner.is_some() {
+                    self.owner_confirmed_by_live_event = true;
+                    self.lifecycle_stage = "bootstrap_non_flat_adopted".to_string();
+                } else {
+                    self.owner_confirmed_by_live_event = false;
+                    self.lifecycle_stage = "bootstrap_non_flat_owner_unconfirmed".to_string();
+                }
             } else {
                 self.open_position = None;
+                self.owner_confirmed_by_live_event = true;
                 if self.tracked_order_ids.is_empty() {
                     self.pending_entry = None;
                     self.entry_intent_inflight = false;
@@ -1012,6 +1084,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             symbol_working_orders = self.tracked_order_ids.len(),
             symbol_working_stop_orders = has_snapshot_stop_orders,
             lifecycle_stage = self.lifecycle_stage.as_str(),
+            reconcile_precedence = "live_events > bootstrap_snapshot > runtime_state",
             "bootstrap snapshot observed; reconcile policy applied and live gate re-armed"
         );
         self.sync_state();
@@ -1030,6 +1103,9 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.tracked_order_ids = state.known_order_ids.iter().copied().collect();
         self.entry_intent_inflight = false;
         self.exit_intent_inflight = false;
+        self.entry_reject_deferred_until_bar_ts = None;
+        self.exit_reject_deferred_until_bar_ts = None;
+        self.owner_confirmed_by_live_event = true;
         info!(
             strategy_id = ctx.strategy_id.as_str(),
             strategy = "alor_usdrubf_hybrid",
@@ -1070,6 +1146,14 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         &self,
         has_open_position: bool,
     ) -> crate::strategy_host::StrategyExitRiskStatus {
+        if self.exit_reject_deferred_until_bar_ts.is_some() && has_open_position {
+            return crate::strategy_host::StrategyExitRiskStatus {
+                phase_override: Some("ExitRejectDeferredRetry".to_string()),
+                exit_recovery_active: true,
+                operator_intervention_required: false,
+                open_risk_position_unflattened: true,
+            };
+        }
         if self.exit_intent_inflight && has_open_position {
             return crate::strategy_host::StrategyExitRiskStatus {
                 phase_override: Some("ExitIntentInflight".to_string()),
@@ -1225,6 +1309,10 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 _ => None,
             };
             self.exit_intent_inflight = *exit_intent_inflight;
+            self.owner_confirmed_by_live_event =
+                self.lifecycle_stage != "bootstrap_non_flat_owner_unconfirmed";
+            self.entry_reject_deferred_until_bar_ts = None;
+            self.exit_reject_deferred_until_bar_ts = None;
         }
         self.state = state;
     }
@@ -1741,7 +1829,7 @@ mod tests {
                 exit_intent_inflight,
                 lifecycle_stage,
                 ..
-            } if !*entry_intent_inflight && !*exit_intent_inflight && lifecycle_stage == "broker_ack_rejected"
+            } if !*entry_intent_inflight && !*exit_intent_inflight && lifecycle_stage == "entry_reject_deferred_retry"
         ));
     }
 
@@ -1998,6 +2086,163 @@ mod tests {
 
         let intents = strategy.on_bar(&ctx, &bar_with_origin(1_775_490_119, 80.3, DataOrigin::Live));
         assert!(intents.is_empty());
+    }
+
+    #[test]
+    fn restart_with_non_flat_snapshot_keeps_owner_conservative_until_live_confirmation() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_240);
+        let snapshot = bootstrap_snapshot_with(1.0, 80.2, &[], &[], 1_775_490_110);
+        let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);
+
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                lifecycle_stage,
+                hybrid_state,
+                open_position_qty,
+                ..
+            } if lifecycle_stage == "bootstrap_non_flat_owner_unconfirmed"
+                && hybrid_state == "open"
+                && *open_position_qty == 1.0
+        ));
+
+        // No blind re-entry should happen while strategy is already non-flat.
+        let intents = strategy.on_bar(&ctx, &bar_with_origin(1_775_490_180, 80.25, DataOrigin::Live));
+        assert!(intents.is_empty());
+
+        // First live position confirmation lifts conservative-owner mode.
+        let _ = strategy.on_position(&ctx, &position_event(1_775_490_181, 1.0, 80.2));
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid { lifecycle_stage, .. }
+                if lifecycle_stage == "broker_position_open"
+        ));
+    }
+
+    #[test]
+    fn terminal_reject_after_entry_intent_clears_inflight_and_defers_retry() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1_775_490_000),
+            last_processed_bar_ts: Some(1_775_489_940),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "pending".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: Some("mean_rev".to_string()),
+            pending_entry_side: Some("short".to_string()),
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: true,
+            pending_entry_reason: Some("mr_short_signal".to_string()),
+            pending_entry_scale_at_signal: Some(0.5),
+            pending_entry_signal_price: Some(80.1),
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: None,
+            open_position_side: None,
+            exit_intent_inflight: false,
+            open_position_qty: 0.0,
+            open_position_entry_ts: None,
+            open_position_entry_price: None,
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: None,
+            open_position_stop2: None,
+        });
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let req = Uuid::new_v4();
+        let ack = CommandAck::rejected(req, "reject", "entry reject");
+        let _ = strategy.on_ack(&ctx, &ack);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                lifecycle_stage,
+                entry_intent_inflight,
+                pending_entry_owner,
+                ..
+            } if lifecycle_stage == "entry_reject_deferred_retry"
+                && !*entry_intent_inflight
+                && pending_entry_owner.as_deref() == Some("mean_rev")
+        ));
+
+        let same_bar_intents = strategy.on_bar(&ctx, &bar_with_origin(1_775_490_000, 80.1, DataOrigin::Live));
+        assert!(same_bar_intents.is_empty());
+    }
+
+    #[test]
+    fn terminal_reject_after_exit_intent_preserves_open_risk_state() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1_775_490_000),
+            last_processed_bar_ts: Some(1_775_489_940),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "open".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: None,
+            pending_entry_side: None,
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: vec![77],
+            entry_intent_inflight: false,
+            pending_entry_reason: None,
+            pending_entry_scale_at_signal: None,
+            pending_entry_signal_price: None,
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: Some("day_breakout_waitfix".to_string()),
+            open_position_side: Some("long".to_string()),
+            exit_intent_inflight: true,
+            open_position_qty: 1.0,
+            open_position_entry_ts: Some("2026-04-06 10:00:00".to_string()),
+            open_position_entry_price: Some(80.0),
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: Some(79.7),
+            open_position_stop2: Some(79.5),
+        });
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let req = Uuid::new_v4();
+        let ack = CommandAck::rejected(req, "reject", "exit reject");
+        let _ = strategy.on_ack(&ctx, &ack);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                lifecycle_stage,
+                exit_intent_inflight,
+                open_position_qty,
+                ..
+            } if lifecycle_stage == "exit_reject_deferred_retry"
+                && !*exit_intent_inflight
+                && *open_position_qty == 1.0
+        ));
+        let risk = strategy.exit_risk_status(true);
+        assert_eq!(risk.phase_override.as_deref(), Some("ExitRejectDeferredRetry"));
+        assert!(risk.exit_recovery_active);
+        assert!(risk.open_risk_position_unflattened);
     }
 
     #[test]

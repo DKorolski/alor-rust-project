@@ -4084,8 +4084,8 @@ mod tests {
             StrategyCapabilities {
                 uses_bootstrap_snapshot: true,
                 uses_runtime_state_restore: true,
-                uses_history_warmup: false,
-                uses_stop_orders: true,
+                uses_history_warmup: true,
+                uses_stop_orders: false,
             }
         );
     }
@@ -4106,8 +4106,8 @@ mod tests {
         runtime.strategy_capabilities = StrategyCapabilities {
             uses_bootstrap_snapshot: true,
             uses_runtime_state_restore: true,
-            uses_history_warmup: false,
-            uses_stop_orders: true,
+            uses_history_warmup: true,
+            uses_stop_orders: false,
         };
 
         let snapshot_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
@@ -4179,7 +4179,7 @@ mod tests {
         assert!(matches!(
             &runtime.state.strategy_state,
             StrategyState::AlorUsdrubfHybrid { lifecycle_stage, .. }
-                if lifecycle_stage == "stop_order_observed"
+                if lifecycle_stage == "runtime_state_restored"
         ));
     }
 
