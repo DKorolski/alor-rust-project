@@ -7,6 +7,29 @@
 - Current no-go for live soak; go for controlled replay/paper hardening.
 - Main risk is startup/live operational semantics, not only signal math.
 
+Progress note:
+- Stage A (`P0.1-P0.3`) is completed in runtime code and covered by unit tests.
+- Stage B is in progress; implemented parts:
+  - live `on_bar` path emits intents without finalizing pending/open transitions,
+  - transition finalization is moved to broker-truth callbacks (currently `on_position`),
+  - in-flight guards are persisted in state payload for restart continuity.
+  - non-live/recovery bar origins (`history/history_gap/replay`) are explicitly suppressed in live mode before session mutation and signal path.
+- Stage C started; initial scope implemented:
+  - strategy-owned hook overrides wired (`tracked_order_ids`, `pending_request_ids`, `intent_comment_tag`, `exit_risk_status`),
+  - tracker fields now restored from `RuntimeStateRestored` and synced in strategy payload,
+  - strategy-level service logs added on bootstrap/restore/suppression/broker-position reconciliation.
+  - hook-path tests added for restore hydration, ack/order tracker updates, comment-tag format, and exit-risk projection.
+- Stage D started:
+  - strategy internals now separate deterministic research evaluation from live adapter orchestration through a dedicated `ResearchSnapshot` path,
+  - no runtime protocol/API changes introduced; behavior locked by existing Stage A-C test suite.
+  - replay parity regression gate (`T6`) re-run after Stage D split:
+    - `golden`, `test`, `train` all pass in `--check` mode.
+- Stage E test gate progress:
+  - `T4` runtime guard interaction: live path stays blocked when `enable_live_execution=false`.
+  - `T5` broker-truth reconciliation ordering variance: out-of-order late reject ACK does not break already confirmed open position.
+  - `T9` dirty-start vs fresh-live transition: recovery tail is suppressed first, then fresh live bar resumes entry path.
+  - parity (`T6`) re-run after Stage E additions: still green on `golden/test/train`.
+
 Observed risk signatures in logs:
 - startup accepted/rejected commands and orphan trades from historical tails,
 - `intent_dropped_bar_silence`,
@@ -152,6 +175,18 @@ Do not rely only on neutral host defaults for strategy-specific behavior.
 - `T9` clean-start vs dirty-start:
   - dirty-start does not trade recovery tail as live,
   - clean-start has no false suppress/revert artifacts.
+
+### Current T1-T9 Coverage Matrix
+
+- `T1` startup stale-bar suppression: covered by `stale_live_bars_are_suppressed_until_fresh_bar`.
+- `T2` restore consistency for pending/open: covered by `set_state_restores_pending_entry_for_next_bar` and `set_state_restores_open_position_and_allows_exit_evaluation`.
+- `T3` warmup no-live-orders behavior: covered by `warmup_keeps_trading_state_untouched_when_pending_or_open_exists`.
+- `T4` runtime guard interaction: covered by `runtime_guard_blocks_live_path_when_live_execution_disabled`.
+- `T5` broker-truth ordering variance: covered by `broker_truth_reconciliation_is_stable_with_out_of_order_ack`.
+- `T6` replay parity regression: covered by `usdrubf_hybrid_replay --check` on `golden/test/train` (green).
+- `T7` duplicate/replayed dedupe: covered by `duplicate_bar_is_ignored` and `recovered_origin_bar_is_suppressed_in_live_without_session_reset`.
+- `T8` state round-trip equivalence: covered by restore tests for pending/open plus hook-state hydration (`runtime_restore_populates_pending_and_tracked_hooks`).
+- `T9` clean-start vs dirty-start: covered by `dirty_start_suppresses_recovery_tail_then_allows_fresh_live_bar`.
 
 ## Implementation Order
 

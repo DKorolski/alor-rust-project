@@ -1,0 +1,120 @@
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502T0U"
+exchange = "MOEX"
+source = "strategy-runtime"
+consumer_group = "strategy-runtime-alor-usdrubf-live-7502T0U-diag-20260406"
+consumer_name = "auto"
+reset_state_on_start = true
+
+[runtime]
+trade_mode = "live"
+allow_live_orders = true
+allow_paper_orders = false
+guard_log_interval_ms = 5000
+bootstrap_dump = false
+still_blocked_log_period_sec = 60
+gateway_health_stale_sec = 20
+require_gateway_ready = true
+
+[runtime.health]
+enabled = true
+listen_addr = "127.0.0.1:8091"
+expose_metrics = false
+
+[streams]
+bars = "md.bars.7502T0U.1m.diag_20260406"
+orders = "broker.orders.7502T0U.diag_20260406"
+trades = "broker.trades.7502T0U.diag_20260406"
+positions = "broker.positions.7502T0U.diag_20260406"
+commands = "cmd.orders.7502T0U.diag_20260406"
+acks = "cmd.acks.7502T0U.diag_20260406"
+snapshots = "broker.snapshots.7502T0U.diag_20260406"
+health = "events.health.alor_usdrubf_diag_20260406"
+dlq_prefix = "dlq"
+runtime_state = "runtime.state.alor_usdrubf_hybrid_v1.live.usdrubf.7502T0U.diag_20260406"
+
+[read]
+block_ms = 500
+claim_idle_ms = 5000
+claim_batch = 50
+poll_interval_ms = 100
+
+[trim]
+bars = 200000
+orders = 100000
+trades = 100000
+positions = 50000
+commands = 50000
+acks = 100000
+health = 10000
+runtime_state = 2000
+
+[strategy]
+strategy_id = "alor_usdrubf_hybrid_v1"
+strategy_kind = "alor_usdrubf_hybrid"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+tick_size = 0.01
+session_open_hour = 9
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 49
+entry_after_open_min = 0
+exit_before_close_min = 0
+timezone_offset_hours = 3
+max_silence_bars_sec = 1200
+
+[trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:04:59"
+break_start_2 = "18:50:00"
+break_end_2 = "19:04:59"
+weekends_off = true
+timezone_offset_hours = 3
+
+[strategy.alor_usdrubf_hybrid]
+mr_min_rel_range = 0.006
+mr_max_rel_range = 0.050
+mr_k_short = 0.045
+mr_take_k_short = 0.16
+mr_stop_k_short = 0.43
+mr_last_entry_time = "11:40:00"
+mr_force_exit_time = "11:50:00"
+bo_k = 0.45
+bo_stop1_range = 0.51
+bo_stop2_range = 0.35
+bo_big_move_threshold = 0.020
+bo_wait_hours = 2.0
+bo_eod_exit_time = "23:30:00"
+commission_pct_per_side = 0.004
+position_size_fraction = 0.9
+initial_cash = 100000.0
+enable_live_execution = true
+use_fixed_live_size = true
+live_fixed_units = 1.0
+
+[paper]
+enabled = false
+output = "stdout"
+file_path = "./reports/paper_alor_usdrubf_7502T0U_live.jsonl"
+trades_csv = "./reports/trades_alor_usdrubf_7502T0U_live.csv"
+summary_json = "./reports/summary_alor_usdrubf_7502T0U_live.json"
+append = false
+
+[backtest]
+enabled = false
+trade_log = "./strategy-runtime/backtest_trades.log"
+trades_csv = "./strategy-runtime/backtest_trades.csv"
+summary_json = "./strategy-runtime/backtest_summary.json"
+append = false
+
+[replay]
+enabled = false
+bars_csv_path = "./paper_bars_2.csv"
+reference_trades_csv_path = "./paper_trades_2.csv"
+output_dir = "./strategy-runtime/replay_out"
+price_tolerance = 1e-8
+strict_dedup = true

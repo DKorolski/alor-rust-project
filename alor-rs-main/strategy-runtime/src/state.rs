@@ -324,21 +324,75 @@ pub enum StrategyState {
         #[serde(default)]
         last_bar_ts: Option<i64>,
         #[serde(default)]
+        last_processed_bar_ts: Option<i64>,
+        #[serde(default)]
         bootstrap_seen: bool,
         #[serde(default)]
         runtime_state_restored: bool,
+        #[serde(default)]
+        live_ready: bool,
         #[serde(default)]
         hybrid_state: String,
         #[serde(default)]
         current_date_local: Option<String>,
         #[serde(default)]
+        day_open: Option<f64>,
+        #[serde(default)]
+        day_high: Option<f64>,
+        #[serde(default)]
+        day_low: Option<f64>,
+        #[serde(default)]
+        day_volume_sum: f64,
+        #[serde(default)]
+        day_vwap_num: f64,
+        #[serde(default)]
+        session_start_local: Option<String>,
+        #[serde(default)]
+        bo_was_long_today: bool,
+        #[serde(default)]
+        bo_was_short_today: bool,
+        #[serde(default)]
         cash: f64,
+        #[serde(default)]
+        pending_entry_owner: Option<String>,
         #[serde(default)]
         pending_entry_side: Option<String>,
         #[serde(default)]
+        pending_request_ids: Vec<Uuid>,
+        #[serde(default)]
+        tracked_order_ids: Vec<i64>,
+        #[serde(default)]
+        entry_intent_inflight: bool,
+        #[serde(default)]
+        pending_entry_reason: Option<String>,
+        #[serde(default)]
+        pending_entry_scale_at_signal: Option<f64>,
+        #[serde(default)]
+        pending_entry_signal_price: Option<f64>,
+        #[serde(default)]
+        pending_entry_stop1: Option<f64>,
+        #[serde(default)]
+        pending_entry_stop2: Option<f64>,
+        #[serde(default)]
+        open_position_owner: Option<String>,
+        #[serde(default)]
         open_position_side: Option<String>,
         #[serde(default)]
+        exit_intent_inflight: bool,
+        #[serde(default)]
         open_position_qty: f64,
+        #[serde(default)]
+        open_position_entry_ts: Option<String>,
+        #[serde(default)]
+        open_position_entry_price: Option<f64>,
+        #[serde(default)]
+        open_position_stop_price: Option<f64>,
+        #[serde(default)]
+        open_position_take_price: Option<f64>,
+        #[serde(default)]
+        open_position_stop1: Option<f64>,
+        #[serde(default)]
+        open_position_stop2: Option<f64>,
     },
     CancelSent {
         cancel_request_id: Uuid,

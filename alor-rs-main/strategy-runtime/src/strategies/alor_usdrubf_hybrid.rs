@@ -1,10 +1,14 @@
-use alor_protocol::{CommandAck, Side};
+use std::collections::BTreeSet;
+
+use alor_protocol::{AckStatus, CommandAck, IntentClass, Side};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use tracing::info;
+use uuid::Uuid;
 
 use crate::state::StrategyState;
 use crate::strategy_host::{
-    BarEvent, BootstrapSnapshot, Intent, OrderEvent, PositionEvent, RuntimeStateRestored, Strategy,
-    StrategyCtx, StopOrderEvent,
+    BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
+    RuntimeStateRestored, Strategy, StrategyCtx, StopOrderEvent,
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +35,7 @@ pub struct AlorUsdrubfHybridConfig {
     pub enable_live_execution: bool,
     pub use_fixed_live_size: bool,
     pub live_fixed_units: f64,
+    pub max_silence_bars_sec: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,14 +125,31 @@ struct OpenPosition {
     stop2: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ResearchSnapshot {
+    close: f64,
+    high: f64,
+    low: f64,
+    local_dt: NaiveDateTime,
+    session_open: Option<f64>,
+    session_vwap: f64,
+    session_range: Option<f64>,
+    elapsed_hours: Option<f64>,
+    ret_from_open: Option<f64>,
+    bo_was_long_today: bool,
+    bo_was_short_today: bool,
+}
+
 #[derive(Debug)]
 pub struct AlorUsdrubfHybridStrategy {
     config: AlorUsdrubfHybridConfig,
     state: StrategyState,
     lifecycle_stage: String,
     last_bar_ts: Option<i64>,
+    last_processed_bar_ts: Option<i64>,
     bootstrap_seen: bool,
     runtime_state_restored: bool,
+    live_ready: bool,
     hybrid_state: HybridState,
     current_date_local: Option<NaiveDate>,
     day_open: Option<f64>,
@@ -137,7 +159,11 @@ pub struct AlorUsdrubfHybridStrategy {
     day_vwap_num: f64,
     session_start_local: Option<NaiveDateTime>,
     pending_entry: Option<PendingEntry>,
+    pending_request_ids: BTreeSet<Uuid>,
+    tracked_order_ids: BTreeSet<i64>,
+    entry_intent_inflight: bool,
     open_position: Option<OpenPosition>,
+    exit_intent_inflight: bool,
     cash: f64,
     bo_was_long_today: bool,
     bo_was_short_today: bool,
@@ -150,19 +176,48 @@ impl AlorUsdrubfHybridStrategy {
             state: StrategyState::AlorUsdrubfHybrid {
                 lifecycle_stage: "created".to_string(),
                 last_bar_ts: None,
+                last_processed_bar_ts: None,
                 bootstrap_seen: false,
                 runtime_state_restored: false,
+                live_ready: false,
                 hybrid_state: "flat".to_string(),
                 current_date_local: None,
+                day_open: None,
+                day_high: None,
+                day_low: None,
+                day_volume_sum: 0.0,
+                day_vwap_num: 0.0,
+                session_start_local: None,
+                bo_was_long_today: false,
+                bo_was_short_today: false,
                 cash: 0.0,
+                pending_entry_owner: None,
                 pending_entry_side: None,
+                pending_request_ids: Vec::new(),
+                tracked_order_ids: Vec::new(),
+                entry_intent_inflight: false,
+                pending_entry_reason: None,
+                pending_entry_scale_at_signal: None,
+                pending_entry_signal_price: None,
+                pending_entry_stop1: None,
+                pending_entry_stop2: None,
+                open_position_owner: None,
                 open_position_side: None,
+                exit_intent_inflight: false,
                 open_position_qty: 0.0,
+                open_position_entry_ts: None,
+                open_position_entry_price: None,
+                open_position_stop_price: None,
+                open_position_take_price: None,
+                open_position_stop1: None,
+                open_position_stop2: None,
             },
             lifecycle_stage: "created".to_string(),
             last_bar_ts: None,
+            last_processed_bar_ts: None,
             bootstrap_seen: false,
             runtime_state_restored: false,
+            live_ready: false,
             hybrid_state: HybridState::Flat,
             current_date_local: None,
             day_open: None,
@@ -172,7 +227,11 @@ impl AlorUsdrubfHybridStrategy {
             day_vwap_num: 0.0,
             session_start_local: None,
             pending_entry: None,
+            pending_request_ids: BTreeSet::new(),
+            tracked_order_ids: BTreeSet::new(),
+            entry_intent_inflight: false,
             open_position: None,
+            exit_intent_inflight: false,
             cash: 0.0,
             bo_was_long_today: false,
             bo_was_short_today: false,
@@ -186,25 +245,76 @@ impl AlorUsdrubfHybridStrategy {
         self.state = StrategyState::AlorUsdrubfHybrid {
             lifecycle_stage: self.lifecycle_stage.clone(),
             last_bar_ts: self.last_bar_ts,
+            last_processed_bar_ts: self.last_processed_bar_ts,
             bootstrap_seen: self.bootstrap_seen,
             runtime_state_restored: self.runtime_state_restored,
+            live_ready: self.live_ready,
             hybrid_state: self.hybrid_state.as_str().to_string(),
             current_date_local: self.current_date_local.map(|d| d.to_string()),
+            day_open: self.day_open,
+            day_high: self.day_high,
+            day_low: self.day_low,
+            day_volume_sum: self.day_volume_sum,
+            day_vwap_num: self.day_vwap_num,
+            session_start_local: self.session_start_local.map(|dt| dt.to_string()),
+            bo_was_long_today: self.bo_was_long_today,
+            bo_was_short_today: self.bo_was_short_today,
             cash: self.cash,
+            pending_entry_owner: self
+                .pending_entry
+                .as_ref()
+                .map(|entry| entry.owner.as_str().to_string()),
             pending_entry_side: self
                 .pending_entry
                 .as_ref()
                 .map(|entry| entry.side.as_str().to_string()),
+            pending_request_ids: self.pending_request_ids.iter().copied().collect(),
+            tracked_order_ids: self.tracked_order_ids.iter().copied().collect(),
+            entry_intent_inflight: self.entry_intent_inflight,
+            pending_entry_reason: self.pending_entry.as_ref().map(|entry| entry.reason.clone()),
+            pending_entry_scale_at_signal: self
+                .pending_entry
+                .as_ref()
+                .map(|entry| entry.scale_at_signal),
+            pending_entry_signal_price: self.pending_entry.as_ref().map(|entry| entry.signal_price),
+            pending_entry_stop1: self.pending_entry.as_ref().and_then(|entry| entry.stop1),
+            pending_entry_stop2: self.pending_entry.as_ref().and_then(|entry| entry.stop2),
+            open_position_owner: self
+                .open_position
+                .as_ref()
+                .map(|position| position.owner.as_str().to_string()),
             open_position_side: self
                 .open_position
                 .as_ref()
                 .map(|position| position.side.as_str().to_string()),
+            exit_intent_inflight: self.exit_intent_inflight,
             open_position_qty: self
                 .open_position
                 .as_ref()
                 .map(|position| position.size as f64)
                 .unwrap_or(0.0),
+            open_position_entry_ts: self
+                .open_position
+                .as_ref()
+                .map(|position| position.entry_ts.to_string()),
+            open_position_entry_price: self.open_position.as_ref().map(|position| position.entry_price),
+            open_position_stop_price: self.open_position.as_ref().and_then(|position| position.stop_price),
+            open_position_take_price: self.open_position.as_ref().and_then(|position| position.take_price),
+            open_position_stop1: self.open_position.as_ref().and_then(|position| position.stop1),
+            open_position_stop2: self.open_position.as_ref().and_then(|position| position.stop2),
         };
+    }
+
+    fn is_live_startup_bar_stale(&self, ctx: &StrategyCtx, bar_ts_utc: i64) -> bool {
+        let age_sec = ctx.now_ts_utc().saturating_sub(bar_ts_utc);
+        age_sec > self.config.max_silence_bars_sec as i64
+    }
+
+    fn is_recovered_or_non_live_bar_origin(origin: &DataOrigin) -> bool {
+        matches!(
+            origin,
+            DataOrigin::History | DataOrigin::HistoryGap | DataOrigin::Replay
+        )
     }
 
     fn update_session_metrics(&mut self, bar: &BarEvent, local_dt: NaiveDateTime) {
@@ -217,6 +327,18 @@ impl AlorUsdrubfHybridStrategy {
     }
 
     fn reset_day(&mut self, local_date: NaiveDate) {
+        self.reset_day_aggregates(local_date);
+        // Strategy has no cross-session carry by design.
+        self.pending_entry = None;
+        self.open_position = None;
+        self.pending_request_ids.clear();
+        self.tracked_order_ids.clear();
+        self.entry_intent_inflight = false;
+        self.exit_intent_inflight = false;
+        self.hybrid_state = HybridState::Flat;
+    }
+
+    fn reset_day_aggregates(&mut self, local_date: NaiveDate) {
         self.current_date_local = Some(local_date);
         self.day_open = None;
         self.day_high = None;
@@ -224,9 +346,6 @@ impl AlorUsdrubfHybridStrategy {
         self.day_volume_sum = 0.0;
         self.day_vwap_num = 0.0;
         self.session_start_local = None;
-        self.pending_entry = None;
-        self.open_position = None;
-        self.hybrid_state = HybridState::Flat;
         self.bo_was_long_today = false;
         self.bo_was_short_today = false;
     }
@@ -266,25 +385,31 @@ impl AlorUsdrubfHybridStrategy {
         }
     }
 
-    fn maybe_fill_pending_entry(&mut self, bar: &BarEvent, intents: &mut Vec<Intent>) {
-        let Some(pending) = self.pending_entry.clone() else {
-            return;
-        };
-        let size = if self.config.use_fixed_live_size {
+    fn compute_entry_size(&self, bar_open: f64) -> i64 {
+        if self.config.use_fixed_live_size {
             self.config.live_fixed_units.max(1.0).floor() as i64
         } else {
-            ((self.cash * self.config.position_size_fraction) / bar.o)
+            ((self.cash * self.config.position_size_fraction) / bar_open)
                 .floor()
                 .max(1.0) as i64
-        };
+        }
+    }
+
+    fn build_open_position_from_pending(
+        &self,
+        pending: &PendingEntry,
+        entry_ts_utc: i64,
+        entry_price: f64,
+        size: i64,
+    ) -> OpenPosition {
         let (stop_price, take_price) = if pending.owner == Owner::MeanRev {
             (
                 Some(self.round_to_tick(
-                    bar.o + self.config.mr_stop_k_short * pending.scale_at_signal,
+                    entry_price + self.config.mr_stop_k_short * pending.scale_at_signal,
                     self.config.tick_size,
                 )),
                 Some(self.round_to_tick(
-                    bar.o - self.config.mr_take_k_short * pending.scale_at_signal,
+                    entry_price - self.config.mr_take_k_short * pending.scale_at_signal,
                     self.config.tick_size,
                 )),
             )
@@ -292,38 +417,105 @@ impl AlorUsdrubfHybridStrategy {
             (None, None)
         };
 
+        OpenPosition {
+            owner: pending.owner,
+            side: pending.side,
+            entry_ts: utc_to_local(entry_ts_utc, self.config.timezone_offset_hours),
+            entry_price,
+            size,
+            stop_price,
+            take_price,
+            stop1: pending.stop1,
+            stop2: pending.stop2,
+        }
+    }
+
+    fn maybe_fill_pending_entry(&mut self, bar: &BarEvent, intents: &mut Vec<Intent>) {
+        let Some(pending) = self.pending_entry.clone() else {
+            return;
+        };
+        let size = self.compute_entry_size(bar.o);
+
         intents.push(Intent::Market {
             qty: size as f64,
             side: pending.side.entry_side(),
             fill_price: Some(bar.o),
             comment: Some(format!("{}|entry|{}", self.config.symbol, pending.owner.as_str())),
         });
-        self.open_position = Some(OpenPosition {
-            owner: pending.owner,
-            side: pending.side,
-            entry_ts: utc_to_local(bar.close_time_utc, self.config.timezone_offset_hours),
-            entry_price: bar.o,
+        self.open_position = Some(self.build_open_position_from_pending(
+            &pending,
+            bar.close_time_utc,
+            bar.o,
             size,
-            stop_price,
-            take_price,
-            stop1: pending.stop1,
-            stop2: pending.stop2,
-        });
+        ));
         self.pending_entry = None;
+        self.entry_intent_inflight = false;
+        self.exit_intent_inflight = false;
         self.hybrid_state = HybridState::Open;
     }
 
-    fn evaluate_mr_signal(&self, bar: &BarEvent, local_dt: NaiveDateTime) -> Option<PendingEntry> {
-        if local_dt.time() > self.config.mr_last_entry_time {
+    fn maybe_emit_live_entry_intent(&mut self, bar: &BarEvent, intents: &mut Vec<Intent>) {
+        let Some(pending) = self.pending_entry.clone() else {
+            return;
+        };
+        if self.entry_intent_inflight || self.open_position.is_some() {
+            return;
+        }
+        let size = self.compute_entry_size(bar.o);
+        intents.push(Intent::Market {
+            qty: size as f64,
+            side: pending.side.entry_side(),
+            fill_price: Some(bar.o),
+            comment: Some(format!("{}|entry|{}", self.config.symbol, pending.owner.as_str())),
+        });
+        self.entry_intent_inflight = true;
+        self.hybrid_state = HybridState::Pending;
+        self.lifecycle_stage = "live_entry_intent_emitted".to_string();
+    }
+
+    fn maybe_emit_live_exit_intent(&mut self, reason: String, exit_price: f64, intents: &mut Vec<Intent>) {
+        let Some(pos) = self.open_position.as_ref() else {
+            return;
+        };
+        if self.exit_intent_inflight {
+            return;
+        }
+        intents.push(Intent::Market {
+            qty: pos.size as f64,
+            side: pos.side.exit_side(),
+            fill_price: Some(exit_price),
+            comment: Some(format!("{}|exit|{}", self.config.symbol, reason)),
+        });
+        self.exit_intent_inflight = true;
+        self.lifecycle_stage = "live_exit_intent_emitted".to_string();
+    }
+
+    fn build_research_snapshot(&self, bar: &BarEvent, local_dt: NaiveDateTime) -> ResearchSnapshot {
+        ResearchSnapshot {
+            close: bar.close,
+            high: bar.h,
+            low: bar.l,
+            local_dt,
+            session_open: self.day_open,
+            session_vwap: self.session_vwap(bar.close),
+            session_range: self.session_range(),
+            elapsed_hours: self.elapsed_hours(local_dt),
+            ret_from_open: self.ret_from_open(bar.close),
+            bo_was_long_today: self.bo_was_long_today,
+            bo_was_short_today: self.bo_was_short_today,
+        }
+    }
+
+    fn evaluate_mr_from_snapshot(&self, rs: &ResearchSnapshot) -> Option<PendingEntry> {
+        if rs.local_dt.time() > self.config.mr_last_entry_time {
             return None;
         }
-        let scale = self.session_range()?;
-        if !scale.is_finite() || scale <= 0.0 || bar.close.abs() <= f64::EPSILON {
+        let scale = rs.session_range?;
+        if !scale.is_finite() || scale <= 0.0 || rs.close.abs() <= f64::EPSILON {
             return None;
         }
-        let session_vwap = self.session_vwap(bar.close);
-        let rel_scale = scale / bar.close;
-        let dist = bar.close - session_vwap;
+        let rel_scale = scale / rs.close;
+        let dist = rs.close - rs.session_vwap;
         if !(self.config.mr_min_rel_range < rel_scale && rel_scale < self.config.mr_max_rel_range) {
             return None;
         }
@@ -335,46 +527,45 @@ impl AlorUsdrubfHybridStrategy {
             side: PositionSide::Short,
             reason: "mr_short_signal".to_string(),
             scale_at_signal: scale,
-            signal_price: bar.close,
+            signal_price: rs.close,
             stop1: None,
             stop2: None,
         })
     }
 
-    fn evaluate_bo_signal(&self, bar: &BarEvent, local_dt: NaiveDateTime) -> Option<PendingEntry> {
-        let _ = local_dt;
-        let scale = self.session_range()?;
+    fn evaluate_bo_from_snapshot(&self, rs: &ResearchSnapshot) -> Option<PendingEntry> {
+        let scale = rs.session_range?;
         if !scale.is_finite() || scale <= 0.0 {
             return None;
         }
-        if self.elapsed_hours(local_dt)? < self.config.bo_wait_hours {
+        if rs.elapsed_hours? < self.config.bo_wait_hours {
             return None;
         }
-        let session_open = self.day_open?;
-        let ret_from_open = self.ret_from_open(bar.close)?;
+        let session_open = rs.session_open?;
+        let ret_from_open = rs.ret_from_open?;
         let can_long = ret_from_open >= -self.config.bo_big_move_threshold;
         let can_short = ret_from_open <= self.config.bo_big_move_threshold;
         let long_level = session_open + self.config.bo_k * scale;
         let short_level = session_open - self.config.bo_k * scale;
 
-        if can_long && !self.bo_was_long_today && bar.close > long_level {
+        if can_long && !rs.bo_was_long_today && rs.close > long_level {
             return Some(PendingEntry {
                 owner: Owner::Breakout,
                 side: PositionSide::Long,
                 reason: "bo_long_signal".to_string(),
                 scale_at_signal: scale,
-                signal_price: bar.close,
+                signal_price: rs.close,
                 stop1: Some(session_open + self.config.bo_stop1_range * scale),
                 stop2: Some(session_open - self.config.bo_stop2_range * scale),
             });
         }
-        if can_short && !self.bo_was_short_today && bar.close < short_level {
+        if can_short && !rs.bo_was_short_today && rs.close < short_level {
             return Some(PendingEntry {
                 owner: Owner::Breakout,
                 side: PositionSide::Short,
                 reason: "bo_short_signal".to_string(),
                 scale_at_signal: scale,
-                signal_price: bar.close,
+                signal_price: rs.close,
                 stop1: Some(session_open - self.config.bo_stop1_range * scale),
                 stop2: Some(session_open + self.config.bo_stop2_range * scale),
             });
@@ -382,19 +573,24 @@ impl AlorUsdrubfHybridStrategy {
         None
     }
 
-    fn evaluate_exit(&self, bar: &BarEvent, local_dt: NaiveDateTime) -> Option<(String, f64)> {
+    fn evaluate_signal_research(&self, rs: &ResearchSnapshot) -> Option<PendingEntry> {
+        self.evaluate_mr_from_snapshot(rs)
+            .or_else(|| self.evaluate_bo_from_snapshot(rs))
+    }
+
+    fn evaluate_exit_research(&self, rs: &ResearchSnapshot) -> Option<(String, f64)> {
         let pos = self.open_position.as_ref()?;
         if pos.owner == Owner::MeanRev {
             let stop_price = pos.stop_price?;
             let take_price = pos.take_price?;
-            if bar.h >= stop_price {
+            if rs.high >= stop_price {
                 return Some(("mr_stop".to_string(), stop_price));
             }
-            if bar.l <= take_price {
+            if rs.low <= take_price {
                 return Some(("mr_take".to_string(), take_price));
             }
-            if local_dt.time() >= self.config.mr_force_exit_time {
-                return Some(("mr_time_cutoff".to_string(), bar.close));
+            if rs.local_dt.time() >= self.config.mr_force_exit_time {
+                return Some(("mr_time_cutoff".to_string(), rs.close));
             }
             return None;
         }
@@ -402,26 +598,26 @@ impl AlorUsdrubfHybridStrategy {
         let stop1 = pos.stop1?;
         let stop2 = pos.stop2?;
         if pos.side == PositionSide::Long {
-            if bar.l <= stop2 {
+            if rs.low <= stop2 {
                 return Some(("bo_stop2_long".to_string(), stop2));
             }
-            if local_dt.minute() == 50 && bar.close < stop1 {
-                return Some(("bo_stop1_long".to_string(), bar.close));
+            if rs.local_dt.minute() == 50 && rs.close < stop1 {
+                return Some(("bo_stop1_long".to_string(), rs.close));
             }
-            if local_dt.time() >= self.config.bo_eod_exit_time {
-                return Some(("bo_eod_exit".to_string(), bar.close));
+            if rs.local_dt.time() >= self.config.bo_eod_exit_time {
+                return Some(("bo_eod_exit".to_string(), rs.close));
             }
             return None;
         }
 
-        if bar.h >= stop2 {
+        if rs.high >= stop2 {
             return Some(("bo_stop2_short".to_string(), stop2));
         }
-        if local_dt.minute() == 50 && bar.close > stop1 {
-            return Some(("bo_stop1_short".to_string(), bar.close));
+        if rs.local_dt.minute() == 50 && rs.close > stop1 {
+            return Some(("bo_stop1_short".to_string(), rs.close));
         }
-        if local_dt.time() >= self.config.bo_eod_exit_time {
-            return Some(("bo_eod_exit".to_string(), bar.close));
+        if rs.local_dt.time() >= self.config.bo_eod_exit_time {
+            return Some(("bo_eod_exit".to_string(), rs.close));
         }
         None
     }
@@ -446,6 +642,8 @@ impl AlorUsdrubfHybridStrategy {
             comment: Some(format!("{}|exit|{}", self.config.symbol, reason)),
         });
         self.open_position = None;
+        self.exit_intent_inflight = false;
+        self.entry_intent_inflight = false;
         self.hybrid_state = HybridState::Flat;
         let _ = bar;
     }
@@ -456,10 +654,57 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         if bar.symbol != self.config.symbol {
             return Vec::new();
         }
+        if self
+            .last_processed_bar_ts
+            .is_some_and(|ts| bar.close_time_utc <= ts)
+        {
+            return Vec::new();
+        }
         self.lifecycle_stage = "live".to_string();
         self.last_bar_ts = Some(bar.close_time_utc);
 
         if matches!(ctx.trade_mode, crate::TradeMode::Live) && !self.config.enable_live_execution {
+            self.last_processed_bar_ts = Some(bar.close_time_utc);
+            self.sync_state();
+            return Vec::new();
+        }
+        if matches!(ctx.trade_mode, crate::TradeMode::Live) && !self.live_ready {
+            if self.is_live_startup_bar_stale(ctx, bar.close_time_utc) {
+                self.lifecycle_stage = "replay_tail_suppressed".to_string();
+                info!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    bar_ts_utc = bar.close_time_utc,
+                    now_ts_utc = ctx.now_ts_utc(),
+                    max_silence_bars_sec = self.config.max_silence_bars_sec,
+                    "startup replay tail bar suppressed"
+                );
+                self.last_processed_bar_ts = Some(bar.close_time_utc);
+                self.sync_state();
+                return Vec::new();
+            }
+            self.live_ready = true;
+            self.lifecycle_stage = "live_ready".to_string();
+            info!(
+                strategy_id = ctx.strategy_id.as_str(),
+                symbol = self.config.symbol.as_str(),
+                event_ts_utc = bar.close_time_utc,
+                now_ts_utc = ctx.now_ts_utc(),
+                "alor_usdrubf_hybrid startup replay guard cleared; live_ready=true"
+            );
+        }
+        if matches!(ctx.trade_mode, crate::TradeMode::Live)
+            && Self::is_recovered_or_non_live_bar_origin(&bar.origin)
+        {
+            self.lifecycle_stage = "recovered_bar_suppressed".to_string();
+            info!(
+                strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                bar_ts_utc = bar.close_time_utc,
+                origin = ?bar.origin,
+                "non-live bar origin suppressed in live mode"
+            );
+            self.last_processed_bar_ts = Some(bar.close_time_utc);
             self.sync_state();
             return Vec::new();
         }
@@ -470,19 +715,32 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             self.reset_day(local_date);
         }
         self.update_session_metrics(bar, local_dt);
+        let research = self.build_research_snapshot(bar, local_dt);
 
         let mut intents = Vec::new();
-        self.maybe_fill_pending_entry(bar, &mut intents);
-        if let Some((reason, exit_price)) = self.evaluate_exit(bar, local_dt) {
-            self.apply_exit(reason, exit_price, bar, &mut intents);
-            self.sync_state();
-            return intents;
+        if matches!(ctx.trade_mode, crate::TradeMode::Live) {
+            if let Some((reason, exit_price)) = self.evaluate_exit_research(&research) {
+                self.maybe_emit_live_exit_intent(reason, exit_price, &mut intents);
+                self.last_processed_bar_ts = Some(bar.close_time_utc);
+                self.sync_state();
+                return intents;
+            }
+            self.maybe_emit_live_entry_intent(bar, &mut intents);
+        } else {
+            self.maybe_fill_pending_entry(bar, &mut intents);
+            if let Some((reason, exit_price)) = self.evaluate_exit_research(&research) {
+                self.apply_exit(reason, exit_price, bar, &mut intents);
+                self.last_processed_bar_ts = Some(bar.close_time_utc);
+                self.sync_state();
+                return intents;
+            }
         }
 
-        if self.open_position.is_none() && self.pending_entry.is_none() {
-            let signal = self
-                .evaluate_mr_signal(bar, local_dt)
-                .or_else(|| self.evaluate_bo_signal(bar, local_dt));
+        if self.open_position.is_none()
+            && self.pending_entry.is_none()
+            && !(matches!(ctx.trade_mode, crate::TradeMode::Live) && self.entry_intent_inflight)
+        {
+            let signal = self.evaluate_signal_research(&research);
             if let Some(signal) = signal {
                 if signal.owner == Owner::Breakout {
                     if signal.side == PositionSide::Long {
@@ -495,15 +753,50 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.hybrid_state = HybridState::Pending;
             }
         }
+        self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.sync_state();
         intents
     }
 
-    fn on_ack(&mut self, _ctx: &StrategyCtx, _ack: &CommandAck) -> Vec<Intent> {
+    fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
+        self.pending_request_ids.remove(&ack.request_id);
+        if let Some(order_id) = ack.broker_order_id {
+            self.tracked_order_ids.insert(order_id);
+        }
+        if matches!(
+            ack.status,
+            AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
+        ) {
+            self.entry_intent_inflight = false;
+            self.exit_intent_inflight = false;
+            self.lifecycle_stage = "broker_ack_rejected".to_string();
+            info!(
+                request_id = %ack.request_id,
+                status = ?ack.status,
+                strategy = "alor_usdrubf_hybrid",
+                "broker ack rejected; inflight flags cleared"
+            );
+            self.sync_state();
+        }
         Vec::new()
     }
 
-    fn on_order(&mut self, _ctx: &StrategyCtx, _ord: &OrderEvent) -> Vec<Intent> {
+    fn on_order(&mut self, _ctx: &StrategyCtx, ord: &OrderEvent) -> Vec<Intent> {
+        if ord.symbol == self.config.symbol && ord.order_id > 0 {
+            self.tracked_order_ids.insert(ord.order_id);
+            if let Some(request_id) = ord.request_id {
+                self.pending_request_ids.remove(&request_id);
+            }
+            let status = ord.status.to_ascii_lowercase();
+            if status == "filled"
+                || status == "cancelled"
+                || status == "canceled"
+                || status == "rejected"
+            {
+                self.tracked_order_ids.remove(&ord.order_id);
+            }
+            self.sync_state();
+        }
         Vec::new()
     }
 
@@ -513,30 +806,213 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         Vec::new()
     }
 
-    fn on_position(&mut self, _ctx: &StrategyCtx, _pos: &PositionEvent) -> Vec<Intent> {
+    fn on_position(&mut self, _ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
+        if pos.symbol != self.config.symbol {
+            return Vec::new();
+        }
+        if pos.qty.abs() < 1e-9 {
+            self.open_position = None;
+            self.exit_intent_inflight = false;
+            self.tracked_order_ids.clear();
+            self.hybrid_state = if self.pending_entry.is_some() {
+                HybridState::Pending
+            } else {
+                HybridState::Flat
+            };
+            self.lifecycle_stage = "broker_position_flat".to_string();
+            info!(
+                strategy = "alor_usdrubf_hybrid",
+                qty = pos.qty,
+                avg_price = pos.avg_price,
+                "broker position confirms flat state"
+            );
+            self.sync_state();
+            return Vec::new();
+        }
+
+        let side = if pos.qty > 0.0 {
+            PositionSide::Long
+        } else {
+            PositionSide::Short
+        };
+        let size = pos.qty.abs().floor().max(1.0) as i64;
+        let entry_price = if pos.avg_price > 0.0 {
+            pos.avg_price
+        } else if let Some(open) = self.open_position.as_ref() {
+            open.entry_price
+        } else {
+            self.pending_entry
+                .as_ref()
+                .map(|pending| pending.signal_price)
+                .unwrap_or(0.0)
+        };
+        if let Some(pending) = self.pending_entry.clone() {
+            self.open_position = Some(self.build_open_position_from_pending(
+                &pending,
+                pos.ts_utc,
+                entry_price,
+                size,
+            ));
+            self.pending_entry = None;
+        } else if let Some(open) = self.open_position.as_mut() {
+            open.side = side;
+            open.size = size;
+            open.entry_price = entry_price;
+        } else {
+            let synthetic_pending = PendingEntry {
+                owner: Owner::Breakout,
+                side,
+                reason: "broker_position_restore".to_string(),
+                scale_at_signal: 0.0,
+                signal_price: entry_price,
+                stop1: None,
+                stop2: None,
+            };
+            self.open_position = Some(self.build_open_position_from_pending(
+                &synthetic_pending,
+                pos.ts_utc,
+                entry_price,
+                size,
+            ));
+        }
+        self.entry_intent_inflight = false;
+        self.exit_intent_inflight = false;
+        self.hybrid_state = HybridState::Open;
+        self.lifecycle_stage = "broker_position_open".to_string();
+        info!(
+            strategy = "alor_usdrubf_hybrid",
+            qty = pos.qty,
+            avg_price = pos.avg_price,
+            side = self
+                .open_position
+                .as_ref()
+                .map(|position| position.side.as_str())
+                .unwrap_or("unknown"),
+            "broker position confirms open state"
+        );
+        self.sync_state();
         Vec::new()
     }
 
     fn on_bootstrap_snapshot(
         &mut self,
-        _ctx: &StrategyCtx,
-        _snapshot: &BootstrapSnapshot,
+        ctx: &StrategyCtx,
+        snapshot: &BootstrapSnapshot,
     ) -> Vec<Intent> {
         self.lifecycle_stage = "bootstrapped".to_string();
         self.bootstrap_seen = true;
+        self.live_ready = false;
+        self.entry_intent_inflight = false;
+        self.exit_intent_inflight = false;
+        self.pending_request_ids.clear();
+        self.tracked_order_ids.clear();
+        info!(
+            strategy_id = ctx.strategy_id.as_str(),
+            strategy = "alor_usdrubf_hybrid",
+            snapshot_ts_utc = snapshot.snapshot_ts_utc,
+            positions_count = snapshot.positions_strategy.len(),
+            orders_count = snapshot.working_orders_strategy.len(),
+            stop_orders_count = snapshot.working_stop_orders_strategy.len(),
+            "bootstrap snapshot observed; live gate re-armed"
+        );
         self.sync_state();
         Vec::new()
     }
 
     fn on_runtime_state_restored(
         &mut self,
-        _ctx: &StrategyCtx,
-        _state: &RuntimeStateRestored,
+        ctx: &StrategyCtx,
+        state: &RuntimeStateRestored,
     ) -> Vec<Intent> {
         self.lifecycle_stage = "runtime_state_restored".to_string();
         self.runtime_state_restored = true;
+        self.live_ready = false;
+        self.pending_request_ids = state.pending_requests.iter().copied().collect();
+        self.tracked_order_ids = state.known_order_ids.iter().copied().collect();
+        self.entry_intent_inflight = false;
+        self.exit_intent_inflight = false;
+        info!(
+            strategy_id = ctx.strategy_id.as_str(),
+            strategy = "alor_usdrubf_hybrid",
+            restored_pending_requests = self.pending_request_ids.len(),
+            restored_known_orders = self.tracked_order_ids.len(),
+            "runtime state restored; broker-truth trackers initialized"
+        );
         self.sync_state();
         Vec::new()
+    }
+
+    fn tracked_order_ids(&self) -> Vec<i64> {
+        self.tracked_order_ids.iter().copied().collect()
+    }
+
+    fn intent_comment_tag(
+        &self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent_class: IntentClass,
+    ) -> Option<String> {
+        let cycle = format!("{:08x}", created_ts_utc.max(0));
+        let role = match intent_class {
+            IntentClass::Entry => "ENTRY",
+            IntentClass::Exit => "EXIT",
+            IntentClass::CancelCleanup => "CANCEL",
+            IntentClass::ProtectiveRepair => "REPAIR",
+        };
+        let comment = format!("AUS|sid={}|c={cycle}|r={role}", ctx.strategy_id);
+        Some(comment.chars().filter(|c| c.is_ascii()).take(100).collect())
+    }
+
+    fn pending_request_ids(&self) -> Vec<Uuid> {
+        self.pending_request_ids.iter().copied().collect()
+    }
+
+    fn exit_risk_status(
+        &self,
+        has_open_position: bool,
+    ) -> crate::strategy_host::StrategyExitRiskStatus {
+        if self.exit_intent_inflight && has_open_position {
+            return crate::strategy_host::StrategyExitRiskStatus {
+                phase_override: Some("ExitIntentInflight".to_string()),
+                exit_recovery_active: true,
+                operator_intervention_required: false,
+                open_risk_position_unflattened: true,
+            };
+        }
+        crate::strategy_host::StrategyExitRiskStatus::default()
+    }
+
+    fn warmup_from_history(&mut self, _ctx: &StrategyCtx, bars: &[BarEvent]) -> usize {
+        // Keep restored live/pending state intact; warmup is only for indicator aggregates.
+        if self.pending_entry.is_some() || self.open_position.is_some() {
+            return 0;
+        }
+        let mut processed = 0usize;
+        for bar in bars {
+            if bar.symbol != self.config.symbol {
+                continue;
+            }
+            if self
+                .last_processed_bar_ts
+                .is_some_and(|ts| bar.close_time_utc <= ts)
+            {
+                continue;
+            }
+            let local_dt = utc_to_local(bar.close_time_utc, self.config.timezone_offset_hours);
+            let local_date = local_dt.date();
+            if self.current_date_local != Some(local_date) {
+                self.reset_day_aggregates(local_date);
+            }
+            self.update_session_metrics(bar, local_dt);
+            self.last_bar_ts = Some(bar.close_time_utc);
+            self.last_processed_bar_ts = Some(bar.close_time_utc);
+            processed = processed.saturating_add(1);
+        }
+        if processed > 0 {
+            self.lifecycle_stage = "warmed_up".to_string();
+            self.sync_state();
+        }
+        processed
     }
 
     fn state(&self) -> &StrategyState {
@@ -547,20 +1023,49 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         if let StrategyState::AlorUsdrubfHybrid {
             lifecycle_stage,
             last_bar_ts,
+            last_processed_bar_ts,
             bootstrap_seen,
             runtime_state_restored,
+            live_ready,
             hybrid_state,
             current_date_local,
+            day_open,
+            day_high,
+            day_low,
+            day_volume_sum,
+            day_vwap_num,
+            session_start_local,
+            bo_was_long_today,
+            bo_was_short_today,
             cash,
-            pending_entry_side: _,
-            open_position_side: _,
-            open_position_qty: _,
+            pending_entry_owner,
+            pending_entry_side,
+            pending_request_ids,
+            tracked_order_ids,
+            entry_intent_inflight,
+            pending_entry_reason,
+            pending_entry_scale_at_signal,
+            pending_entry_signal_price,
+            pending_entry_stop1,
+            pending_entry_stop2,
+            open_position_owner,
+            open_position_side,
+            exit_intent_inflight,
+            open_position_qty,
+            open_position_entry_ts,
+            open_position_entry_price,
+            open_position_stop_price,
+            open_position_take_price,
+            open_position_stop1,
+            open_position_stop2,
         } = &state
         {
             self.lifecycle_stage = lifecycle_stage.clone();
             self.last_bar_ts = *last_bar_ts;
+            self.last_processed_bar_ts = *last_processed_bar_ts;
             self.bootstrap_seen = *bootstrap_seen;
             self.runtime_state_restored = *runtime_state_restored;
+            self.live_ready = *live_ready;
             self.hybrid_state = match hybrid_state.as_str() {
                 "pending" => HybridState::Pending,
                 "open" => HybridState::Open,
@@ -569,9 +1074,58 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             self.current_date_local = current_date_local
                 .as_ref()
                 .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok());
+            self.day_open = *day_open;
+            self.day_high = *day_high;
+            self.day_low = *day_low;
+            self.day_volume_sum = *day_volume_sum;
+            self.day_vwap_num = *day_vwap_num;
+            self.session_start_local = session_start_local
+                .as_ref()
+                .and_then(|value| parse_naive_datetime(value));
+            self.bo_was_long_today = *bo_was_long_today;
+            self.bo_was_short_today = *bo_was_short_today;
             if *cash > 0.0 {
                 self.cash = *cash;
             }
+            self.pending_entry = match (
+                pending_entry_owner.as_ref().and_then(|owner| parse_owner(owner)),
+                pending_entry_side.as_ref().and_then(|side| parse_position_side(side)),
+            ) {
+                (Some(owner), Some(side)) => Some(PendingEntry {
+                    owner,
+                    side,
+                    reason: pending_entry_reason.clone().unwrap_or_else(|| "restored".to_string()),
+                    scale_at_signal: pending_entry_scale_at_signal.unwrap_or(0.0),
+                    signal_price: pending_entry_signal_price.unwrap_or(0.0),
+                    stop1: *pending_entry_stop1,
+                    stop2: *pending_entry_stop2,
+                }),
+                _ => None,
+            };
+            self.pending_request_ids = pending_request_ids.iter().copied().collect();
+            self.tracked_order_ids = tracked_order_ids.iter().copied().collect();
+            self.entry_intent_inflight = *entry_intent_inflight;
+            self.open_position = match (
+                open_position_owner.as_ref().and_then(|owner| parse_owner(owner)),
+                open_position_side.as_ref().and_then(|side| parse_position_side(side)),
+            ) {
+                (Some(owner), Some(side)) if *open_position_qty >= 1.0 => Some(OpenPosition {
+                    owner,
+                    side,
+                    entry_ts: open_position_entry_ts
+                        .as_ref()
+                        .and_then(|value| parse_naive_datetime(value))
+                        .unwrap_or_else(|| utc_to_local(last_bar_ts.unwrap_or(0), self.config.timezone_offset_hours)),
+                    entry_price: open_position_entry_price.unwrap_or(0.0),
+                    size: open_position_qty.floor() as i64,
+                    stop_price: *open_position_stop_price,
+                    take_price: *open_position_take_price,
+                    stop1: *open_position_stop1,
+                    stop2: *open_position_stop2,
+                }),
+                _ => None,
+            };
+            self.exit_intent_inflight = *exit_intent_inflight;
         }
         self.state = state;
     }
@@ -582,4 +1136,769 @@ fn utc_to_local(ts_utc: i64, timezone_offset_hours: i32) -> NaiveDateTime {
     let offset = FixedOffset::east_opt(timezone_offset_hours.saturating_mul(3600))
         .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero offset must be valid"));
     utc.with_timezone(&offset).naive_local()
+}
+
+fn parse_owner(value: &str) -> Option<Owner> {
+    match value {
+        "mean_rev" => Some(Owner::MeanRev),
+        "day_breakout_waitfix" => Some(Owner::Breakout),
+        _ => None,
+    }
+}
+
+fn parse_position_side(value: &str) -> Option<PositionSide> {
+    match value {
+        "long" => Some(PositionSide::Long),
+        "short" => Some(PositionSide::Short),
+        _ => None,
+    }
+}
+
+fn parse_naive_datetime(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .or_else(|| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AlorUsdrubfHybridConfig, AlorUsdrubfHybridStrategy};
+    use crate::live_guard::GatewayPhase;
+    use crate::state::StrategyState;
+    use crate::strategy_host::{
+        BarEvent, DataOrigin, OrderEvent, PositionEvent, RuntimeStateRestored, Strategy,
+        StrategyCtx,
+    };
+    use crate::{PaperExecutionMode, TradeMode};
+    use alor_protocol::{CommandAck, IntentClass};
+    use chrono::NaiveTime;
+    use uuid::Uuid;
+
+    fn test_config() -> AlorUsdrubfHybridConfig {
+        AlorUsdrubfHybridConfig {
+            symbol: "USDRUBF".to_string(),
+            timezone_offset_hours: 3,
+            tick_size: 0.01,
+            mr_min_rel_range: 0.006,
+            mr_max_rel_range: 0.050,
+            mr_k_short: 0.045,
+            mr_take_k_short: 0.16,
+            mr_stop_k_short: 0.43,
+            mr_last_entry_time: NaiveTime::from_hms_opt(11, 40, 0).unwrap_or(NaiveTime::MIN),
+            mr_force_exit_time: NaiveTime::from_hms_opt(11, 50, 0).unwrap_or(NaiveTime::MIN),
+            bo_k: 0.45,
+            bo_stop1_range: 0.51,
+            bo_stop2_range: 0.35,
+            bo_big_move_threshold: 0.020,
+            bo_wait_hours: 2.0,
+            bo_eod_exit_time: NaiveTime::from_hms_opt(23, 30, 0).unwrap_or(NaiveTime::MIN),
+            commission_pct_per_side: 0.004,
+            position_size_fraction: 0.9,
+            initial_cash: 100000.0,
+            enable_live_execution: true,
+            use_fixed_live_size: true,
+            live_fixed_units: 1.0,
+            max_silence_bars_sec: 1200,
+        }
+    }
+
+    fn test_ctx(trade_mode: TradeMode, now_ts_utc: i64) -> StrategyCtx {
+        StrategyCtx {
+            strategy_id: "alor_usdrubf_hybrid_v1".to_string(),
+            portfolio: "7502T0U".to_string(),
+            exchange: "MOEX".to_string(),
+            symbol: "USDRUBF".to_string(),
+            tick_size: 0.01,
+            trade_mode,
+            paper_execution_mode: PaperExecutionMode::LiveOnly,
+            allow_live_orders: matches!(trade_mode, TradeMode::Live),
+            gateway_phase: GatewayPhase::LiveReady,
+            position_qty: None,
+            event_ts_utc: now_ts_utc,
+            now_ts_utc,
+            last_bar_ts: None,
+        }
+    }
+
+    fn bar(ts_utc: i64, close: f64) -> BarEvent {
+        bar_with_origin(ts_utc, close, DataOrigin::Live)
+    }
+
+    fn bar_with_origin(ts_utc: i64, close: f64, origin: DataOrigin) -> BarEvent {
+        BarEvent {
+            symbol: "USDRUBF".to_string(),
+            close_time_utc: ts_utc,
+            close,
+            o: close,
+            h: close + 0.01,
+            l: close - 0.01,
+            v: 100.0,
+            origin,
+        }
+    }
+
+    fn position_event(ts_utc: i64, qty: f64, avg_price: f64) -> PositionEvent {
+        PositionEvent {
+            symbol: "USDRUBF".to_string(),
+            qty,
+            existing: true,
+            avg_price,
+            ts_utc,
+        }
+    }
+
+    fn order_event(order_id: i64, status: &str, request_id: Option<Uuid>) -> OrderEvent {
+        OrderEvent {
+            order_id,
+            request_id,
+            symbol: "USDRUBF".to_string(),
+            status: status.to_string(),
+            ..OrderEvent::default()
+        }
+    }
+
+    #[test]
+    fn duplicate_bar_is_ignored() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Paper, 1_000_000);
+        let first = bar(999_000, 80.0);
+        let duplicate = bar(999_000, 80.1);
+
+        let _ = strategy.on_bar(&ctx, &first);
+        let state_after_first = strategy.state().clone();
+        let intents = strategy.on_bar(&ctx, &duplicate);
+
+        assert!(intents.is_empty());
+        assert_eq!(
+            serde_json::to_string(&state_after_first).ok(),
+            serde_json::to_string(strategy.state()).ok()
+        );
+    }
+
+    #[test]
+    fn stale_live_bars_are_suppressed_until_fresh_bar() {
+        let mut cfg = test_config();
+        cfg.max_silence_bars_sec = 30;
+        let mut strategy = AlorUsdrubfHybridStrategy::new(cfg);
+        let now = 1_000_000;
+        let ctx = test_ctx(TradeMode::Live, now);
+
+        let stale_bar = bar(now - 120, 80.0);
+        let fresh_bar = bar(now - 5, 80.0);
+
+        let stale_intents = strategy.on_bar(&ctx, &stale_bar);
+        assert!(stale_intents.is_empty());
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                live_ready: false,
+                lifecycle_stage,
+                ..
+            } if lifecycle_stage == "replay_tail_suppressed"
+        ));
+
+        let _ = strategy.on_bar(&ctx, &fresh_bar);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                live_ready: true, ..
+            }
+        ));
+    }
+
+    #[test]
+    fn recovered_origin_bar_is_suppressed_in_live_without_session_reset() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1775400000),
+            last_processed_bar_ts: Some(1775400000),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "flat".to_string(),
+            current_date_local: Some("2026-04-05".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-05 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: None,
+            pending_entry_side: None,
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: false,
+            pending_entry_reason: None,
+            pending_entry_scale_at_signal: None,
+            pending_entry_signal_price: None,
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: None,
+            open_position_side: None,
+            exit_intent_inflight: false,
+            open_position_qty: 0.0,
+            open_position_entry_ts: None,
+            open_position_entry_price: None,
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: None,
+            open_position_stop2: None,
+        });
+
+        let ctx = test_ctx(TradeMode::Live, 1775486460);
+        let recovered_bar = bar_with_origin(1775486400, 81.0, DataOrigin::Replay);
+        let intents = strategy.on_bar(&ctx, &recovered_bar);
+
+        assert!(intents.is_empty());
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                lifecycle_stage,
+                current_date_local,
+                pending_entry_owner,
+                ..
+            } if lifecycle_stage == "recovered_bar_suppressed"
+                && current_date_local.as_deref() == Some("2026-04-05")
+                && pending_entry_owner.is_none()
+        ));
+    }
+
+    #[test]
+    fn set_state_restores_pending_entry_for_next_bar() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let restored = StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1775490000),
+            last_processed_bar_ts: Some(1775490000),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "pending".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: Some("mean_rev".to_string()),
+            pending_entry_side: Some("short".to_string()),
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: false,
+            pending_entry_reason: Some("mr_short_signal".to_string()),
+            pending_entry_scale_at_signal: Some(0.5),
+            pending_entry_signal_price: Some(80.1),
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: None,
+            open_position_side: None,
+            exit_intent_inflight: false,
+            open_position_qty: 0.0,
+            open_position_entry_ts: None,
+            open_position_entry_price: None,
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: None,
+            open_position_stop2: None,
+        };
+        strategy.set_state(restored);
+
+        let ctx = test_ctx(TradeMode::Paper, 1775490120);
+        let intents = strategy.on_bar(&ctx, &bar(1775490060, 80.0));
+
+        assert!(!intents.is_empty());
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                last_processed_bar_ts,
+                ..
+            } if *last_processed_bar_ts == Some(1775490060)
+        ));
+    }
+
+    #[test]
+    fn warmup_processes_history_bars_for_aggregates() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1_000_000);
+        let bars = vec![bar(999_000, 80.0), bar(999_060, 80.1), bar(999_120, 80.2)];
+
+        let processed = strategy.warmup_from_history(&ctx, &bars);
+
+        assert_eq!(processed, 3);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                lifecycle_stage,
+                day_open,
+                day_high,
+                day_low,
+                day_volume_sum,
+                ..
+            } if lifecycle_stage == "warmed_up"
+                && day_open.is_some()
+                && day_high.is_some()
+                && day_low.is_some()
+                && day_high.unwrap_or(0.0) >= day_open.unwrap_or(0.0)
+                && day_low.unwrap_or(0.0) <= day_open.unwrap_or(0.0)
+                && *day_volume_sum > 0.0
+        ));
+    }
+
+    #[test]
+    fn live_pending_entry_is_confirmed_by_position_callback() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1775490000),
+            last_processed_bar_ts: Some(1775490000),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "pending".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: Some("mean_rev".to_string()),
+            pending_entry_side: Some("short".to_string()),
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: false,
+            pending_entry_reason: Some("mr_short_signal".to_string()),
+            pending_entry_scale_at_signal: Some(0.5),
+            pending_entry_signal_price: Some(80.1),
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: None,
+            open_position_side: None,
+            exit_intent_inflight: false,
+            open_position_qty: 0.0,
+            open_position_entry_ts: None,
+            open_position_entry_price: None,
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: None,
+            open_position_stop2: None,
+        });
+
+        let ctx = test_ctx(TradeMode::Live, 1775490120);
+        let intents = strategy.on_bar(&ctx, &bar(1775490060, 80.0));
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                hybrid_state,
+                open_position_qty,
+                entry_intent_inflight,
+                ..
+            } if hybrid_state == "pending" && *open_position_qty == 0.0 && *entry_intent_inflight
+        ));
+
+        let _ = strategy.on_position(&ctx, &position_event(1775490070, -1.0, 80.0));
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                hybrid_state,
+                open_position_qty,
+                entry_intent_inflight,
+                ..
+            } if hybrid_state == "open" && *open_position_qty >= 1.0 && !*entry_intent_inflight
+        ));
+    }
+
+    #[test]
+    fn live_ack_rejection_clears_inflight_flags() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1775490000),
+            last_processed_bar_ts: Some(1775490000),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "pending".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: Some("mean_rev".to_string()),
+            pending_entry_side: Some("short".to_string()),
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: true,
+            pending_entry_reason: Some("mr_short_signal".to_string()),
+            pending_entry_scale_at_signal: Some(0.5),
+            pending_entry_signal_price: Some(80.1),
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: None,
+            open_position_side: None,
+            exit_intent_inflight: true,
+            open_position_qty: 0.0,
+            open_position_entry_ts: None,
+            open_position_entry_price: None,
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: None,
+            open_position_stop2: None,
+        });
+
+        let ctx = test_ctx(TradeMode::Live, 1775490120);
+        let ack = CommandAck::rejected(Uuid::new_v4(), "reject", "mock reject");
+        let _ = strategy.on_ack(&ctx, &ack);
+
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                entry_intent_inflight,
+                exit_intent_inflight,
+                lifecycle_stage,
+                ..
+            } if !*entry_intent_inflight && !*exit_intent_inflight && lifecycle_stage == "broker_ack_rejected"
+        ));
+    }
+
+    #[test]
+    fn runtime_restore_populates_pending_and_tracked_hooks() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1775490120);
+        let req = Uuid::new_v4();
+        let restored = RuntimeStateRestored {
+            known_order_ids: vec![42, 7],
+            pending_requests: vec![req],
+        };
+
+        let _ = strategy.on_runtime_state_restored(&ctx, &restored);
+        assert_eq!(strategy.pending_request_ids(), vec![req]);
+        assert_eq!(strategy.tracked_order_ids(), vec![7, 42]);
+    }
+
+    #[test]
+    fn ack_and_order_callbacks_update_tracking_sets() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1775490120);
+        let req = Uuid::new_v4();
+        let restored = RuntimeStateRestored {
+            known_order_ids: Vec::new(),
+            pending_requests: vec![req],
+        };
+        let _ = strategy.on_runtime_state_restored(&ctx, &restored);
+
+        let ack = CommandAck::confirmed(req, Some(1001));
+        let _ = strategy.on_ack(&ctx, &ack);
+        assert!(strategy.pending_request_ids().is_empty());
+        assert_eq!(strategy.tracked_order_ids(), vec![1001]);
+
+        let _ = strategy.on_order(&ctx, &order_event(1001, "cancelled", None));
+        assert!(strategy.tracked_order_ids().is_empty());
+    }
+
+    #[test]
+    fn intent_comment_and_exit_risk_hooks_are_strategy_owned() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1775490120);
+
+        let entry_tag = strategy
+            .intent_comment_tag(&ctx, 1775490120, IntentClass::Entry)
+            .unwrap_or_default();
+        assert!(entry_tag.contains("AUS|sid=alor_usdrubf_hybrid_v1"));
+        assert!(entry_tag.contains("r=ENTRY"));
+
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1775490000),
+            last_processed_bar_ts: Some(1775490000),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "open".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: None,
+            pending_entry_side: None,
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: vec![77],
+            entry_intent_inflight: false,
+            pending_entry_reason: None,
+            pending_entry_scale_at_signal: None,
+            pending_entry_signal_price: None,
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: Some("day_breakout_waitfix".to_string()),
+            open_position_side: Some("long".to_string()),
+            exit_intent_inflight: true,
+            open_position_qty: 1.0,
+            open_position_entry_ts: Some("2026-04-06 10:00:00".to_string()),
+            open_position_entry_price: Some(80.0),
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: Some(79.7),
+            open_position_stop2: Some(79.5),
+        });
+
+        let risk = strategy.exit_risk_status(true);
+        assert_eq!(risk.phase_override.as_deref(), Some("ExitIntentInflight"));
+        assert!(risk.exit_recovery_active);
+        assert!(risk.open_risk_position_unflattened);
+    }
+
+    #[test]
+    fn runtime_guard_blocks_live_path_when_live_execution_disabled() {
+        let mut cfg = test_config();
+        cfg.enable_live_execution = false;
+        let mut strategy = AlorUsdrubfHybridStrategy::new(cfg);
+        let ctx = test_ctx(TradeMode::Live, 1_000_000);
+        let intents = strategy.on_bar(&ctx, &bar(999_990, 80.0));
+
+        assert!(intents.is_empty());
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                live_ready,
+                last_processed_bar_ts,
+                ..
+            } if !*live_ready && *last_processed_bar_ts == Some(999_990)
+        ));
+    }
+
+    #[test]
+    fn broker_truth_reconciliation_is_stable_with_out_of_order_ack() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let req = Uuid::new_v4();
+        let restored = RuntimeStateRestored {
+            known_order_ids: Vec::new(),
+            pending_requests: vec![req],
+        };
+        let _ = strategy.on_runtime_state_restored(&ctx, &restored);
+        let _ = strategy.on_position(&ctx, &position_event(1_775_490_130, 1.0, 80.2));
+        let ack = CommandAck::rejected(req, "reject", "late reject");
+        let _ = strategy.on_ack(&ctx, &ack);
+
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                hybrid_state,
+                open_position_qty,
+                ..
+            } if hybrid_state == "open" && *open_position_qty >= 1.0
+        ));
+    }
+
+    #[test]
+    fn dirty_start_suppresses_recovery_tail_then_allows_fresh_live_bar() {
+        let mut cfg = test_config();
+        cfg.max_silence_bars_sec = 60;
+        let mut strategy = AlorUsdrubfHybridStrategy::new(cfg);
+        let now = 1_775_490_120;
+        let ctx = test_ctx(TradeMode::Live, now);
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(now - 300),
+            last_processed_bar_ts: Some(now - 300),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: false,
+            hybrid_state: "pending".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: Some("mean_rev".to_string()),
+            pending_entry_side: Some("short".to_string()),
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: false,
+            pending_entry_reason: Some("mr_short_signal".to_string()),
+            pending_entry_scale_at_signal: Some(0.5),
+            pending_entry_signal_price: Some(80.1),
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: None,
+            open_position_side: None,
+            exit_intent_inflight: false,
+            open_position_qty: 0.0,
+            open_position_entry_ts: None,
+            open_position_entry_price: None,
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: None,
+            open_position_stop2: None,
+        });
+
+        let stale_tail = bar_with_origin(now - 120, 80.0, DataOrigin::Replay);
+        let stale_intents = strategy.on_bar(&ctx, &stale_tail);
+        assert!(stale_intents.is_empty());
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                lifecycle_stage, ..
+            } if lifecycle_stage == "replay_tail_suppressed"
+        ));
+
+        let fresh_live = bar_with_origin(now - 5, 80.0, DataOrigin::Live);
+        let fresh_intents = strategy.on_bar(&ctx, &fresh_live);
+        assert_eq!(fresh_intents.len(), 1);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                live_ready,
+                hybrid_state,
+                entry_intent_inflight,
+                ..
+            } if *live_ready && hybrid_state == "pending" && *entry_intent_inflight
+        ));
+    }
+
+    #[test]
+    fn set_state_restores_open_position_and_allows_exit_evaluation() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1_775_490_000),
+            last_processed_bar_ts: Some(1_775_490_000),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "open".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: None,
+            pending_entry_side: None,
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: false,
+            pending_entry_reason: None,
+            pending_entry_scale_at_signal: None,
+            pending_entry_signal_price: None,
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: Some("mean_rev".to_string()),
+            open_position_side: Some("short".to_string()),
+            exit_intent_inflight: false,
+            open_position_qty: 1.0,
+            open_position_entry_ts: Some("2026-04-06 11:35:00".to_string()),
+            open_position_entry_price: Some(80.0),
+            open_position_stop_price: Some(80.1),
+            open_position_take_price: Some(79.9),
+            open_position_stop1: None,
+            open_position_stop2: None,
+        });
+
+        let ctx = test_ctx(TradeMode::Paper, 1_775_490_720);
+        let intents = strategy.on_bar(&ctx, &bar(1_775_490_660, 80.0));
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                hybrid_state,
+                open_position_qty,
+                ..
+            } if hybrid_state == "flat" && *open_position_qty == 0.0
+        ));
+    }
+
+    #[test]
+    fn warmup_keeps_trading_state_untouched_when_pending_or_open_exists() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.set_state(StrategyState::AlorUsdrubfHybrid {
+            lifecycle_stage: "runtime_state_restored".to_string(),
+            last_bar_ts: Some(1_775_490_000),
+            last_processed_bar_ts: Some(1_775_490_000),
+            bootstrap_seen: true,
+            runtime_state_restored: true,
+            live_ready: true,
+            hybrid_state: "pending".to_string(),
+            current_date_local: Some("2026-04-06".to_string()),
+            day_open: Some(80.0),
+            day_high: Some(80.3),
+            day_low: Some(79.8),
+            day_volume_sum: 1000.0,
+            day_vwap_num: 80_000.0,
+            session_start_local: Some("2026-04-06 09:00:00".to_string()),
+            bo_was_long_today: false,
+            bo_was_short_today: false,
+            cash: 100000.0,
+            pending_entry_owner: Some("mean_rev".to_string()),
+            pending_entry_side: Some("short".to_string()),
+            pending_request_ids: Vec::new(),
+            tracked_order_ids: Vec::new(),
+            entry_intent_inflight: false,
+            pending_entry_reason: Some("mr_short_signal".to_string()),
+            pending_entry_scale_at_signal: Some(0.5),
+            pending_entry_signal_price: Some(80.1),
+            pending_entry_stop1: None,
+            pending_entry_stop2: None,
+            open_position_owner: None,
+            open_position_side: None,
+            exit_intent_inflight: false,
+            open_position_qty: 0.0,
+            open_position_entry_ts: None,
+            open_position_entry_price: None,
+            open_position_stop_price: None,
+            open_position_take_price: None,
+            open_position_stop1: None,
+            open_position_stop2: None,
+        });
+
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let processed = strategy.warmup_from_history(
+            &ctx,
+            &[bar(1_775_490_060, 80.0), bar(1_775_490_120, 80.1)],
+        );
+        assert_eq!(processed, 0);
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                hybrid_state,
+                pending_entry_owner,
+                open_position_qty,
+                ..
+            } if hybrid_state == "pending"
+                && pending_entry_owner.as_deref() == Some("mean_rev")
+                && *open_position_qty == 0.0
+        ));
+    }
 }

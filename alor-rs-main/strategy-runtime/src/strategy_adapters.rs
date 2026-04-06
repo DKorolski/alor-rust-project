@@ -195,6 +195,7 @@ impl AlorUsdrubfHybridAdapter {
                 enable_live_execution: settings.enable_live_execution,
                 use_fixed_live_size: settings.use_fixed_live_size,
                 live_fixed_units: settings.live_fixed_units,
+                max_silence_bars_sec: config.max_silence_bars_sec,
                 tick_size: config.tick_size,
             }),
             other => bail!(

@@ -39,6 +39,68 @@ redis-cli -u redis://127.0.0.1/ XREVRANGE events.health + - COUNT 2
 
 ## Observations
 
+### 0) Current clean-start diagnostic (gateway runner + runtime live)
+
+Latest local run sequence:
+- gateway started with `alor_gateway_runner` (not `alor_gateway_limit_cancel`),
+- legacy working order tail was manually cancelled and restart repeated,
+- runtime started with `runtime.alor_usdrubf.live.7502T0U.toml`.
+
+Observed statuses:
+- gateway probe:
+  - `GET /liveness` -> HTTP `200`
+  - `GET /readiness` -> `readiness=true`, `gateway_phase=LiveReady`, `ws_connected=true`, `cws_authorized=true`
+- runtime probe:
+  - `GET /liveness` -> `{"liveness":true,...}`
+  - `GET /readiness` -> `readiness=false`, `live_guard=BLOCKED`, reasons:
+    - `gateway_health_stale`
+    - `bootstrap:not_ready`
+    - `bootstrap:missing_live_bar`
+
+Redis evidence for this run:
+- latest `runtime.state.alor_usdrubf_hybrid_v1.live.usdrubf.7502T0U` payload keeps restored historical tail context (February state markers),
+- latest `events.health` entry remained from older gateway instance (`source=gateway-33589-...`, old timestamp), i.e. health stream tail was not refreshed for current runtime read path.
+
+Operational interpretation:
+- strategy process is up and warmup executes, but live readiness gate remains intentionally blocked due stale health/state context.
+- this is consistent with hardening protocol: next run should use clean diagnostic isolation (fresh runtime-state stream and/or consumer group, optionally `reset_state_on_start=true`).
+
+### 0.1) Fully isolated diagnostic rerun (v2) - PASS
+
+A second diagnostic pass was executed with fully isolated stream namespace:
+- gateway transport-only stream overrides:
+  - `md.bars.7502T0U.1m.diag_20260406`
+  - `broker.orders.7502T0U.diag_20260406`
+  - `broker.trades.7502T0U.diag_20260406`
+  - `broker.positions.7502T0U.diag_20260406`
+  - `broker.snapshots.7502T0U.diag_20260406`
+  - `cmd.orders.7502T0U.diag_20260406`
+  - `cmd.acks.7502T0U.diag_20260406`
+  - `events.health.alor_usdrubf_diag_20260406`
+- runtime:
+  - `configs/runtime.alor_usdrubf.live.7502T0U.diag.toml`
+  - `reset_state_on_start = true`
+  - `runtime_state = runtime.state.alor_usdrubf_hybrid_v1.live.usdrubf.7502T0U.diag_20260406`
+
+Observed result:
+- gateway probe: readiness `true`, phase `LiveReady`, ws/cws healthy.
+- runtime probe:
+  - liveness `true`
+  - readiness `true`
+  - `live_guard = ALLOWED`
+  - reasons `[]`
+- runtime logs:
+  - `startup replay guard cleared; live_ready=true`
+  - `live_guard_changed ... to="ALLOWED"`
+- isolated Redis tails:
+  - `events.health.alor_usdrubf_diag_20260406` latest source is current diag transport runner,
+  - `runtime.state...diag_20260406` shows same-day live state and no legacy `seen_trade_ids` tail.
+- isolated stream lengths confirm clean command/ack/trade tails:
+  - `XLEN cmd.orders...diag = 0`
+  - `XLEN cmd.acks...diag = 0`
+  - `XLEN broker.trades...diag = 0`
+  - `XLEN broker.orders...diag = 1` (snapshot canceled order tail, no working live order).
+
 ### 1) Gateway startup and probes
 
 Gateway was started successfully after setting `ALOR_REFRESH_TOKEN` in the run shell.
@@ -101,12 +163,12 @@ Latest `events.health` entry is from current gateway instance and confirms:
 
 ## Indicator Warmup Status
 
-For `StrategyKind::AlorUsdrubfHybrid`, history warmup capability is currently disabled:
-- `uses_history_warmup: false` in `strategy-runtime/src/strategy_registry.rs`
+For `StrategyKind::AlorUsdrubfHybrid`, history warmup capability is enabled:
+- `uses_history_warmup: true` in `strategy-runtime/src/strategy_registry.rs`
 
 Operational consequence:
-- `warmup_from_history(...)` path is not executed for this strategy.
-- indicators are initialized from live/streamed bars only, not pre-warmed from historical bars at startup.
+- `warmup_from_history(...)` is executed at startup when strategy state allows it,
+- indicators/session aggregates are pre-warmed from historical bars before live path.
 
 ## Pre-Smoke Canary/Soak Gate
 
@@ -116,5 +178,5 @@ Current status before next smoke canary/soak cycle:
 2. **Runtime bring-up (paper):** PASS (`liveness` up, bootstrap/recovery path executed, runtime state persisted).
 3. **Probe evidence:** PASS (fresh `events.health` + `runtime.state` tails captured).
 4. **Indicator warmup policy:** OPEN ITEM
-   - current strategy has `uses_history_warmup = false`
-   - if strict pre-warm is required before canary/soak, enable and validate warmup path first.
+   - current strategy already has `uses_history_warmup = true`
+   - remaining gate is operational stream/state cleanliness (`events.health` freshness + runtime-state tail isolation) before canary/soak.

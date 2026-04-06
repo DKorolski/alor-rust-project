@@ -91,7 +91,7 @@ impl StrategyRegistry {
                 capabilities: StrategyCapabilities {
                     uses_bootstrap_snapshot: true,
                     uses_runtime_state_restore: true,
-                    uses_history_warmup: false,
+                    uses_history_warmup: true,
                     uses_stop_orders: true,
                 },
             },
@@ -391,7 +391,7 @@ mod tests {
             StrategyCapabilities {
                 uses_bootstrap_snapshot: true,
                 uses_runtime_state_restore: true,
-                uses_history_warmup: false,
+                uses_history_warmup: true,
                 uses_stop_orders: true,
             }
         );

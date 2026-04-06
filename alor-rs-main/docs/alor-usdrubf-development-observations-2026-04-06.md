@@ -6,6 +6,45 @@ Consolidated record of what was implemented for `alor_usdrubf_hybrid_v1`, what w
 
 ## Delivered Implementation
 
+### Hardening progress snapshot
+
+- Stage A (`P0.1-P0.3`) is implemented and validated:
+  - bar dedupe (`last_processed_bar_ts` monotonic guard),
+  - startup replay-tail suppression with `live_ready` gate,
+  - full state round-trip payload for pending/open/session internals.
+- Stage B started and partially delivered:
+  - live `on_bar` no longer finalizes execution-sensitive transitions,
+  - pending/open transitions in live are reconciled via broker callbacks (`on_position`),
+  - in-flight intent flags added to strategy state (`entry_intent_inflight`, `exit_intent_inflight`),
+  - rejected/expired/error ack clears in-flight flags,
+  - live suppression added for non-live/recovery bar origins (`history`, `history_gap`, `replay`) before session reset/signal generation.
+- Stage C started:
+  - strategy-owned hooks implemented in `AlorUsdrubfHybrid`:
+    - `tracked_order_ids()`,
+    - `pending_request_ids()`,
+    - `intent_comment_tag()` (format `AUS|sid=...|c=...|r=...`),
+    - `exit_risk_status()` for exit-inflight risk projection.
+  - request/order trackers are now hydrated from `on_runtime_state_restored` and updated via `on_ack`/`on_order`.
+  - strategy-level observability logs added for bootstrap, runtime restore, stale/recovered suppression, and broker-truth position reconciliation.
+- Stage D started:
+  - deterministic signal/exit evaluation path is now explicitly wrapped as research-core methods via `ResearchSnapshot`:
+    - `evaluate_signal_research(...)`,
+    - `evaluate_exit_research(...)`.
+  - live adapter/orchestration (`on_bar` + broker-truth callbacks) now consumes this research-core layer without changing runtime API.
+  - post-refactor parity gate re-run:
+    - `cargo run -p strategy-runtime --bin usdrubf_hybrid_replay -- --split golden --check`,
+    - `cargo run -p strategy-runtime --bin usdrubf_hybrid_replay -- --split test --check`,
+    - `cargo run -p strategy-runtime --bin usdrubf_hybrid_replay -- --split train --check`,
+    - all splits passed without parity diffs.
+- Stage E tests (in progress) added and validated:
+  - runtime guard interaction in live when execution is disabled,
+  - broker-truth reconciliation stability under out-of-order ack sequencing,
+  - dirty-start recovery-tail suppression followed by fresh live resume path.
+  - parity re-check after these additions remains green across `golden/test/train`.
+  - additional formal coverage added for:
+    - open-position restore + exit evaluation path,
+    - warmup non-interference with pending/open trading state.
+
 ### Strategy integration path
 
 - Strategy kind and payload wired as `AlorUsdrubfHybrid` in runtime config/model.
@@ -80,8 +119,9 @@ Interpretation:
 
 ## Indicator Warmup Status
 
-- `AlorUsdrubfHybrid` capability currently has `uses_history_warmup = false`.
-- Consequence: no startup pre-warm from history bars for this strategy; state is built from streamed events.
+- `AlorUsdrubfHybrid` capability now has `uses_history_warmup = true`.
+- `warmup_from_history` is implemented for session/day aggregates and does not mutate active pending/open trading state.
+- Warmup test coverage is present in strategy unit tests.
 
 ## Logging Notes
 
@@ -106,6 +146,14 @@ Status now:
 3. Live micro quantity semantics (`qty=1.0`): CONFIRMED.
 4. Operational cleanliness for soak: NOT YET (due to duplicate/reject/orphan noise from active stream context).
 5. Indicator pre-warm policy: OPEN (if mandatory for soak, enable and validate history warmup first).
+
+Update after isolated diagnostic rerun (`diag_20260406` stream namespace):
+
+1. Gateway probe/readiness: PASS (`LiveReady`, ws/cws healthy).
+2. Runtime liveness/readiness: PASS (`live_guard=ALLOWED`, reasons empty).
+3. Isolated Redis tails: PASS (no stale command/ack/trade tails in diagnostic streams).
+4. Operational cleanliness for staged smoke/canary: PASS in isolated mode.
+5. Indicator warmup: PASS (`uses_history_warmup=true`, startup warmup executed in logs).
 
 ## Follow-up TZ
 
