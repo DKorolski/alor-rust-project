@@ -92,7 +92,7 @@ impl StrategyRegistry {
                     uses_bootstrap_snapshot: true,
                     uses_runtime_state_restore: true,
                     uses_history_warmup: true,
-                    uses_stop_orders: true,
+                    uses_stop_orders: false,
                 },
             },
         ])
@@ -392,7 +392,7 @@ mod tests {
                 uses_bootstrap_snapshot: true,
                 uses_runtime_state_restore: true,
                 uses_history_warmup: true,
-                uses_stop_orders: true,
+                uses_stop_orders: false,
             }
         );
     }

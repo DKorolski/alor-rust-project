@@ -180,3 +180,27 @@ Current status before next smoke canary/soak cycle:
 4. **Indicator warmup policy:** OPEN ITEM
    - current strategy already has `uses_history_warmup = true`
    - remaining gate is operational stream/state cleanliness (`events.health` freshness + runtime-state tail isolation) before canary/soak.
+
+## Next-Run Operational Protocol (Locked)
+
+Before the next controlled micro run:
+
+1. use a new runtime `consumer_group`,
+2. use fresh `runtime_state` stream key,
+3. use isolated stream namespace (gateway + runtime),
+4. start in paper or `allow_live_orders=false` until startup profile for target scenario is proven.
+
+For the next report, capture and attach:
+
+- bootstrap summary,
+- replay guard armed,
+- replay guard cleared,
+- first fresh `DataOrigin::Live` bar observed,
+- first `live_guard=ALLOWED`,
+- first allowed entry,
+- first broker-truth position transition.
+
+Startup support declaration for current revision:
+
+- supported profile: clean-start only,
+- non-flat restart/working-orders/stop-orders scenarios: not yet proven and treated as follow-up hardening scope.

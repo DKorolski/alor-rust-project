@@ -317,6 +317,22 @@ impl AlorUsdrubfHybridStrategy {
         )
     }
 
+    fn snapshot_position_side(qty: f64) -> PositionSide {
+        if qty >= 0.0 {
+            PositionSide::Long
+        } else {
+            PositionSide::Short
+        }
+    }
+
+    fn snapshot_owner_fallback(&self) -> Owner {
+        self.open_position
+            .as_ref()
+            .map(|position| position.owner)
+            .or_else(|| self.pending_entry.as_ref().map(|pending| pending.owner))
+            .unwrap_or(Owner::Breakout)
+    }
+
     fn update_session_metrics(&mut self, bar: &BarEvent, local_dt: NaiveDateTime) {
         self.day_open.get_or_insert(bar.o);
         self.day_high = Some(self.day_high.unwrap_or(bar.h).max(bar.h));
@@ -683,6 +699,19 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.sync_state();
                 return Vec::new();
             }
+            if !matches!(bar.origin, DataOrigin::Live) {
+                self.lifecycle_stage = "awaiting_fresh_live_origin_bar".to_string();
+                info!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    bar_ts_utc = bar.close_time_utc,
+                    origin = ?bar.origin,
+                    "startup guard remains armed; only fresh live-origin bar can clear live_ready"
+                );
+                self.last_processed_bar_ts = Some(bar.close_time_utc);
+                self.sync_state();
+                return Vec::new();
+            }
             self.live_ready = true;
             self.lifecycle_stage = "live_ready".to_string();
             info!(
@@ -795,6 +824,12 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             {
                 self.tracked_order_ids.remove(&ord.order_id);
             }
+            if self.tracked_order_ids.is_empty() && self.open_position.is_none() {
+                self.entry_intent_inflight = false;
+                if self.pending_entry.is_none() {
+                    self.hybrid_state = HybridState::Flat;
+                }
+            }
             self.sync_state();
         }
         Vec::new()
@@ -906,6 +941,65 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.exit_intent_inflight = false;
         self.pending_request_ids.clear();
         self.tracked_order_ids.clear();
+        let symbol = self.config.symbol.as_str();
+        let snapshot_position = snapshot.positions_strategy.get(symbol);
+        let mut snapshot_working_order_ids = BTreeSet::new();
+        for (order_id, order) in &snapshot.working_orders_strategy {
+            if order.symbol == symbol {
+                snapshot_working_order_ids.insert(*order_id);
+            }
+        }
+        let has_snapshot_stop_orders = snapshot
+            .working_stop_orders_strategy
+            .values()
+            .any(|order| order.symbol == symbol);
+        self.tracked_order_ids = snapshot_working_order_ids;
+
+        if let Some(position) = snapshot_position {
+            if position.qty.abs() >= 1e-9 {
+                let owner = self.snapshot_owner_fallback();
+                let side = Self::snapshot_position_side(position.qty);
+                let size = position.qty.abs().floor().max(1.0) as i64;
+                let entry_price = if position.avg_price > 0.0 {
+                    position.avg_price
+                } else {
+                    self.open_position
+                        .as_ref()
+                        .map(|open| open.entry_price)
+                        .unwrap_or(0.0)
+                };
+                self.pending_entry = None;
+                self.entry_intent_inflight = false;
+                self.exit_intent_inflight = false;
+                self.open_position = Some(OpenPosition {
+                    owner,
+                    side,
+                    entry_ts: utc_to_local(position.ts_utc, self.config.timezone_offset_hours),
+                    entry_price,
+                    size,
+                    stop_price: None,
+                    take_price: None,
+                    stop1: None,
+                    stop2: None,
+                });
+                self.hybrid_state = HybridState::Open;
+                self.lifecycle_stage = "bootstrap_non_flat_adopted".to_string();
+            } else {
+                self.open_position = None;
+                if self.tracked_order_ids.is_empty() {
+                    self.pending_entry = None;
+                    self.entry_intent_inflight = false;
+                    self.hybrid_state = HybridState::Flat;
+                } else {
+                    // Safe fallback for unsupported order-ownership restore:
+                    // block new entry intents until broker callbacks reconcile terminal order state.
+                    self.pending_entry = None;
+                    self.entry_intent_inflight = true;
+                    self.hybrid_state = HybridState::Pending;
+                    self.lifecycle_stage = "bootstrap_working_orders_pending_reconcile".to_string();
+                }
+            }
+        }
         info!(
             strategy_id = ctx.strategy_id.as_str(),
             strategy = "alor_usdrubf_hybrid",
@@ -913,7 +1007,12 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             positions_count = snapshot.positions_strategy.len(),
             orders_count = snapshot.working_orders_strategy.len(),
             stop_orders_count = snapshot.working_stop_orders_strategy.len(),
-            "bootstrap snapshot observed; live gate re-armed"
+            symbol,
+            symbol_position_qty = snapshot_position.map(|pos| pos.qty).unwrap_or(0.0),
+            symbol_working_orders = self.tracked_order_ids.len(),
+            symbol_working_stop_orders = has_snapshot_stop_orders,
+            lifecycle_stage = self.lifecycle_stage.as_str(),
+            "bootstrap snapshot observed; reconcile policy applied and live gate re-armed"
         );
         self.sync_state();
         Vec::new()
@@ -1162,12 +1261,14 @@ fn parse_naive_datetime(value: &str) -> Option<NaiveDateTime> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{AlorUsdrubfHybridConfig, AlorUsdrubfHybridStrategy};
     use crate::live_guard::GatewayPhase;
     use crate::state::StrategyState;
     use crate::strategy_host::{
-        BarEvent, DataOrigin, OrderEvent, PositionEvent, RuntimeStateRestored, Strategy,
-        StrategyCtx,
+        BarEvent, BootstrapSnapshot, DataOrigin, OrderEvent, PositionEvent, RuntimeStateRestored,
+        StopOrderEvent, Strategy, StrategyCtx,
     };
     use crate::{PaperExecutionMode, TradeMode};
     use alor_protocol::{CommandAck, IntentClass};
@@ -1254,6 +1355,72 @@ mod tests {
             symbol: "USDRUBF".to_string(),
             status: status.to_string(),
             ..OrderEvent::default()
+        }
+    }
+
+    fn bootstrap_snapshot_with(
+        position_qty: f64,
+        avg_price: f64,
+        order_ids: &[i64],
+        stop_order_ids: &[&str],
+        ts_utc: i64,
+    ) -> BootstrapSnapshot {
+        let mut positions_strategy = HashMap::new();
+        if position_qty.abs() > f64::EPSILON {
+            positions_strategy.insert(
+                "USDRUBF".to_string(),
+                PositionEvent {
+                    symbol: "USDRUBF".to_string(),
+                    qty: position_qty,
+                    existing: true,
+                    avg_price,
+                    ts_utc,
+                },
+            );
+        }
+        let mut working_orders_strategy = HashMap::new();
+        for order_id in order_ids {
+            working_orders_strategy.insert(
+                *order_id,
+                OrderEvent {
+                    order_id: *order_id,
+                    symbol: "USDRUBF".to_string(),
+                    status: "working".to_string(),
+                    ..OrderEvent::default()
+                },
+            );
+        }
+        let mut working_stop_orders_strategy = HashMap::new();
+        for stop_order_id in stop_order_ids {
+            working_stop_orders_strategy.insert(
+                (*stop_order_id).to_string(),
+                StopOrderEvent {
+                    stop_order_id: (*stop_order_id).to_string(),
+                    symbol: "USDRUBF".to_string(),
+                    status: "working".to_string(),
+                    ..StopOrderEvent {
+                        stop_order_id: String::new(),
+                        exchange_order_id: None,
+                        symbol: String::new(),
+                        status: String::new(),
+                        side: String::new(),
+                        qty: 0.0,
+                        filled: 0.0,
+                        stop_price: 0.0,
+                        price: 0.0,
+                        existing: false,
+                        comment: None,
+                        end_time: None,
+                        ts_utc: 0,
+                    }
+                },
+            );
+        }
+        BootstrapSnapshot {
+            positions_strategy,
+            working_orders_strategy,
+            working_stop_orders_strategy,
+            snapshot_ts_utc: Some(ts_utc),
         }
     }
 
@@ -1782,6 +1949,55 @@ mod tests {
                 ..
             } if *live_ready && hybrid_state == "pending" && *entry_intent_inflight
         ));
+    }
+
+    #[test]
+    fn fresh_recovered_origin_bar_does_not_clear_live_ready() {
+        let mut cfg = test_config();
+        cfg.max_silence_bars_sec = 60;
+        let mut strategy = AlorUsdrubfHybridStrategy::new(cfg);
+        let now = 1_775_490_120;
+        let ctx = test_ctx(TradeMode::Live, now);
+        let recovered_fresh = bar_with_origin(now - 3, 80.0, DataOrigin::Replay);
+
+        let intents = strategy.on_bar(&ctx, &recovered_fresh);
+        assert!(intents.is_empty());
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                live_ready,
+                lifecycle_stage,
+                ..
+            } if !*live_ready && lifecycle_stage == "awaiting_fresh_live_origin_bar"
+        ));
+    }
+
+    #[test]
+    fn bootstrap_adoption_with_non_flat_snapshot_prevents_blind_entry() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let snapshot = bootstrap_snapshot_with(2.0, 80.25, &[77], &["stp-1"], 1_775_490_110);
+
+        let _ = strategy.on_bootstrap_snapshot(&ctx, &snapshot);
+
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                hybrid_state,
+                open_position_qty,
+                pending_entry_owner,
+                tracked_order_ids,
+                live_ready,
+                ..
+            } if hybrid_state == "open"
+                && *open_position_qty >= 2.0
+                && pending_entry_owner.is_none()
+                && tracked_order_ids.contains(&77)
+                && !*live_ready
+        ));
+
+        let intents = strategy.on_bar(&ctx, &bar_with_origin(1_775_490_119, 80.3, DataOrigin::Live));
+        assert!(intents.is_empty());
     }
 
     #[test]

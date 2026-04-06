@@ -18,11 +18,32 @@ This checklist is for controlled rollout of `alor_usdrubf_hybrid_v1` on `USDRUBF
   - use `reset_state_on_start = true`
   - use a fresh `consumer_group` for runtime
   - use a fresh `streams.runtime_state` key for the run
+  - use isolated stream namespace for bars/orders/trades/positions/acks/commands/health
 - confirm no stale-tail symptoms in logs:
   - no startup stale entry attempts
   - no repeated `intent_dropped_*` + immediate state revert pattern
   - no unexpected duplicate request churn from historical tails
 - proceed to smoke/canary/soak only after preflight is clean
+
+### Supported startup profile (current)
+
+- supported: clean-start profile only (flat account, isolated namespace, fresh consumer group and runtime-state stream),
+- not yet proven: restart with open position and/or working orders/stop orders.
+
+### Mandatory evidence to capture in next run
+
+- bootstrap summary line,
+- replay guard armed line,
+- replay guard cleared line,
+- first fresh live-origin bar marker,
+- first `live_guard=ALLOWED`,
+- first allowed entry,
+- first broker-truth position transition.
+
+Guard semantics to verify in logs:
+
+- `live_ready` is cleared only by fresh `DataOrigin::Live` bar,
+- fresh `history/history_gap/replay` bars must stay suppressed during startup gate.
 
 ## Config Files
 

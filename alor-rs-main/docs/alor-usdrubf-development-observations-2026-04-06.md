@@ -161,3 +161,59 @@ Formal follow-up hardening scope is fixed in:
 
 - `docs/alor-usdrubf-live-hardening-tz-2026-04-06.md`
 
+## Post-Review Follow-up Lock (Next Iteration)
+
+### Supported startup profile (declared)
+
+For the current strategy revision, operationally supported startup profile is explicitly limited to:
+
+- clean-start only,
+- fresh consumer group,
+- fresh runtime-state stream,
+- isolated stream namespace,
+- flat startup account (no active position and no working orders/stop orders).
+
+### Unsupported / not yet proven startup scenarios
+
+- restart with open position,
+- restart with working orders,
+- restart with stop orders,
+- full bootstrap ownership/reconcile parity with mature strategies.
+
+### Next hardening deltas agreed after review
+
+- strict `live_ready` rule: only fresh `DataOrigin::Live` bar may clear startup guard,
+- non-live fresh bars (`history/history_gap/replay`) must stay suppressed and must not unlock entry path,
+- bootstrap snapshot handling must become meaningful for non-flat scenarios with explicit reconcile policy,
+- capability descriptor must match actual implemented semantics (no "future-looking" flags).
+
+### Follow-up implementation status
+
+Delivered in current cycle:
+
+- `T11` delivered:
+  - startup guard is no longer cleared by fresh recovered/history-origin bars,
+  - strategy waits for fresh `DataOrigin::Live` before setting `live_ready=true`.
+- `T10` delivered:
+  - bootstrap non-flat symbol position is adopted into strategy open state,
+  - runtime pending/open conflict resolves deterministically in favor of snapshot position,
+  - bootstrap symbol working orders are tracked and unsafe blind entry is blocked until reconcile events.
+- capability review delivered:
+  - `AlorUsdrubfHybrid` capability updated to `uses_stop_orders=false`,
+  - capability descriptor now reflects current operational maturity.
+
+### Mandatory follow-up tests (new)
+
+- `T10`: bootstrap adoption with non-flat snapshot.
+- `T11`: fresh recovered-origin bar does not clear `live_ready`.
+
+Recommended:
+
+- `T12`: capability descriptor consistency.
+
+### Readiness wording policy (for next review memo)
+
+- **Go:** controlled diagnostic bring-up, paper, clean-start live-preflight, clean-start micro-soak under isolated protocol.
+- **Conditional-Go:** next micro-run only via clean protocol; limited restart only after `T10` and capability review closure.
+- **Not yet equivalent:** full non-flat restart/ownership/stop-order parity with mature strategies until proven by code+tests.
+

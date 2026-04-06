@@ -1,5 +1,100 @@
 # Alor USDRUBF Live Hardening TZ (2026-04-06)
 
+## Review Follow-up TZ (Locked After Review)
+
+This document is extended by a focused follow-up hardening scope for `AlorUsdrubfHybrid` inside the already refactored `strategy-runtime` host path.
+
+### Context
+
+- base runtime refactor is already completed (registry/adapters/host hooks path),
+- `AlorUsdrubfHybrid` already passes clean-start and isolated diagnostic bring-up,
+- readiness and guard behavior are proven for isolated clean-start,
+- parity path (`golden/test/train`) remains green after hardening changes.
+
+Remaining gap from review:
+- strategy is not yet proven equivalent to mature strategies for non-flat restart and deep bootstrap adoption/reconcile scenarios.
+
+### Supported startup profile (current explicit verdict)
+
+Current formally supported profile is **Profile A (minimum)**:
+
+- clean-start,
+- fresh consumer group,
+- fresh runtime-state stream,
+- isolated stream namespace,
+- flat account (no active position/working orders/stop orders at startup).
+
+Not yet proven / unsupported as fully reliable production semantics:
+
+- restart with already open position,
+- restart with working orders and stop orders,
+- full ownership/reconcile parity with mature runtime strategies.
+
+### Follow-up objective
+
+Reach controlled live-prep maturity without widening architecture scope:
+
+- make `live_ready` semantics strict (`fresh + DataOrigin::Live` only),
+- implement meaningful bootstrap adoption/reconcile for non-flat scenarios,
+- align capability descriptor with real operational behavior,
+- publish an explicit next-run operational protocol and honest readiness verdict.
+
+### In scope (follow-up)
+
+- `strategy-runtime/src/strategies/alor_usdrubf_hybrid.rs`,
+- related adapter/registry/state wiring,
+- strategy unit/integration tests,
+- strategy docs, bring-up docs, runbook/config instructions.
+
+### Out of scope (follow-up)
+
+- `alor-gateway` contract/behavior changes,
+- Redis stream contract redesign,
+- broker command schema changes,
+- new execution contour,
+- broad all-strategies rearchitecture.
+
+### Required additional tests in this follow-up
+
+- `T10` Bootstrap adoption with non-flat snapshot.
+- `T11` Fresh recovered-origin bar does not clear `live_ready`.
+- `T12` (recommended) capability descriptor consistency check.
+
+### Follow-up implementation progress
+
+Implemented in current iteration:
+
+- `PR1`: strict `live_ready` unlock now requires fresh `DataOrigin::Live` bar only.
+  - fresh non-live origins (`history/history_gap/replay`) no longer clear startup guard.
+  - verified by `fresh_recovered_origin_bar_does_not_clear_live_ready` (`T11`).
+- `PR2`: bootstrap adoption/reconcile for non-flat snapshot added.
+  - non-flat symbol position from bootstrap is adopted as broker truth into strategy open state.
+  - pending entry is cleared on non-flat adoption to avoid blind duplicate entry.
+  - symbol working orders are tracked at bootstrap and block unsafe blind entry until reconcile.
+  - verified by `bootstrap_adoption_with_non_flat_snapshot_prevents_blind_entry` (`T10`).
+- `PR3`: capability descriptor reviewed.
+  - `uses_stop_orders` for `AlorUsdrubfHybrid` downgraded to `false` (callback existed but no mature stop-order ownership semantics yet).
+  - registry capability expectation tests updated and green.
+
+### Practical PR order for this follow-up
+
+- `PR1`: strict `live_ready` only on fresh live-origin + `T11` + docs sync.
+- `PR2`: bootstrap adoption/reconcile (non-flat snapshot) + `T10` + precedence policy docs.
+- `PR3`: capability descriptor review/cleanup + `T12` (or equivalent proof) + docs sync.
+- `PR4`: next-run runbook finalization + controlled bring-up report update + final review memo.
+
+### Definition of done for this follow-up
+
+All must be true simultaneously:
+
+1. supported startup profile is explicit and unambiguous in docs,
+2. `live_ready` is cleared only by fresh `DataOrigin::Live` bar,
+3. non-flat bootstrap adoption/reconcile is implemented at least at limited mature level and covered by test,
+4. capability descriptor is aligned with actual strategy behavior,
+5. `T10` and `T11` are green,
+6. next-run protocol is reproducible and isolated from stale tails,
+7. final readiness statement is honest: `Go` vs `Conditional-Go` vs `Not yet equivalent`.
+
 ## Status and Engineering Verdict
 
 - Replay-core migration is usable and integrated into the new host path.
