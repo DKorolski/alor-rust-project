@@ -8,7 +8,7 @@ use crate::strategies::hybrid_intraday::{
 use crate::strategies::hybrid_intraday_runtime::{
     HybridIntradayRuntimeConfig, HybridIntradayRuntimeStrategy,
 };
-use crate::strategies::alor_skeleton::{AlorSkeletonConfig, AlorSkeletonStrategy};
+use crate::strategies::alor_usdrubf_hybrid::{AlorUsdrubfHybridConfig, AlorUsdrubfHybridStrategy};
 use crate::strategies::session_gap_standalone::{
     SessionGapStandaloneConfig, SessionGapStandaloneStrategy,
 };
@@ -165,16 +165,40 @@ impl HybridIntradayAdapter {
     }
 }
 
-pub(crate) struct AlorSkeletonAdapter;
+pub(crate) struct AlorUsdrubfHybridAdapter;
 
-impl AlorSkeletonAdapter {
-    pub(crate) fn from_strategy_config(config: &StrategyConfig) -> Result<AlorSkeletonConfig> {
+impl AlorUsdrubfHybridAdapter {
+    pub(crate) fn from_strategy_config(config: &StrategyConfig) -> Result<AlorUsdrubfHybridConfig> {
         match config.specific() {
-            StrategySpecificConfig::AlorSkeleton(_) => Ok(AlorSkeletonConfig {
+            StrategySpecificConfig::AlorUsdrubfHybrid(settings) => Ok(AlorUsdrubfHybridConfig {
                 symbol: config.symbol.clone(),
+                timezone_offset_hours: config.timezone_offset_hours,
+                mr_min_rel_range: settings.mr_min_rel_range,
+                mr_max_rel_range: settings.mr_max_rel_range,
+                mr_k_short: settings.mr_k_short,
+                mr_take_k_short: settings.mr_take_k_short,
+                mr_stop_k_short: settings.mr_stop_k_short,
+                mr_last_entry_time: NaiveTime::parse_from_str(&settings.mr_last_entry_time, "%H:%M:%S")
+                    .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 40, 0).unwrap_or(NaiveTime::MIN)),
+                mr_force_exit_time: NaiveTime::parse_from_str(&settings.mr_force_exit_time, "%H:%M:%S")
+                    .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 50, 0).unwrap_or(NaiveTime::MIN)),
+                bo_k: settings.bo_k,
+                bo_stop1_range: settings.bo_stop1_range,
+                bo_stop2_range: settings.bo_stop2_range,
+                bo_big_move_threshold: settings.bo_big_move_threshold,
+                bo_wait_hours: settings.bo_wait_hours,
+                bo_eod_exit_time: NaiveTime::parse_from_str(&settings.bo_eod_exit_time, "%H:%M:%S")
+                    .unwrap_or_else(|_| NaiveTime::from_hms_opt(23, 30, 0).unwrap_or(NaiveTime::MIN)),
+                commission_pct_per_side: settings.commission_pct_per_side,
+                position_size_fraction: settings.position_size_fraction,
+                initial_cash: settings.initial_cash,
+                enable_live_execution: settings.enable_live_execution,
+                use_fixed_live_size: settings.use_fixed_live_size,
+                live_fixed_units: settings.live_fixed_units,
+                tick_size: config.tick_size,
             }),
             other => bail!(
-                "strategy kind {:?} requires AlorSkeleton payload, found {:?}",
+                "strategy kind {:?} requires AlorUsdrubfHybrid payload, found {:?}",
                 config.strategy_kind,
                 other.kind()
             ),
@@ -183,13 +207,13 @@ impl AlorSkeletonAdapter {
 
     pub(crate) fn create(config: &StrategyConfig) -> Result<BoxedStrategy> {
         let strategy_config = Self::from_strategy_config(config)?;
-        Ok(Box::new(AlorSkeletonStrategy::new(strategy_config)))
+        Ok(Box::new(AlorUsdrubfHybridStrategy::new(strategy_config)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AlorSkeletonAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter};
+    use super::{AlorUsdrubfHybridAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter};
     use crate::{StrategyConfig, StrategyKind};
 
     #[test]
@@ -215,13 +239,13 @@ mod tests {
     }
 
     #[test]
-    fn alor_skeleton_adapter_rejects_non_matching_payload() {
+    fn alor_usdrubf_hybrid_adapter_rejects_non_matching_payload() {
         let config = StrategyConfig::defaults_for_kind(StrategyKind::LimitCancel);
-        let err = AlorSkeletonAdapter::from_strategy_config(&config)
+        let err = AlorUsdrubfHybridAdapter::from_strategy_config(&config)
             .err()
             .expect("expected mismatch error");
         assert!(err
             .to_string()
-            .contains("requires AlorSkeleton payload"));
+            .contains("requires AlorUsdrubfHybrid payload"));
     }
 }

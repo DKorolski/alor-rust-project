@@ -474,7 +474,7 @@ symbol = "ALRS"
 qty = 3.0
 side = "sell"
 
-[strategy.alor_skeleton]
+[strategy.alor_usdrubf_hybrid]
 "#,
     );
 
@@ -482,13 +482,59 @@ side = "sell"
 
     assert_eq!(
         resolved.config.strategy.strategy_kind,
-        strategy_runtime::StrategyKind::AlorSkeleton
+        strategy_runtime::StrategyKind::AlorUsdrubfHybrid
     );
-    assert_eq!(resolved.config.strategy.strategy_id, "alor_skeleton");
+    assert_eq!(
+        resolved.config.strategy.strategy_id,
+        "alor_usdrubf_hybrid_v1"
+    );
     assert_eq!(resolved.config.strategy.symbol, "ALRS");
     assert_eq!(resolved.config.strategy.qty, 3.0);
     assert_eq!(resolved.config.strategy.side, alor_protocol::Side::Sell);
-    assert!(resolved.config.strategy.alor_skeleton().is_some());
+    assert!(resolved.config.strategy.alor_usdrubf_hybrid().is_some());
+}
+
+#[test]
+fn loads_split_alor_skeleton_runtime_fields() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let path = write_temp_config(
+        r#"
+[strategy.common]
+strategy_kind = "alor_skeleton"
+symbol = "USDRUBF"
+tick_size = 0.01
+
+[strategy.alor_usdrubf_hybrid]
+mr_min_rel_range = 0.01
+mr_max_rel_range = 0.06
+bo_wait_hours = 2.5
+commission_pct_per_side = 0.004
+enable_live_execution = true
+use_fixed_live_size = true
+live_fixed_units = 1.0
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .alor_usdrubf_hybrid()
+        .expect("alor skeleton settings");
+
+    assert_eq!(settings.mr_min_rel_range, 0.01);
+    assert_eq!(settings.mr_max_rel_range, 0.06);
+    assert_eq!(settings.bo_wait_hours, 2.5);
+    assert_eq!(settings.commission_pct_per_side, 0.004);
+    assert!(settings.enable_live_execution);
+    assert!(settings.use_fixed_live_size);
+    assert_eq!(settings.live_fixed_units, 1.0);
+    assert_eq!(
+        resolved.sources.strategy.alor_usdrubf_hybrid,
+        strategy_runtime::config::ConfigSource::File
+    );
 }
 
 #[test]

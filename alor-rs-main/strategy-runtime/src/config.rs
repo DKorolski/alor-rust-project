@@ -182,6 +182,7 @@ pub struct StrategySources {
     pub session_gap_exit_offset_min: ConfigSource,
     pub session_gap_work_weekends: ConfigSource,
     pub hybrid_intraday: ConfigSource,
+    pub alor_usdrubf_hybrid: ConfigSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +340,7 @@ impl Default for StrategySources {
             session_gap_exit_offset_min: ConfigSource::Default,
             session_gap_work_weekends: ConfigSource::Default,
             hybrid_intraday: ConfigSource::Default,
+            alor_usdrubf_hybrid: ConfigSource::Default,
         }
     }
 }
@@ -494,7 +496,8 @@ struct StrategyConfigFile {
     mock_live_probe: Option<MockLiveProbeConfigFile>,
     session_gap: Option<SessionGapConfigFile>,
     hybrid_intraday: Option<HybridIntradayConfigFile>,
-    alor_skeleton: Option<AlorSkeletonConfigFile>,
+    alor_usdrubf_hybrid: Option<AlorUsdrubfHybridConfigFile>,
+    alor_skeleton: Option<AlorUsdrubfHybridConfigFile>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -614,7 +617,27 @@ struct SessionGapConfigFile {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct AlorSkeletonConfigFile {}
+struct AlorUsdrubfHybridConfigFile {
+    mr_min_rel_range: Option<f64>,
+    mr_max_rel_range: Option<f64>,
+    mr_k_short: Option<f64>,
+    mr_take_k_short: Option<f64>,
+    mr_stop_k_short: Option<f64>,
+    mr_last_entry_time: Option<String>,
+    mr_force_exit_time: Option<String>,
+    bo_k: Option<f64>,
+    bo_stop1_range: Option<f64>,
+    bo_stop2_range: Option<f64>,
+    bo_big_move_threshold: Option<f64>,
+    bo_wait_hours: Option<f64>,
+    bo_eod_exit_time: Option<String>,
+    commission_pct_per_side: Option<f64>,
+    position_size_fraction: Option<f64>,
+    initial_cash: Option<f64>,
+    enable_live_execution: Option<bool>,
+    use_fixed_live_size: Option<bool>,
+    live_fixed_units: Option<f64>,
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct PaperConfigFile {
@@ -1204,6 +1227,74 @@ fn apply_hybrid_intraday_config_file(
     }
 }
 
+fn apply_alor_usdrubf_hybrid_config_file(
+    strategy: &mut StrategyConfig,
+    sources: &mut StrategySources,
+    alor_file: &AlorUsdrubfHybridConfigFile,
+    source: ConfigSource,
+) {
+    if let Some(settings) = strategy.alor_usdrubf_hybrid_mut() {
+        sources.alor_usdrubf_hybrid = source;
+        if let Some(value) = alor_file.mr_min_rel_range {
+            settings.mr_min_rel_range = value;
+        }
+        if let Some(value) = alor_file.mr_max_rel_range {
+            settings.mr_max_rel_range = value;
+        }
+        if let Some(value) = alor_file.mr_k_short {
+            settings.mr_k_short = value;
+        }
+        if let Some(value) = alor_file.mr_take_k_short {
+            settings.mr_take_k_short = value;
+        }
+        if let Some(value) = alor_file.mr_stop_k_short {
+            settings.mr_stop_k_short = value;
+        }
+        if let Some(value) = &alor_file.mr_last_entry_time {
+            settings.mr_last_entry_time = value.clone();
+        }
+        if let Some(value) = &alor_file.mr_force_exit_time {
+            settings.mr_force_exit_time = value.clone();
+        }
+        if let Some(value) = alor_file.bo_k {
+            settings.bo_k = value;
+        }
+        if let Some(value) = alor_file.bo_stop1_range {
+            settings.bo_stop1_range = value;
+        }
+        if let Some(value) = alor_file.bo_stop2_range {
+            settings.bo_stop2_range = value;
+        }
+        if let Some(value) = alor_file.bo_big_move_threshold {
+            settings.bo_big_move_threshold = value;
+        }
+        if let Some(value) = alor_file.bo_wait_hours {
+            settings.bo_wait_hours = value;
+        }
+        if let Some(value) = &alor_file.bo_eod_exit_time {
+            settings.bo_eod_exit_time = value.clone();
+        }
+        if let Some(value) = alor_file.commission_pct_per_side {
+            settings.commission_pct_per_side = value;
+        }
+        if let Some(value) = alor_file.position_size_fraction {
+            settings.position_size_fraction = value;
+        }
+        if let Some(value) = alor_file.initial_cash {
+            settings.initial_cash = value;
+        }
+        if let Some(value) = alor_file.enable_live_execution {
+            settings.enable_live_execution = value;
+        }
+        if let Some(value) = alor_file.use_fixed_live_size {
+            settings.use_fixed_live_size = value;
+        }
+        if let Some(value) = alor_file.live_fixed_units {
+            settings.live_fixed_units = value;
+        }
+    }
+}
+
 fn validate_matching_strategy_specific_sections(
     strategy_file: &StrategyConfigFile,
     kind: StrategyKind,
@@ -1225,7 +1316,10 @@ fn validate_matching_strategy_specific_sections(
     if strategy_file.hybrid_intraday.is_some() && kind != StrategyKind::HybridIntraday {
         mismatches.push("strategy.hybrid_intraday");
     }
-    if strategy_file.alor_skeleton.is_some() && kind != StrategyKind::AlorSkeleton {
+    if strategy_file.alor_usdrubf_hybrid.is_some() && kind != StrategyKind::AlorUsdrubfHybrid {
+        mismatches.push("strategy.alor_usdrubf_hybrid");
+    }
+    if strategy_file.alor_skeleton.is_some() && kind != StrategyKind::AlorUsdrubfHybrid {
         mismatches.push("strategy.alor_skeleton");
     }
 
@@ -1460,6 +1554,18 @@ pub fn load_runtime_config(
                     &mut strategy,
                     &mut sources.strategy,
                     hybrid_file,
+                    ConfigSource::File,
+                );
+            }
+            if let Some(alor_file) = strategy_file
+                .alor_usdrubf_hybrid
+                .as_ref()
+                .or(strategy_file.alor_skeleton.as_ref())
+            {
+                apply_alor_usdrubf_hybrid_config_file(
+                    &mut strategy,
+                    &mut sources.strategy,
+                    alor_file,
                     ConfigSource::File,
                 );
             }
@@ -2095,7 +2201,8 @@ fn parse_strategy_kind(value: &str) -> Result<StrategyKind> {
         "toy_session_timing" | "toysessiontiming" => Ok(StrategyKind::ToySessionTiming),
         "session_gap_standalone" | "sessiongapstandalone" => Ok(StrategyKind::SessionGapStandalone),
         "hybrid_intraday" | "hybridintraday" | "hybrid" => Ok(StrategyKind::HybridIntraday),
-        "alor_skeleton" | "alorskeleton" | "alor" => Ok(StrategyKind::AlorSkeleton),
+        "alor_usdrubf_hybrid" | "alorusdrubfhybrid" => Ok(StrategyKind::AlorUsdrubfHybrid),
+        "alor_skeleton" | "alorskeleton" | "alor" => Ok(StrategyKind::AlorUsdrubfHybrid),
         _ => Err(anyhow!("unknown strategy_kind: {value}")),
     }
 }

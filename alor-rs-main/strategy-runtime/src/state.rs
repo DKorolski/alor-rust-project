@@ -318,7 +318,7 @@ pub enum StrategyState {
         #[serde(default)]
         overnight_exit_armed_date: Option<String>,
     },
-    AlorSkeleton {
+    AlorUsdrubfHybrid {
         #[serde(default)]
         lifecycle_stage: String,
         #[serde(default)]
@@ -327,6 +327,18 @@ pub enum StrategyState {
         bootstrap_seen: bool,
         #[serde(default)]
         runtime_state_restored: bool,
+        #[serde(default)]
+        hybrid_state: String,
+        #[serde(default)]
+        current_date_local: Option<String>,
+        #[serde(default)]
+        cash: f64,
+        #[serde(default)]
+        pending_entry_side: Option<String>,
+        #[serde(default)]
+        open_position_side: Option<String>,
+        #[serde(default)]
+        open_position_qty: f64,
     },
     CancelSent {
         cancel_request_id: Uuid,

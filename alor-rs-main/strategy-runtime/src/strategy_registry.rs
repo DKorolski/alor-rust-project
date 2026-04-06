@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Result};
-use crate::strategy_adapters::{AlorSkeletonAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter};
+use crate::strategy_adapters::{AlorUsdrubfHybridAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter};
 use crate::strategies::limit_cancel::{LimitCancelConfig, LimitCancelStrategy};
 use crate::strategies::market_buy_and_close::{
     MarketBuyAndCloseConfig, MarketBuyAndCloseStrategy,
@@ -85,9 +85,9 @@ impl StrategyRegistry {
                 },
             },
             StrategyDescriptor {
-                kind: StrategyKind::AlorSkeleton,
-                display_name: "AlorSkeleton",
-                factory: create_alor_skeleton,
+                kind: StrategyKind::AlorUsdrubfHybrid,
+                display_name: "AlorUsdrubfHybrid",
+                factory: create_alor_usdrubf_hybrid,
                 capabilities: StrategyCapabilities {
                     uses_bootstrap_snapshot: true,
                     uses_runtime_state_restore: true,
@@ -252,8 +252,8 @@ fn create_hybrid_intraday(config: &StrategyConfig) -> Result<BoxedStrategy> {
     HybridIntradayAdapter::create(config)
 }
 
-fn create_alor_skeleton(config: &StrategyConfig) -> Result<BoxedStrategy> {
-    AlorSkeletonAdapter::create(config)
+fn create_alor_usdrubf_hybrid(config: &StrategyConfig) -> Result<BoxedStrategy> {
+    AlorUsdrubfHybridAdapter::create(config)
 }
 
 #[cfg(test)]
@@ -281,7 +281,7 @@ mod tests {
                 StrategyKind::SessionGapStandalone,
                 StrategyKind::MockLiveProbe,
                 StrategyKind::HybridIntraday,
-                StrategyKind::AlorSkeleton,
+                StrategyKind::AlorUsdrubfHybrid,
             ]
         );
     }
@@ -340,7 +340,7 @@ mod tests {
             StrategyKind::SessionGapStandalone,
             StrategyKind::MockLiveProbe,
             StrategyKind::HybridIntraday,
-            StrategyKind::AlorSkeleton,
+            StrategyKind::AlorUsdrubfHybrid,
         ] {
             let _strategy = registry
                 .create(&sample_strategy_config(kind))
@@ -384,7 +384,7 @@ mod tests {
         );
 
         let alor = registry
-            .descriptor(StrategyKind::AlorSkeleton)
+            .descriptor(StrategyKind::AlorUsdrubfHybrid)
             .expect("alor skeleton descriptor");
         assert_eq!(
             alor.capabilities,

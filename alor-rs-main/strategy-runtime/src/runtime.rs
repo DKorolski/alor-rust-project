@@ -4071,8 +4071,8 @@ mod tests {
         );
 
         let mut alor_config = limit_runtime.config.clone();
-        alor_config.strategy.set_kind(StrategyKind::AlorSkeleton);
-        alor_config.strategy.strategy_id = "alor_skeleton".to_string();
+        alor_config.strategy.set_kind(StrategyKind::AlorUsdrubfHybrid);
+        alor_config.strategy.strategy_id = "alor_usdrubf_hybrid_v1".to_string();
 
         let alor_runtime = tokio::runtime::Runtime::new()
             .unwrap()
@@ -4093,14 +4093,15 @@ mod tests {
     #[test]
     fn alor_skeleton_lifecycle_callbacks_are_wired_in_runtime() {
         let mut runtime = test_runtime(TradeMode::Live);
-        runtime.config.strategy.set_kind(StrategyKind::AlorSkeleton);
-        runtime.config.strategy.strategy_id = "alor_skeleton".to_string();
+        runtime.config.strategy.set_kind(StrategyKind::AlorUsdrubfHybrid);
+        runtime.config.strategy.strategy_id = "alor_usdrubf_hybrid_v1".to_string();
+        let strategy_config =
+            crate::strategy_adapters::AlorUsdrubfHybridAdapter::from_strategy_config(
+                &runtime.config.strategy,
+            )
+            .expect("alor skeleton config");
         runtime.strategy = Box::new(
-            crate::strategies::alor_skeleton::AlorSkeletonStrategy::new(
-                crate::strategies::alor_skeleton::AlorSkeletonConfig {
-                    symbol: runtime.config.strategy.symbol.clone(),
-                },
-            ),
+            crate::strategies::alor_usdrubf_hybrid::AlorUsdrubfHybridStrategy::new(strategy_config),
         );
         runtime.strategy_capabilities = StrategyCapabilities {
             uses_bootstrap_snapshot: true,
@@ -4132,7 +4133,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             &runtime.state.strategy_state,
-            StrategyState::AlorSkeleton {
+            StrategyState::AlorUsdrubfHybrid {
                 lifecycle_stage,
                 bootstrap_seen,
                 ..
@@ -4145,7 +4146,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             &runtime.state.strategy_state,
-            StrategyState::AlorSkeleton {
+            StrategyState::AlorUsdrubfHybrid {
                 lifecycle_stage,
                 runtime_state_restored,
                 ..
@@ -4177,7 +4178,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             &runtime.state.strategy_state,
-            StrategyState::AlorSkeleton { lifecycle_stage, .. }
+            StrategyState::AlorUsdrubfHybrid { lifecycle_stage, .. }
                 if lifecycle_stage == "stop_order_observed"
         ));
     }

@@ -1,4 +1,4 @@
-pub mod alor_skeleton;
+pub mod alor_usdrubf_hybrid;
 pub mod hybrid_intraday;
 pub mod hybrid_intraday_runtime;
 pub mod limit_cancel;

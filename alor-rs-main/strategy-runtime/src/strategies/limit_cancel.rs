@@ -141,7 +141,7 @@ impl Strategy for LimitCancelStrategy {
                 *last_bar_ts = Some(bar.close_time_utc);
                 None
             }
-            StrategyState::AlorSkeleton { last_bar_ts, .. } => {
+            StrategyState::AlorUsdrubfHybrid { last_bar_ts, .. } => {
                 *last_bar_ts = Some(bar.close_time_utc);
                 None
             }

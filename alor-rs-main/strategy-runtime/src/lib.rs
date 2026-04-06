@@ -212,8 +212,54 @@ pub struct HybridIntradayStrategySettings {
     pub strategy: HybridIntradaySettings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct AlorSkeletonSettings;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AlorUsdrubfHybridSettings {
+    pub mr_min_rel_range: f64,
+    pub mr_max_rel_range: f64,
+    pub mr_k_short: f64,
+    pub mr_take_k_short: f64,
+    pub mr_stop_k_short: f64,
+    pub mr_last_entry_time: String,
+    pub mr_force_exit_time: String,
+    pub bo_k: f64,
+    pub bo_stop1_range: f64,
+    pub bo_stop2_range: f64,
+    pub bo_big_move_threshold: f64,
+    pub bo_wait_hours: f64,
+    pub bo_eod_exit_time: String,
+    pub commission_pct_per_side: f64,
+    pub position_size_fraction: f64,
+    pub initial_cash: f64,
+    pub enable_live_execution: bool,
+    pub use_fixed_live_size: bool,
+    pub live_fixed_units: f64,
+}
+
+impl Default for AlorUsdrubfHybridSettings {
+    fn default() -> Self {
+        Self {
+            mr_min_rel_range: 0.006,
+            mr_max_rel_range: 0.050,
+            mr_k_short: 0.045,
+            mr_take_k_short: 0.16,
+            mr_stop_k_short: 0.43,
+            mr_last_entry_time: "11:40:00".to_string(),
+            mr_force_exit_time: "11:50:00".to_string(),
+            bo_k: 0.45,
+            bo_stop1_range: 0.51,
+            bo_stop2_range: 0.35,
+            bo_big_move_threshold: 0.020,
+            bo_wait_hours: 2.0,
+            bo_eod_exit_time: "23:30:00".to_string(),
+            commission_pct_per_side: 0.004,
+            position_size_fraction: 0.9,
+            initial_cash: 100_000.0,
+            enable_live_execution: false,
+            use_fixed_live_size: true,
+            live_fixed_units: 1.0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StrategySpecificConfig {
@@ -223,7 +269,7 @@ pub enum StrategySpecificConfig {
     SessionGapStandalone(SessionGapStandaloneSettings),
     MockLiveProbe(MockLiveProbeSettings),
     HybridIntraday(HybridIntradayStrategySettings),
-    AlorSkeleton(AlorSkeletonSettings),
+    AlorUsdrubfHybrid(AlorUsdrubfHybridSettings),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -403,7 +449,9 @@ impl StrategySpecificConfig {
             StrategyKind::HybridIntraday => {
                 Self::HybridIntraday(HybridIntradayStrategySettings::default())
             }
-            StrategyKind::AlorSkeleton => Self::AlorSkeleton(AlorSkeletonSettings),
+            StrategyKind::AlorUsdrubfHybrid => {
+                Self::AlorUsdrubfHybrid(AlorUsdrubfHybridSettings::default())
+            }
         }
     }
 
@@ -415,7 +463,7 @@ impl StrategySpecificConfig {
             StrategySpecificConfig::SessionGapStandalone(_) => StrategyKind::SessionGapStandalone,
             StrategySpecificConfig::MockLiveProbe(_) => StrategyKind::MockLiveProbe,
             StrategySpecificConfig::HybridIntraday(_) => StrategyKind::HybridIntraday,
-            StrategySpecificConfig::AlorSkeleton(_) => StrategyKind::AlorSkeleton,
+            StrategySpecificConfig::AlorUsdrubfHybrid(_) => StrategyKind::AlorUsdrubfHybrid,
         }
     }
 }
@@ -437,7 +485,7 @@ pub enum StrategyKind {
     SessionGapStandalone,
     MockLiveProbe,
     HybridIntraday,
-    AlorSkeleton,
+    AlorUsdrubfHybrid,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -593,18 +641,26 @@ impl StrategyConfig {
         }
     }
 
-    pub fn alor_skeleton(&self) -> Option<&AlorSkeletonSettings> {
+    pub fn alor_usdrubf_hybrid(&self) -> Option<&AlorUsdrubfHybridSettings> {
         match &self.specific {
-            StrategySpecificConfig::AlorSkeleton(settings) => Some(settings),
+            StrategySpecificConfig::AlorUsdrubfHybrid(settings) => Some(settings),
             _ => None,
         }
     }
 
-    pub fn alor_skeleton_mut(&mut self) -> Option<&mut AlorSkeletonSettings> {
+    pub fn alor_usdrubf_hybrid_mut(&mut self) -> Option<&mut AlorUsdrubfHybridSettings> {
         match &mut self.specific {
-            StrategySpecificConfig::AlorSkeleton(settings) => Some(settings),
+            StrategySpecificConfig::AlorUsdrubfHybrid(settings) => Some(settings),
             _ => None,
         }
+    }
+
+    pub fn alor_skeleton(&self) -> Option<&AlorUsdrubfHybridSettings> {
+        self.alor_usdrubf_hybrid()
+    }
+
+    pub fn alor_skeleton_mut(&mut self) -> Option<&mut AlorUsdrubfHybridSettings> {
+        self.alor_usdrubf_hybrid_mut()
     }
 }
 
@@ -631,7 +687,7 @@ impl StrategyKind {
             StrategyKind::SessionGapStandalone => "session_gap_standalone",
             StrategyKind::MockLiveProbe => "mock_live_probe",
             StrategyKind::HybridIntraday => "hybrid_intraday",
-            StrategyKind::AlorSkeleton => "alor_skeleton",
+            StrategyKind::AlorUsdrubfHybrid => "alor_usdrubf_hybrid_v1",
         }
     }
 }
