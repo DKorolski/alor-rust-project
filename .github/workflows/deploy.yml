@@ -11,6 +11,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # strategy-runtime unit tests (e.g. lifecycle hooks) call persist_state / xack via RedisRuntimeTransport.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: alor-rs-main
