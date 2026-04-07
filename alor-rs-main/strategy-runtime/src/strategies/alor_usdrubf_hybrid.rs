@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use alor_protocol::{AckStatus, CommandAck, IntentClass, Side};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use tracing::info;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::state::StrategyState;
@@ -170,6 +170,17 @@ pub struct AlorUsdrubfHybridStrategy {
     cash: f64,
     bo_was_long_today: bool,
     bo_was_short_today: bool,
+    /// Last broker qty/avg for position_transition / duplicate suppression (not persisted).
+    last_logged_broker_qty: f64,
+    last_logged_broker_avg: f64,
+    last_logged_broker_initialized: bool,
+    startup_replay_tail_info_emitted: bool,
+    awaiting_live_bar_info_emitted: bool,
+    recovered_bar_suppressed_info_emitted: bool,
+    last_logged_entry_inflight: bool,
+    last_logged_exit_inflight: bool,
+    last_logged_entry_reject_defer_ts: Option<i64>,
+    last_logged_exit_reject_defer_ts: Option<i64>,
 }
 
 impl AlorUsdrubfHybridStrategy {
@@ -241,6 +252,16 @@ impl AlorUsdrubfHybridStrategy {
             cash: 0.0,
             bo_was_long_today: false,
             bo_was_short_today: false,
+            last_logged_broker_qty: 0.0,
+            last_logged_broker_avg: 0.0,
+            last_logged_broker_initialized: false,
+            startup_replay_tail_info_emitted: false,
+            awaiting_live_bar_info_emitted: false,
+            recovered_bar_suppressed_info_emitted: false,
+            last_logged_entry_inflight: false,
+            last_logged_exit_inflight: false,
+            last_logged_entry_reject_defer_ts: None,
+            last_logged_exit_reject_defer_ts: None,
         };
         strategy.cash = strategy.config.initial_cash;
         strategy.sync_state();
@@ -365,6 +386,9 @@ impl AlorUsdrubfHybridStrategy {
         self.entry_intent_inflight = false;
         self.exit_intent_inflight = false;
         self.hybrid_state = HybridState::Flat;
+        self.last_logged_broker_qty = 0.0;
+        self.last_logged_broker_avg = 0.0;
+        self.last_logged_broker_initialized = false;
     }
 
     fn reset_day_aggregates(&mut self, local_date: NaiveDate) {
@@ -483,7 +507,12 @@ impl AlorUsdrubfHybridStrategy {
         self.hybrid_state = HybridState::Open;
     }
 
-    fn maybe_emit_live_entry_intent(&mut self, bar: &BarEvent, intents: &mut Vec<Intent>) {
+    fn maybe_emit_live_entry_intent(
+        &mut self,
+        ctx: &StrategyCtx,
+        bar: &BarEvent,
+        intents: &mut Vec<Intent>,
+    ) {
         let Some(pending) = self.pending_entry.clone() else {
             return;
         };
@@ -497,19 +526,61 @@ impl AlorUsdrubfHybridStrategy {
             return;
         }
         let size = self.compute_entry_size(bar.o);
+        let side = pending.side.entry_side();
         intents.push(Intent::Market {
             qty: size as f64,
-            side: pending.side.entry_side(),
+            side,
             fill_price: Some(bar.o),
             comment: Some(format!("{}|entry|{}", self.config.symbol, pending.owner.as_str())),
         });
         self.entry_intent_inflight = true;
         self.hybrid_state = HybridState::Pending;
         self.lifecycle_stage = "live_entry_intent_emitted".to_string();
+        self.log_live_intent_emitted_entry(ctx, bar, size as f64, side);
+    }
+
+    fn log_live_intent_emitted_entry(&self, ctx: &StrategyCtx, bar: &BarEvent, qty: f64, side: Side) {
+        info!(
+            strategy_id = ctx.strategy_id.as_str(),
+            strategy = "alor_usdrubf_hybrid",
+            action = "intent_emitted",
+            intent_class = "entry",
+            symbol = self.config.symbol.as_str(),
+            bar_ts_utc = bar.close_time_utc,
+            qty,
+            side = ?side,
+            reference_price_from_bar_open = bar.o,
+            "live entry intent emitted (reference price is bar open, not fill)"
+        );
+    }
+
+    fn log_live_intent_emitted_exit(
+        &self,
+        ctx: &StrategyCtx,
+        bar_ts_utc: i64,
+        qty: f64,
+        side: Side,
+        reference_price: f64,
+        reason: &str,
+    ) {
+        info!(
+            strategy_id = ctx.strategy_id.as_str(),
+            strategy = "alor_usdrubf_hybrid",
+            action = "intent_emitted",
+            intent_class = "exit",
+            symbol = self.config.symbol.as_str(),
+            bar_ts_utc,
+            qty,
+            side = ?side,
+            reference_price_from_signal = reference_price,
+            exit_reason = reason,
+            "live exit intent emitted (reference price is signal path, not fill)"
+        );
     }
 
     fn maybe_emit_live_exit_intent(
         &mut self,
+        ctx: &StrategyCtx,
         reason: String,
         exit_price: f64,
         bar_ts_utc: i64,
@@ -527,14 +598,23 @@ impl AlorUsdrubfHybridStrategy {
         if self.exit_intent_inflight {
             return;
         }
+        let side = pos.side.exit_side();
         intents.push(Intent::Market {
             qty: pos.size as f64,
-            side: pos.side.exit_side(),
+            side,
             fill_price: Some(exit_price),
             comment: Some(format!("{}|exit|{}", self.config.symbol, reason)),
         });
         self.exit_intent_inflight = true;
         self.lifecycle_stage = "live_exit_intent_emitted".to_string();
+        self.log_live_intent_emitted_exit(
+            ctx,
+            bar_ts_utc,
+            pos.size as f64,
+            side,
+            exit_price,
+            reason.as_str(),
+        );
     }
 
     fn build_research_snapshot(&self, bar: &BarEvent, local_dt: NaiveDateTime) -> ResearchSnapshot {
@@ -698,6 +778,148 @@ impl AlorUsdrubfHybridStrategy {
         self.hybrid_state = HybridState::Flat;
         let _ = bar;
     }
+
+    fn classify_broker_position_transition(
+        &self,
+        prev_qty: f64,
+        prev_avg: f64,
+        initialized: bool,
+        pos: &PositionEvent,
+    ) -> &'static str {
+        let q = pos.qty;
+        let avg = pos.avg_price;
+        let flat = q.abs() < 1e-9;
+        let prev_flat = prev_qty.abs() < 1e-9;
+        if !initialized {
+            return if flat {
+                "initial_broker_sync_flat"
+            } else {
+                "initial_broker_sync_open"
+            };
+        }
+        if prev_flat && flat {
+            "flat_reconfirm"
+        } else if prev_flat && !flat {
+            "flat_to_open"
+        } else if !prev_flat && flat {
+            "open_to_flat"
+        } else {
+            let sp = prev_qty.signum();
+            let sn = q.signum();
+            if sp != sn && sn != 0.0 && sp != 0.0 {
+                "direction_flip"
+            } else {
+                let tick = self.config.tick_size.max(1e-12);
+                let qty_eps = 0.25_f64;
+                if (q - prev_qty).abs() >= qty_eps || (avg - prev_avg).abs() >= tick {
+                    "qty_or_avg_material_change"
+                } else {
+                    "duplicate_reconfirm"
+                }
+            }
+        }
+    }
+
+    fn log_broker_position_transition_if_needed(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) {
+        let transition = self.classify_broker_position_transition(
+            self.last_logged_broker_qty,
+            self.last_logged_broker_avg,
+            self.last_logged_broker_initialized,
+            pos,
+        );
+        let loud = !matches!(
+            transition,
+            "flat_reconfirm" | "duplicate_reconfirm"
+        );
+        if loud {
+            info!(
+                strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                action = "position_transition",
+                transition,
+                symbol = pos.symbol.as_str(),
+                event_ts_utc = pos.ts_utc,
+                qty = pos.qty,
+                avg_price = pos.avg_price,
+                lifecycle_stage = self.lifecycle_stage.as_str(),
+                "broker position transition"
+            );
+        } else {
+            debug!(
+                strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                action = "broker_position_duplicate",
+                transition,
+                symbol = pos.symbol.as_str(),
+                qty = pos.qty,
+                avg_price = pos.avg_price,
+                "broker position reconfirm"
+            );
+        }
+        let flat = pos.qty.abs() < 1e-9;
+        self.last_logged_broker_qty = pos.qty;
+        self.last_logged_broker_avg = if flat { 0.0 } else { pos.avg_price };
+        self.last_logged_broker_initialized = true;
+    }
+
+    fn log_entry_exit_inflight_transitions(&mut self, ctx: &StrategyCtx) {
+        if self.entry_intent_inflight != self.last_logged_entry_inflight {
+            info!(
+                strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                action = "risk_state_changed",
+                field = "entry_intent_inflight",
+                value = self.entry_intent_inflight,
+                lifecycle_stage = self.lifecycle_stage.as_str(),
+                "entry intent inflight changed"
+            );
+            self.last_logged_entry_inflight = self.entry_intent_inflight;
+        }
+        if self.exit_intent_inflight != self.last_logged_exit_inflight {
+            info!(
+                strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                action = "risk_state_changed",
+                field = "exit_intent_inflight",
+                value = self.exit_intent_inflight,
+                lifecycle_stage = self.lifecycle_stage.as_str(),
+                "exit intent inflight changed"
+            );
+            self.last_logged_exit_inflight = self.exit_intent_inflight;
+        }
+        let entry_ts = self.entry_reject_deferred_until_bar_ts;
+        if entry_ts != self.last_logged_entry_reject_defer_ts {
+            info!(
+                strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                action = "risk_state_changed",
+                field = "entry_reject_deferred_until_bar_ts",
+                entry_reject_deferred_until_bar_ts = ?entry_ts,
+                lifecycle_stage = self.lifecycle_stage.as_str(),
+                "entry reject defer bar ts changed"
+            );
+            self.last_logged_entry_reject_defer_ts = entry_ts;
+        }
+        let exit_ts = self.exit_reject_deferred_until_bar_ts;
+        if exit_ts != self.last_logged_exit_reject_defer_ts {
+            info!(
+                strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                action = "risk_state_changed",
+                field = "exit_reject_deferred_until_bar_ts",
+                exit_reject_deferred_until_bar_ts = ?exit_ts,
+                lifecycle_stage = self.lifecycle_stage.as_str(),
+                "exit reject defer bar ts changed"
+            );
+            self.last_logged_exit_reject_defer_ts = exit_ts;
+        }
+    }
+
+    fn reset_startup_log_gates(&mut self) {
+        self.startup_replay_tail_info_emitted = false;
+        self.awaiting_live_bar_info_emitted = false;
+        self.recovered_bar_suppressed_info_emitted = false;
+    }
 }
 
 impl Strategy for AlorUsdrubfHybridStrategy {
@@ -722,52 +944,100 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         if matches!(ctx.trade_mode, crate::TradeMode::Live) && !self.live_ready {
             if self.is_live_startup_bar_stale(ctx, bar.close_time_utc) {
                 self.lifecycle_stage = "replay_tail_suppressed".to_string();
-                info!(
-                    strategy_id = ctx.strategy_id.as_str(),
-                    strategy = "alor_usdrubf_hybrid",
-                    bar_ts_utc = bar.close_time_utc,
-                    now_ts_utc = ctx.now_ts_utc(),
-                    max_silence_bars_sec = self.config.max_silence_bars_sec,
-                    "startup replay tail bar suppressed"
-                );
+                if !self.startup_replay_tail_info_emitted {
+                    self.startup_replay_tail_info_emitted = true;
+                    info!(
+                        strategy_id = ctx.strategy_id.as_str(),
+                        strategy = "alor_usdrubf_hybrid",
+                        action = "replay_guard_armed",
+                        guard = "startup_replay_tail",
+                        bar_ts_utc = bar.close_time_utc,
+                        now_ts_utc = ctx.now_ts_utc(),
+                        max_silence_bars_sec = self.config.max_silence_bars_sec,
+                        "startup replay tail bar suppressed (first)"
+                    );
+                } else {
+                    debug!(
+                        strategy_id = ctx.strategy_id.as_str(),
+                        strategy = "alor_usdrubf_hybrid",
+                        action = "replay_guard_armed",
+                        guard = "startup_replay_tail",
+                        bar_ts_utc = bar.close_time_utc,
+                        "startup replay tail bar suppressed (repeat)"
+                    );
+                }
                 self.last_processed_bar_ts = Some(bar.close_time_utc);
                 self.sync_state();
                 return Vec::new();
             }
             if !matches!(bar.origin, DataOrigin::Live) {
                 self.lifecycle_stage = "awaiting_fresh_live_origin_bar".to_string();
-                info!(
-                    strategy_id = ctx.strategy_id.as_str(),
-                    strategy = "alor_usdrubf_hybrid",
-                    bar_ts_utc = bar.close_time_utc,
-                    origin = ?bar.origin,
-                    "startup guard remains armed; only fresh live-origin bar can clear live_ready"
-                );
+                if !self.awaiting_live_bar_info_emitted {
+                    self.awaiting_live_bar_info_emitted = true;
+                    info!(
+                        strategy_id = ctx.strategy_id.as_str(),
+                        strategy = "alor_usdrubf_hybrid",
+                        action = "replay_guard_armed",
+                        guard = "awaiting_fresh_live_bar",
+                        bar_ts_utc = bar.close_time_utc,
+                        origin = ?bar.origin,
+                        "replay guard armed; waiting for live-origin bar"
+                    );
+                } else {
+                    debug!(
+                        strategy_id = ctx.strategy_id.as_str(),
+                        strategy = "alor_usdrubf_hybrid",
+                        action = "replay_guard_armed",
+                        guard = "awaiting_fresh_live_bar",
+                        bar_ts_utc = bar.close_time_utc,
+                        origin = ?bar.origin,
+                        "still awaiting live-origin bar"
+                    );
+                }
                 self.last_processed_bar_ts = Some(bar.close_time_utc);
                 self.sync_state();
                 return Vec::new();
             }
             self.live_ready = true;
             self.lifecycle_stage = "live_ready".to_string();
+            self.recovered_bar_suppressed_info_emitted = false;
             info!(
                 strategy_id = ctx.strategy_id.as_str(),
+                strategy = "alor_usdrubf_hybrid",
+                action = "replay_guard_cleared",
                 symbol = self.config.symbol.as_str(),
                 event_ts_utc = bar.close_time_utc,
                 now_ts_utc = ctx.now_ts_utc(),
-                "alor_usdrubf_hybrid startup replay guard cleared; live_ready=true"
+                live_ready = true,
+                "replay guard cleared; first live-origin bar"
             );
         }
         if matches!(ctx.trade_mode, crate::TradeMode::Live)
             && Self::is_recovered_or_non_live_bar_origin(&bar.origin)
         {
             self.lifecycle_stage = "recovered_bar_suppressed".to_string();
-            info!(
-                strategy_id = ctx.strategy_id.as_str(),
-                strategy = "alor_usdrubf_hybrid",
-                bar_ts_utc = bar.close_time_utc,
-                origin = ?bar.origin,
-                "non-live bar origin suppressed in live mode"
-            );
+            if !self.recovered_bar_suppressed_info_emitted {
+                self.recovered_bar_suppressed_info_emitted = true;
+                info!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    action = "lifecycle_stage",
+                    stage = "recovered_bar_suppressed",
+                    bar_ts_utc = bar.close_time_utc,
+                    origin = ?bar.origin,
+                    "non-live bar origin suppressed in live mode (first)"
+                );
+            } else {
+                debug!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    action = "lifecycle_stage",
+                    stage = "recovered_bar_suppressed",
+                    bar_ts_utc = bar.close_time_utc,
+                    origin = ?bar.origin,
+                    "non-live bar suppressed (repeat)"
+                );
+            }
             self.last_processed_bar_ts = Some(bar.close_time_utc);
             self.sync_state();
             return Vec::new();
@@ -796,12 +1066,19 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.exit_reject_deferred_until_bar_ts = None;
             }
             if let Some((reason, exit_price)) = self.evaluate_exit_research(&research) {
-                self.maybe_emit_live_exit_intent(reason, exit_price, bar.close_time_utc, &mut intents);
+                self.maybe_emit_live_exit_intent(
+                    ctx,
+                    reason,
+                    exit_price,
+                    bar.close_time_utc,
+                    &mut intents,
+                );
+                self.log_entry_exit_inflight_transitions(ctx);
                 self.last_processed_bar_ts = Some(bar.close_time_utc);
                 self.sync_state();
                 return intents;
             }
-            self.maybe_emit_live_entry_intent(bar, &mut intents);
+            self.maybe_emit_live_entry_intent(ctx, bar, &mut intents);
         } else {
             self.maybe_fill_pending_entry(bar, &mut intents);
             if let Some((reason, exit_price)) = self.evaluate_exit_research(&research) {
@@ -825,16 +1102,30 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                         self.bo_was_short_today = true;
                     }
                 }
+                info!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    action = "signal_generated",
+                    owner = signal.owner.as_str(),
+                    side = signal.side.as_str(),
+                    reason = signal.reason.as_str(),
+                    signal_price = signal.signal_price,
+                    scale_at_signal = signal.scale_at_signal,
+                    symbol = self.config.symbol.as_str(),
+                    bar_ts_utc = bar.close_time_utc,
+                    "research signal accepted into pending entry"
+                );
                 self.pending_entry = Some(signal);
                 self.hybrid_state = HybridState::Pending;
             }
         }
+        self.log_entry_exit_inflight_transitions(ctx);
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.sync_state();
         intents
     }
 
-    fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
+    fn on_ack(&mut self, ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
         self.pending_request_ids.remove(&ack.request_id);
         if let Some(order_id) = ack.broker_order_id {
             self.tracked_order_ids.insert(order_id);
@@ -849,22 +1140,48 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.exit_intent_inflight = false;
                 self.exit_reject_deferred_until_bar_ts = Some(reject_ts);
                 self.lifecycle_stage = "exit_reject_deferred_retry".to_string();
+                warn!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    action = "command_ack_rejected",
+                    reject_policy = "exit_reject_deferred_next_bar",
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    error_code = ?ack.error_code,
+                    defer_until_after_bar_ts_utc = reject_ts,
+                    "broker rejected exit; defer retry to following bar"
+                );
             } else if self.entry_intent_inflight && self.pending_entry.is_some() {
                 self.entry_intent_inflight = false;
                 self.exit_intent_inflight = false;
                 self.entry_reject_deferred_until_bar_ts = Some(reject_ts);
                 self.lifecycle_stage = "entry_reject_deferred_retry".to_string();
+                warn!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    action = "command_ack_rejected",
+                    reject_policy = "entry_reject_deferred_next_bar",
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    error_code = ?ack.error_code,
+                    defer_until_after_bar_ts_utc = reject_ts,
+                    "broker rejected entry; defer retry to following bar"
+                );
             } else {
                 self.entry_intent_inflight = false;
                 self.exit_intent_inflight = false;
                 self.lifecycle_stage = "broker_ack_rejected".to_string();
+                warn!(
+                    strategy_id = ctx.strategy_id.as_str(),
+                    strategy = "alor_usdrubf_hybrid",
+                    action = "command_ack_rejected",
+                    reject_policy = "clear_inflight_terminal",
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    error_code = ?ack.error_code,
+                    "broker ack terminal reject; inflight flags cleared"
+                );
             }
-            info!(
-                request_id = %ack.request_id,
-                status = ?ack.status,
-                strategy = "alor_usdrubf_hybrid",
-                "broker ack rejected; inflight flags cleared"
-            );
             self.sync_state();
         }
         Vec::new()
@@ -895,16 +1212,25 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         Vec::new()
     }
 
-    fn on_stop_order(&mut self, _ctx: &StrategyCtx, _ord: &StopOrderEvent) -> Vec<Intent> {
-        self.lifecycle_stage = "stop_order_observed".to_string();
+    fn on_stop_order(&mut self, ctx: &StrategyCtx, ord: &StopOrderEvent) -> Vec<Intent> {
+        debug!(
+            strategy_id = ctx.strategy_id.as_str(),
+            strategy = "alor_usdrubf_hybrid",
+            action = "stop_order_event",
+            symbol = ord.symbol.as_str(),
+            stop_order_id = ord.stop_order_id,
+            status = %ord.status,
+            "stop order stream update"
+        );
         self.sync_state();
         Vec::new()
     }
 
-    fn on_position(&mut self, _ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
+    fn on_position(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
         if pos.symbol != self.config.symbol {
             return Vec::new();
         }
+        self.log_broker_position_transition_if_needed(ctx, pos);
         if pos.qty.abs() < 1e-9 {
             self.open_position = None;
             self.owner_confirmed_by_live_event = true;
@@ -916,12 +1242,6 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 HybridState::Flat
             };
             self.lifecycle_stage = "broker_position_flat".to_string();
-            info!(
-                strategy = "alor_usdrubf_hybrid",
-                qty = pos.qty,
-                avg_price = pos.avg_price,
-                "broker position confirms flat state"
-            );
             self.sync_state();
             return Vec::new();
         }
@@ -976,17 +1296,6 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.owner_confirmed_by_live_event = true;
         self.hybrid_state = HybridState::Open;
         self.lifecycle_stage = "broker_position_open".to_string();
-        info!(
-            strategy = "alor_usdrubf_hybrid",
-            qty = pos.qty,
-            avg_price = pos.avg_price,
-            side = self
-                .open_position
-                .as_ref()
-                .map(|position| position.side.as_str())
-                .unwrap_or("unknown"),
-            "broker position confirms open state"
-        );
         self.sync_state();
         Vec::new()
     }
@@ -999,6 +1308,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.lifecycle_stage = "bootstrapped".to_string();
         self.bootstrap_seen = true;
         self.live_ready = false;
+        self.reset_startup_log_gates();
         self.entry_intent_inflight = false;
         self.exit_intent_inflight = false;
         self.entry_reject_deferred_until_bar_ts = None;
@@ -1075,6 +1385,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         info!(
             strategy_id = ctx.strategy_id.as_str(),
             strategy = "alor_usdrubf_hybrid",
+            action = "bootstrap_processed",
             snapshot_ts_utc = snapshot.snapshot_ts_utc,
             positions_count = snapshot.positions_strategy.len(),
             orders_count = snapshot.working_orders_strategy.len(),
@@ -1085,7 +1396,9 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             symbol_working_stop_orders = has_snapshot_stop_orders,
             lifecycle_stage = self.lifecycle_stage.as_str(),
             reconcile_precedence = "live_events > bootstrap_snapshot > runtime_state",
-            "bootstrap snapshot observed; reconcile policy applied and live gate re-armed"
+            replay_guard_armed = true,
+            live_ready = false,
+            "bootstrap processed; reconcile applied; replay guard re-armed"
         );
         self.sync_state();
         Vec::new()
@@ -1099,6 +1412,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.lifecycle_stage = "runtime_state_restored".to_string();
         self.runtime_state_restored = true;
         self.live_ready = false;
+        self.reset_startup_log_gates();
         self.pending_request_ids = state.pending_requests.iter().copied().collect();
         self.tracked_order_ids = state.known_order_ids.iter().copied().collect();
         self.entry_intent_inflight = false;
@@ -1109,9 +1423,12 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         info!(
             strategy_id = ctx.strategy_id.as_str(),
             strategy = "alor_usdrubf_hybrid",
+            action = "runtime_state_restored",
             restored_pending_requests = self.pending_request_ids.len(),
             restored_known_orders = self.tracked_order_ids.len(),
-            "runtime state restored; broker-truth trackers initialized"
+            replay_guard_armed = true,
+            live_ready = false,
+            "runtime state restored; trackers initialized; await live bar for replay guard"
         );
         self.sync_state();
         Vec::new()
@@ -1313,6 +1630,10 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.lifecycle_stage != "bootstrap_non_flat_owner_unconfirmed";
             self.entry_reject_deferred_until_bar_ts = None;
             self.exit_reject_deferred_until_bar_ts = None;
+            self.last_logged_entry_inflight = self.entry_intent_inflight;
+            self.last_logged_exit_inflight = self.exit_intent_inflight;
+            self.last_logged_entry_reject_defer_ts = self.entry_reject_deferred_until_bar_ts;
+            self.last_logged_exit_reject_defer_ts = self.exit_reject_deferred_until_bar_ts;
         }
         self.state = state;
     }

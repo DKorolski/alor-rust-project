@@ -1,5 +1,7 @@
 # Hybrid CWS Stop Cleanup Observation (2026-04-07)
 
+Operational baseline for hybrid stop cleanup during extended micro soak: [`extended-micro-soak-spec-2026-04-07.md`](./extended-micro-soak-spec-2026-04-07.md) (блок B).
+
 ## Incident Window
 
 - Stack: `trading-hybrid`

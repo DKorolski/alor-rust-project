@@ -1503,6 +1503,8 @@ impl StrategyRuntime {
             | alor_protocol::AckStatus::Expired
             | alor_protocol::AckStatus::Error => {
                 warn!(
+                    action = "command_acknowledged",
+                    outcome = "rejected",
                     request_id = %ack.request_id,
                     status = ?ack.status,
                     error_code = ?ack.error_code,
@@ -1514,17 +1516,21 @@ impl StrategyRuntime {
             }
             alor_protocol::AckStatus::Accepted | alor_protocol::AckStatus::Confirmed => {
                 info!(
+                    action = "command_acknowledged",
+                    outcome = "accepted",
                     request_id = %ack.request_id,
                     status = ?ack.status,
                     broker_order_id = ack.broker_order_id,
-                    "command accepted"
+                    "command acknowledged"
                 );
             }
             alor_protocol::AckStatus::Duplicate => {
                 info!(
+                    action = "command_acknowledged",
+                    outcome = "duplicate",
                     request_id = %ack.request_id,
                     status = ?ack.status,
-                    "command duplicate"
+                    "command duplicate ack"
                 );
             }
         }
@@ -1745,15 +1751,22 @@ impl StrategyRuntime {
                 };
                 self.ledger.record_fill(trade_record);
                 pending.filled_qty += exec_qty;
+                let position_qty_runtime_snapshot = self
+                    .state
+                    .positions
+                    .get(&pending.symbol)
+                    .map(|p| p.qty);
                 info!(
+                    action = "execution_confirmed",
                     order_id = pending.order_id,
                     symbol = pending.symbol,
                     side = pending.side,
                     qty = exec_qty,
-                    order_price = pending.order_price,
+                    reference_price_from_order_record = pending.order_price,
                     exec_price = trade.price,
                     commission = trade.commission,
-                    "execution confirmed"
+                    position_qty_runtime_snapshot = ?position_qty_runtime_snapshot,
+                    "execution confirmed (exec_price is fill; reference_price_from_order_record is not execution price)"
                 );
                 if pending.filled_qty + f64::EPSILON >= pending.target_qty {
                     self.pending_exec.remove(&trade.order_id);

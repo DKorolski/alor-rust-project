@@ -117,6 +117,25 @@ Interpretation:
 - runtime live path is functioning and guarded;
 - current stream/session context is not fully clean for soak-quality signal extraction (historical tail/pending artifacts are present).
 
+### Monitoring addendum (2026-04-07): repeated position-confirm logs
+
+Observed runtime lines:
+
+- `broker position confirms open state strategy="alor_usdrubf_hybrid" qty=-1.0 avg_price=78.6 side="short"`
+- repeated with same values at different timestamps.
+
+Interpretation:
+
+- this is currently expected with repeated broker `PositionEvent` updates for the same open state;
+- this does not indicate duplicate entry intent emission by strategy;
+- execution path remained consistent with one accepted entry and broker-truth open position reconciliation.
+
+Follow-up (development backlog):
+
+- reduce observability noise in `on_position` for `AlorUsdrubfHybrid`:
+  - keep `info` on real state transition (`Flat -> Open`) or material position change (`qty/avg_price/side`),
+  - demote unchanged repeated confirmations to `debug`.
+
 ## Indicator Warmup Status
 
 - `AlorUsdrubfHybrid` capability now has `uses_history_warmup = true`.
