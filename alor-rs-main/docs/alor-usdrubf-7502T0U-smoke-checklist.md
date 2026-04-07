@@ -92,6 +92,49 @@ Gateway control contour must be aligned with active `sessiongap/hybrid` live sta
   - requested live quantity is exactly `1`
   - no oversize incidents and no unexpected quantity transformations
 
+## VPS rollout from `main` (Docker / GHCR; other stacks untouched)
+
+Layout on VPS mirrors `sessiongap` / `trading-hybrid`: **отдельная директория** и **отдельный** `docker compose` project для USDRUBF, чтобы не трогать extended soak стеки.
+
+- Compose project name (по именам контейнеров): **`alorusdrubf`** → `alorusdrubf-strategy-runtime-1`, `alorusdrubf-alor-gateway-1`.
+- Каталог на хосте задайте по своей схеме (часто рядом с `/opt/trading-sessiongap`, `/opt/trading-hybrid`); в репозитории путь не захардкожен.
+
+### Образы
+
+После push в `main` GitHub Actions (`.github/workflows/deploy.yml`) публикует в GHCR:
+
+- `ghcr.io/dkorolski/alor-rust-project/strategy-runtime` — теги `latest`, `sha-<короткий_sha>`
+- `ghcr.io/dkorolski/alor-rust-project/alor-gateway` — то же
+
+Для фиксированного rollout возьмите **SHA коммита** с `main` (пример после merge логирования: `3ff9aa4`) и используйте тег **`sha-3ff9aa4`** (проверьте точное имя тега в GHCR / Packages после сборки).
+
+### Шаги (только стек Alor USDRUBF)
+
+1. Дождаться **зелёного** workflow на нужном коммите `main`.
+2. На VPS: перейти в каталог compose-проекта `alorusdrubf`.
+3. Бэкап `.env`:  
+   `cp .env ".env.bak.$(date +%Y%m%d-%H%M%S)"`
+4. Обновить теги образов:
+   - если в `.env` один **`IMAGE_TAG`** (как в корневом `docker-compose.yml` репозитория): выставить `IMAGE_TAG=sha-<commit>`;
+   - если на VPS раздельно **`RUNTIME_IMAGE_TAG`** / **`GATEWAY_IMAGE_TAG`** (как в runbook hybrid): обновить **runtime** обязательно; gateway — если менялся gateway-код в том же коммите (при одном `IMAGE_TAG` обновляются оба).
+5. При необходимости синхронизировать **только** TOML из `alor-rs-main/configs/` для `7502T0U` в `configs/` этого стека (если в коммите менялись конфиги).
+6. Применить **только этот** проект:  
+   `docker compose pull`  
+   `docker compose up -d`  
+   (при необходимости `-p alorusdrubf` и `-f <path/to.compose.yml>` — как заведено на хосте).
+7. Не менять каталоги **`sessiongap`** и **`trading-hybrid`** и их `.env`.
+
+### Проверка после rollout
+
+- `docker compose ps` в каталоге USDRUBF — оба сервиса up.
+- Логи gateway: `Resolved config` с ожидаемым `control_cws_mode` и action-scope флагами (см. выше).
+- Логи runtime: новые события с полем `action` (`position_transition`, `replay_guard_cleared`, `intent_emitted`, …), меньше спама по позиции.
+- `readiness` gateway/runtime (как в `README-DEPLOY.md`).
+
+### Rollback
+
+- восстановить `.env` из бэкапа и повторить `docker compose pull && docker compose up -d` **только** для проекта `alorusdrubf`.
+
 ## Rollback
 
 - stop runtime process first
