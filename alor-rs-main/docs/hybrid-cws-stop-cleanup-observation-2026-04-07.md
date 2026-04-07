@@ -75,3 +75,17 @@ Until functional cleanup-retry patch is in place, when this warning appears:
 - verify active stop list in gateway/broker snapshot,
 - cancel residual stop manually if required by run protocol,
 - keep event bundle (runtime + gateway logs around request ids) for follow-up fix validation.
+
+## Post-Rollout Validation (Success)
+
+After deploying `fbf744f` to `trading-hybrid`:
+
+- gateway/runtime were restarted on `vps-fbf744f` images,
+- `control_cws_mode="action_scoped"` and `action_scope_enable_delete_limit=true` were confirmed in resolved config,
+- strategy resumed normal live flow and protective lifecycle,
+- cleanup completed and the previously hanging stop order was removed.
+
+Practical verdict:
+
+- the incident path is considered mitigated for current rollout,
+- `delete:stopLimit` now follows the same action-scoped lifecycle expectations as other limit cleanup actions.
