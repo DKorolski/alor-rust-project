@@ -384,8 +384,12 @@ pub async fn run_command_consumer(
                 let mut post_recycle_exit_send_active = false;
                 let mut post_recycle_exit_send_conn_id = None;
                 let execution_path = execution_path_for_command(&command, &config);
-                if execution_path == CommandExecutionPath::LegacyLongLived {
-                    if let Some(policy) = control_path_hardening_policy(&command, &config) {
+                let policy_opt = if execution_path == CommandExecutionPath::LegacyLongLived {
+                    control_path_hardening_policy(&command, &config)
+                } else {
+                    None
+                };
+                if let Some(policy) = policy_opt {
                     let recycle_timeout = match policy {
                         ControlPathHardeningPolicy::Entry => config.control_path_recycle_timeout,
                         ControlPathHardeningPolicy::Exit => {
@@ -463,8 +467,9 @@ pub async fn run_command_consumer(
                             continue;
                         }
                     }
-                    }
                 }
+                // Avoid `&& let` (let-chains): stable toolchains in Docker differ from latest clippy suggestions.
+                #[allow(clippy::collapsible_if)]
                 if post_recycle_exit_send_active {
                     if let Err(error) = cws.begin_post_recycle_exit_send(
                         request_id,
