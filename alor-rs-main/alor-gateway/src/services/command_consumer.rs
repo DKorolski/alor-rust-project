@@ -384,9 +384,8 @@ pub async fn run_command_consumer(
                 let mut post_recycle_exit_send_active = false;
                 let mut post_recycle_exit_send_conn_id = None;
                 let execution_path = execution_path_for_command(&command, &config);
-                if execution_path == CommandExecutionPath::LegacyLongLived
-                    && let Some(policy) = control_path_hardening_policy(&command, &config)
-                {
+                if execution_path == CommandExecutionPath::LegacyLongLived {
+                    if let Some(policy) = control_path_hardening_policy(&command, &config) {
                     let recycle_timeout = match policy {
                         ControlPathHardeningPolicy::Entry => config.control_path_recycle_timeout,
                         ControlPathHardeningPolicy::Exit => {
@@ -464,13 +463,13 @@ pub async fn run_command_consumer(
                             continue;
                         }
                     }
+                    }
                 }
-                if post_recycle_exit_send_active
-                    && let Err(error) = cws.begin_post_recycle_exit_send(
+                if post_recycle_exit_send_active {
+                    if let Err(error) = cws.begin_post_recycle_exit_send(
                         request_id,
                         post_recycle_exit_send_conn_id.as_deref(),
-                    )
-                {
+                    ) {
                         increment_counter(&health, |h| {
                             h.cws_errors_total = h.cws_errors_total.saturating_add(1)
                         });
@@ -505,6 +504,7 @@ pub async fn run_command_consumer(
                             source.ack(message_id).await?;
                         }
                         continue;
+                    }
                 }
 
                 match execute_command(
