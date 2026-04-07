@@ -14,9 +14,9 @@ use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand};
 use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
-    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperExecutionMode,
-    PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
-    StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperExecutionMode, PaperOutput,
+    PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode,
+    TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};

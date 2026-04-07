@@ -407,7 +407,10 @@ exit_fill_timeout_ms = 2222
     );
     assert_eq!(settings.entry_ack_timeout_ms, 1111);
     assert_eq!(settings.exit_fill_timeout_ms, 2222);
-    assert_eq!(resolved.sources.strategy.live_order_style, strategy_runtime::config::ConfigSource::File);
+    assert_eq!(
+        resolved.sources.strategy.live_order_style,
+        strategy_runtime::config::ConfigSource::File
+    );
     assert_eq!(
         resolved.sources.strategy.marketable_limit_offset_ticks,
         strategy_runtime::config::ConfigSource::File
@@ -454,7 +457,10 @@ close_hour = 21
     assert_eq!(settings.exit_fill_timeout_ms, 5678);
     assert_eq!(settings.k_long, 0.81);
     assert_eq!(settings.close_hour, 21);
-    assert_eq!(resolved.sources.strategy.place_offset_ticks, strategy_runtime::config::ConfigSource::File);
+    assert_eq!(
+        resolved.sources.strategy.place_offset_ticks,
+        strategy_runtime::config::ConfigSource::File
+    );
     assert_eq!(
         resolved.sources.strategy.entry_ack_timeout_ms,
         strategy_runtime::config::ConfigSource::File

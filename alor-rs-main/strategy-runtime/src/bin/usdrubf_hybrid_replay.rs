@@ -7,7 +7,8 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use csv::{ReaderBuilder, WriterBuilder};
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_BUNDLE_DIR: &str = "../../moex_usdrubf_pre_rust_handoff/replay_data/usdrubf_2023_2026";
+const DEFAULT_BUNDLE_DIR: &str =
+    "../../moex_usdrubf_pre_rust_handoff/replay_data/usdrubf_2023_2026";
 const DEFAULT_OUT_DIR: &str = "./tmp/usdrubf_hybrid_out";
 const STRATEGY_ID: &str = "alor_usdrubf_hybrid_v1";
 const INITIAL_CASH: f64 = 100_000.0;
@@ -324,9 +325,21 @@ fn main() -> Result<()> {
     run_replay(&bars, &mut state);
     let summary = build_summary(cli.split, cli.split.prepared_csv(), &bars, &state);
 
-    write_outputs(&cli.out_dir, cli.split, &state.actions, &state.trades, &summary)?;
+    write_outputs(
+        &cli.out_dir,
+        cli.split,
+        &state.actions,
+        &state.trades,
+        &summary,
+    )?;
     if cli.check {
-        check_expected(&cli.bundle_dir, cli.split, &state.actions, &state.trades, &summary)?;
+        check_expected(
+            &cli.bundle_dir,
+            cli.split,
+            &state.actions,
+            &state.trades,
+            &summary,
+        )?;
     }
 
     println!(
@@ -475,7 +488,12 @@ fn run_replay(bars: &[PreparedBar], state: &mut ReplayState) {
     }
 }
 
-fn build_summary(split: Split, source_prepared_csv: &str, bars: &[PreparedBar], state: &ReplayState) -> ReplaySummary {
+fn build_summary(
+    split: Split,
+    source_prepared_csv: &str,
+    bars: &[PreparedBar],
+    state: &ReplayState,
+) -> ReplaySummary {
     let start_date = bars
         .first()
         .map(|b| b.datetime.date().to_string())
@@ -741,7 +759,12 @@ fn evaluate_and_apply_exit(bar: &PreparedBar, state: &mut ReplayState) -> bool {
         return false;
     };
     let before = state.hybrid_state;
-    let pnl = mark_to_market_trade(position.side, position.entry_price, exit_price, position.size);
+    let pnl = mark_to_market_trade(
+        position.side,
+        position.entry_price,
+        exit_price,
+        position.size,
+    );
     state.cash += pnl;
     state.day_pnl += pnl;
     state.actions.push(ReplayAction {
@@ -775,8 +798,8 @@ fn evaluate_and_apply_exit(bar: &PreparedBar, state: &mut ReplayState) -> bool {
 }
 
 fn evaluate_mr_signal(bar: &PreparedBar) -> Option<PendingEntry> {
-    let entry_deadline =
-        NaiveTime::from_hms_opt(MR_LAST_ENTRY_HOUR, MR_LAST_ENTRY_MINUTE, 0).unwrap_or(NaiveTime::MIN);
+    let entry_deadline = NaiveTime::from_hms_opt(MR_LAST_ENTRY_HOUR, MR_LAST_ENTRY_MINUTE, 0)
+        .unwrap_or(NaiveTime::MIN);
     if bar.datetime.time() > entry_deadline {
         return None;
     }
@@ -853,8 +876,8 @@ fn evaluate_mr_exit(bar: &PreparedBar, position: &OpenPosition) -> Option<(&'sta
     if bar.low <= take_price {
         return Some(("mr_take", take_price));
     }
-    let force_time =
-        NaiveTime::from_hms_opt(MR_FORCE_EXIT_HOUR, MR_FORCE_EXIT_MINUTE, 0).unwrap_or(NaiveTime::MIN);
+    let force_time = NaiveTime::from_hms_opt(MR_FORCE_EXIT_HOUR, MR_FORCE_EXIT_MINUTE, 0)
+        .unwrap_or(NaiveTime::MIN);
     if bar.datetime.time() >= force_time {
         return Some(("mr_time_cutoff", bar.close));
     }

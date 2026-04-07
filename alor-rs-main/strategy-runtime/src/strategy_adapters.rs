@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use chrono::{Duration, NaiveTime, Timelike};
 
+use crate::strategies::alor_usdrubf_hybrid::{AlorUsdrubfHybridConfig, AlorUsdrubfHybridStrategy};
 use crate::strategies::hybrid_intraday::{
     BreakoutEodMode, HybridOrchestratorConfig, IntradayBreakoutConfig, MeanReversionConfig,
     MinRangeMode,
@@ -8,7 +9,6 @@ use crate::strategies::hybrid_intraday::{
 use crate::strategies::hybrid_intraday_runtime::{
     HybridIntradayRuntimeConfig, HybridIntradayRuntimeStrategy,
 };
-use crate::strategies::alor_usdrubf_hybrid::{AlorUsdrubfHybridConfig, AlorUsdrubfHybridStrategy};
 use crate::strategies::session_gap_standalone::{
     SessionGapStandaloneConfig, SessionGapStandaloneStrategy,
 };
@@ -20,7 +20,9 @@ pub(crate) type BoxedStrategy = Box<dyn Strategy + Send + Sync>;
 pub(crate) struct SessionGapStandaloneAdapter;
 
 impl SessionGapStandaloneAdapter {
-    pub(crate) fn from_strategy_config(config: &StrategyConfig) -> Result<SessionGapStandaloneConfig> {
+    pub(crate) fn from_strategy_config(
+        config: &StrategyConfig,
+    ) -> Result<SessionGapStandaloneConfig> {
         let settings = match config.specific() {
             StrategySpecificConfig::SessionGapStandalone(settings) => settings,
             other => {
@@ -69,7 +71,9 @@ impl SessionGapStandaloneAdapter {
 pub(crate) struct HybridIntradayAdapter;
 
 impl HybridIntradayAdapter {
-    pub(crate) fn from_strategy_config(config: &StrategyConfig) -> Result<HybridIntradayRuntimeConfig> {
+    pub(crate) fn from_strategy_config(
+        config: &StrategyConfig,
+    ) -> Result<HybridIntradayRuntimeConfig> {
         let settings = match config.specific() {
             StrategySpecificConfig::HybridIntraday(settings) => settings,
             other => {
@@ -85,11 +89,19 @@ impl HybridIntradayAdapter {
             .trading_periods
             .as_ref()
             .map(|p| (p.session_end.hour(), p.session_end.minute(), p.weekends_off))
-            .unwrap_or((config.session_close_hour, config.session_close_minute, false));
+            .unwrap_or((
+                config.session_close_hour,
+                config.session_close_minute,
+                false,
+            ));
         let mr_session_end_time =
             NaiveTime::parse_from_str(&runtime_settings.mr_session_end_time, "%H:%M:%S")
                 .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 59, 0).unwrap_or(NaiveTime::MIN));
-        let bo_min_range_mode = match runtime_settings.bo_min_range_mode.to_ascii_lowercase().as_str() {
+        let bo_min_range_mode = match runtime_settings
+            .bo_min_range_mode
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "disabled" => MinRangeMode::Disabled,
             "relative_prev_close" | "relativeprevclose" => MinRangeMode::RelativePrevClose,
             _ => MinRangeMode::Absolute,
@@ -161,7 +173,9 @@ impl HybridIntradayAdapter {
 
     pub(crate) fn create(config: &StrategyConfig) -> Result<BoxedStrategy> {
         let strategy_config = Self::from_strategy_config(config)?;
-        Ok(Box::new(HybridIntradayRuntimeStrategy::new(strategy_config)))
+        Ok(Box::new(HybridIntradayRuntimeStrategy::new(
+            strategy_config,
+        )))
     }
 }
 
@@ -178,17 +192,25 @@ impl AlorUsdrubfHybridAdapter {
                 mr_k_short: settings.mr_k_short,
                 mr_take_k_short: settings.mr_take_k_short,
                 mr_stop_k_short: settings.mr_stop_k_short,
-                mr_last_entry_time: NaiveTime::parse_from_str(&settings.mr_last_entry_time, "%H:%M:%S")
-                    .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 40, 0).unwrap_or(NaiveTime::MIN)),
-                mr_force_exit_time: NaiveTime::parse_from_str(&settings.mr_force_exit_time, "%H:%M:%S")
-                    .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 50, 0).unwrap_or(NaiveTime::MIN)),
+                mr_last_entry_time: NaiveTime::parse_from_str(
+                    &settings.mr_last_entry_time,
+                    "%H:%M:%S",
+                )
+                .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 40, 0).unwrap_or(NaiveTime::MIN)),
+                mr_force_exit_time: NaiveTime::parse_from_str(
+                    &settings.mr_force_exit_time,
+                    "%H:%M:%S",
+                )
+                .unwrap_or_else(|_| NaiveTime::from_hms_opt(11, 50, 0).unwrap_or(NaiveTime::MIN)),
                 bo_k: settings.bo_k,
                 bo_stop1_range: settings.bo_stop1_range,
                 bo_stop2_range: settings.bo_stop2_range,
                 bo_big_move_threshold: settings.bo_big_move_threshold,
                 bo_wait_hours: settings.bo_wait_hours,
                 bo_eod_exit_time: NaiveTime::parse_from_str(&settings.bo_eod_exit_time, "%H:%M:%S")
-                    .unwrap_or_else(|_| NaiveTime::from_hms_opt(23, 30, 0).unwrap_or(NaiveTime::MIN)),
+                    .unwrap_or_else(|_| {
+                        NaiveTime::from_hms_opt(23, 30, 0).unwrap_or(NaiveTime::MIN)
+                    }),
                 commission_pct_per_side: settings.commission_pct_per_side,
                 position_size_fraction: settings.position_size_fraction,
                 initial_cash: settings.initial_cash,
@@ -221,8 +243,7 @@ mod tests {
     fn session_gap_adapter_rejects_non_matching_payload() {
         let config = StrategyConfig::defaults_for_kind(StrategyKind::LimitCancel);
         let err = SessionGapStandaloneAdapter::from_strategy_config(&config)
-            .err()
-            .expect("expected mismatch error");
+            .expect_err("expected mismatch error");
         assert!(err
             .to_string()
             .contains("requires SessionGapStandalone payload"));
@@ -232,19 +253,15 @@ mod tests {
     fn hybrid_adapter_rejects_non_matching_payload() {
         let config = StrategyConfig::defaults_for_kind(StrategyKind::LimitCancel);
         let err = HybridIntradayAdapter::from_strategy_config(&config)
-            .err()
-            .expect("expected mismatch error");
-        assert!(err
-            .to_string()
-            .contains("requires HybridIntraday payload"));
+            .expect_err("expected mismatch error");
+        assert!(err.to_string().contains("requires HybridIntraday payload"));
     }
 
     #[test]
     fn alor_usdrubf_hybrid_adapter_rejects_non_matching_payload() {
         let config = StrategyConfig::defaults_for_kind(StrategyKind::LimitCancel);
         let err = AlorUsdrubfHybridAdapter::from_strategy_config(&config)
-            .err()
-            .expect("expected mismatch error");
+            .expect_err("expected mismatch error");
         assert!(err
             .to_string()
             .contains("requires AlorUsdrubfHybrid payload"));

@@ -13,9 +13,9 @@ use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand};
 use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
-    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperExecutionMode,
-    PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
-    StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperExecutionMode, PaperOutput,
+    PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode,
+    TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -28,7 +28,8 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
     let portfolio = "demo".to_string();
     let strategy_id = "limit_cancel".to_string();
     let symbol = "SBER".to_string();
-    let mut strategy = StrategyConfig::defaults_for_kind(strategy_runtime::StrategyKind::LimitCancel);
+    let mut strategy =
+        StrategyConfig::defaults_for_kind(strategy_runtime::StrategyKind::LimitCancel);
     strategy.strategy_id = strategy_id.clone();
     strategy.symbol = symbol;
     if let Some(settings) = strategy.limit_cancel_mut() {

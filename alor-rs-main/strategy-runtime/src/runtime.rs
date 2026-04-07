@@ -1192,7 +1192,8 @@ impl StrategyRuntime {
     }
 
     fn restore_pending_requests(&mut self) {
-        self.our_request_ids.extend(self.strategy.pending_request_ids());
+        self.our_request_ids
+            .extend(self.strategy.pending_request_ids());
     }
 
     async fn recover_pending(
@@ -1751,11 +1752,8 @@ impl StrategyRuntime {
                 };
                 self.ledger.record_fill(trade_record);
                 pending.filled_qty += exec_qty;
-                let position_qty_runtime_snapshot = self
-                    .state
-                    .positions
-                    .get(&pending.symbol)
-                    .map(|p| p.qty);
+                let position_qty_runtime_snapshot =
+                    self.state.positions.get(&pending.symbol).map(|p| p.qty);
                 info!(
                     action = "execution_confirmed",
                     order_id = pending.order_id,
@@ -2871,7 +2869,9 @@ impl StrategyRuntime {
                 &ctx,
                 created_ts,
                 "on_runtime_state_restored",
-                |strategy, strategy_ctx| strategy.on_runtime_state_restored(strategy_ctx, &restored),
+                |strategy, strategy_ctx| {
+                    strategy.on_runtime_state_restored(strategy_ctx, &restored)
+                },
             )
             .await?;
         self.audit_event(
@@ -3860,11 +3860,7 @@ mod tests {
             Vec::new()
         }
 
-        fn on_ack(
-            &mut self,
-            _ctx: &StrategyCtx,
-            _ack: &alor_protocol::CommandAck,
-        ) -> Vec<Intent> {
+        fn on_ack(&mut self, _ctx: &StrategyCtx, _ack: &alor_protocol::CommandAck) -> Vec<Intent> {
             Vec::new()
         }
 
@@ -3935,11 +3931,7 @@ mod tests {
             Vec::new()
         }
 
-        fn on_ack(
-            &mut self,
-            _ctx: &StrategyCtx,
-            _ack: &alor_protocol::CommandAck,
-        ) -> Vec<Intent> {
+        fn on_ack(&mut self, _ctx: &StrategyCtx, _ack: &alor_protocol::CommandAck) -> Vec<Intent> {
             Vec::new()
         }
 
@@ -4035,16 +4027,16 @@ mod tests {
             },
             ..HookSpyStrategy::default()
         });
-        runtime
-            .state
-            .positions
-            .insert(runtime.config.strategy.symbol.clone(), PositionEvent {
+        runtime.state.positions.insert(
+            runtime.config.strategy.symbol.clone(),
+            PositionEvent {
                 symbol: runtime.config.strategy.symbol.clone(),
                 qty: 1.0,
                 existing: true,
                 avg_price: 100.0,
                 ts_utc: 1_700_000_000,
-            });
+            },
+        );
 
         runtime.refresh_health_snapshot();
         let snapshot = runtime.health_snapshot.read();
@@ -4065,7 +4057,9 @@ mod tests {
         );
 
         let mut hybrid_config = limit_runtime.config.clone();
-        hybrid_config.strategy.set_kind(StrategyKind::HybridIntraday);
+        hybrid_config
+            .strategy
+            .set_kind(StrategyKind::HybridIntraday);
         hybrid_config.strategy.strategy_id = "hybrid_intraday".to_string();
 
         let hybrid_runtime = tokio::runtime::Runtime::new()
@@ -4084,7 +4078,9 @@ mod tests {
         );
 
         let mut alor_config = limit_runtime.config.clone();
-        alor_config.strategy.set_kind(StrategyKind::AlorUsdrubfHybrid);
+        alor_config
+            .strategy
+            .set_kind(StrategyKind::AlorUsdrubfHybrid);
         alor_config.strategy.strategy_id = "alor_usdrubf_hybrid_v1".to_string();
 
         let alor_runtime = tokio::runtime::Runtime::new()
@@ -4106,7 +4102,10 @@ mod tests {
     #[test]
     fn alor_skeleton_lifecycle_callbacks_are_wired_in_runtime() {
         let mut runtime = test_runtime(TradeMode::Live);
-        runtime.config.strategy.set_kind(StrategyKind::AlorUsdrubfHybrid);
+        runtime
+            .config
+            .strategy
+            .set_kind(StrategyKind::AlorUsdrubfHybrid);
         runtime.config.strategy.strategy_id = "alor_usdrubf_hybrid_v1".to_string();
         let strategy_config =
             crate::strategy_adapters::AlorUsdrubfHybridAdapter::from_strategy_config(
@@ -4303,13 +4302,13 @@ mod tests {
                 .timestamp(),
         };
 
-        let _ = tokio::runtime::Runtime::new().unwrap().block_on(
-            runtime.handle_stop_order(
+        let _ = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.handle_stop_order(
                 "stop-orders".to_string(),
                 "1-0".to_string(),
                 stop_order.clone(),
-            ),
-        );
+            ));
 
         assert_eq!(
             runtime.state.stop_orders.get(&stop_order.stop_order_id),

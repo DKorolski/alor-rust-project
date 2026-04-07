@@ -13,9 +13,9 @@ use alor_protocol::{CommandAck, Envelope, MessageType, OrderCommand, Side};
 use strategy_runtime::live_guard::{GatewayPhase, HealthEvent};
 use strategy_runtime::runtime::StrategyRuntime;
 use strategy_runtime::{
-    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperExecutionMode,
-    PaperOutput, PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig,
-    StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, BarEvent, DataOrigin, OrderEvent, PaperConfig, PaperExecutionMode, PaperOutput,
+    PositionEvent, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StreamNames, TradeMode,
+    TrimConfig,
 };
 
 use crate::common::{extract_payload, redis_flushdb, xadd_json, xlen};
@@ -421,14 +421,18 @@ async fn read_latest_runtime_state_payload(
     Ok(value)
 }
 
-fn session_gap_state_from_runtime_payload(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+fn session_gap_state_from_runtime_payload(
+    payload: &serde_json::Value,
+) -> Option<&serde_json::Value> {
     let strategy_state = &payload["strategy_state"];
     if strategy_state.is_null() {
         return None;
     }
-    strategy_state
-        .get("SessionGapStandalone")
-        .or_else(|| strategy_state.get("payload").and_then(|p| p.get("SessionGapStandalone")))
+    strategy_state.get("SessionGapStandalone").or_else(|| {
+        strategy_state
+            .get("payload")
+            .and_then(|p| p.get("SessionGapStandalone"))
+    })
 }
 
 async fn publish_entry_bars(redis_url: &str, config: &RuntimeConfig) -> Result<()> {

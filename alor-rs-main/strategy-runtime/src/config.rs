@@ -9,9 +9,9 @@ use serde::Deserialize;
 
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 use crate::{
-    BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperExecutionMode,
-    PaperOutput, ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind,
-    StreamNames, TradeMode, TrimConfig,
+    BacktestConfig, CloseTrigger, HealthServerConfig, PaperConfig, PaperExecutionMode, PaperOutput,
+    ReadConfig, ReplayConfig, RuntimeConfig, StrategyConfig, StrategyKind, StreamNames, TradeMode,
+    TrimConfig,
 };
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1/";
@@ -1780,7 +1780,8 @@ pub fn load_runtime_config(
     }
     if let Ok(value) = env::var("STRATEGY_KIND") {
         strategy.set_kind(
-            parse_strategy_kind(&value).with_context(|| format!("invalid STRATEGY_KIND: {value}"))?,
+            parse_strategy_kind(&value)
+                .with_context(|| format!("invalid STRATEGY_KIND: {value}"))?,
         );
         sources.strategy.strategy_kind = ConfigSource::Env;
     }
@@ -1813,7 +1814,12 @@ pub fn load_runtime_config(
         );
     }
     if let Some(value) = env_parse("PLACE_OFFSET_TICKS") {
-        apply_place_offset_ticks(&mut strategy, &mut sources.strategy, value, ConfigSource::Env);
+        apply_place_offset_ticks(
+            &mut strategy,
+            &mut sources.strategy,
+            value,
+            ConfigSource::Env,
+        );
     }
     if let Some(value) = env_parse("TICK_SIZE") {
         strategy.tick_size = value;

@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::state::StrategyState;
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
-    RuntimeStateRestored, Strategy, StrategyCtx, StopOrderEvent,
+    RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx,
 };
 
 #[derive(Debug, Clone)]
@@ -298,7 +298,10 @@ impl AlorUsdrubfHybridStrategy {
             pending_request_ids: self.pending_request_ids.iter().copied().collect(),
             tracked_order_ids: self.tracked_order_ids.iter().copied().collect(),
             entry_intent_inflight: self.entry_intent_inflight,
-            pending_entry_reason: self.pending_entry.as_ref().map(|entry| entry.reason.clone()),
+            pending_entry_reason: self
+                .pending_entry
+                .as_ref()
+                .map(|entry| entry.reason.clone()),
             pending_entry_scale_at_signal: self
                 .pending_entry
                 .as_ref()
@@ -324,11 +327,26 @@ impl AlorUsdrubfHybridStrategy {
                 .open_position
                 .as_ref()
                 .map(|position| position.entry_ts.to_string()),
-            open_position_entry_price: self.open_position.as_ref().map(|position| position.entry_price),
-            open_position_stop_price: self.open_position.as_ref().and_then(|position| position.stop_price),
-            open_position_take_price: self.open_position.as_ref().and_then(|position| position.take_price),
-            open_position_stop1: self.open_position.as_ref().and_then(|position| position.stop1),
-            open_position_stop2: self.open_position.as_ref().and_then(|position| position.stop2),
+            open_position_entry_price: self
+                .open_position
+                .as_ref()
+                .map(|position| position.entry_price),
+            open_position_stop_price: self
+                .open_position
+                .as_ref()
+                .and_then(|position| position.stop_price),
+            open_position_take_price: self
+                .open_position
+                .as_ref()
+                .and_then(|position| position.take_price),
+            open_position_stop1: self
+                .open_position
+                .as_ref()
+                .and_then(|position| position.stop1),
+            open_position_stop2: self
+                .open_position
+                .as_ref()
+                .and_then(|position| position.stop2),
         };
     }
 
@@ -493,14 +511,14 @@ impl AlorUsdrubfHybridStrategy {
             qty: size as f64,
             side: pending.side.entry_side(),
             fill_price: Some(bar.o),
-            comment: Some(format!("{}|entry|{}", self.config.symbol, pending.owner.as_str())),
+            comment: Some(format!(
+                "{}|entry|{}",
+                self.config.symbol,
+                pending.owner.as_str()
+            )),
         });
-        self.open_position = Some(self.build_open_position_from_pending(
-            &pending,
-            bar.close_time_utc,
-            bar.o,
-            size,
-        ));
+        self.open_position =
+            Some(self.build_open_position_from_pending(&pending, bar.close_time_utc, bar.o, size));
         self.pending_entry = None;
         self.entry_intent_inflight = false;
         self.exit_intent_inflight = false;
@@ -531,7 +549,11 @@ impl AlorUsdrubfHybridStrategy {
             qty: size as f64,
             side,
             fill_price: Some(bar.o),
-            comment: Some(format!("{}|entry|{}", self.config.symbol, pending.owner.as_str())),
+            comment: Some(format!(
+                "{}|entry|{}",
+                self.config.symbol,
+                pending.owner.as_str()
+            )),
         });
         self.entry_intent_inflight = true;
         self.hybrid_state = HybridState::Pending;
@@ -539,7 +561,13 @@ impl AlorUsdrubfHybridStrategy {
         self.log_live_intent_emitted_entry(ctx, bar, size as f64, side);
     }
 
-    fn log_live_intent_emitted_entry(&self, ctx: &StrategyCtx, bar: &BarEvent, qty: f64, side: Side) {
+    fn log_live_intent_emitted_entry(
+        &self,
+        ctx: &StrategyCtx,
+        bar: &BarEvent,
+        qty: f64,
+        side: Side,
+    ) {
         info!(
             strategy_id = ctx.strategy_id.as_str(),
             strategy = "alor_usdrubf_hybrid",
@@ -753,7 +781,13 @@ impl AlorUsdrubfHybridStrategy {
         None
     }
 
-    fn apply_exit(&mut self, reason: String, exit_price: f64, bar: &BarEvent, intents: &mut Vec<Intent>) {
+    fn apply_exit(
+        &mut self,
+        reason: String,
+        exit_price: f64,
+        bar: &BarEvent,
+        intents: &mut Vec<Intent>,
+    ) {
         let Some(pos) = self.open_position.clone() else {
             return;
         };
@@ -827,10 +861,7 @@ impl AlorUsdrubfHybridStrategy {
             self.last_logged_broker_initialized,
             pos,
         );
-        let loud = !matches!(
-            transition,
-            "flat_reconfirm" | "duplicate_reconfirm"
-        );
+        let loud = !matches!(transition, "flat_reconfirm" | "duplicate_reconfirm");
         if loud {
             info!(
                 strategy_id = ctx.strategy_id.as_str(),
@@ -1588,13 +1619,19 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.cash = *cash;
             }
             self.pending_entry = match (
-                pending_entry_owner.as_ref().and_then(|owner| parse_owner(owner)),
-                pending_entry_side.as_ref().and_then(|side| parse_position_side(side)),
+                pending_entry_owner
+                    .as_ref()
+                    .and_then(|owner| parse_owner(owner)),
+                pending_entry_side
+                    .as_ref()
+                    .and_then(|side| parse_position_side(side)),
             ) {
                 (Some(owner), Some(side)) => Some(PendingEntry {
                     owner,
                     side,
-                    reason: pending_entry_reason.clone().unwrap_or_else(|| "restored".to_string()),
+                    reason: pending_entry_reason
+                        .clone()
+                        .unwrap_or_else(|| "restored".to_string()),
                     scale_at_signal: pending_entry_scale_at_signal.unwrap_or(0.0),
                     signal_price: pending_entry_signal_price.unwrap_or(0.0),
                     stop1: *pending_entry_stop1,
@@ -1606,8 +1643,12 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             self.tracked_order_ids = tracked_order_ids.iter().copied().collect();
             self.entry_intent_inflight = *entry_intent_inflight;
             self.open_position = match (
-                open_position_owner.as_ref().and_then(|owner| parse_owner(owner)),
-                open_position_side.as_ref().and_then(|side| parse_position_side(side)),
+                open_position_owner
+                    .as_ref()
+                    .and_then(|owner| parse_owner(owner)),
+                open_position_side
+                    .as_ref()
+                    .and_then(|side| parse_position_side(side)),
             ) {
                 (Some(owner), Some(side)) if *open_position_qty >= 1.0 => Some(OpenPosition {
                     owner,
@@ -1615,7 +1656,12 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                     entry_ts: open_position_entry_ts
                         .as_ref()
                         .and_then(|value| parse_naive_datetime(value))
-                        .unwrap_or_else(|| utc_to_local(last_bar_ts.unwrap_or(0), self.config.timezone_offset_hours)),
+                        .unwrap_or_else(|| {
+                            utc_to_local(
+                                last_bar_ts.unwrap_or(0),
+                                self.config.timezone_offset_hours,
+                            )
+                        }),
                     entry_price: open_position_entry_price.unwrap_or(0.0),
                     size: open_position_qty.floor() as i64,
                     stop_price: *open_position_stop_price,
@@ -1877,7 +1923,8 @@ mod tests {
         assert!(matches!(
             strategy.state(),
             StrategyState::AlorUsdrubfHybrid {
-                live_ready: true, ..
+                live_ready: true,
+                ..
             }
         ));
     }
@@ -2405,7 +2452,10 @@ mod tests {
                 && !*live_ready
         ));
 
-        let intents = strategy.on_bar(&ctx, &bar_with_origin(1_775_490_119, 80.3, DataOrigin::Live));
+        let intents = strategy.on_bar(
+            &ctx,
+            &bar_with_origin(1_775_490_119, 80.3, DataOrigin::Live),
+        );
         assert!(intents.is_empty());
     }
 
@@ -2429,7 +2479,10 @@ mod tests {
         ));
 
         // No blind re-entry should happen while strategy is already non-flat.
-        let intents = strategy.on_bar(&ctx, &bar_with_origin(1_775_490_180, 80.25, DataOrigin::Live));
+        let intents = strategy.on_bar(
+            &ctx,
+            &bar_with_origin(1_775_490_180, 80.25, DataOrigin::Live),
+        );
         assert!(intents.is_empty());
 
         // First live position confirmation lifts conservative-owner mode.
@@ -2499,7 +2552,10 @@ mod tests {
                 && pending_entry_owner.as_deref() == Some("mean_rev")
         ));
 
-        let same_bar_intents = strategy.on_bar(&ctx, &bar_with_origin(1_775_490_000, 80.1, DataOrigin::Live));
+        let same_bar_intents = strategy.on_bar(
+            &ctx,
+            &bar_with_origin(1_775_490_000, 80.1, DataOrigin::Live),
+        );
         assert!(same_bar_intents.is_empty());
     }
 
@@ -2561,7 +2617,10 @@ mod tests {
                 && *open_position_qty == 1.0
         ));
         let risk = strategy.exit_risk_status(true);
-        assert_eq!(risk.phase_override.as_deref(), Some("ExitRejectDeferredRetry"));
+        assert_eq!(
+            risk.phase_override.as_deref(),
+            Some("ExitRejectDeferredRetry")
+        );
         assert!(risk.exit_recovery_active);
         assert!(risk.open_risk_position_unflattened);
     }
@@ -2666,10 +2725,8 @@ mod tests {
         });
 
         let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
-        let processed = strategy.warmup_from_history(
-            &ctx,
-            &[bar(1_775_490_060, 80.0), bar(1_775_490_120, 80.1)],
-        );
+        let processed = strategy
+            .warmup_from_history(&ctx, &[bar(1_775_490_060, 80.0), bar(1_775_490_120, 80.1)]);
         assert_eq!(processed, 0);
         assert!(matches!(
             strategy.state(),

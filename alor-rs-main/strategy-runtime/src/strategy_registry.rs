@@ -1,15 +1,15 @@
-use anyhow::{anyhow, bail, Result};
-use crate::strategy_adapters::{AlorUsdrubfHybridAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter};
 use crate::strategies::limit_cancel::{LimitCancelConfig, LimitCancelStrategy};
-use crate::strategies::market_buy_and_close::{
-    MarketBuyAndCloseConfig, MarketBuyAndCloseStrategy,
-};
+use crate::strategies::market_buy_and_close::{MarketBuyAndCloseConfig, MarketBuyAndCloseStrategy};
 use crate::strategies::mock_live_probe::{
     MockLiveProbeConfig, MockLiveProbeMode, MockLiveProbeStrategy,
 };
 use crate::strategies::toy_session_timing::{ToySessionTimingConfig, ToySessionTimingStrategy};
+use crate::strategy_adapters::{
+    AlorUsdrubfHybridAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter,
+};
 use crate::strategy_host::Strategy;
 use crate::{StrategyConfig, StrategyKind, StrategySpecificConfig};
+use anyhow::{anyhow, bail, Result};
 
 pub(crate) type BoxedStrategy = Box<dyn Strategy + Send + Sync>;
 type StrategyFactoryFn = fn(&StrategyConfig) -> Result<BoxedStrategy>;
@@ -259,8 +259,8 @@ fn create_alor_usdrubf_hybrid(config: &StrategyConfig) -> Result<BoxedStrategy> 
 #[cfg(test)]
 mod tests {
     use super::{StrategyCapabilities, StrategyDescriptor, StrategyRegistry};
-    use crate::StrategyKind;
     use crate::StrategyConfig;
+    use crate::StrategyKind;
 
     fn sample_strategy_config(kind: StrategyKind) -> StrategyConfig {
         let mut config = StrategyConfig::defaults_for_kind(kind);

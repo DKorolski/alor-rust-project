@@ -28,7 +28,8 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
     let portfolio = "demo".to_string();
     let strategy_id = "limit_cancel".to_string();
     let symbol = "SBER".to_string();
-    let mut strategy = StrategyConfig::defaults_for_kind(strategy_runtime::StrategyKind::LimitCancel);
+    let mut strategy =
+        StrategyConfig::defaults_for_kind(strategy_runtime::StrategyKind::LimitCancel);
     strategy.strategy_id = strategy_id.clone();
     strategy.symbol = symbol;
     if let Some(settings) = strategy.limit_cancel_mut() {
