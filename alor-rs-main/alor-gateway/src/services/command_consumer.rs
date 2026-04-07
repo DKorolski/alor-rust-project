@@ -829,6 +829,9 @@ fn execution_path_for_command(
         (&CommandAction::Cancel(_), _) if config.action_scope_enable_delete_limit => {
             CommandExecutionPath::ActionScoped
         }
+        (&CommandAction::DeleteStopLimit(_), _) if config.action_scope_enable_delete_limit => {
+            CommandExecutionPath::ActionScoped
+        }
         _ => CommandExecutionPath::LegacyLongLived,
     }
 }
@@ -1087,16 +1090,31 @@ async fn execute_command(
         }
         CommandAction::DeleteStopLimit(payload) => {
             let request_id_str = request_id.to_string();
-            let response = cws
-                .delete_stop_limit(
-                    &command.portfolio,
-                    &command.exchange,
-                    &payload.order_id,
-                    payload.side.map(side_str),
-                    payload.check_duplicates.unwrap_or(true),
-                    Some(request_id_str.as_str()),
-                )
-                .await?;
+            let response = match execution_path {
+                CommandExecutionPath::LegacyLongLived => {
+                    cws.delete_stop_limit(
+                        &command.portfolio,
+                        &command.exchange,
+                        &payload.order_id,
+                        payload.side.map(side_str),
+                        payload.check_duplicates.unwrap_or(true),
+                        Some(request_id_str.as_str()),
+                    )
+                    .await?
+                }
+                CommandExecutionPath::ActionScoped => {
+                    action_scope_cws
+                        .delete_stop_limit(
+                            &command.portfolio,
+                            &command.exchange,
+                            &payload.order_id,
+                            payload.side.map(side_str),
+                            payload.check_duplicates.unwrap_or(true),
+                            request_id_str.as_str(),
+                        )
+                        .await?
+                }
+            };
             Ok(response)
         }
     }
@@ -1554,9 +1572,24 @@ mod tests {
             CommandExecutionPath::ActionScoped
         );
 
+        let mut delete_stop = sample_command(chrono::Utc::now().timestamp(), None);
+        delete_stop.action = CommandAction::DeleteStopLimit(alor_protocol::DeleteStopLimitOrder {
+            order_id: "abc-1".to_string(),
+            side: None,
+            check_duplicates: None,
+        });
+        assert_eq!(
+            execution_path_for_command(&delete_stop, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
         config.action_scope_enable_delete_limit = false;
         assert_eq!(
             execution_path_for_command(&cancel, &config),
+            CommandExecutionPath::LegacyLongLived
+        );
+        assert_eq!(
+            execution_path_for_command(&delete_stop, &config),
             CommandExecutionPath::LegacyLongLived
         );
     }

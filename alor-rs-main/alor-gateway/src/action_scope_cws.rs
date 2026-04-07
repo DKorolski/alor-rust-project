@@ -120,6 +120,31 @@ impl ActionScopeCwsManager {
         result
     }
 
+    pub async fn delete_stop_limit(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        stop_order_id: &str,
+        side: Option<&str>,
+        check_duplicates: bool,
+        request_id: &str,
+    ) -> Result<Value> {
+        let mut session = self.open_session("delete:stopLimit").await?;
+        let result = session
+            .send_delete_stop_limit(
+                self,
+                portfolio,
+                exchange,
+                stop_order_id,
+                side,
+                check_duplicates,
+                request_id,
+            )
+            .await;
+        self.close_session(&mut session).await;
+        result
+    }
+
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub async fn create_then_cancel(
@@ -428,6 +453,35 @@ impl ActionScopeSession {
             "delete:limit",
             Some(order_id.to_string()),
             is_followup,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_delete_stop_limit(
+        &mut self,
+        manager: &ActionScopeCwsManager,
+        portfolio: &str,
+        exchange: &str,
+        stop_order_id: &str,
+        side: Option<&str>,
+        check_duplicates: bool,
+        request_id: &str,
+    ) -> Result<Value> {
+        let payload = build_delete_stop_limit_payload(
+            portfolio,
+            exchange,
+            stop_order_id,
+            side,
+            check_duplicates,
+            Some(request_id),
+        );
+        self.send_and_await_response(
+            manager,
+            payload,
+            "delete:stopLimit",
+            Some(stop_order_id.to_string()),
+            false,
         )
         .await
     }
@@ -745,6 +799,45 @@ fn build_delete_limit_payload(
         }),
     );
     payload.insert("checkDuplicates".to_string(), Value::from(true));
+    if let Some(request_id) = request_id {
+        payload.insert(
+            "requestId".to_string(),
+            Value::String(request_id.to_string()),
+        );
+    }
+    Value::Object(payload)
+}
+
+fn build_delete_stop_limit_payload(
+    portfolio: &str,
+    exchange: &str,
+    stop_order_id: &str,
+    side: Option<&str>,
+    check_duplicates: bool,
+    request_id: Option<&str>,
+) -> Value {
+    let guid = Uuid::new_v4().to_string();
+    let mut payload = Map::new();
+    payload.insert(
+        "opcode".to_string(),
+        Value::String("delete:stopLimit".to_string()),
+    );
+    payload.insert("guid".to_string(), Value::String(guid));
+    payload.insert(
+        "orderId".to_string(),
+        Value::String(stop_order_id.to_string()),
+    );
+    payload.insert("exchange".to_string(), Value::String(exchange.to_string()));
+    payload.insert(
+        "user".to_string(),
+        json!({
+            "portfolio": portfolio,
+        }),
+    );
+    payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
+    if let Some(side) = side {
+        payload.insert("side".to_string(), Value::String(side.to_string()));
+    }
     if let Some(request_id) = request_id {
         payload.insert(
             "requestId".to_string(),

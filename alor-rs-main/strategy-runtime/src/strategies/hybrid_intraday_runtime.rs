@@ -3473,6 +3473,23 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.sync_state();
             return Vec::new();
         }
+        if matches!(
+            ack.status,
+            AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
+        ) && self.last_position_qty.abs() <= f64::EPSILON
+            && !self.working_stop_orders.is_empty()
+        {
+            warn!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "cleanup_ack_error_with_active_stop_while_flat",
+                request_id = %ack.request_id,
+                error_code = ?ack.error_code,
+                error_msg = ?ack.error_msg,
+                working_stop_orders_count = self.working_stop_orders.len(),
+                sl_stop_order_id = ?self.sl_stop_order_id,
+                "cleanup command failed while strategy is flat and stop orders are still active"
+            );
+        }
         // Stale/foreign ack: ignore.
         Vec::new()
     }
@@ -3598,6 +3615,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.working_stop_orders.remove(&ord.stop_order_id);
         } else if !ord.stop_order_id.trim().is_empty() {
             self.working_stop_orders.insert(ord.stop_order_id.clone());
+        }
+        if self.last_position_qty.abs() <= f64::EPSILON && !self.working_stop_orders.is_empty() {
+            warn!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "stop_order_active_while_flat",
+                stop_order_id = %ord.stop_order_id,
+                status = %status,
+                working_stop_orders_count = self.working_stop_orders.len(),
+                sl_stop_order_id = ?self.sl_stop_order_id,
+                "stop order remains active while strategy position is flat"
+            );
         }
         self.sync_state();
         intents
