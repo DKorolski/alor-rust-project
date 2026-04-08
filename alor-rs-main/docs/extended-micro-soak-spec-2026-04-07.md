@@ -5,6 +5,7 @@
 Связанные материалы:
 
 - Action-scoped stop cleanup (hybrid): [`hybrid-cws-stop-cleanup-observation-2026-04-07.md`](./hybrid-cws-stop-cleanup-observation-2026-04-07.md)
+- Readiness / defer-now-vs-after-soak decision: [`alor-usdrubf-extended-micro-soak-readiness-2026-04-08.md`](./alor-usdrubf-extended-micro-soak-readiness-2026-04-08.md)
 - Ранее: [`hybrid-action-scoped-live-soak-runbook-2026-04-02.md`](./hybrid-action-scoped-live-soak-runbook-2026-04-02.md)
 
 ---
