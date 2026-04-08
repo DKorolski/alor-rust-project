@@ -101,28 +101,30 @@ Layout on VPS mirrors `sessiongap` / `trading-hybrid`: **отдельная ди
 
 ### Образы
 
-После push в `main` GitHub Actions (`.github/workflows/deploy.yml`) публикует в GHCR:
+После merge/push в `main` используйте тот GHCR image tag, который был выпущен и подтверждён зелёным CI/publish pipeline для целевого коммита.
+Для rollout предпочтителен фиксированный tag, а не `latest`.
 
 - `ghcr.io/dkorolski/alor-rust-project/strategy-runtime` — теги `latest`, `sha-<короткий_sha>`
 - `ghcr.io/dkorolski/alor-rust-project/alor-gateway` — то же
 
-Для фиксированного rollout возьмите **SHA коммита** с `main` (пример после merge логирования: `3ff9aa4`) и используйте тег **`sha-3ff9aa4`** (проверьте точное имя тега в GHCR / Packages после сборки).
+Для фиксированного rollout возьмите **SHA коммита** с `main` и используйте соответствующий published tag (`sha-...`, `vps-...` или иной фактически опубликованный immutable tag, в зависимости от текущего release процесса).
 
 ### Шаги (только стек Alor USDRUBF)
 
 1. Дождаться **зелёного** workflow на нужном коммите `main`.
-2. На VPS: перейти в каталог compose-проекта `alorusdrubf`.
-3. Бэкап `.env`:  
+2. На VPS: убедиться, что активен только один canonical compose project для USDRUBF.
+3. Перейти в каталог compose-проекта `alorusdrubf`.
+4. Бэкап `.env`:  
    `cp .env ".env.bak.$(date +%Y%m%d-%H%M%S)"`
-4. Обновить теги образов:
+5. Обновить теги образов:
    - если в `.env` один **`IMAGE_TAG`** (как в корневом `docker-compose.yml` репозитория): выставить `IMAGE_TAG=sha-<commit>`;
    - если на VPS раздельно **`RUNTIME_IMAGE_TAG`** / **`GATEWAY_IMAGE_TAG`** (как в runbook hybrid): обновить **runtime** обязательно; gateway — если менялся gateway-код в том же коммите (при одном `IMAGE_TAG` обновляются оба).
-5. При необходимости синхронизировать **только** TOML из `alor-rs-main/configs/` для `7502T0U` в `configs/` этого стека (если в коммите менялись конфиги).
-6. Применить **только этот** проект:  
+6. При необходимости синхронизировать **только** TOML из `alor-rs-main/configs/` для `7502T0U` в `configs/` этого стека (если в коммите менялись конфиги).
+7. Применить **только этот** проект:  
    `docker compose pull`  
    `docker compose up -d`  
    (при необходимости `-p alorusdrubf` и `-f <path/to.compose.yml>` — как заведено на хосте).
-7. Не менять каталоги **`sessiongap`** и **`trading-hybrid`** и их `.env`.
+8. Не менять каталоги **`sessiongap`** и **`trading-hybrid`** и их `.env`.
 
 ### Проверка после rollout
 
