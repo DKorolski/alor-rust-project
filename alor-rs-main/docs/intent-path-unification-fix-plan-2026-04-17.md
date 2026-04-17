@@ -17,7 +17,7 @@ and the engineering synthesis:
 The central objective is:
 
 - make the lifecycle and control path of identical intent classes more uniform,
-- while preserving the valid strategy-specific business logic differences.
+- while preserving valid strategy-specific business logic differences.
 
 ## Problem Statement
 
@@ -58,13 +58,13 @@ Intended work:
 
 - keep behavior stable,
 - align repo/deploy docs and config naming with the actual live action-scoped phase2 path,
-- optionally normalize lifecycle vocabulary if shared runtime changes require it.
+- use it as a regression baseline for patched validation soak.
 
 ### 2. `trading-hybrid`
 
 Primary role in this fix line:
 
-- highest-priority functional hot path
+- highest-priority protective hot path
 
 Expected change impact:
 
@@ -113,7 +113,7 @@ Intended work:
 
 Primary role in this fix line:
 
-- lifecycle taxonomy and operator semantics
+- minimal patched-soak observability first, broader lifecycle semantics later
 
 Expected change impact:
 
@@ -121,9 +121,12 @@ Expected change impact:
 
 Intended work:
 
-- normalize intent lifecycle states,
-- normalize reject / timeout taxonomy,
-- standardize broker-truth convergence logging and state transitions.
+- Patch A:
+  - add only the minimum emit / timeout / reset / reject distinctions needed for patched validation soak;
+- Patch B:
+  - normalize intent lifecycle states,
+  - normalize reject / timeout taxonomy,
+  - standardize broker-truth convergence logging and state transitions.
 
 ## Out of Scope
 
@@ -135,6 +138,49 @@ The following are explicitly out of scope for this fix line:
 - changing position sizing,
 - rewriting all strategies to a single identical business workflow,
 - broad runtime host refactor unrelated to intent-path issues.
+
+## Implementation Phasing
+
+This fix line is intentionally split into two phases.
+
+### Patch A. Functional hotfix line
+
+This is the line to implement now.
+
+Scope:
+
+- WP1 baseline alignment,
+- WP2 hybrid protective contour unification,
+- WP3 alor-usdrubf market path hardening,
+- minimal observability additions only where they are required for patched validation soak.
+
+Non-goals for Patch A:
+
+- full host-level lifecycle normalization,
+- full reject taxonomy normalization,
+- broad broker-truth cleanup unification.
+
+Rationale:
+
+- the soak localized the main problem to hot-path routing asymmetry;
+- mixing routing fixes with large semantic normalization would widen side-effect risk;
+- a narrower hotfix line keeps causal attribution clear in the next live validation cycle.
+
+### Patch B. Semantic normalization follow-up
+
+This line should start only after Patch A passes patched micro validation soak.
+
+Scope:
+
+- WP4 common intent lifecycle contract,
+- WP5 reject taxonomy normalization,
+- WP6 broker-truth and cleanup convergence semantics.
+
+Rationale:
+
+- these changes are valuable, but they are broader shared-runtime work;
+- they should be validated after the main functional hot paths are stabilized;
+- they should not be a prerequisite for the first patched live confidence read.
 
 ## Work Packages
 
@@ -210,6 +256,8 @@ Fix the repeated `create:market` failure pattern so that market entry / exit doe
 
 Standardize the lifecycle vocabulary and semantics across strategies.
 
+This work package belongs to Patch B, not to the first hotfix release.
+
 ### Tasks
 
 Introduce or normalize host/runtime-visible concepts for:
@@ -241,6 +289,8 @@ Introduce or normalize host/runtime-visible concepts for:
 
 Make failures comparable across strategies and across days.
 
+This work package belongs to Patch B, not to the first hotfix release.
+
 ### Tasks
 
 Normalize coarse classes:
@@ -264,6 +314,8 @@ Normalize coarse classes:
 
 Make late trade / cleanup / flat confirmation behavior more uniform.
 
+This work package belongs to Patch B, not to the first hotfix release.
+
 ### Tasks
 
 - standardize how runtime reacts to broker truth after delayed or noisy control paths;
@@ -278,28 +330,46 @@ Make late trade / cleanup / flat confirmation behavior more uniform.
 
 ## Recommended Order of Implementation
 
-### PR1. Control-path baseline alignment
+### Patch A
+
+#### PR1. Control-path baseline alignment
 
 - repo / deploy config alignment
 - doc cleanup
 - no semantic change
 
-### PR2. Hybrid protective routing fix
+#### PR2. Hybrid protective routing fix
 
 - highest-confidence narrow hotfix
 - move TP / SL path off the unhealthy contour behavior
 
-### PR3. Alor-usdrubf market-path fix
+#### PR3. Alor-usdrubf market-path fix
 
 - reduce `create:market` burst accumulation
 - tighten deferred retry semantics
 
-### PR4. Shared lifecycle + reject taxonomy
+#### PR4. Minimal observability slice
 
 - runtime / adapter level
-- mostly semantic normalization and logging/state consistency
+- add only the minimum coarse distinctions needed for patched soak:
+  - dropped before emit
+  - emitted then timeout
+  - transport reset
+  - broker reject
+- no broad lifecycle refactor in this PR
 
-### PR5. Broker-truth convergence cleanup
+### Patch A validation gate
+
+Run a focused patched micro validation soak before starting Patch B.
+
+### Patch B
+
+#### PR5. Shared lifecycle + reject taxonomy
+
+- runtime / adapter level
+- broader semantic normalization and logging/state consistency
+
+#### PR6. Broker-truth convergence cleanup
 
 - late trades
 - inflight clearing
@@ -314,7 +384,7 @@ Each PR should be validated at three levels:
 - routing choice by intent class
 - retry / defer semantics
 - lifecycle state transitions
-- reject taxonomy mapping
+- reject taxonomy mapping where introduced
 
 ### B. Replay / synthetic scenarios
 
@@ -325,7 +395,13 @@ Each PR should be validated at three levels:
 
 ### C. Live micro validation
 
-Re-run a narrower validation soak with explicit focus on:
+Patch A must be followed by a focused patched micro validation soak before any scale-up decision.
+
+Recommended duration:
+
+- 3 to 5 sessions
+
+Focus:
 
 - hybrid protective install
 - hybrid protective cleanup
@@ -333,9 +409,15 @@ Re-run a narrower validation soak with explicit focus on:
 - alor-usdrubf market exit / EOD flatten
 - sessiongap still staying clean on one-shot path
 
+Scale-up policy after Patch A:
+
+- `sessiongap`: candidate for first selective small rollout if no regression is observed;
+- `hybrid`: conditional small only after protective install and cleanup behavior stabilizes;
+- `alor-usdrubf`: keep on micro / limited exposure until a second positive confidence read, even if the first patched soak is materially better.
+
 ## Success Criteria
 
-The fix line should be considered successful if:
+The full fix line should be considered successful if:
 
 1. `sessiongap` remains as clean as before.
 2. `hybrid` protective TP / SL no longer depends on the failure-prone old contour behavior.
@@ -348,14 +430,31 @@ The fix line should be considered successful if:
    - was executed.
 5. End-of-day and broker-flat semantics remain reliable.
 
+Patch A should be considered successful if:
+
+1. `sessiongap` shows no regression on the clean one-shot path.
+2. `hybrid` protective TP / SL install and cleanup use the intended resilient contour family.
+3. `alor-usdrubf` no longer accumulates long stale pending market bursts before eventual success.
+4. Operators can distinguish the minimum coarse classes needed for patched soak analysis.
+
+Patch B should be considered successful if:
+
+1. lifecycle vocabulary is genuinely comparable across strategies;
+2. reject taxonomy is normalized across stacks;
+3. broker-truth and cleanup convergence semantics are operator-readable and shared.
+
 ## Final Recommendation
 
 Implementation should start without waiting for outside problem-definition input.
 
 External review may still be useful before code rollout, but not to understand the problem.
 
-The soak already provided enough evidence to proceed with an internal engineering fix plan centered on:
+The soak already provided enough evidence to proceed with an internal engineering fix plan.
 
-- contour unification,
-- lifecycle normalization,
-- and bounded retry / convergence semantics.
+Recommended execution shape:
+
+- implement Patch A now,
+- run focused patched micro validation soak,
+- only then proceed to Patch B semantic normalization.
+
+This keeps the direction of the original plan, but reduces near-term side-effect risk and makes the first patched live read easier to interpret.
