@@ -85,6 +85,7 @@ pub struct AlorGatewayConfig {
     pub control_path_hardening_log_only: bool,
     pub control_cws_mode: ControlCwsMode,
     pub action_scope_enable_create_limit: bool,
+    pub action_scope_enable_market: bool,
     pub action_scope_enable_delete_limit: bool,
     pub action_scope_enable_replace_limit: bool,
     pub action_scope_enable_exit: bool,
@@ -221,6 +222,7 @@ impl AlorGatewayConfig {
                 "ALOR_ACTION_SCOPE_ENABLE_CREATE_LIMIT",
                 false,
             ),
+            action_scope_enable_market: parse_bool("ALOR_ACTION_SCOPE_ENABLE_MARKET", false),
             action_scope_enable_delete_limit: parse_bool(
                 "ALOR_ACTION_SCOPE_ENABLE_DELETE_LIMIT",
                 false,
@@ -429,6 +431,11 @@ impl AlorGatewayConfig {
             )?,
             action_scope_enable_create_limit: parse_bool_with_source(
                 "ALOR_ACTION_SCOPE_ENABLE_CREATE_LIMIT",
+                false,
+                &mut sources,
+            ),
+            action_scope_enable_market: parse_bool_with_source(
+                "ALOR_ACTION_SCOPE_ENABLE_MARKET",
                 false,
                 &mut sources,
             ),
@@ -656,6 +663,7 @@ impl AlorGatewayConfig {
             action_scope_enable_create_limit: file_cfg
                 .action_scope_enable_create_limit
                 .unwrap_or(false),
+            action_scope_enable_market: file_cfg.action_scope_enable_market.unwrap_or(false),
             action_scope_enable_delete_limit: file_cfg
                 .action_scope_enable_delete_limit
                 .unwrap_or(false),
@@ -890,6 +898,7 @@ impl AlorGatewayConfig {
             action_scope_enable_create_limit: file_cfg
                 .action_scope_enable_create_limit
                 .unwrap_or(false),
+            action_scope_enable_market: file_cfg.action_scope_enable_market.unwrap_or(false),
             action_scope_enable_delete_limit: file_cfg
                 .action_scope_enable_delete_limit
                 .unwrap_or(false),
@@ -1016,6 +1025,7 @@ struct FileConfig {
     control_path_hardening_log_only: Option<bool>,
     control_cws_mode: Option<ControlCwsMode>,
     action_scope_enable_create_limit: Option<bool>,
+    action_scope_enable_market: Option<bool>,
     action_scope_enable_delete_limit: Option<bool>,
     action_scope_enable_replace_limit: Option<bool>,
     action_scope_enable_exit: Option<bool>,
@@ -1500,6 +1510,11 @@ fn track_file_sources(file_cfg: &FileConfig, sources: &mut BTreeMap<&'static str
     );
     set_source(
         sources,
+        "action_scope_enable_market",
+        file_cfg.action_scope_enable_market.is_some(),
+    );
+    set_source(
+        sources,
         "action_scope_enable_delete_limit",
         file_cfg.action_scope_enable_delete_limit.is_some(),
     );
@@ -1619,6 +1634,7 @@ pub fn log_resolved_config(resolved: &ResolvedConfig, config_path: Option<&str>)
         control_path_hardening_log_only = cfg.control_path_hardening_log_only,
         control_cws_mode = cfg.control_cws_mode.as_str(),
         action_scope_enable_create_limit = cfg.action_scope_enable_create_limit,
+        action_scope_enable_market = cfg.action_scope_enable_market,
         action_scope_enable_delete_limit = cfg.action_scope_enable_delete_limit,
         action_scope_enable_replace_limit = cfg.action_scope_enable_replace_limit,
         action_scope_enable_exit = cfg.action_scope_enable_exit,

@@ -515,6 +515,7 @@ fn test_config(
         control_path_hardening_log_only: false,
         control_cws_mode: ControlCwsMode::LegacyLongLived,
         action_scope_enable_create_limit: false,
+        action_scope_enable_market: false,
         action_scope_enable_delete_limit: false,
         action_scope_enable_replace_limit: false,
         action_scope_enable_exit: false,

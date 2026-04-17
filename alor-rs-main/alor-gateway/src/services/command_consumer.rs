@@ -35,6 +35,7 @@ pub struct CommandConsumerConfig {
     pub control_path_hardening_log_only: bool,
     pub control_cws_mode: ControlCwsMode,
     pub action_scope_enable_create_limit: bool,
+    pub action_scope_enable_market: bool,
     pub action_scope_enable_delete_limit: bool,
     pub action_scope_enable_replace_limit: bool,
     pub action_scope_enable_exit: bool,
@@ -57,6 +58,7 @@ impl Default for CommandConsumerConfig {
             control_path_hardening_log_only: false,
             control_cws_mode: ControlCwsMode::LegacyLongLived,
             action_scope_enable_create_limit: false,
+            action_scope_enable_market: false,
             action_scope_enable_delete_limit: false,
             action_scope_enable_replace_limit: false,
             action_scope_enable_exit: false,
@@ -831,6 +833,11 @@ fn execution_path_for_command(
         (&CommandAction::Place(_), IntentClass::Exit) if config.action_scope_enable_exit => {
             CommandExecutionPath::ActionScoped
         }
+        (&CommandAction::Market(_), IntentClass::Entry | IntentClass::Exit)
+            if config.action_scope_enable_market =>
+        {
+            CommandExecutionPath::ActionScoped
+        }
         (&CommandAction::CreateStopLimit(_), IntentClass::ProtectiveRepair)
             if config.action_scope_enable_create_limit =>
         {
@@ -1018,17 +1025,33 @@ async fn execute_command(
         CommandAction::Market(payload) => {
             let request_id_str = request_id.to_string();
             let qty = normalize_qty(payload.qty, volume_step);
-            let response = cws
-                .create_market(
-                    &command.portfolio,
-                    &command.exchange,
-                    &command.symbol,
-                    qty,
-                    side_str(payload.side),
-                    payload.comment.as_deref(),
-                    Some(request_id_str.as_str()),
-                )
-                .await?;
+            let response = match execution_path {
+                CommandExecutionPath::LegacyLongLived => {
+                    cws.create_market(
+                        &command.portfolio,
+                        &command.exchange,
+                        &command.symbol,
+                        qty,
+                        side_str(payload.side),
+                        payload.comment.as_deref(),
+                        Some(request_id_str.as_str()),
+                    )
+                    .await?
+                }
+                CommandExecutionPath::ActionScoped => {
+                    action_scope_cws
+                        .create_market(
+                            &command.portfolio,
+                            &command.exchange,
+                            &command.symbol,
+                            qty,
+                            side_str(payload.side),
+                            payload.comment.as_deref(),
+                            request_id_str.as_str(),
+                        )
+                        .await?
+                }
+            };
             Ok(response)
         }
         CommandAction::Cancel(payload) => {
@@ -1568,6 +1591,7 @@ mod tests {
         let mut config = CommandConsumerConfig {
             control_cws_mode: ControlCwsMode::ActionScoped,
             action_scope_enable_create_limit: true,
+            action_scope_enable_market: true,
             action_scope_enable_delete_limit: true,
             ..CommandConsumerConfig::default()
         };
@@ -1639,6 +1663,19 @@ mod tests {
             CommandExecutionPath::LegacyLongLived
         );
 
+        let mut market = sample_command(chrono::Utc::now().timestamp(), None);
+        market.intent_class = Some(IntentClass::Entry);
+        assert_eq!(
+            execution_path_for_command(&market, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
+        market.intent_class = Some(IntentClass::Exit);
+        assert_eq!(
+            execution_path_for_command(&market, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
         config.action_scope_enable_delete_limit = false;
         assert_eq!(
             execution_path_for_command(&cancel, &config),
@@ -1646,6 +1683,12 @@ mod tests {
         );
         assert_eq!(
             execution_path_for_command(&delete_stop, &config),
+            CommandExecutionPath::LegacyLongLived
+        );
+
+        config.action_scope_enable_market = false;
+        assert_eq!(
+            execution_path_for_command(&market, &config),
             CommandExecutionPath::LegacyLongLived
         );
 

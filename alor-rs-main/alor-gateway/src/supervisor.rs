@@ -538,6 +538,7 @@ impl Supervisor {
                         control_path_hardening_log_only: cfg.control_path_hardening_log_only,
                         control_cws_mode: cfg.control_cws_mode,
                         action_scope_enable_create_limit: cfg.action_scope_enable_create_limit,
+                        action_scope_enable_market: cfg.action_scope_enable_market,
                         action_scope_enable_delete_limit: cfg.action_scope_enable_delete_limit,
                         action_scope_enable_replace_limit: cfg.action_scope_enable_replace_limit,
                         action_scope_enable_exit: cfg.action_scope_enable_exit,

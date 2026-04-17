@@ -20,6 +20,8 @@ use crate::health::{CwsFrameTraceEntry, HealthState};
 const ACTION_SCOPE_FRAME_RING_LIMIT: usize = 100;
 const CWS_TIME_IN_FORCE: &str = "OneDay";
 const CWS_ALLOW_MARGIN: bool = true;
+const CWS_MARKET_TIME_IN_FORCE: &str = "oneday";
+const CWS_MARKET_ALLOW_MARGIN: bool = true;
 const DIAG_CWS_SEND_SEQ: &str = "_diag_cws_send_seq";
 const DIAG_CWS_SEND_TS_UTC: &str = "_diag_cws_send_ts_utc";
 const DIAG_CWS_RECV_SEQ: &str = "_diag_cws_recv_seq";
@@ -101,6 +103,27 @@ impl ActionScopeCwsManager {
         let result = session
             .send_create_limit(
                 self, portfolio, exchange, symbol, price, qty, side, comment, request_id,
+            )
+            .await;
+        self.close_session(&mut session).await;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_market(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        symbol: &str,
+        qty: f64,
+        side: &str,
+        comment: Option<&str>,
+        request_id: &str,
+    ) -> Result<Value> {
+        let mut session = self.open_session("create:market").await?;
+        let result = session
+            .send_create_market(
+                self, portfolio, exchange, symbol, qty, side, comment, request_id,
             )
             .await;
         self.close_session(&mut session).await;
@@ -457,6 +480,32 @@ impl ActionScopeSession {
             Some(request_id),
         );
         self.send_and_await_response(manager, payload, "create:limit", None, false)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_create_market(
+        &mut self,
+        manager: &ActionScopeCwsManager,
+        portfolio: &str,
+        exchange: &str,
+        symbol: &str,
+        qty: f64,
+        side: &str,
+        comment: Option<&str>,
+        request_id: &str,
+    ) -> Result<Value> {
+        let payload = build_create_market_payload(
+            portfolio,
+            exchange,
+            symbol,
+            &manager.instrument_group,
+            qty.round() as i64,
+            side,
+            comment,
+            Some(request_id),
+        );
+        self.send_and_await_response(manager, payload, "create:market", None, false)
             .await
     }
 
@@ -878,6 +927,63 @@ fn build_delete_limit_payload(
         }),
     );
     payload.insert("checkDuplicates".to_string(), Value::from(true));
+    if let Some(request_id) = request_id {
+        payload.insert(
+            "requestId".to_string(),
+            Value::String(request_id.to_string()),
+        );
+    }
+    Value::Object(payload)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_create_market_payload(
+    portfolio: &str,
+    exchange: &str,
+    symbol: &str,
+    instrument_group: &str,
+    qty: i64,
+    side: &str,
+    comment: Option<&str>,
+    request_id: Option<&str>,
+) -> Value {
+    let guid = request_id
+        .map(ToString::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut payload = Map::new();
+    payload.insert(
+        "opcode".to_string(),
+        Value::String("create:market".to_string()),
+    );
+    payload.insert("guid".to_string(), Value::String(guid));
+    payload.insert("side".to_string(), Value::String(side.to_string()));
+    payload.insert("quantity".to_string(), Value::from(qty));
+    payload.insert(
+        "instrument".to_string(),
+        json!({
+            "symbol": symbol,
+            "exchange": exchange,
+            "instrumentGroup": instrument_group,
+        }),
+    );
+    payload.insert(
+        "user".to_string(),
+        json!({
+            "portfolio": portfolio,
+        }),
+    );
+    payload.insert(
+        "timeInForce".to_string(),
+        Value::String(CWS_MARKET_TIME_IN_FORCE.to_string()),
+    );
+    payload.insert(
+        "allowMargin".to_string(),
+        Value::from(CWS_MARKET_ALLOW_MARGIN),
+    );
+    payload.insert("checkDuplicates".to_string(), Value::from(true));
+    if let Some(comment) = comment {
+        payload.insert("comment".to_string(), Value::String(comment.to_string()));
+    }
     if let Some(request_id) = request_id {
         payload.insert(
             "requestId".to_string(),
