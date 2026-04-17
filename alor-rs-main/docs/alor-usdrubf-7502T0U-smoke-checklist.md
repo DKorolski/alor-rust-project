@@ -94,9 +94,9 @@ Gateway control contour must be aligned with active `sessiongap/hybrid` live sta
 
 ## VPS rollout from `main` (Docker / GHCR; other stacks untouched)
 
-Layout on VPS mirrors `sessiongap` / `trading-hybrid`: **отдельная директория** и **отдельный** `docker compose` project для USDRUBF, чтобы не трогать extended soak стеки.
+Layout on VPS mirrors `trading-sessiongap` / `trading-hybrid`: **отдельная директория** и **отдельный** `docker compose` project для USDRUBF, чтобы не трогать extended soak стеки.
 
-- Compose project name (по именам контейнеров): **`alorusdrubf`** → `alorusdrubf-strategy-runtime-1`, `alorusdrubf-alor-gateway-1`.
+- Compose project name (по именам контейнеров): **`trading-alor-usdrubf`** → `trading-alor-usdrubf-strategy-runtime-1`, `trading-alor-usdrubf-alor-gateway-1`.
 - Каталог на хосте задайте по своей схеме (часто рядом с `/opt/trading-sessiongap`, `/opt/trading-hybrid`); в репозитории путь не захардкожен.
 
 ### Образы
@@ -113,7 +113,7 @@ Layout on VPS mirrors `sessiongap` / `trading-hybrid`: **отдельная ди
 
 1. Дождаться **зелёного** workflow на нужном коммите `main`.
 2. На VPS: убедиться, что активен только один canonical compose project для USDRUBF.
-3. Перейти в каталог compose-проекта `alorusdrubf`.
+3. Перейти в каталог compose-проекта `trading-alor-usdrubf`.
 4. Бэкап `.env`:  
    `cp .env ".env.bak.$(date +%Y%m%d-%H%M%S)"`
 5. Обновить теги образов:
@@ -123,7 +123,7 @@ Layout on VPS mirrors `sessiongap` / `trading-hybrid`: **отдельная ди
 7. Применить **только этот** проект:  
    `docker compose pull`  
    `docker compose up -d`  
-   (при необходимости `-p alorusdrubf` и `-f <path/to.compose.yml>` — как заведено на хосте).
+   (при необходимости `-p trading-alor-usdrubf` и `-f <path/to.compose.yml>` — как заведено на хосте).
 8. Не менять каталоги **`sessiongap`** и **`trading-hybrid`** и их `.env`.
 
 ### Проверка после rollout
@@ -135,7 +135,7 @@ Layout on VPS mirrors `sessiongap` / `trading-hybrid`: **отдельная ди
 
 ### Rollback
 
-- восстановить `.env` из бэкапа и повторить `docker compose pull && docker compose up -d` **только** для проекта `alorusdrubf`.
+- восстановить `.env` из бэкапа и повторить `docker compose pull && docker compose up -d` **только** для проекта `trading-alor-usdrubf`.
 
 ## Rollback
 

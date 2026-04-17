@@ -2,11 +2,17 @@
 
 **Правило №1:** все актуальные TOML-конфиги лежат в `./configs/`. Другие `.toml` в репозитории считаются legacy.
 
+**Правило №2:** текущий live baseline по путям конфигов и compose project names зафиксирован в
+[live-control-path-baseline-2026-04-17.md](./live-control-path-baseline-2026-04-17.md).
+Если старый phase-документ говорит иначе, операторский источник истины сначала надо сверять с этим baseline memo.
+
 ## Config file path
-- `./configs/gateway.sessiongap.live.7502MIW.toml` — gateway профиль для `session_gap`.
-- `./configs/gateway.sessiongap.live.7502MIW.action-scoped.toml` — Phase 1 candidate профиль для `session_gap` с `action_scoped` только для `create/delete`.
-- `./configs/gateway.sessiongap.live.7502MIW.action-scoped.phase2.toml` — Phase 2 candidate профиль для `session_gap` с action-scoped `entry` и `flatten` через `IntentClass`.
-- `./configs/gateway.hybrid.live.7502SN6.toml` — gateway профиль для `hybrid`.
+- `./configs/gateway.sessiongap.live.7502MIW.action-scoped.phase2.toml` — current live baseline for `sessiongap`.
+- `./configs/gateway.hybrid.live.7502SN6.action-scoped.toml` — current live baseline for `hybrid`.
+- `./configs/gateway.alor_usdrubf.live.7502T0U.toml` — current live baseline for `alor_usdrubf`.
+- `./configs/gateway.sessiongap.live.7502MIW.toml` — historical / legacy live profile for `sessiongap`.
+- `./configs/gateway.sessiongap.live.7502MIW.action-scoped.toml` — historical Phase 1 candidate for `sessiongap`.
+- `./configs/gateway.hybrid.live.7502SN6.toml` — historical / legacy live profile for `hybrid`.
 - `./configs/gateway.example.toml` — минимальный шаблон для первичной настройки.
 
 ## Run command
