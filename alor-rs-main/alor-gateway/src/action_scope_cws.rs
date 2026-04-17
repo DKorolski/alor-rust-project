@@ -12,6 +12,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use alor_protocol::StopLimitCondition;
+
 use crate::auth::TokenProvider;
 use crate::health::{CwsFrameTraceEntry, HealthState};
 
@@ -137,6 +139,46 @@ impl ActionScopeCwsManager {
                 exchange,
                 stop_order_id,
                 side,
+                check_duplicates,
+                request_id,
+            )
+            .await;
+        self.close_session(&mut session).await;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_stop_limit(
+        &self,
+        portfolio: &str,
+        exchange: &str,
+        symbol: &str,
+        side: &str,
+        qty: f64,
+        trigger_price: f64,
+        price: f64,
+        condition: StopLimitCondition,
+        stop_end_unix_time: i64,
+        comment: Option<&str>,
+        instrument_group: Option<&str>,
+        check_duplicates: bool,
+        request_id: &str,
+    ) -> Result<Value> {
+        let mut session = self.open_session("create:stopLimit").await?;
+        let result = session
+            .send_create_stop_limit(
+                self,
+                portfolio,
+                exchange,
+                symbol,
+                side,
+                qty,
+                trigger_price,
+                price,
+                condition,
+                stop_end_unix_time,
+                comment,
+                instrument_group,
                 check_duplicates,
                 request_id,
             )
@@ -484,6 +526,43 @@ impl ActionScopeSession {
             false,
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_create_stop_limit(
+        &mut self,
+        manager: &ActionScopeCwsManager,
+        portfolio: &str,
+        exchange: &str,
+        symbol: &str,
+        side: &str,
+        qty: f64,
+        trigger_price: f64,
+        price: f64,
+        condition: StopLimitCondition,
+        stop_end_unix_time: i64,
+        comment: Option<&str>,
+        instrument_group: Option<&str>,
+        check_duplicates: bool,
+        request_id: &str,
+    ) -> Result<Value> {
+        let payload = build_create_stop_limit_payload(
+            portfolio,
+            exchange,
+            symbol,
+            side,
+            qty.round() as i64,
+            trigger_price,
+            price,
+            condition,
+            stop_end_unix_time,
+            comment,
+            resolve_stop_limit_instrument_group(instrument_group, &manager.instrument_group),
+            check_duplicates,
+            Some(request_id),
+        );
+        self.send_and_await_response(manager, payload, "create:stopLimit", None, false)
+            .await
     }
 
     async fn send_and_await_response(
@@ -837,6 +916,81 @@ fn build_delete_stop_limit_payload(
     payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
     if let Some(side) = side {
         payload.insert("side".to_string(), Value::String(side.to_string()));
+    }
+    if let Some(request_id) = request_id {
+        payload.insert(
+            "requestId".to_string(),
+            Value::String(request_id.to_string()),
+        );
+    }
+    Value::Object(payload)
+}
+
+fn resolve_stop_limit_instrument_group<'a>(
+    requested: Option<&'a str>,
+    default_group: &'a str,
+) -> Option<&'a str> {
+    requested.or(Some(default_group))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_create_stop_limit_payload(
+    portfolio: &str,
+    exchange: &str,
+    symbol: &str,
+    side: &str,
+    qty: i64,
+    trigger_price: f64,
+    price: f64,
+    condition: StopLimitCondition,
+    stop_end_unix_time: i64,
+    comment: Option<&str>,
+    instrument_group: Option<&str>,
+    check_duplicates: bool,
+    request_id: Option<&str>,
+) -> Value {
+    let guid = request_id
+        .map(ToString::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut instrument = Map::new();
+    instrument.insert("symbol".to_string(), Value::String(symbol.to_string()));
+    instrument.insert("exchange".to_string(), Value::String(exchange.to_string()));
+    if let Some(group) = instrument_group {
+        instrument.insert(
+            "instrumentGroup".to_string(),
+            Value::String(group.to_string()),
+        );
+    }
+
+    let mut payload = Map::new();
+    payload.insert(
+        "opcode".to_string(),
+        Value::String("create:stopLimit".to_string()),
+    );
+    payload.insert("guid".to_string(), Value::String(guid));
+    payload.insert("side".to_string(), Value::String(side.to_string()));
+    payload.insert("quantity".to_string(), Value::from(qty));
+    payload.insert("triggerPrice".to_string(), Value::from(trigger_price));
+    payload.insert("price".to_string(), Value::from(price));
+    payload.insert(
+        "condition".to_string(),
+        Value::String(condition.as_canonical_str().to_string()),
+    );
+    payload.insert(
+        "stopEndUnixTime".to_string(),
+        Value::from(stop_end_unix_time),
+    );
+    payload.insert("instrument".to_string(), Value::Object(instrument));
+    payload.insert(
+        "user".to_string(),
+        json!({
+            "portfolio": portfolio,
+        }),
+    );
+    payload.insert("allowMargin".to_string(), Value::from(CWS_ALLOW_MARGIN));
+    payload.insert("checkDuplicates".to_string(), Value::from(check_duplicates));
+    if let Some(comment) = comment {
+        payload.insert("comment".to_string(), Value::String(comment.to_string()));
     }
     if let Some(request_id) = request_id {
         payload.insert(

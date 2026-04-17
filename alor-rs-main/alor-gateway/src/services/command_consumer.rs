@@ -831,6 +831,11 @@ fn execution_path_for_command(
         (&CommandAction::Place(_), IntentClass::Exit) if config.action_scope_enable_exit => {
             CommandExecutionPath::ActionScoped
         }
+        (&CommandAction::CreateStopLimit(_), IntentClass::ProtectiveRepair)
+            if config.action_scope_enable_create_limit =>
+        {
+            CommandExecutionPath::ActionScoped
+        }
         (&CommandAction::Cancel(_), _) if config.action_scope_enable_delete_limit => {
             CommandExecutionPath::ActionScoped
         }
@@ -1074,23 +1079,45 @@ async fn execute_command(
             let qty = normalize_qty(payload.qty, volume_step);
             let trigger_price = normalize_step_round(payload.trigger_price, price_step);
             let price = normalize_step_round(payload.price, price_step);
-            let response = cws
-                .create_stop_limit(
-                    &command.portfolio,
-                    &command.exchange,
-                    &command.symbol,
-                    side_str(payload.side),
-                    qty,
-                    trigger_price,
-                    price,
-                    payload.condition,
-                    payload.stop_end_unix_time,
-                    payload.comment.as_deref(),
-                    payload.instrument_group.as_deref(),
-                    payload.check_duplicates.unwrap_or(true),
-                    Some(request_id_str.as_str()),
-                )
-                .await?;
+            let response = match execution_path {
+                CommandExecutionPath::LegacyLongLived => {
+                    cws.create_stop_limit(
+                        &command.portfolio,
+                        &command.exchange,
+                        &command.symbol,
+                        side_str(payload.side),
+                        qty,
+                        trigger_price,
+                        price,
+                        payload.condition,
+                        payload.stop_end_unix_time,
+                        payload.comment.as_deref(),
+                        payload.instrument_group.as_deref(),
+                        payload.check_duplicates.unwrap_or(true),
+                        Some(request_id_str.as_str()),
+                    )
+                    .await?
+                }
+                CommandExecutionPath::ActionScoped => {
+                    action_scope_cws
+                        .create_stop_limit(
+                            &command.portfolio,
+                            &command.exchange,
+                            &command.symbol,
+                            side_str(payload.side),
+                            qty,
+                            trigger_price,
+                            price,
+                            payload.condition,
+                            payload.stop_end_unix_time,
+                            payload.comment.as_deref(),
+                            payload.instrument_group.as_deref(),
+                            payload.check_duplicates.unwrap_or(true),
+                            request_id_str.as_str(),
+                        )
+                        .await?
+                }
+            };
             Ok(response)
         }
         CommandAction::DeleteStopLimit(payload) => {
@@ -1588,6 +1615,30 @@ mod tests {
             CommandExecutionPath::ActionScoped
         );
 
+        let mut create_stop = sample_command(chrono::Utc::now().timestamp(), None);
+        create_stop.intent_class = Some(IntentClass::ProtectiveRepair);
+        create_stop.action = CommandAction::CreateStopLimit(alor_protocol::CreateStopLimitOrder {
+            side: Side::Sell,
+            qty: 1.0,
+            trigger_price: 79.5,
+            price: 79.0,
+            condition: alor_protocol::StopLimitCondition::LessOrEqual,
+            stop_end_unix_time: chrono::Utc::now().timestamp() + 60,
+            comment: None,
+            instrument_group: None,
+            check_duplicates: None,
+        });
+        assert_eq!(
+            execution_path_for_command(&create_stop, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
+        create_stop.intent_class = Some(IntentClass::Entry);
+        assert_eq!(
+            execution_path_for_command(&create_stop, &config),
+            CommandExecutionPath::LegacyLongLived
+        );
+
         config.action_scope_enable_delete_limit = false;
         assert_eq!(
             execution_path_for_command(&cancel, &config),
@@ -1595,6 +1646,18 @@ mod tests {
         );
         assert_eq!(
             execution_path_for_command(&delete_stop, &config),
+            CommandExecutionPath::LegacyLongLived
+        );
+
+        create_stop.intent_class = Some(IntentClass::ProtectiveRepair);
+        assert_eq!(
+            execution_path_for_command(&create_stop, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
+        config.action_scope_enable_create_limit = false;
+        assert_eq!(
+            execution_path_for_command(&create_stop, &config),
             CommandExecutionPath::LegacyLongLived
         );
     }
