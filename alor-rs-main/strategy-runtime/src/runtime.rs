@@ -1511,6 +1511,7 @@ impl StrategyRuntime {
                     error_code = ?ack.error_code,
                     error_msg = ?ack.error_msg,
                     cws_http_code = ?ack.cws_http_code,
+                    cws_message = ?ack.cws_message,
                     cws_request_guid = ?ack.cws_request_guid,
                     "command rejected"
                 );

@@ -712,6 +712,7 @@ pub async fn run_command_consumer(
                         let cws_guid = transport_failure.map(|failure| failure.cws_guid().to_string());
                         let disconnect_kind = transport_failure
                             .map(|failure| failure.transport().disconnect_kind_str().to_string());
+                        let failure_class = classify_transport_error(&error);
                         let failure_order_id = transport_failure
                             .and_then(|failure| failure.order_id().map(ToString::to_string));
                         if matches!(command.action, CommandAction::Place(_)) {
@@ -724,6 +725,7 @@ pub async fn run_command_consumer(
                                 broker_order_id = Option::<i64>::None,
                                 error_code = "cws_error",
                                 error_msg = %format_transport_error_message(&error),
+                                failure_class,
                                 disconnect_kind = ?disconnect_kind,
                                 "cws limit ack received"
                             );
@@ -741,6 +743,7 @@ pub async fn run_command_consumer(
                             target_order_id = ?command_target_order_id(&command.action),
                             failure_order_id = ?failure_order_id,
                             error_code = ?ack.error_code,
+                            cws_message = ?ack.cws_message,
                             cws_http_code = ?ack.cws_http_code,
                             cws_request_guid = ?ack.cws_request_guid,
                             sent_after_recycle,
@@ -1330,7 +1333,31 @@ fn format_transport_error_message(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+fn classify_transport_error(error: &anyhow::Error) -> &'static str {
+    if let Some(failure) = error.downcast_ref::<crate::cws_client::CwsRequestFailure>() {
+        return failure.transport().disconnect_kind_str();
+    }
+    let text = error.to_string().to_ascii_lowercase();
+    if text.contains("authorize timeout") {
+        "authorize_timeout"
+    } else if text.contains("response timeout")
+        || text.contains("timeout waiting for guid")
+        || text.contains("read timeout while waiting for guid")
+    {
+        "response_timeout"
+    } else if text.contains("open timeout") {
+        "open_timeout"
+    } else if text.contains("close timeout") {
+        "close_timeout"
+    } else if text.contains("timeout") {
+        "timeout"
+    } else {
+        "transport_error"
+    }
+}
+
 fn build_transport_error_ack(request_id: uuid::Uuid, error: &anyhow::Error) -> CommandAck {
+    let failure_class = classify_transport_error(error);
     if let Some(failure) = error.downcast_ref::<crate::cws_client::CwsRequestFailure>() {
         return CommandAck {
             request_id,
@@ -1340,12 +1367,23 @@ fn build_transport_error_ack(request_id: uuid::Uuid, error: &anyhow::Error) -> C
             error_code: Some("cws_error".to_string()),
             error_msg: Some(failure.summary()),
             cws_http_code: None,
-            cws_message: None,
+            cws_message: Some(failure_class.to_string()),
             cws_request_guid: Some(failure.cws_guid().to_string()),
             processed_ts_utc: chrono::Utc::now().timestamp(),
         };
     }
-    CommandAck::error(request_id, "cws_error", error.to_string())
+    CommandAck {
+        request_id,
+        status: alor_protocol::AckStatus::Error,
+        broker_order_id: None,
+        broker_order_id_str: None,
+        error_code: Some("cws_error".to_string()),
+        error_msg: Some(error.to_string()),
+        cws_http_code: None,
+        cws_message: Some(failure_class.to_string()),
+        cws_request_guid: None,
+        processed_ts_utc: chrono::Utc::now().timestamp(),
+    }
 }
 
 fn side_str(side: Side) -> &'static str {
@@ -1518,6 +1556,10 @@ mod tests {
             ack.error_msg.as_deref(),
             Some("cws disconnected: protocol_reset_without_close_handshake")
         );
+        assert_eq!(
+            ack.cws_message.as_deref(),
+            Some("protocol_reset_without_close_handshake")
+        );
         assert_eq!(ack.cws_request_guid.as_deref(), Some("guid-1"));
     }
 
@@ -1525,6 +1567,19 @@ mod tests {
     fn format_transport_error_message_falls_back_to_plain_error() {
         let error = anyhow::anyhow!("plain error");
         assert_eq!(format_transport_error_message(&error), "plain error");
+    }
+
+    #[test]
+    fn build_transport_error_ack_classifies_plain_timeout() {
+        let request_id = uuid::Uuid::new_v4();
+        let error = anyhow::anyhow!("cws response timeout");
+
+        let ack = build_transport_error_ack(request_id, &error);
+        assert_eq!(ack.status, alor_protocol::AckStatus::Error);
+        assert_eq!(ack.error_code.as_deref(), Some("cws_error"));
+        assert_eq!(ack.error_msg.as_deref(), Some("cws response timeout"));
+        assert_eq!(ack.cws_message.as_deref(), Some("response_timeout"));
+        assert_eq!(ack.cws_request_guid, None);
     }
 
     fn sample_command(created_ts_utc: i64, ttl_ms: Option<u64>) -> OrderCommand {
