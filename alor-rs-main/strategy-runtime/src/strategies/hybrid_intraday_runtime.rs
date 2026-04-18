@@ -374,6 +374,36 @@ impl HybridIntradayRuntimeStrategy {
         }
     }
 
+    fn effective_created_ts_utc(&self, ctx: &StrategyCtx, fallback_ts_utc: i64) -> i64 {
+        ctx.event_ts_utc().max(fallback_ts_utc)
+    }
+
+    fn log_request_id_skew_if_pending(
+        &self,
+        kind: &'static str,
+        expected_request_id: Option<Uuid>,
+        pending_created_ts_utc: Option<i64>,
+        ack: &CommandAck,
+    ) {
+        let Some(expected_request_id) = expected_request_id else {
+            return;
+        };
+        if expected_request_id == ack.request_id {
+            return;
+        }
+        info!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "pending_request_id_skew_detected",
+            kind,
+            strategy_pending_request_id = %expected_request_id,
+            ack_request_id = %ack.request_id,
+            pending_created_ts_utc,
+            ack_processed_ts_utc = ack.processed_ts_utc,
+            error_code = ?ack.error_code,
+            error_msg = ?ack.error_msg,
+        );
+    }
+
     fn build_live_entry_exit_intent(
         &self,
         ctx: &StrategyCtx,
@@ -2704,6 +2734,33 @@ mod tests {
     }
 
     #[test]
+    fn pending_exit_request_id_uses_effective_created_ts() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let mut ctx = test_ctx(Some(1.0));
+        ctx.event_ts_utc = ts_local(2026, 4, 2, 14, 4, 55);
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+
+        let created_ts_utc =
+            strategy.effective_created_ts_utc(&ctx, ts_local(2026, 4, 2, 14, 4, 0));
+        let _ = strategy.map_action_to_intents(
+            &ctx,
+            created_ts_utc,
+            true,
+            true,
+            Action::SubmitExit {
+                owner: Owner::MeanReversion,
+                reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+            },
+        );
+
+        let expected_request_id = strategy.live_request_id(&ctx, ctx.event_ts_utc, OrderSide::Sell);
+        assert_eq!(strategy.pending_exit_request_id, Some(expected_request_id));
+        assert_eq!(strategy.pending_exit_created_ts_utc, Some(ctx.event_ts_utc));
+    }
+
+    #[test]
     fn deferred_exit_reissues_after_live_ready_returns_until_flat() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let ctx = test_ctx(Some(1.0));
@@ -3270,6 +3327,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.clear_stale_pending_tail(bar.close_time_utc, ctx.position_qty.unwrap_or(0.0));
         let can_emit = self.can_emit_now(ctx, bar.origin == DataOrigin::Live);
         let can_execute = self.can_execute_now(ctx, bar.origin == DataOrigin::Live);
+        let created_ts_utc = self.effective_created_ts_utc(ctx, bar.close_time_utc);
         let reference_price = self.live_reference_price();
         let bar_input =
             self.bar_input(dt_local, bar, close_prev, day_range_prev, has_open_position);
@@ -3277,7 +3335,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.orchestrator.warm_bar(bar_input);
             if let Some(intents) = self.maybe_reissue_deferred_exit(
                 ctx,
-                bar.close_time_utc,
+                created_ts_utc,
                 can_emit,
                 can_execute,
                 reference_price,
@@ -3290,7 +3348,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.orchestrator.warm_bar(bar_input);
             if let Some(intents) = self.maybe_reissue_deferred_entry(
                 ctx,
-                bar.close_time_utc,
+                created_ts_utc,
                 dt_local,
                 can_emit,
                 can_execute,
@@ -3350,15 +3408,27 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 );
             }
         }
-        let mut intents = self.maybe_emit_repair_intents(ctx, bar.close_time_utc);
+        let mut intents = self.maybe_emit_repair_intents(ctx, created_ts_utc);
         intents.extend(actions.into_iter().flat_map(|action| {
-            self.map_action_to_intents(ctx, bar.close_time_utc, can_emit, can_execute, action)
+            self.map_action_to_intents(ctx, created_ts_utc, can_emit, can_execute, action)
         }));
         self.sync_state();
         intents
     }
 
     fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
+        self.log_request_id_skew_if_pending(
+            "entry",
+            self.pending_entry_request_id,
+            self.pending_entry_created_ts_utc,
+            ack,
+        );
+        self.log_request_id_skew_if_pending(
+            "exit",
+            self.pending_exit_request_id,
+            self.pending_exit_created_ts_utc,
+            ack,
+        );
         if Some(ack.request_id) == self.pending_entry_request_id {
             if matches!(
                 ack.status,

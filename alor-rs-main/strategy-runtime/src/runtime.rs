@@ -3075,6 +3075,103 @@ impl StrategyRuntime {
         true
     }
 
+    fn current_market_state(
+        &self,
+        created_ts_utc: i64,
+    ) -> Option<(MarketState, String)> {
+        let periods = self.config.strategy.trading_periods.clone()?;
+        let scheduler = Scheduler::new_with_fallback_offset_hours(
+            periods,
+            self.config.strategy.timezone_offset_hours,
+        );
+        let now_local = scheduler
+            .local_datetime_utc(created_ts_utc)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "unknown".to_string());
+        Some((scheduler.market_state_utc(created_ts_utc), now_local))
+    }
+
+    async fn maybe_defer_exit_before_emit(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent: Intent,
+        intent_class: alor_protocol::IntentClass,
+    ) -> Result<bool> {
+        if intent_class != alor_protocol::IntentClass::Exit {
+            return Ok(false);
+        }
+        let Some((market_state, now_local)) = self.current_market_state(created_ts_utc) else {
+            return Ok(false);
+        };
+        if market_state == MarketState::Open {
+            return Ok(false);
+        }
+
+        let action = self.intent_action_name(&intent);
+        let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+        info!(
+            action,
+            class = ?intent_class,
+            state = ?market_state,
+            created_ts_utc,
+            now_local,
+            request_id = %command.request_id,
+            "intent_deferred_by_trading_window_pre_emit"
+        );
+        self.audit_event(
+            "intent_deferred",
+            json!({
+                "reason": "trading_window_pre_emit",
+                "action": action,
+                "class": format!("{intent_class:?}"),
+                "state": format!("{market_state:?}"),
+                "request_id": command.request_id.to_string(),
+                "created_ts_utc": created_ts_utc,
+                "synthetic_ack": true,
+            }),
+        );
+
+        let mut ack = alor_protocol::CommandAck::rejected(
+            command.request_id,
+            "trading_window_closed",
+            "validation failed",
+        );
+        ack.processed_ts_utc = created_ts_utc;
+
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ack_ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts_utc);
+        let (follow_up_intents, _previous_strategy_state) = self.invoke_strategy_callback(
+            &ack_ctx,
+            "on_ack_pre_emit_window_closed",
+            |strategy, strategy_ctx| strategy.on_ack(strategy_ctx, &ack),
+        );
+        let intents_count = follow_up_intents.len();
+        if !follow_up_intents.is_empty() {
+            warn!(
+                request_id = %ack.request_id,
+                intents_count,
+                "synthetic_pre_emit_ack_generated_unexpected_follow_up_intents"
+            );
+        }
+        self.audit_event(
+            "order_acknowledged_by_strategy",
+            json!({
+                "callback": "on_ack_pre_emit_window_closed",
+                "event_ts_utc": created_ts_utc,
+                "request_id": ack.request_id.to_string(),
+                "intents_count": intents_count,
+                "synthetic_ack": true,
+            }),
+        );
+        self.persist_state(None).await?;
+        Ok(true)
+    }
+
     fn restore_strategy_state_after_dropped_intents(
         &mut self,
         previous_state: StrategyState,
@@ -3181,6 +3278,12 @@ impl StrategyRuntime {
                     }
                     for (intent, intent_class) in passthrough {
                         let action = self.intent_action_name(&intent);
+                        if self
+                            .maybe_defer_exit_before_emit(ctx, created_ts_utc, intent.clone(), intent_class)
+                            .await?
+                        {
+                            continue;
+                        }
                         let command =
                             self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
                         info!(
@@ -3207,6 +3310,12 @@ impl StrategyRuntime {
                 }
                 for (intent, intent_class) in accepted {
                     let action = self.intent_action_name(&intent);
+                    if self
+                        .maybe_defer_exit_before_emit(ctx, created_ts_utc, intent.clone(), intent_class)
+                        .await?
+                    {
+                        continue;
+                    }
                     let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
                     info!(
                         action,
@@ -3973,6 +4082,45 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct WindowClosedExitSpyStrategy {
+        state: StrategyState,
+    }
+
+    impl Strategy for WindowClosedExitSpyStrategy {
+        fn on_bar(&mut self, _ctx: &StrategyCtx, _bar: &BarEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent> {
+            self.state = StrategyState::Blocked {
+                reason: format!(
+                    "ack:{}:{}",
+                    ack.request_id,
+                    ack.error_code.as_deref().unwrap_or("none")
+                ),
+                last_bar_ts: ack.processed_ts_utc,
+            };
+            Vec::new()
+        }
+
+        fn on_order(&mut self, _ctx: &StrategyCtx, _ord: &OrderEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_position(&mut self, _ctx: &StrategyCtx, _pos: &PositionEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn state(&self) -> &StrategyState {
+            &self.state
+        }
+
+        fn set_state(&mut self, state: StrategyState) {
+            self.state = state;
+        }
+    }
+
     #[test]
     fn restore_pending_requests_uses_strategy_hook() {
         let mut runtime = test_runtime(TradeMode::Live);
@@ -4364,6 +4512,93 @@ mod tests {
             &ctx,
             created_ts_utc,
             alor_protocol::IntentClass::Exit
+        ));
+    }
+
+    #[test]
+    fn closed_window_exit_is_deferred_before_emit() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.strategy = Box::new(WindowClosedExitSpyStrategy::default());
+        runtime.config.strategy.max_silence_bars_sec = 0;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+        let last_bar_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        runtime
+            .state
+            .last_processed_bar_ts
+            .insert(runtime.config.strategy.symbol.clone(), last_bar_ts);
+        runtime.state.positions.insert(
+            runtime.config.strategy.symbol.clone(),
+            PositionEvent {
+                symbol: runtime.config.strategy.symbol.clone(),
+                qty: 1.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: last_bar_ts,
+            },
+        );
+        runtime.live_guard.health = Some(HealthEvent {
+            gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
+            readiness: true,
+            ws_connected: true,
+            cws_authorized: true,
+            scheduler_state: Some("Break2".to_string()),
+            last_event_ts: Utc::now().timestamp(),
+        });
+
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(15, 55, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let ctx = runtime.strategy_ctx_with_last_bar_and_event_ts(Some(last_bar_ts), created_ts_utc);
+        let intent = Intent::Place {
+            price: 100.5,
+            qty: 1.0,
+            side: alor_protocol::Side::Sell,
+            comment: None,
+        }
+        .with_class(alor_protocol::IntentClass::Exit);
+        let expected_request_id = runtime
+            .intent_to_command(
+                &ctx,
+                created_ts_utc,
+                intent.clone(),
+                alor_protocol::IntentClass::Exit,
+            )
+            .request_id;
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.apply_intents(
+                &ctx,
+                created_ts_utc,
+                vec![intent],
+                runtime.state.strategy_state.clone(),
+            ))
+            .unwrap();
+
+        assert!(!runtime.our_request_ids.contains(&expected_request_id));
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::Blocked { reason, last_bar_ts: state_last_bar_ts }
+                if reason == &format!("ack:{expected_request_id}:trading_window_closed")
+                    && *state_last_bar_ts == created_ts_utc
         ));
     }
 
