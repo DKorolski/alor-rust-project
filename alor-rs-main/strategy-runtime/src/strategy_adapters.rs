@@ -44,6 +44,7 @@ impl SessionGapStandaloneAdapter {
             entry_fill_timeout_ms: settings.entry_fill_timeout_ms,
             exit_ack_timeout_ms: settings.exit_ack_timeout_ms,
             exit_fill_timeout_ms: settings.exit_fill_timeout_ms,
+            signal_minute: settings.signal_minute,
             k_long: settings.k_long,
             k_short: settings.k_short,
             wait_hours: settings.wait_hours,

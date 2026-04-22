@@ -12,6 +12,7 @@ use crate::TradeMode;
 pub struct SessionGapStandaloneConfig {
     pub symbol: String,
     pub timezone_offset_hours: i32,
+    pub signal_minute: u32,
     pub k_long: f64,
     pub k_short: f64,
     pub wait_hours: i64,
@@ -42,6 +43,7 @@ impl Default for SessionGapStandaloneConfig {
         Self {
             symbol: "USDRUBF".to_string(),
             timezone_offset_hours: 3,
+            signal_minute: 59,
             k_long: 0.5,
             k_short: 0.46,
             wait_hours: 3,
@@ -514,7 +516,7 @@ impl SessionGapStandaloneStrategy {
         ) {
             (Some(close), Some(range), Some(prev_close)) => (close, range, prev_close),
             _ => {
-                if bar_dt.minute() == 59
+                if bar_dt.minute() == self.config.signal_minute
                     && (bar_dt - session_start_dt).num_seconds() >= self.config.wait_hours * 3600
                 {
                     warn!(
@@ -533,7 +535,7 @@ impl SessionGapStandaloneStrategy {
             }
         };
 
-        if bar_dt.minute() == 59
+        if bar_dt.minute() == self.config.signal_minute
             && (bar_dt - session_start_dt).num_seconds() >= self.config.wait_hours * 3600
         {
             let price = bar.close;

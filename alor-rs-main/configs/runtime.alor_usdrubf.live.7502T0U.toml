@@ -22,7 +22,7 @@ listen_addr = "127.0.0.1:8091"
 expose_metrics = false
 
 [streams]
-bars = "md.bars.7502T0U.1m"
+bars = "md.bars.7502T0U.10m"
 orders = "broker.orders.7502T0U"
 trades = "broker.trades.7502T0U"
 positions = "broker.positions.7502T0U"

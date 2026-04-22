@@ -166,6 +166,7 @@ pub struct StrategySources {
     pub max_silence_bars_sec: ConfigSource,
     pub session_gap_k_long: ConfigSource,
     pub session_gap_k_short: ConfigSource,
+    pub session_gap_signal_minute: ConfigSource,
     pub session_gap_wait_hours: ConfigSource,
     pub session_gap_k_tp_long: ConfigSource,
     pub session_gap_k_sl_long: ConfigSource,
@@ -324,6 +325,7 @@ impl Default for StrategySources {
             max_silence_bars_sec: ConfigSource::Default,
             session_gap_k_long: ConfigSource::Default,
             session_gap_k_short: ConfigSource::Default,
+            session_gap_signal_minute: ConfigSource::Default,
             session_gap_wait_hours: ConfigSource::Default,
             session_gap_k_tp_long: ConfigSource::Default,
             session_gap_k_sl_long: ConfigSource::Default,
@@ -597,6 +599,7 @@ struct SessionGapConfigFile {
     entry_fill_timeout_ms: Option<u64>,
     exit_ack_timeout_ms: Option<u64>,
     exit_fill_timeout_ms: Option<u64>,
+    signal_minute: Option<u32>,
     k_long: Option<f64>,
     k_short: Option<f64>,
     wait_hours: Option<i64>,
@@ -1057,6 +1060,10 @@ fn apply_session_gap_config_file(
         if let Some(value) = session_gap_file.k_short {
             settings.k_short = value;
             sources.session_gap_k_short = source;
+        }
+        if let Some(value) = session_gap_file.signal_minute {
+            settings.signal_minute = value;
+            sources.session_gap_signal_minute = source;
         }
         if let Some(value) = session_gap_file.wait_hours {
             settings.wait_hours = value;

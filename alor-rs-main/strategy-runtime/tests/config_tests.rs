@@ -607,6 +607,7 @@ fn loads_session_gap_settings_from_nested_strategy_section() {
 strategy_kind = "session_gap_standalone"
 
 [strategy.session_gap]
+signal_minute = 50
 k_long = 0.77
 k_short = 0.55
 wait_hours = 4
@@ -634,6 +635,7 @@ work_weekends = true
         .session_gap_standalone()
         .expect("session gap settings");
 
+    assert_eq!(settings.signal_minute, 50);
     assert_eq!(settings.k_long, 0.77);
     assert_eq!(settings.k_short, 0.55);
     assert_eq!(settings.wait_hours, 4);
@@ -660,6 +662,7 @@ fn session_gap_defaults_apply_when_section_missing() {
         "STRATEGY_KIND",
         "SESSION_GAP_K_LONG",
         "SESSION_GAP_K_SHORT",
+        "SESSION_GAP_SIGNAL_MINUTE",
         "SESSION_GAP_WAIT_HOURS",
         "SESSION_GAP_K_TP_LONG",
         "SESSION_GAP_K_SL_LONG",
@@ -691,6 +694,7 @@ strategy_kind = "session_gap_standalone"
         .session_gap_standalone()
         .expect("session gap settings");
 
+    assert_eq!(settings.signal_minute, 59);
     assert_eq!(settings.k_long, 0.5);
     assert_eq!(settings.wait_hours, 2);
     assert_eq!(settings.k_tp_long, 0.28);
@@ -706,6 +710,7 @@ fn session_gap_partial_section_uses_defaults_for_missing_fields() {
         "STRATEGY_KIND",
         "SESSION_GAP_K_LONG",
         "SESSION_GAP_K_SHORT",
+        "SESSION_GAP_SIGNAL_MINUTE",
         "SESSION_GAP_WAIT_HOURS",
         "SESSION_GAP_K_TP_LONG",
         "SESSION_GAP_K_SL_LONG",
@@ -729,6 +734,7 @@ fn session_gap_partial_section_uses_defaults_for_missing_fields() {
 strategy_kind = "session_gap_standalone"
 
 [strategy.session_gap]
+signal_minute = 50
 k_long = 0.77
 close_hour = 22
 work_weekends = true
@@ -742,6 +748,7 @@ work_weekends = true
         .session_gap_standalone()
         .expect("session gap settings");
 
+    assert_eq!(settings.signal_minute, 50);
     assert_eq!(settings.k_long, 0.77);
     assert_eq!(settings.close_hour, 22);
     assert!(settings.work_weekends);
