@@ -78,6 +78,8 @@ Required before runtime promotion:
   `hybrid_replay --assert-gap-flatten`; full candidate parity still pending);
 - reproduce the primary candidate against package reference files;
 - write a discrepancy note for any timestamp/fill-price differences.
+  `docs/imoexf-hybrid-bo-carry-discrepancy-2026-04-26.md` already records the
+  known BO cross-day reference carry class.
 
 Follow-up after main work:
 
