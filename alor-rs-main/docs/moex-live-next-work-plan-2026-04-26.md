@@ -141,7 +141,9 @@ Required before runtime promotion:
   first from-zero seed import. Then switch the same validation stack to
   `configs/runtime.hybrid.live.7502SN6.riskgate-shadow.toml` for steady
   `normal_append` shadow validation. The production action-scoped baseline
-  config remains unchanged;
+  config remains unchanged. The seed CSV is expected at
+  `/configs/riskgate_high180_lb120_seed_2026-04-26.csv` on VPS because the
+  runtime image does not carry `docs/` artifacts;
 - decide explicitly whether Rust close-bar/no-overnight `bo_gap_flatten` is the
   accepted runtime contract. If accepted and final report is clean, IMOEXF can
   move to extended micro soak at size `1` with explicit MR/BO attribution

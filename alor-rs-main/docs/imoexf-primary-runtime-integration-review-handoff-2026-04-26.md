@@ -553,6 +553,9 @@ Use this checklist only after review accepts the current conditional soak scope.
 6. Start with `risk_gate_mode = bootstrap_from_seed` and the checked-in
    `riskgate_high180_lb120_seed_2026-04-26.csv`.
    Use `configs/runtime.hybrid.live.7502SN6.riskgate-bootstrap.toml`.
+   On VPS the seed CSV must be copied into the mounted config directory as
+   `/configs/riskgate_high180_lb120_seed_2026-04-26.csv`; it is intentionally
+   not read from `docs/` inside the runtime image.
 7. Verify startup logs contain `risk_gate_startup_bootstrap` with seed import
    or existing-ledger decision, `state_refreshed = true`, and no identity
    mismatch.

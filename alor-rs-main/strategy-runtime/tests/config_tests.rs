@@ -564,7 +564,7 @@ fn loads_live_imoexf_riskgate_shadow_configs() {
         assert_eq!(hybrid.mr_gate_policy, "shadow_pnl_lb120_positive");
         assert_eq!(
             hybrid.risk_gate_seed_file.as_deref(),
-            Some("docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv")
+            Some("/configs/riskgate_high180_lb120_seed_2026-04-26.csv")
         );
         assert_eq!(
             hybrid.risk_gate_ledger_key.as_deref(),
