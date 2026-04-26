@@ -89,6 +89,7 @@ struct Cli {
     strict: bool,
     allow_non_strict: bool,
     verify_checksums: bool,
+    assert_gap_flatten: bool,
     weekend_policy: WeekendPolicy,
     cash: f64,
     size_pct: f64,
@@ -105,6 +106,7 @@ impl Default for Cli {
             strict: false,
             allow_non_strict: false,
             verify_checksums: false,
+            assert_gap_flatten: false,
             weekend_policy: WeekendPolicy::BaselineSkip,
             cash: DEFAULT_CASH,
             size_pct: DEFAULT_SIZE_PCT,
@@ -157,6 +159,16 @@ struct TradeRow {
     pnl_comm: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct GapFlattenViolation {
+    owner: String,
+    reason: String,
+    submitted_ts: String,
+    fill_ts: String,
+    submitted_weekday: String,
+    fill_weekday: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SummaryRow {
     split: String,
@@ -188,6 +200,9 @@ struct ParityReport {
     actual_actions: usize,
     expected_trades: usize,
     actual_trades: usize,
+    assert_gap_flatten: bool,
+    gap_flatten_violations: usize,
+    first_gap_flatten_violation: Option<GapFlattenViolation>,
     first_divergence: Option<FirstDivergence>,
     verdict: String,
 }
@@ -236,6 +251,7 @@ struct EngineState {
     equity_curve: Vec<(NaiveDateTime, f64)>,
     action_rows: Vec<ActionRow>,
     trade_rows: Vec<TradeRow>,
+    gap_flatten_violations: Vec<GapFlattenViolation>,
     pending_entry: Option<PendingEntry>,
     pending_exit: Option<PendingExit>,
     position: Option<Position>,
@@ -250,6 +266,7 @@ impl EngineState {
             equity_curve: Vec::new(),
             action_rows: Vec::new(),
             trade_rows: Vec::new(),
+            gap_flatten_violations: Vec::new(),
             pending_entry: None,
             pending_exit: None,
             position: None,
@@ -299,10 +316,14 @@ fn main() -> Result<()> {
             actual_actions: state.action_rows.len(),
             expected_trades: 0,
             actual_trades: state.trade_rows.len(),
+            assert_gap_flatten: false,
+            gap_flatten_violations: 0,
+            first_gap_flatten_violation: None,
             first_divergence: None,
             verdict: "SKIPPED".to_string(),
         }
     };
+    let parity = attach_gap_flatten_report(&cli, &state, parity);
     write_parity_report(&cli, &parity)?;
 
     match parity.verdict.as_str() {
@@ -349,6 +370,7 @@ fn parse_cli() -> Result<Cli> {
             "--strict" => cli.strict = true,
             "--allow-non-strict" => cli.allow_non_strict = true,
             "--verify-checksums" => cli.verify_checksums = true,
+            "--assert-gap-flatten" => cli.assert_gap_flatten = true,
             _ => bail!("unknown arg: {arg}"),
         }
     }
@@ -633,11 +655,35 @@ fn process_pending_exit(
         state.pending_exit = None;
         return;
     };
+    if let Some(violation) = gap_flatten_violation(&exit, bar) {
+        state.gap_flatten_violations.push(violation);
+    }
     close_trade(bar.ts, bar.open, &position, &exit.reason, state);
     state.pending_exit = None;
     state.position = None;
     state.bracket = None;
     orchestrator.on_order_filled("exit", exit.owner, Some(position.side));
+}
+
+fn gap_flatten_violation(exit: &PendingExit, bar: &PreparedBar) -> Option<GapFlattenViolation> {
+    if exit.owner != Owner::IntradayBreakout || exit.reason != "breakout_eod_exit" {
+        return None;
+    }
+    if exit.submitted_ts.date() == bar.ts.date() && !is_weekend_ts(bar.ts) {
+        return None;
+    }
+    Some(GapFlattenViolation {
+        owner: exit.owner.as_str().to_string(),
+        reason: exit.reason.clone(),
+        submitted_ts: format_ts(exit.submitted_ts),
+        fill_ts: format_ts(bar.ts),
+        submitted_weekday: format!("{:?}", exit.submitted_ts.weekday()),
+        fill_weekday: format!("{:?}", bar.ts.weekday()),
+    })
+}
+
+fn is_weekend_ts(ts: NaiveDateTime) -> bool {
+    matches!(ts.weekday(), Weekday::Sat | Weekday::Sun)
 }
 
 fn process_active_bracket(
@@ -917,9 +963,26 @@ fn compare_with_expected(
         actual_actions: actions.len(),
         expected_trades: expected_trades.len(),
         actual_trades: trades.len(),
+        assert_gap_flatten: false,
+        gap_flatten_violations: 0,
+        first_gap_flatten_violation: None,
         first_divergence,
         verdict: verdict.to_string(),
     })
+}
+
+fn attach_gap_flatten_report(
+    cli: &Cli,
+    state: &EngineState,
+    mut report: ParityReport,
+) -> ParityReport {
+    report.assert_gap_flatten = cli.assert_gap_flatten;
+    report.gap_flatten_violations = state.gap_flatten_violations.len();
+    report.first_gap_flatten_violation = state.gap_flatten_violations.first().cloned();
+    if cli.assert_gap_flatten && !state.gap_flatten_violations.is_empty() {
+        report.verdict = "FAIL".to_string();
+    }
+    report
 }
 
 fn compare_actions(

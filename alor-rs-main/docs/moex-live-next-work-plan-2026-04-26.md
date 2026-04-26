@@ -59,7 +59,7 @@ Validation gate:
 
 ## Workstream C: IMOEXF Hybrid MR + BO
 
-Status: `PENDING_BO_GAP_FLATTEN_PARITY_CHECK`.
+Status: `GAP_FLATTEN_ASSERT_ADDED / REPLAY_PARITY_IN_PROGRESS`.
 
 The model is not considered broken. The remaining required blocker is
 replay/runtime parity around Backtrader next-bar fill semantics versus the Rust
@@ -73,7 +73,8 @@ Required before runtime promotion:
 - implement the regular-weekday session policy;
 - ensure Saturday/Sunday bars are audit-visible but non-tradable;
 - ensure Monday anchors use Friday or the latest earlier regular weekday;
-- add a BO gap-flatten assert for `force_exit_time = 23:30`;
+- add a BO gap-flatten assert for `force_exit_time = 23:30` (implemented in
+  `hybrid_replay --assert-gap-flatten`; full candidate parity still pending);
 - reproduce the primary candidate against package reference files;
 - write a discrepancy note for any timestamp/fill-price differences.
 
