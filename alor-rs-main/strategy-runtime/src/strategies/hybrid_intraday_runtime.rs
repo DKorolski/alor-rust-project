@@ -11,13 +11,16 @@ use uuid::Uuid;
 use crate::state::StrategyState;
 use crate::strategies::hybrid_intraday::{
     Action, BreakoutEodMode, EntrySignal, EntryStyle, High180MrConfig, High180MrEngine,
-    HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig, IntradayBreakoutEngine,
-    MeanReversionConfig, MeanReversionEngine, Owner, ReasonCode, Side,
+    High180Open, HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig,
+    IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine, Owner, ReasonCode, Side,
 };
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 use crate::strategy_host::{
-    BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, StopOrderEvent, Strategy, StrategyCtx,
+    BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, RiskGateSessionFinalization,
+    StopOrderEvent, Strategy, StrategyCtx,
 };
+
+const RISK_GATE_MAKER_COST_POINTS: f64 = 0.1;
 
 #[derive(Debug, Clone)]
 pub struct HybridIntradayRuntimeConfig {
@@ -95,6 +98,13 @@ struct PendingExit {
     reason: crate::strategies::hybrid_intraday::ReasonCode,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ShadowHigh180Position {
+    side: Side,
+    entry_ts_utc: i64,
+    entry_price: f64,
+}
+
 #[derive(Debug, Clone)]
 struct DeferredEntry {
     signal: crate::strategies::hybrid_intraday::EntrySignal,
@@ -134,6 +144,7 @@ pub struct HybridIntradayRuntimeStrategy {
     config: HybridIntradayRuntimeConfig,
     orchestrator: HybridOrchestrator,
     high180_mr: High180MrEngine,
+    risk_gate_shadow_mr: High180MrEngine,
     state: StrategyState,
     last_processed_bar_ts: Option<i64>,
     last_position_qty: f64,
@@ -177,6 +188,12 @@ pub struct HybridIntradayRuntimeStrategy {
     working_stop_orders: HashSet<String>,
     startup_live_replay_boundary_ts_utc: Option<i64>,
     startup_replay_suppressed_bars: u32,
+    risk_gate_shadow_session_date: Option<NaiveDate>,
+    risk_gate_shadow_pnl_points: f64,
+    risk_gate_shadow_trade_count: u32,
+    risk_gate_shadow_position: Option<ShadowHigh180Position>,
+    risk_gate_shadow_open: Option<High180Open>,
+    pending_risk_gate_finalizations: Vec<RiskGateSessionFinalization>,
 }
 
 impl HybridIntradayRuntimeStrategy {
@@ -210,10 +227,12 @@ impl HybridIntradayRuntimeStrategy {
         let br = IntradayBreakoutEngine::new(config.breakout_config);
         let orchestrator = HybridOrchestrator::new(mr, br, config.orchestrator_config);
         let high180_mr = High180MrEngine::new(High180MrConfig::default());
+        let risk_gate_shadow_mr = High180MrEngine::new(High180MrConfig::default());
         Self {
             config,
             orchestrator,
             high180_mr,
+            risk_gate_shadow_mr,
             state: StrategyState::Idle,
             last_processed_bar_ts: None,
             last_position_qty: 0.0,
@@ -257,6 +276,12 @@ impl HybridIntradayRuntimeStrategy {
             working_stop_orders: HashSet::new(),
             startup_live_replay_boundary_ts_utc: None,
             startup_replay_suppressed_bars: 0,
+            risk_gate_shadow_session_date: None,
+            risk_gate_shadow_pnl_points: 0.0,
+            risk_gate_shadow_trade_count: 0,
+            risk_gate_shadow_position: None,
+            risk_gate_shadow_open: None,
+            pending_risk_gate_finalizations: Vec::new(),
         }
     }
 
@@ -325,6 +350,131 @@ impl HybridIntradayRuntimeStrategy {
             MrGatePolicy::Disabled => true,
             MrGatePolicy::ShadowPnlLb120Positive => {
                 !matches!(self.config.risk_gate_mode, RiskGateMode::Enforced)
+            }
+        }
+    }
+
+    fn risk_gate_shadow_enabled(&self) -> bool {
+        self.uses_high180_mr() && self.config.mr_gate_policy == MrGatePolicy::ShadowPnlLb120Positive
+    }
+
+    fn finalize_risk_gate_shadow_session(&mut self, session_date: NaiveDate) {
+        if matches!(session_date.weekday(), Weekday::Sat | Weekday::Sun) {
+            return;
+        }
+        if self
+            .pending_risk_gate_finalizations
+            .iter()
+            .any(|finalization| finalization.session_date == session_date)
+        {
+            return;
+        }
+        self.pending_risk_gate_finalizations
+            .push(RiskGateSessionFinalization {
+                session_date,
+                shadow_pnl_points: self.risk_gate_shadow_pnl_points,
+                shadow_trade_count: self.risk_gate_shadow_trade_count,
+            });
+        info!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "risk_gate_shadow_session_finalized",
+            session_date = %Self::format_local_day(session_date),
+            shadow_pnl_points = self.risk_gate_shadow_pnl_points,
+            shadow_trade_count = self.risk_gate_shadow_trade_count,
+        );
+    }
+
+    fn update_risk_gate_shadow(
+        &mut self,
+        dt_local: NaiveDateTime,
+        ts_utc: i64,
+        high: f64,
+        low: f64,
+        close: f64,
+        close_prev: f64,
+        day_range_prev: f64,
+    ) {
+        if !self.risk_gate_shadow_enabled() || close == 0.0 {
+            return;
+        }
+
+        let session_date = dt_local.date();
+        match self.risk_gate_shadow_session_date {
+            None => {
+                self.risk_gate_shadow_session_date = Some(session_date);
+            }
+            Some(prev_date) if prev_date != session_date => {
+                self.finalize_risk_gate_shadow_session(prev_date);
+                self.risk_gate_shadow_session_date = Some(session_date);
+                self.risk_gate_shadow_pnl_points = 0.0;
+                self.risk_gate_shadow_trade_count = 0;
+                self.risk_gate_shadow_position = None;
+                self.risk_gate_shadow_open = None;
+            }
+            Some(_) => {}
+        }
+
+        self.risk_gate_shadow_mr.on_bar(dt_local, high, low);
+        let mut closed_this_bar = false;
+        if let (Some(position), Some(open)) =
+            (self.risk_gate_shadow_position, self.risk_gate_shadow_open)
+        {
+            let entry_dt = self
+                .utc_to_local_naive(position.entry_ts_utc)
+                .unwrap_or(dt_local);
+            if let Some((_reason, exit_price)) = self.risk_gate_shadow_mr.evaluate_exit(
+                &open,
+                entry_dt,
+                position.side,
+                dt_local,
+                close,
+            ) {
+                let pnl = match position.side {
+                    Side::Long => exit_price - position.entry_price,
+                    Side::Short => position.entry_price - exit_price,
+                } - RISK_GATE_MAKER_COST_POINTS;
+                self.risk_gate_shadow_pnl_points += pnl;
+                self.risk_gate_shadow_trade_count =
+                    self.risk_gate_shadow_trade_count.saturating_add(1);
+                self.risk_gate_shadow_position = None;
+                self.risk_gate_shadow_open = None;
+                closed_this_bar = true;
+                debug!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    action = "risk_gate_shadow_mr_exit",
+                    dt_local = %dt_local,
+                    side = ?position.side,
+                    entry_price = position.entry_price,
+                    exit_price,
+                    pnl_points = pnl,
+                    session_pnl_points = self.risk_gate_shadow_pnl_points,
+                );
+            }
+        }
+
+        if self.risk_gate_shadow_position.is_none() && !closed_this_bar {
+            if let Some(signal) =
+                self.risk_gate_shadow_mr
+                    .evaluate_entry(dt_local, close, close_prev, day_range_prev)
+            {
+                self.risk_gate_shadow_position = Some(ShadowHigh180Position {
+                    side: signal.side,
+                    entry_ts_utc: ts_utc,
+                    entry_price: close,
+                });
+                self.risk_gate_shadow_open = Some(High180Open::from_signal(
+                    &signal,
+                    High180MrConfig::default(),
+                ));
+                debug!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    action = "risk_gate_shadow_mr_entry",
+                    dt_local = %dt_local,
+                    side = ?signal.side,
+                    entry_price = close,
+                    target_price = signal.target_price,
+                    stop_price = signal.stop_price,
+                );
             }
         }
     }
@@ -1003,6 +1153,7 @@ impl HybridIntradayRuntimeStrategy {
     fn sync_state(&mut self) {
         let breakout = self.breakout_snapshot();
         let orchestrator = self.orchestrator.snapshot();
+        let pending_risk_gate_finalization = self.pending_risk_gate_finalizations.first();
         self.state = StrategyState::HybridIntradayRuntime {
             active_cycle_id: self.active_cycle_id.map(|v| Self::format_cycle_id(&v)),
             next_cycle_seq: self.next_cycle_seq,
@@ -1076,6 +1227,28 @@ impl HybridIntradayRuntimeStrategy {
             overnight_exit_armed_date: orchestrator
                 .overnight_exit_armed_date
                 .map(Self::format_local_day),
+            risk_gate_shadow_session_date: self
+                .risk_gate_shadow_session_date
+                .map(Self::format_local_day),
+            risk_gate_shadow_pnl_points: self.risk_gate_shadow_pnl_points,
+            risk_gate_shadow_trade_count: self.risk_gate_shadow_trade_count,
+            risk_gate_shadow_entry_ts_utc: self
+                .risk_gate_shadow_position
+                .map(|position| position.entry_ts_utc),
+            risk_gate_shadow_entry_price: self
+                .risk_gate_shadow_position
+                .map(|position| position.entry_price),
+            risk_gate_shadow_side: self.risk_gate_shadow_position.map(|position| position.side),
+            risk_gate_shadow_target_price: self.risk_gate_shadow_open.map(|open| open.target_price),
+            risk_gate_shadow_stop_price: self.risk_gate_shadow_open.map(|open| open.stop_price),
+            risk_gate_pending_session_date: pending_risk_gate_finalization
+                .map(|finalization| Self::format_local_day(finalization.session_date)),
+            risk_gate_pending_shadow_pnl_points: pending_risk_gate_finalization
+                .map(|finalization| finalization.shadow_pnl_points)
+                .unwrap_or(0.0),
+            risk_gate_pending_shadow_trade_count: pending_risk_gate_finalization
+                .map(|finalization| finalization.shadow_trade_count)
+                .unwrap_or(0),
         };
     }
 
@@ -1788,6 +1961,15 @@ mod tests {
         }
     }
 
+    fn risk_gate_test_config() -> HybridIntradayRuntimeConfig {
+        let mut cfg = test_config();
+        cfg.profile = HybridIntradayProfile::ImoexfPrimaryRiskgateHigh180Lb120;
+        cfg.mr_variant = MeanReversionVariant::High180;
+        cfg.mr_gate_policy = MrGatePolicy::ShadowPnlLb120Positive;
+        cfg.risk_gate_mode = RiskGateMode::NormalAppend;
+        cfg
+    }
+
     fn test_ctx(position_qty: Option<f64>) -> StrategyCtx {
         StrategyCtx {
             strategy_id: "hyb-test".to_string(),
@@ -1939,6 +2121,84 @@ mod tests {
             strategy.pending_exit.expect("pending exit").reason,
             ReasonCode::MeanRevTimeCutoff
         );
+    }
+
+    #[test]
+    fn risk_gate_shadow_finalizes_previous_regular_session_on_rollover() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(risk_gate_test_config());
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(4.0);
+        strategy.entry_ready = true;
+        let ctx = test_ctx(Some(0.0));
+
+        let _ = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 0, 0),
+                100.2,
+                101.0,
+                99.0,
+                100.2,
+                DataOrigin::Live,
+            ),
+        );
+        let _ = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 10, 0),
+                99.9,
+                100.1,
+                99.8,
+                99.9,
+                DataOrigin::Live,
+            ),
+        );
+        let _ = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 7, 9, 0, 0),
+                100.0,
+                100.5,
+                99.5,
+                100.0,
+                DataOrigin::Live,
+            ),
+        );
+
+        let finalizations = strategy.risk_gate_session_finalizations();
+        assert_eq!(finalizations.len(), 1);
+        assert_eq!(
+            finalizations[0].session_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 6).unwrap_or(chrono::NaiveDate::MIN)
+        );
+        assert_eq!(finalizations[0].shadow_trade_count, 1);
+        assert!((finalizations[0].shadow_pnl_points - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn risk_gate_shadow_ack_clears_pending_finalization_and_state() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(risk_gate_test_config());
+        let session_date =
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 6).unwrap_or(chrono::NaiveDate::MIN);
+        strategy
+            .pending_risk_gate_finalizations
+            .push(RiskGateSessionFinalization {
+                session_date,
+                shadow_pnl_points: 1.0,
+                shadow_trade_count: 1,
+            });
+        strategy.sync_state();
+
+        strategy.acknowledge_risk_gate_session_finalizations(&[session_date]);
+
+        assert!(strategy.risk_gate_session_finalizations().is_empty());
+        match strategy.state() {
+            StrategyState::HybridIntradayRuntime {
+                risk_gate_pending_session_date,
+                ..
+            } => assert_eq!(risk_gate_pending_session_date, &None),
+            other => panic!("unexpected state: {other:?}"),
+        }
     }
 
     #[test]
@@ -2626,6 +2886,17 @@ mod tests {
             was_long_today: true,
             was_short_today: false,
             overnight_exit_armed_date: Some("2026-03-08".to_string()),
+            risk_gate_shadow_session_date: None,
+            risk_gate_shadow_pnl_points: 0.0,
+            risk_gate_shadow_trade_count: 0,
+            risk_gate_shadow_entry_ts_utc: None,
+            risk_gate_shadow_entry_price: None,
+            risk_gate_shadow_side: None,
+            risk_gate_shadow_target_price: None,
+            risk_gate_shadow_stop_price: None,
+            risk_gate_pending_session_date: None,
+            risk_gate_pending_shadow_pnl_points: 0.0,
+            risk_gate_pending_shadow_trade_count: 0,
         };
         strategy.set_state(restored.clone());
         assert!(strategy.entry_ready);
@@ -2736,6 +3007,17 @@ mod tests {
             was_long_today: false,
             was_short_today: false,
             overnight_exit_armed_date: None,
+            risk_gate_shadow_session_date: None,
+            risk_gate_shadow_pnl_points: 0.0,
+            risk_gate_shadow_trade_count: 0,
+            risk_gate_shadow_entry_ts_utc: None,
+            risk_gate_shadow_entry_price: None,
+            risk_gate_shadow_side: None,
+            risk_gate_shadow_target_price: None,
+            risk_gate_shadow_stop_price: None,
+            risk_gate_pending_session_date: None,
+            risk_gate_pending_shadow_pnl_points: 0.0,
+            risk_gate_pending_shadow_trade_count: 0,
         });
         let ctx = test_ctx(Some(0.0));
 
@@ -2809,6 +3091,17 @@ mod tests {
             was_long_today: false,
             was_short_today: false,
             overnight_exit_armed_date: None,
+            risk_gate_shadow_session_date: None,
+            risk_gate_shadow_pnl_points: 0.0,
+            risk_gate_shadow_trade_count: 0,
+            risk_gate_shadow_entry_ts_utc: None,
+            risk_gate_shadow_entry_price: None,
+            risk_gate_shadow_side: None,
+            risk_gate_shadow_target_price: None,
+            risk_gate_shadow_stop_price: None,
+            risk_gate_pending_session_date: None,
+            risk_gate_pending_shadow_pnl_points: 0.0,
+            risk_gate_pending_shadow_trade_count: 0,
         });
         let ctx = test_ctx(Some(0.0));
 
@@ -3777,6 +4070,15 @@ impl Strategy for HybridIntradayRuntimeStrategy {
 
         let close_prev = self.prev_day_close().unwrap_or(bar.close);
         let day_range_prev = self.prev_day_range.unwrap_or(0.0);
+        self.update_risk_gate_shadow(
+            dt_local,
+            bar.close_time_utc,
+            bar.h,
+            bar.l,
+            bar.close,
+            close_prev,
+            day_range_prev,
+        );
         let has_open_position = ctx.position_qty.unwrap_or(0.0).abs() > f64::EPSILON;
         if self.suppress_startup_replay_bar(
             ctx,
@@ -4328,6 +4630,19 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         Vec::new()
     }
 
+    fn risk_gate_session_finalizations(&self) -> Vec<RiskGateSessionFinalization> {
+        self.pending_risk_gate_finalizations.clone()
+    }
+
+    fn acknowledge_risk_gate_session_finalizations(&mut self, session_dates: &[NaiveDate]) {
+        if session_dates.is_empty() {
+            return;
+        }
+        self.pending_risk_gate_finalizations
+            .retain(|finalization| !session_dates.contains(&finalization.session_date));
+        self.sync_state();
+    }
+
     fn warmup_from_history(&mut self, _ctx: &StrategyCtx, bars: &[BarEvent]) -> usize {
         let mut warmup = HybridIntradayRuntimeStrategy::new(self.config.clone());
         let mut processed = 0usize;
@@ -4350,6 +4665,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             warmup.update_day_aggregates(dt_local, bar.h, bar.l);
             if warmup.uses_high180_mr() {
                 warmup.high180_mr.on_bar(dt_local, bar.h, bar.l);
+                warmup.risk_gate_shadow_mr.on_bar(dt_local, bar.h, bar.l);
             }
             warmup
                 .orchestrator
@@ -4372,6 +4688,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.current_day_low = warmup.current_day_low;
         self.prev_day_range = warmup.prev_day_range;
         self.high180_mr = warmup.high180_mr;
+        self.risk_gate_shadow_mr = warmup.risk_gate_shadow_mr;
         self.orchestrator
             .intraday_breakout
             .restore_snapshot(breakout.clone());
@@ -4480,6 +4797,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             was_long_today,
             was_short_today,
             overnight_exit_armed_date,
+            risk_gate_shadow_session_date,
+            risk_gate_shadow_pnl_points,
+            risk_gate_shadow_trade_count,
+            risk_gate_shadow_entry_ts_utc,
+            risk_gate_shadow_entry_price,
+            risk_gate_shadow_side,
+            risk_gate_shadow_target_price,
+            risk_gate_shadow_stop_price,
+            risk_gate_pending_session_date,
+            risk_gate_pending_shadow_pnl_points,
+            risk_gate_pending_shadow_trade_count,
         } = &state
         {
             self.active_cycle_id = active_cycle_id.as_deref().and_then(Self::parse_cycle_id);
@@ -4630,6 +4958,46 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             );
             self.entry_ready = *entry_ready && self.signals_warmed();
             self.last_warmup_log = Some(self.entry_ready);
+            self.risk_gate_shadow_session_date = risk_gate_shadow_session_date
+                .as_deref()
+                .and_then(Self::parse_local_day);
+            self.risk_gate_shadow_pnl_points = *risk_gate_shadow_pnl_points;
+            self.risk_gate_shadow_trade_count = *risk_gate_shadow_trade_count;
+            self.risk_gate_shadow_position = match (
+                *risk_gate_shadow_entry_ts_utc,
+                *risk_gate_shadow_entry_price,
+                *risk_gate_shadow_side,
+            ) {
+                (Some(entry_ts_utc), Some(entry_price), Some(side)) => {
+                    Some(ShadowHigh180Position {
+                        side,
+                        entry_ts_utc,
+                        entry_price,
+                    })
+                }
+                _ => None,
+            };
+            self.risk_gate_shadow_open =
+                match (*risk_gate_shadow_target_price, *risk_gate_shadow_stop_price) {
+                    (Some(target_price), Some(stop_price)) => Some(High180Open {
+                        target_price,
+                        stop_price,
+                        max_hold: High180MrConfig::default().max_hold,
+                    }),
+                    _ => None,
+                };
+            self.pending_risk_gate_finalizations.clear();
+            if let Some(session_date) = risk_gate_pending_session_date
+                .as_deref()
+                .and_then(Self::parse_local_day)
+            {
+                self.pending_risk_gate_finalizations
+                    .push(RiskGateSessionFinalization {
+                        session_date,
+                        shadow_pnl_points: *risk_gate_pending_shadow_pnl_points,
+                        shadow_trade_count: *risk_gate_pending_shadow_trade_count,
+                    });
+            }
             if *entry_ready && !self.signals_warmed() {
                 needs_resync = true;
             }

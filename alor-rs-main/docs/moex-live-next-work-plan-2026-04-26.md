@@ -59,7 +59,7 @@ Validation gate:
 
 ## Workstream C: IMOEXF Hybrid MR + BO
 
-Status: `LIVE_HIGH180_READY / RISK_GATE_STARTUP_STORE_BOOTSTRAP_READY / RUNTIME_LEDGER_READ_WRITE_READY_FOR_SHADOW_VALIDATION`.
+Status: `LIVE_HIGH180_READY / RISK_GATE_RUNTIME_LEDGER_APPEND_READY / READY_FOR_SHADOW_VALIDATION`.
 
 The model is not considered broken. The remaining required blocker is
 replay/runtime parity around Backtrader next-bar fill semantics versus the Rust
@@ -134,8 +134,8 @@ Required before runtime promotion:
   `runtime.riskgate.sessions.<strategy_id>.<profile_id>` plus a small
   materialized state key `runtime.riskgate.state.<strategy_id>.<profile_id>`;
   the ordinary strategy snapshot must not be the canonical gate ledger. Startup
-  bootstrap import/read/write is now wired into runtime; daily append and
-  enforced MR gate application remain after shadow validation;
+  bootstrap import/read/write and daily runtime append are now wired into
+  runtime; enforced MR gate application remains after shadow validation;
 - decide explicitly whether Rust close-bar/no-overnight `bo_gap_flatten` is the
   accepted runtime contract. If accepted and final report is clean, IMOEXF can
   move to extended micro soak at size `1` with explicit MR/BO attribution

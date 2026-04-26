@@ -410,7 +410,10 @@ mod tests {
             runtime_config.mr_gate_policy,
             MrGatePolicy::ShadowPnlLb120Positive
         );
-        assert_eq!(runtime_config.risk_gate_mode, RiskGateMode::BootstrapFromSeed);
+        assert_eq!(
+            runtime_config.risk_gate_mode,
+            RiskGateMode::BootstrapFromSeed
+        );
     }
 
     #[test]
@@ -421,7 +424,9 @@ mod tests {
         settings.strategy.risk_gate_mode = "enforced".to_string();
 
         let err = HybridIntradayAdapter::from_strategy_config(&config).expect_err("enforced mode");
-        assert!(err.to_string().contains("enforcement is not live-integrated yet"));
+        assert!(err
+            .to_string()
+            .contains("enforcement is not live-integrated yet"));
     }
 
     #[test]

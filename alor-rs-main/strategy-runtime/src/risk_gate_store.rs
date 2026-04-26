@@ -6,10 +6,13 @@ use chrono::{FixedOffset, NaiveDate, TimeZone};
 
 use crate::redis_transport::{RedisRuntimeTransport, RedisStreamFieldMessage};
 use crate::strategies::hybrid_intraday::{
-    parse_seed_csv, plan_risk_gate_startup, validate_ledger_record_identity, RiskGateLedgerRecord,
-    RiskGateMaterializedState, RiskGateProfileIdentity, RiskGateRedisKeys, RiskGateSessionRow,
-    RiskGateStartupArtifacts, RiskGateStartupMode,
+    build_ledger_records_from_rows, build_runtime_session_row, parse_seed_csv,
+    plan_risk_gate_startup, rebuild_materialized_state_from_ledger_records,
+    rows_from_ledger_records, validate_ledger_record_identity, RiskGateLedgerRecord,
+    RiskGateMaterializedState, RiskGateProfileIdentity, RiskGateRedisKeys, RiskGateRowSource,
+    RiskGateSessionRow, RiskGateStartupArtifacts, RiskGateStartupMode,
 };
+use crate::strategy_host::RiskGateSessionFinalization;
 use crate::{StrategyConfig, StrategySpecificConfig};
 
 pub const RISK_GATE_LEDGER_RECOVERY_SCAN_COUNT: usize = 256;
@@ -244,6 +247,88 @@ pub async fn persist_risk_gate_startup_artifacts(
         inserted_records,
         duplicate_records,
         state_refreshed: true,
+    })
+}
+
+pub async fn append_risk_gate_runtime_session(
+    transport: &RedisRuntimeTransport,
+    identity: &RiskGateProfileIdentity,
+    finalization: &RiskGateSessionFinalization,
+    finalized_at_utc: i64,
+    ledger_scan_count: usize,
+) -> Result<RiskGateWriteSummary> {
+    let keys = RiskGateRedisKeys::for_profile(
+        &identity.strategy_id,
+        &identity.profile_id,
+        finalization.session_date,
+    );
+    let existing_records =
+        load_risk_gate_ledger_records(transport, &keys.ledger_stream, ledger_scan_count.max(1))
+            .await?;
+    validate_ledger_record_identity(&existing_records, identity)
+        .map_err(anyhow::Error::msg)
+        .context("risk gate runtime append identity validation failed")?;
+    let mut rows = rows_from_ledger_records(&existing_records)
+        .map_err(anyhow::Error::msg)
+        .context("risk gate runtime append ledger rows invalid")?;
+
+    if rows
+        .iter()
+        .any(|row| row.session_date == finalization.session_date)
+    {
+        return Ok(RiskGateWriteSummary {
+            attempted_records: 1,
+            inserted_records: 0,
+            duplicate_records: 1,
+            state_refreshed: false,
+        });
+    }
+
+    let runtime_row = build_runtime_session_row(
+        &rows,
+        finalization.session_date,
+        finalization.shadow_pnl_points,
+        finalization.shadow_trade_count,
+    )
+    .map_err(anyhow::Error::msg)
+    .context("risk gate runtime row build failed")?;
+    rows.push(runtime_row);
+    let records = build_ledger_records_from_rows(&rows, identity, finalized_at_utc)
+        .map_err(anyhow::Error::msg)
+        .context("risk gate runtime record build failed")?;
+    let record = records
+        .last()
+        .cloned()
+        .context("risk gate runtime append produced no record")?;
+    let seed_loaded = records
+        .iter()
+        .any(|record| record.row.source == RiskGateRowSource::Seed);
+    let materialized_state =
+        rebuild_materialized_state_from_ledger_records(&records, None, 0.0, seed_loaded)
+            .map_err(anyhow::Error::msg)
+            .context("risk gate runtime state rebuild failed")?;
+
+    let inserted = transport
+        .write_risk_gate_session_if_new(
+            &keys.finalized_key,
+            &keys.ledger_stream,
+            &keys.state_key,
+            &record.redis_fields(),
+            &materialized_state.redis_fields(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "risk gate runtime append write failed: session_date={}",
+                finalization.session_date
+            )
+        })?;
+
+    Ok(RiskGateWriteSummary {
+        attempted_records: 1,
+        inserted_records: usize::from(inserted),
+        duplicate_records: usize::from(!inserted),
+        state_refreshed: inserted,
     })
 }
 
@@ -498,7 +583,10 @@ mod tests {
             config.identity.model_version,
             "riskgate_lb120_seed_2026_04_26"
         );
-        assert_eq!(config.ledger_scan_count, RISK_GATE_LEDGER_RECOVERY_SCAN_COUNT);
+        assert_eq!(
+            config.ledger_scan_count,
+            RISK_GATE_LEDGER_RECOVERY_SCAN_COUNT
+        );
         assert!(config.seed_file.is_some());
         assert!(config.current_shadow_session_date.is_some());
     }
@@ -537,9 +625,8 @@ mod tests {
         settings.strategy.mr_variant = "high180".to_string();
         settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
         settings.strategy.risk_gate_mode = "normal_append".to_string();
-        settings.strategy.risk_gate_ledger_key = Some(
-            "runtime.riskgate.sessions.hybrid_imoexf.some_other_profile".to_string(),
-        );
+        settings.strategy.risk_gate_ledger_key =
+            Some("runtime.riskgate.sessions.hybrid_imoexf.some_other_profile".to_string());
 
         let err =
             startup_store_config_from_strategy_config(&strategy, 1_777_000_000).expect_err("err");

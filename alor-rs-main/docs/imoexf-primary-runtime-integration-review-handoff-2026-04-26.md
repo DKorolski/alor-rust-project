@@ -506,9 +506,9 @@ MR. The gate decision is for the next regular session.
   `ledger_last_session_date`.
 - Define gap handling for missing canonical `10m` regular sessions.
 - Add observability for enabled/disabled risk-gate dates.
-- Status: seed/state contract, CSV parser, startup reconciliation rules, and
-  Redis-backed startup persistence/import flow exist. Runtime daily append and
-  enforced gate application remain follow-up work.
+- Status: seed/state contract, CSV parser, startup reconciliation rules,
+  Redis-backed startup persistence/import flow, and runtime daily append exist.
+  Enforced gate application remains follow-up work after shadow validation.
 
 ### Patch 4: Runtime Feed Guard
 
@@ -559,7 +559,8 @@ Use this checklist only after review accepts the current conditional soak scope.
 9. Keep live size at `1` during the first extended micro soak.
 10. Monitor separately:
     MR High180 entries/exits, BO entries/exits, `bo_gap_flatten`, suppressed
-    service bars, risk-gate startup decision, Redis memory, and live guard.
+    service bars, risk-gate startup decision, daily risk-gate append events,
+    Redis memory, and live guard.
 
 ## Review Ask
 

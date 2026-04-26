@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use alor_protocol::{IntentClass, Side};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -117,8 +118,19 @@ pub trait Strategy: Send + Sync {
         let _ = has_open_position;
         StrategyExitRiskStatus::default()
     }
+    fn risk_gate_session_finalizations(&self) -> Vec<RiskGateSessionFinalization> {
+        Vec::new()
+    }
+    fn acknowledge_risk_gate_session_finalizations(&mut self, _session_dates: &[NaiveDate]) {}
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskGateSessionFinalization {
+    pub session_date: NaiveDate,
+    pub shadow_pnl_points: f64,
+    pub shadow_trade_count: u32,
 }
 
 #[derive(Debug, Clone)]

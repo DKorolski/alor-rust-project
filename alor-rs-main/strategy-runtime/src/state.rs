@@ -317,6 +317,28 @@ pub enum StrategyState {
         was_short_today: bool,
         #[serde(default)]
         overnight_exit_armed_date: Option<String>,
+        #[serde(default)]
+        risk_gate_shadow_session_date: Option<String>,
+        #[serde(default)]
+        risk_gate_shadow_pnl_points: f64,
+        #[serde(default)]
+        risk_gate_shadow_trade_count: u32,
+        #[serde(default)]
+        risk_gate_shadow_entry_ts_utc: Option<i64>,
+        #[serde(default)]
+        risk_gate_shadow_entry_price: Option<f64>,
+        #[serde(default)]
+        risk_gate_shadow_side: Option<crate::strategies::hybrid_intraday::Side>,
+        #[serde(default)]
+        risk_gate_shadow_target_price: Option<f64>,
+        #[serde(default)]
+        risk_gate_shadow_stop_price: Option<f64>,
+        #[serde(default)]
+        risk_gate_pending_session_date: Option<String>,
+        #[serde(default)]
+        risk_gate_pending_shadow_pnl_points: f64,
+        #[serde(default)]
+        risk_gate_pending_shadow_trade_count: u32,
     },
     AlorUsdrubfHybrid {
         #[serde(default)]

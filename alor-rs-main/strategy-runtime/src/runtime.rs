@@ -21,7 +21,8 @@ use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::risk_gate_store::{
-    run_risk_gate_startup_store, startup_store_config_from_strategy_config,
+    append_risk_gate_runtime_session, run_risk_gate_startup_store,
+    startup_store_config_from_strategy_config,
 };
 use crate::state::{RuntimeState, StrategyState, StrategyStateEnvelopeCompat};
 use crate::strategy_host::{
@@ -757,6 +758,7 @@ impl StrategyRuntime {
         self.load_snapshots().await?;
         self.load_runtime_state().await?;
         self.bootstrap_risk_gate_startup_store().await?;
+        self.flush_risk_gate_session_finalizations().await?;
         self.notify_bootstrap_snapshot().await?;
         self.notify_runtime_state_restored().await?;
         self.warmup_strategy_indicators_from_history().await?;
@@ -871,6 +873,74 @@ impl StrategyRuntime {
             state_refreshed = result.write_summary.state_refreshed,
             "risk gate startup store bootstrap finished"
         );
+        Ok(())
+    }
+
+    async fn flush_risk_gate_session_finalizations(&mut self) -> Result<()> {
+        let finalizations = self.strategy.risk_gate_session_finalizations();
+        if finalizations.is_empty() {
+            return Ok(());
+        }
+
+        if self.config.trade_mode != TradeMode::Live {
+            let session_dates = finalizations
+                .iter()
+                .map(|finalization| finalization.session_date)
+                .collect::<Vec<_>>();
+            self.strategy
+                .acknowledge_risk_gate_session_finalizations(&session_dates);
+            self.state.strategy_state = self.strategy.state().clone();
+            return Ok(());
+        }
+
+        let finalized_at_utc = Utc::now().timestamp();
+        let Some(config) =
+            startup_store_config_from_strategy_config(&self.config.strategy, finalized_at_utc)?
+        else {
+            return Ok(());
+        };
+
+        let mut acknowledged_dates = Vec::new();
+        for finalization in &finalizations {
+            let summary = append_risk_gate_runtime_session(
+                &self.transport,
+                &config.identity,
+                finalization,
+                finalized_at_utc,
+                config.ledger_scan_count,
+            )
+            .await?;
+            self.audit_event(
+                "risk_gate_runtime_session_finalized",
+                json!({
+                    "profile_id": config.identity.profile_id,
+                    "session_date": finalization.session_date.format("%Y-%m-%d").to_string(),
+                    "shadow_pnl_points": finalization.shadow_pnl_points,
+                    "shadow_trade_count": finalization.shadow_trade_count,
+                    "records_attempted": summary.attempted_records,
+                    "records_inserted": summary.inserted_records,
+                    "records_duplicate": summary.duplicate_records,
+                    "state_refreshed": summary.state_refreshed,
+                }),
+            );
+            info!(
+                strategy = %self.config.strategy.strategy_id,
+                profile = %config.identity.profile_id,
+                session_date = %finalization.session_date,
+                shadow_pnl_points = finalization.shadow_pnl_points,
+                shadow_trade_count = finalization.shadow_trade_count,
+                inserted_records = summary.inserted_records,
+                duplicate_records = summary.duplicate_records,
+                state_refreshed = summary.state_refreshed,
+                "risk gate runtime session finalized"
+            );
+            acknowledged_dates.push(finalization.session_date);
+        }
+
+        self.strategy
+            .acknowledge_risk_gate_session_finalizations(&acknowledged_dates);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.persist_state(None).await?;
         Ok(())
     }
 
@@ -1917,6 +1987,7 @@ impl StrategyRuntime {
             self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
                 .await?;
         }
+        self.flush_risk_gate_session_finalizations().await?;
         self.state
             .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
         self.transport.xack(&stream, &message_id).await?;
