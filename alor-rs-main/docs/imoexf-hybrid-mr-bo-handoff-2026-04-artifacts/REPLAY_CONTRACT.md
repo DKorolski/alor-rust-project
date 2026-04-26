@@ -120,11 +120,14 @@ Hybrid merge:
 - EOD exit at `23:30`.
 - BO must be flat before weekend/non-tradable gaps. If `force_exit_time = 23:30`,
   the Rust replay/runtime must assert that the position closes no later than the
-  last regular weekday bar or runtime timer event for that day.
+  last regular weekday bar or next regular runtime bar/event.
 - If the EOD exit signal is generated but there is no later same-day fill bar,
-  Rust may flatten through its explicit event-loop/timer semantics instead of
+  Rust may flatten through its bar/event no-overnight guard instead of
   reproducing Backtrader's next-bar fill. Carrying the BO position to the next
   regular session is not equivalent to this frozen package.
+- A stricter runtime timer/event-loop hook, able to flatten exactly at `23:30`
+  without waiting for a later bar/event, is a follow-up `nice to have` after the
+  main parity and rollout work.
 
 ## MR Exit Contract
 

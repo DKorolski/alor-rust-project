@@ -61,9 +61,11 @@ Validation gate:
 
 Status: `PENDING_BO_GAP_FLATTEN_PARITY_CHECK`.
 
-The model is not considered broken. The remaining blocker is replay/runtime
-parity around Backtrader next-bar fill semantics versus Rust runtime
-timer/event-loop flattening.
+The model is not considered broken. The remaining required blocker is
+replay/runtime parity around Backtrader next-bar fill semantics versus the Rust
+bar/event no-overnight safety guard. A stricter runtime timer/event-loop hook is
+useful, but is explicitly a follow-up `nice to have`, not a blocker for the
+main patch line.
 
 Required before runtime promotion:
 
@@ -74,6 +76,12 @@ Required before runtime promotion:
 - add a BO gap-flatten assert for `force_exit_time = 23:30`;
 - reproduce the primary candidate against package reference files;
 - write a discrepancy note for any timestamp/fill-price differences.
+
+Follow-up after main work:
+
+- consider a runtime timer/event-loop hook so `23:30` flatten can fire even
+  without any later bar/event; this should be scheduled after the core
+  SessionGap, alor-USDRUBF, and IMOEXF parity/rollout work.
 
 Primary candidate:
 

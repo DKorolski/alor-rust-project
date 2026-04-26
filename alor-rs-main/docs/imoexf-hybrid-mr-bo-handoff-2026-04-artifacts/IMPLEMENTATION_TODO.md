@@ -33,10 +33,12 @@ Implement and verify a Rust-compatible replay/runtime path for the updated
    - Apply this anchor rule consistently to MR, BO, and the MR risk gate.
    - Add a BO gap-flatten parity assert. If `force_exit_time = 23:30`, the
      position must be closed no later than the last regular weekday bar or
-     runtime timer event for that day.
+     next regular runtime bar/event.
    - If the EOD exit signal is generated and no later same-day fill bar exists,
-     Rust may flatten by explicit event-loop/timer semantics rather than
-     reproducing Backtrader's next-bar fill.
+     Rust may flatten through the runtime bar/event no-overnight guard rather
+     than reproducing Backtrader's next-bar fill.
+   - Nice to have after the main work: add a runtime timer/event-loop hook that
+     can flatten exactly at `23:30` even without any later bar/event.
 
 3. Implement BO parameter override set `bo_new_k053`.
 

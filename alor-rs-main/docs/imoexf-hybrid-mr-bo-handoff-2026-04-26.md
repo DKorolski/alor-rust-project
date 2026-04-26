@@ -85,6 +85,11 @@ carry and nine non-same-day BO exits because EOD `close()` can fill on the next
 available bar. Runtime/replay parity should therefore include a BO gap-flatten
 assert before promotion.
 
+Implementation scope note: the required near-term fix is the bar/event
+no-overnight guard plus replay parity assertion. A runtime timer/event-loop hook
+that can flatten exactly at `23:30` even when no later bar/event arrives is a
+post-main-work `nice to have`, not a blocker for this handoff.
+
 ## Required Developer Work
 
 1. Add or adapt a Rust replay path for this exact `10m` contract.

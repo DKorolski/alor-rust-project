@@ -124,12 +124,14 @@ Required runtime/replay assert:
 
 - BO must be flat before any non-tradable gap.
 - If `force_exit_time = 23:30`, the BO position must be closed no later than the
-  last regular weekday bar or runtime timer event for that day.
+  last regular weekday bar or next regular runtime bar/event.
 - If the configured `23:30` EOD exit signal is generated and there is no later
-  same-day fill bar, Rust may flatten by explicit timer/event-loop semantics
+  same-day fill bar, Rust may flatten through the bar/event no-overnight guard
   rather than reproducing Backtrader's next-bar fill.
 - Saturday/Sunday bars must remain audit-visible but must not become trading,
   exit, or anchor bars.
+- Runtime timer/event-loop flattening without a later bar/event is a follow-up
+  `nice to have`, not a blocker for this parity checkpoint.
 
 ## Practical Verdict
 
@@ -137,6 +139,7 @@ MR window behavior and MR/BO no-overlap behavior are acceptable.
 
 BO weekend anchor use is acceptable in the current engine. The remaining item is
 BO gap-flatten parity: Backtrader can carry because of next-bar fill semantics,
-while Rust/barter runtime may correctly flatten through its event loop or timer.
+while Rust/barter runtime may correctly flatten through its bar/event
+no-overnight guard. A stricter timer hook can be added later.
 The replay contract should be treated as `PENDING_BO_GAP_FLATTEN_PARITY_CHECK`
 before final parity review.
