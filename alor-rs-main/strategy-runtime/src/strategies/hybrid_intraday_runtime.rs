@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::state::StrategyState;
 use crate::strategies::hybrid_intraday::{
-    Action, EntryStyle, HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig,
-    IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine, Owner, Side,
+    Action, BreakoutEodMode, EntryStyle, HybridOrchestrator, HybridOrchestratorConfig,
+    IntradayBreakoutConfig, IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine,
+    Owner, ReasonCode, Side,
 };
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 use crate::strategy_host::{
@@ -260,6 +261,83 @@ impl HybridIntradayRuntimeStrategy {
 
     fn suppress_weekend_signal_generation(&self, dt_local: NaiveDateTime) -> bool {
         self.config.weekends_off && matches!(dt_local.weekday(), Weekday::Sat | Weekday::Sun)
+    }
+
+    fn breakout_eod_time(&self) -> NaiveTime {
+        NaiveTime::from_hms_opt(23, 30, 0).unwrap_or(NaiveTime::MIN)
+    }
+
+    fn active_cycle_local_day(&self) -> Option<NaiveDate> {
+        let cycle_id = self.active_cycle_id?;
+        let cycle_ts = Self::cycle_ts_utc(cycle_id)?;
+        self.utc_to_local_naive(cycle_ts).map(|dt| dt.date())
+    }
+
+    fn has_breakout_exit_action(actions: &[Action]) -> bool {
+        actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::SubmitExit {
+                    owner: Owner::IntradayBreakout,
+                    ..
+                }
+            )
+        })
+    }
+
+    fn append_breakout_no_overnight_guard(
+        &mut self,
+        actions: &mut Vec<Action>,
+        dt_local: NaiveDateTime,
+        previous_day_local: Option<NaiveDate>,
+        has_open_position: bool,
+    ) {
+        if !has_open_position
+            || self.current_owner != Some(Owner::IntradayBreakout)
+            || !matches!(
+                self.config.orchestrator_config.breakout_eod_mode,
+                BreakoutEodMode::SameDay
+            )
+            || self.pending_exit_request_id.is_some()
+            || self.deferred_exit.is_some()
+            || Self::has_breakout_exit_action(actions)
+        {
+            return;
+        }
+
+        let current_day = dt_local.date();
+        let active_cycle_day = self
+            .active_cycle_local_day()
+            .filter(|cycle_day| *cycle_day <= current_day);
+        let reference_day =
+            active_cycle_day.or_else(|| previous_day_local.filter(|day| *day <= current_day));
+        let crossed_regular_day = reference_day.is_some_and(|day| current_day > day);
+        let after_same_day_eod = dt_local.time() >= self.breakout_eod_time();
+        if !crossed_regular_day && !after_same_day_eod {
+            return;
+        }
+
+        let guard_reason = if crossed_regular_day {
+            "overnight_carry_rescue"
+        } else {
+            "late_same_day_eod_guard"
+        };
+        warn!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "breakout_no_overnight_guard_exit",
+            reason = guard_reason,
+            dt_local = %dt_local,
+            reference_day = reference_day.map(Self::format_local_day),
+            active_cycle_day = active_cycle_day.map(Self::format_local_day),
+            previous_day_local = previous_day_local.map(Self::format_local_day),
+            eod_time = %self.breakout_eod_time(),
+            cycle_id = self.active_cycle_id.map(|v| Self::format_cycle_id(&v)),
+            "BO position is still open after the same-day EOD contour; forcing exit"
+        );
+        actions.push(Action::SubmitExit {
+            owner: Owner::IntradayBreakout,
+            reason: ReasonCode::BreakoutEodExit,
+        });
     }
 
     fn startup_live_replay_tolerance_sec(&self) -> i64 {
@@ -1902,6 +1980,97 @@ mod tests {
     }
 
     #[test]
+    fn breakout_eod_guard_exits_on_late_same_day_bar_without_changing_signal_time() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::IntradayBreakout);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(strategy.next_cycle_id(ts_local(2026, 4, 17, 12, 0, 0)));
+        strategy.last_day_local = Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 17).unwrap());
+        strategy.current_day_high = Some(101.0);
+        strategy.current_day_low = Some(99.0);
+        strategy.last_bar_close = Some(100.0);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(2.0);
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 4, 17, 23, 40, 0), 100.5, DataOrigin::Live),
+        );
+
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Classified {
+                intent,
+                intent_class: IntentClass::Exit
+            }] if matches!(intent.as_ref(), Intent::Market { qty, side: OrderSide::Sell, .. } if (*qty - 1.0).abs() <= f64::EPSILON)
+        ));
+        assert_eq!(
+            strategy.pending_exit.map(|pending| pending.owner),
+            Some(Owner::IntradayBreakout)
+        );
+        assert_eq!(
+            strategy.pending_exit.map(|pending| pending.reason),
+            Some(ReasonCode::BreakoutEodExit)
+        );
+    }
+
+    #[test]
+    fn breakout_eod_guard_does_not_move_baseline_exit_before_2330() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(1.0));
+        strategy.current_owner = Some(Owner::IntradayBreakout);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(strategy.next_cycle_id(ts_local(2026, 4, 17, 12, 0, 0)));
+        strategy.last_day_local = Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 17).unwrap());
+        strategy.current_day_high = Some(101.0);
+        strategy.current_day_low = Some(99.0);
+        strategy.last_bar_close = Some(100.0);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(2.0);
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 4, 17, 23, 20, 0), 100.5, DataOrigin::Live),
+        );
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_exit_request_id.is_none());
+    }
+
+    #[test]
+    fn breakout_eod_guard_rescues_carried_position_on_next_regular_day() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(-1.0));
+        strategy.current_owner = Some(Owner::IntradayBreakout);
+        strategy.current_side = Some(Side::Short);
+        strategy.active_cycle_id = Some(strategy.next_cycle_id(ts_local(2026, 4, 17, 18, 0, 0)));
+        strategy.last_day_local = Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 17).unwrap());
+        strategy.current_day_high = Some(101.0);
+        strategy.current_day_low = Some(99.0);
+        strategy.last_bar_close = Some(100.0);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(2.0);
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar(ts_local(2026, 4, 20, 9, 10, 0), 98.5, DataOrigin::Live),
+        );
+
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Classified {
+                intent,
+                intent_class: IntentClass::Exit
+            }] if matches!(intent.as_ref(), Intent::Market { qty, side: OrderSide::Buy, .. } if (*qty - 1.0).abs() <= f64::EPSILON)
+        ));
+        assert_eq!(
+            strategy.pending_exit.map(|pending| pending.reason),
+            Some(ReasonCode::BreakoutEodExit)
+        );
+    }
+
+    #[test]
     fn publish_gate_blocks_pending_mutation_when_not_publishable() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let ctx = test_ctx_with_phase(Some(0.0), crate::live_guard::GatewayPhase::SyncingHistory);
@@ -3379,6 +3548,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let Some(dt_local) = self.utc_to_local_naive(bar.close_time_utc) else {
             return Vec::new();
         };
+        let previous_day_local = self.last_day_local;
         if self.suppress_weekend_signal_generation(dt_local) {
             self.last_processed_bar_ts = Some(bar.close_time_utc);
             debug!(
@@ -3442,7 +3612,13 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 return intents;
             }
         }
-        let actions = self.orchestrator.on_bar(bar_input);
+        let mut actions = self.orchestrator.on_bar(bar_input);
+        self.append_breakout_no_overnight_guard(
+            &mut actions,
+            dt_local,
+            previous_day_local,
+            has_open_position,
+        );
         if !actions.is_empty() {
             let action_labels = actions
                 .iter()
