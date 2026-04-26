@@ -389,8 +389,10 @@ impl AlorUsdrubfHybridStrategy {
         self.day_open.get_or_insert(bar.o);
         self.day_high = Some(self.day_high.unwrap_or(bar.h).max(bar.h));
         self.day_low = Some(self.day_low.unwrap_or(bar.l).min(bar.l));
-        self.day_volume_sum += bar.v.max(0.0);
-        self.day_vwap_num += bar.close * bar.v.max(0.0);
+        let volume = bar.v.max(0.0);
+        let typical_price = (bar.h + bar.l + bar.close) / 3.0;
+        self.day_volume_sum += volume;
+        self.day_vwap_num += typical_price * volume;
         self.session_start_local.get_or_insert(local_dt);
     }
 
@@ -1718,7 +1720,7 @@ fn parse_naive_datetime(value: &str) -> Option<NaiveDateTime> {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{AlorUsdrubfHybridConfig, AlorUsdrubfHybridStrategy};
+    use super::{utc_to_local, AlorUsdrubfHybridConfig, AlorUsdrubfHybridStrategy};
     use crate::live_guard::GatewayPhase;
     use crate::state::StrategyState;
     use crate::strategy_host::{
@@ -1791,6 +1793,27 @@ mod tests {
             v: 100.0,
             origin,
         }
+    }
+
+    #[test]
+    fn session_vwap_uses_typical_price_weighting() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let local_dt = utc_to_local(1_775_490_000, 3);
+        let bar = BarEvent {
+            symbol: "USDRUBF".to_string(),
+            close_time_utc: 1_775_490_000,
+            close: 78.0,
+            o: 78.4,
+            h: 79.0,
+            l: 77.0,
+            v: 120.0,
+            origin: DataOrigin::Live,
+        };
+
+        strategy.update_session_metrics(&bar, local_dt);
+
+        let expected_typical = (79.0 + 77.0 + 78.0) / 3.0;
+        assert!((strategy.session_vwap(bar.close) - expected_typical).abs() < 1e-9);
     }
 
     fn position_event(ts_utc: i64, qty: f64, avg_price: f64) -> PositionEvent {
