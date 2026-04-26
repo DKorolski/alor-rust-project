@@ -523,6 +523,81 @@ bo_k = 0.53
 }
 
 #[test]
+fn loads_live_imoexf_riskgate_shadow_configs() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let bootstrap_path =
+        repo_root.join("configs/runtime.hybrid.live.7502SN6.riskgate-bootstrap.toml");
+    let shadow_path = repo_root.join("configs/runtime.hybrid.live.7502SN6.riskgate-shadow.toml");
+
+    let bootstrap = load_runtime_config(bootstrap_path, false).expect("load bootstrap config");
+    let shadow = load_runtime_config(shadow_path, false).expect("load shadow config");
+
+    for resolved in [&bootstrap, &shadow] {
+        let common = &resolved.config.strategy.common;
+        let hybrid = resolved
+            .config
+            .strategy
+            .hybrid_intraday()
+            .expect("hybrid strategy settings")
+            .strategy
+            .clone();
+
+        assert_eq!(common.strategy_id, "hybrid_imoexf");
+        assert_eq!(
+            common.strategy_kind,
+            strategy_runtime::StrategyKind::HybridIntraday
+        );
+        assert_eq!(common.symbol, "IMOEXF");
+        assert_eq!(resolved.config.streams.bars, "md.bars.7502SN6.10m");
+        assert_eq!(
+            resolved.config.streams.runtime_state,
+            "runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6"
+        );
+        assert_eq!(hybrid.profile, "imoexf_primary_riskgate_high180_lb120");
+        assert_eq!(hybrid.mr_variant, "high180");
+        assert_eq!(hybrid.mr_gate_policy, "shadow_pnl_lb120_positive");
+        assert_eq!(
+            hybrid.risk_gate_seed_file.as_deref(),
+            Some("docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv")
+        );
+        assert_eq!(
+            hybrid.risk_gate_ledger_key.as_deref(),
+            Some("runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120")
+        );
+        assert_eq!(hybrid.model_session_start_time, "09:00:00");
+        assert_eq!(hybrid.model_session_end_time, "23:49:59");
+        assert_eq!(hybrid.bo_k, 0.53);
+    }
+
+    assert_eq!(
+        bootstrap
+            .config
+            .strategy
+            .hybrid_intraday()
+            .expect("bootstrap hybrid settings")
+            .strategy
+            .risk_gate_mode,
+        "bootstrap_from_seed"
+    );
+    assert_eq!(
+        shadow
+            .config
+            .strategy
+            .hybrid_intraday()
+            .expect("shadow hybrid settings")
+            .strategy
+            .risk_gate_mode,
+        "normal_append"
+    );
+}
+
+#[test]
 fn loads_split_alor_skeleton_sections() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);

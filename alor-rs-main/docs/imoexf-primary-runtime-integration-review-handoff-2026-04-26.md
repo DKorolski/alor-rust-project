@@ -225,7 +225,7 @@ passed: 215 lib tests + all strategy-runtime integration/e2e/doc tests
 Current engineering status:
 
 ```text
-LIVE_HIGH180_READY / RISK_GATE_STARTUP_STORE_READY / RUNTIME_LEDGER_READ_WRITE_SKELETON_READY
+LIVE_HIGH180_READY / RISK_GATE_ENFORCEMENT_CODE_READY / SHADOW_VALIDATION_CONFIGS_READY
 ```
 
 ## Architecture Review Needed
@@ -552,11 +552,13 @@ Use this checklist only after review accepts the current conditional soak scope.
    risk-gate ledger/state keys for the selected profile.
 6. Start with `risk_gate_mode = bootstrap_from_seed` and the checked-in
    `riskgate_high180_lb120_seed_2026-04-26.csv`.
+   Use `configs/runtime.hybrid.live.7502SN6.riskgate-bootstrap.toml`.
 7. Verify startup logs contain `risk_gate_startup_bootstrap` with seed import
    or existing-ledger decision, `state_refreshed = true`, and no identity
    mismatch.
 8. Switch subsequent restarts to `risk_gate_mode = normal_append` once the
    ledger exists and seed bootstrap has succeeded.
+   Use `configs/runtime.hybrid.live.7502SN6.riskgate-shadow.toml`.
 9. Keep `risk_gate_mode = normal_append` for shadow validation. Move to
    `risk_gate_mode = enforced` only after the ledger/state events are clean and
    review explicitly accepts gate enforcement.
