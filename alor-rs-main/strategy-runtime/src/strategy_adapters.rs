@@ -148,12 +148,6 @@ impl HybridIntradayAdapter {
         let mr_variant = Self::parse_mr_variant(&runtime_settings.mr_variant)?;
         let mr_gate_policy = Self::parse_mr_gate_policy(&runtime_settings.mr_gate_policy)?;
         let risk_gate_mode = Self::parse_risk_gate_mode(&runtime_settings.risk_gate_mode)?;
-        if risk_gate_mode == RiskGateMode::Enforced {
-            bail!(
-                "hybrid_intraday risk_gate_mode {:?} is configured but enforcement is not live-integrated yet",
-                risk_gate_mode
-            );
-        }
         if mr_gate_policy == MrGatePolicy::Disabled && risk_gate_mode != RiskGateMode::Disabled {
             bail!(
                 "hybrid_intraday risk_gate_mode {:?} requires non-disabled mr_gate_policy",
@@ -417,16 +411,17 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_adapter_rejects_enforced_risk_gate_mode() {
+    fn hybrid_adapter_allows_enforced_risk_gate_mode() {
         let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
         let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.profile = "imoexf_primary_riskgate".to_string();
+        settings.strategy.mr_variant = "high180".to_string();
         settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
         settings.strategy.risk_gate_mode = "enforced".to_string();
 
-        let err = HybridIntradayAdapter::from_strategy_config(&config).expect_err("enforced mode");
-        assert!(err
-            .to_string()
-            .contains("enforcement is not live-integrated yet"));
+        let runtime_config =
+            HybridIntradayAdapter::from_strategy_config(&config).expect("runtime config");
+        assert_eq!(runtime_config.risk_gate_mode, RiskGateMode::Enforced);
     }
 
     #[test]

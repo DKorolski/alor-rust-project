@@ -339,6 +339,14 @@ pub enum StrategyState {
         risk_gate_pending_shadow_pnl_points: f64,
         #[serde(default)]
         risk_gate_pending_shadow_trade_count: u32,
+        #[serde(default)]
+        risk_gate_mr_enabled_current_session: Option<bool>,
+        #[serde(default)]
+        risk_gate_rolling_sum_lb120: Option<f64>,
+        #[serde(default)]
+        risk_gate_last_finalized_session_date: Option<String>,
+        #[serde(default)]
+        risk_gate_ledger_rows_count: usize,
     },
     AlorUsdrubfHybrid {
         #[serde(default)]

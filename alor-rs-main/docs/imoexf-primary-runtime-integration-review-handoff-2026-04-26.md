@@ -507,8 +507,9 @@ MR. The gate decision is for the next regular session.
 - Define gap handling for missing canonical `10m` regular sessions.
 - Add observability for enabled/disabled risk-gate dates.
 - Status: seed/state contract, CSV parser, startup reconciliation rules,
-  Redis-backed startup persistence/import flow, and runtime daily append exist.
-  Enforced gate application remains follow-up work after shadow validation.
+  Redis-backed startup persistence/import flow, runtime daily append, and
+  enforced MR gate application exist. Operational promotion to `enforced`
+  remains gated by shadow validation and review approval.
 
 ### Patch 4: Runtime Feed Guard
 
@@ -556,8 +557,11 @@ Use this checklist only after review accepts the current conditional soak scope.
    mismatch.
 8. Switch subsequent restarts to `risk_gate_mode = normal_append` once the
    ledger exists and seed bootstrap has succeeded.
-9. Keep live size at `1` during the first extended micro soak.
-10. Monitor separately:
+9. Keep `risk_gate_mode = normal_append` for shadow validation. Move to
+   `risk_gate_mode = enforced` only after the ledger/state events are clean and
+   review explicitly accepts gate enforcement.
+10. Keep live size at `1` during the first extended micro soak.
+11. Monitor separately:
     MR High180 entries/exits, BO entries/exits, `bo_gap_flatten`, suppressed
     service bars, risk-gate startup decision, daily risk-gate append events,
     Redis memory, and live guard.

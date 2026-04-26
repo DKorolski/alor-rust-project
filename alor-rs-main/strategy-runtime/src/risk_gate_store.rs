@@ -43,6 +43,12 @@ pub struct RiskGateStartupStoreResult {
     pub write_summary: RiskGateWriteSummary,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskGateRuntimeAppendResult {
+    pub write_summary: RiskGateWriteSummary,
+    pub materialized_state: Option<RiskGateMaterializedState>,
+}
+
 pub fn startup_store_config_from_strategy_config(
     strategy: &StrategyConfig,
     finalized_at_utc: i64,
@@ -256,7 +262,7 @@ pub async fn append_risk_gate_runtime_session(
     finalization: &RiskGateSessionFinalization,
     finalized_at_utc: i64,
     ledger_scan_count: usize,
-) -> Result<RiskGateWriteSummary> {
+) -> Result<RiskGateRuntimeAppendResult> {
     let keys = RiskGateRedisKeys::for_profile(
         &identity.strategy_id,
         &identity.profile_id,
@@ -276,11 +282,14 @@ pub async fn append_risk_gate_runtime_session(
         .iter()
         .any(|row| row.session_date == finalization.session_date)
     {
-        return Ok(RiskGateWriteSummary {
-            attempted_records: 1,
-            inserted_records: 0,
-            duplicate_records: 1,
-            state_refreshed: false,
+        return Ok(RiskGateRuntimeAppendResult {
+            write_summary: RiskGateWriteSummary {
+                attempted_records: 1,
+                inserted_records: 0,
+                duplicate_records: 1,
+                state_refreshed: false,
+            },
+            materialized_state: None,
         });
     }
 
@@ -324,11 +333,14 @@ pub async fn append_risk_gate_runtime_session(
             )
         })?;
 
-    Ok(RiskGateWriteSummary {
-        attempted_records: 1,
-        inserted_records: usize::from(inserted),
-        duplicate_records: usize::from(!inserted),
-        state_refreshed: inserted,
+    Ok(RiskGateRuntimeAppendResult {
+        write_summary: RiskGateWriteSummary {
+            attempted_records: 1,
+            inserted_records: usize::from(inserted),
+            duplicate_records: usize::from(!inserted),
+            state_refreshed: inserted,
+        },
+        materialized_state: inserted.then_some(materialized_state),
     })
 }
 
@@ -363,10 +375,11 @@ pub fn load_seed_rows(seed_file: Option<&PathBuf>) -> Result<Vec<RiskGateSession
 
 fn parse_startup_mode(raw: &str) -> Result<Option<RiskGateStartupMode>> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "disabled" | "none" | "shadow_only" | "enforced" => Ok(None),
+        "" | "disabled" | "none" | "shadow_only" => Ok(None),
         "bootstrap_from_seed" => Ok(Some(RiskGateStartupMode::BootstrapFromSeed)),
         "normal_append" => Ok(Some(RiskGateStartupMode::NormalAppend)),
         "rebuild_from_history" => Ok(Some(RiskGateStartupMode::RebuildFromHistory)),
+        "enforced" => Ok(Some(RiskGateStartupMode::NormalAppend)),
         other => bail!("unsupported risk gate startup mode: {other}"),
     }
 }
@@ -599,6 +612,22 @@ mod tests {
             .expect("startup config");
 
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn startup_config_from_strategy_maps_enforced_to_existing_ledger_mode() {
+        let mut strategy = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = strategy.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.profile = "imoexf_primary_riskgate".to_string();
+        settings.strategy.mr_variant = "high180".to_string();
+        settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
+        settings.strategy.risk_gate_mode = "enforced".to_string();
+
+        let config = startup_store_config_from_strategy_config(&strategy, 1_777_000_000)
+            .expect("startup config")
+            .expect("enabled");
+
+        assert_eq!(config.mode, RiskGateStartupMode::NormalAppend);
     }
 
     #[test]

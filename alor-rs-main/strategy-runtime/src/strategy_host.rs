@@ -122,6 +122,7 @@ pub trait Strategy: Send + Sync {
         Vec::new()
     }
     fn acknowledge_risk_gate_session_finalizations(&mut self, _session_dates: &[NaiveDate]) {}
+    fn on_risk_gate_state(&mut self, _state: &RiskGateRuntimeState) {}
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
 }
@@ -131,6 +132,16 @@ pub struct RiskGateSessionFinalization {
     pub session_date: NaiveDate,
     pub shadow_pnl_points: f64,
     pub shadow_trade_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskGateRuntimeState {
+    pub profile_id: String,
+    pub last_finalized_session_date: Option<NaiveDate>,
+    pub rolling_sum_lb120: Option<f64>,
+    pub mr_enabled_current_session: Option<bool>,
+    pub mr_enabled_next_session: Option<bool>,
+    pub ledger_rows_count: usize,
 }
 
 #[derive(Debug, Clone)]

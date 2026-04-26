@@ -16,8 +16,8 @@ use crate::strategies::hybrid_intraday::{
 };
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 use crate::strategy_host::{
-    BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, RiskGateSessionFinalization,
-    StopOrderEvent, Strategy, StrategyCtx,
+    BarEvent, DataOrigin, Intent, OrderEvent, PositionEvent, RiskGateRuntimeState,
+    RiskGateSessionFinalization, StopOrderEvent, Strategy, StrategyCtx,
 };
 
 const RISK_GATE_MAKER_COST_POINTS: f64 = 0.1;
@@ -194,6 +194,10 @@ pub struct HybridIntradayRuntimeStrategy {
     risk_gate_shadow_position: Option<ShadowHigh180Position>,
     risk_gate_shadow_open: Option<High180Open>,
     pending_risk_gate_finalizations: Vec<RiskGateSessionFinalization>,
+    risk_gate_mr_enabled_current_session: Option<bool>,
+    risk_gate_rolling_sum_lb120: Option<f64>,
+    risk_gate_last_finalized_session_date: Option<NaiveDate>,
+    risk_gate_ledger_rows_count: usize,
 }
 
 impl HybridIntradayRuntimeStrategy {
@@ -282,6 +286,10 @@ impl HybridIntradayRuntimeStrategy {
             risk_gate_shadow_position: None,
             risk_gate_shadow_open: None,
             pending_risk_gate_finalizations: Vec::new(),
+            risk_gate_mr_enabled_current_session: None,
+            risk_gate_rolling_sum_lb120: None,
+            risk_gate_last_finalized_session_date: None,
+            risk_gate_ledger_rows_count: 0,
         }
     }
 
@@ -348,9 +356,12 @@ impl HybridIntradayRuntimeStrategy {
     fn mr_gate_allows_current_session(&self) -> bool {
         match self.config.mr_gate_policy {
             MrGatePolicy::Disabled => true,
-            MrGatePolicy::ShadowPnlLb120Positive => {
-                !matches!(self.config.risk_gate_mode, RiskGateMode::Enforced)
-            }
+            MrGatePolicy::ShadowPnlLb120Positive => match self.config.risk_gate_mode {
+                RiskGateMode::Enforced => {
+                    self.risk_gate_mr_enabled_current_session.unwrap_or(false)
+                }
+                _ => true,
+            },
         }
     }
 
@@ -1249,6 +1260,12 @@ impl HybridIntradayRuntimeStrategy {
             risk_gate_pending_shadow_trade_count: pending_risk_gate_finalization
                 .map(|finalization| finalization.shadow_trade_count)
                 .unwrap_or(0),
+            risk_gate_mr_enabled_current_session: self.risk_gate_mr_enabled_current_session,
+            risk_gate_rolling_sum_lb120: self.risk_gate_rolling_sum_lb120,
+            risk_gate_last_finalized_session_date: self
+                .risk_gate_last_finalized_session_date
+                .map(Self::format_local_day),
+            risk_gate_ledger_rows_count: self.risk_gate_ledger_rows_count,
         };
     }
 
@@ -1970,6 +1987,17 @@ mod tests {
         cfg
     }
 
+    fn enabled_risk_gate_state(enabled: bool) -> RiskGateRuntimeState {
+        RiskGateRuntimeState {
+            profile_id: "imoexf_primary_high180_lb120".to_string(),
+            last_finalized_session_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5),
+            rolling_sum_lb120: Some(if enabled { 1.0 } else { -1.0 }),
+            mr_enabled_current_session: Some(enabled),
+            mr_enabled_next_session: Some(enabled),
+            ledger_rows_count: 120,
+        }
+    }
+
     fn test_ctx(position_qty: Option<f64>) -> StrategyCtx {
         StrategyCtx {
             strategy_id: "hyb-test".to_string(),
@@ -2199,6 +2227,86 @@ mod tests {
             } => assert_eq!(risk_gate_pending_session_date, &None),
             other => panic!("unexpected state: {other:?}"),
         }
+    }
+
+    #[test]
+    fn enforced_risk_gate_blocks_mr_without_state() {
+        let mut cfg = risk_gate_test_config();
+        cfg.risk_gate_mode = RiskGateMode::Enforced;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(4.0);
+        strategy.entry_ready = true;
+        let ctx = test_ctx(Some(0.0));
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 0, 0),
+                100.2,
+                101.0,
+                99.0,
+                99.9,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
+    }
+
+    #[test]
+    fn enforced_risk_gate_allows_mr_when_state_enabled() {
+        let mut cfg = risk_gate_test_config();
+        cfg.risk_gate_mode = RiskGateMode::Enforced;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(4.0);
+        strategy.entry_ready = true;
+        strategy.on_risk_gate_state(&enabled_risk_gate_state(true));
+        let ctx = test_ctx(Some(0.0));
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 0, 0),
+                100.2,
+                101.0,
+                99.0,
+                99.9,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert_eq!(intents.len(), 1);
+        assert!(strategy.pending_entry.is_some());
+    }
+
+    #[test]
+    fn enforced_risk_gate_blocks_mr_when_state_disabled() {
+        let mut cfg = risk_gate_test_config();
+        cfg.risk_gate_mode = RiskGateMode::Enforced;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(4.0);
+        strategy.entry_ready = true;
+        strategy.on_risk_gate_state(&enabled_risk_gate_state(false));
+        let ctx = test_ctx(Some(0.0));
+
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 0, 0),
+                100.2,
+                101.0,
+                99.0,
+                99.9,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
     }
 
     #[test]
@@ -2897,6 +3005,10 @@ mod tests {
             risk_gate_pending_session_date: None,
             risk_gate_pending_shadow_pnl_points: 0.0,
             risk_gate_pending_shadow_trade_count: 0,
+            risk_gate_mr_enabled_current_session: None,
+            risk_gate_rolling_sum_lb120: None,
+            risk_gate_last_finalized_session_date: None,
+            risk_gate_ledger_rows_count: 0,
         };
         strategy.set_state(restored.clone());
         assert!(strategy.entry_ready);
@@ -3018,6 +3130,10 @@ mod tests {
             risk_gate_pending_session_date: None,
             risk_gate_pending_shadow_pnl_points: 0.0,
             risk_gate_pending_shadow_trade_count: 0,
+            risk_gate_mr_enabled_current_session: None,
+            risk_gate_rolling_sum_lb120: None,
+            risk_gate_last_finalized_session_date: None,
+            risk_gate_ledger_rows_count: 0,
         });
         let ctx = test_ctx(Some(0.0));
 
@@ -3102,6 +3218,10 @@ mod tests {
             risk_gate_pending_session_date: None,
             risk_gate_pending_shadow_pnl_points: 0.0,
             risk_gate_pending_shadow_trade_count: 0,
+            risk_gate_mr_enabled_current_session: None,
+            risk_gate_rolling_sum_lb120: None,
+            risk_gate_last_finalized_session_date: None,
+            risk_gate_ledger_rows_count: 0,
         });
         let ctx = test_ctx(Some(0.0));
 
@@ -4643,6 +4763,29 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.sync_state();
     }
 
+    fn on_risk_gate_state(&mut self, state: &RiskGateRuntimeState) {
+        if !self.risk_gate_shadow_enabled() {
+            return;
+        }
+        self.risk_gate_mr_enabled_current_session = state.mr_enabled_current_session;
+        self.risk_gate_rolling_sum_lb120 = state.rolling_sum_lb120;
+        self.risk_gate_last_finalized_session_date = state.last_finalized_session_date;
+        self.risk_gate_ledger_rows_count = state.ledger_rows_count;
+        info!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "risk_gate_state_applied",
+            profile_id = %state.profile_id,
+            mr_enabled_current_session = state.mr_enabled_current_session,
+            mr_enabled_next_session = state.mr_enabled_next_session,
+            rolling_sum_lb120 = state.rolling_sum_lb120,
+            last_finalized_session_date = state
+                .last_finalized_session_date
+                .map(Self::format_local_day),
+            ledger_rows_count = state.ledger_rows_count,
+        );
+        self.sync_state();
+    }
+
     fn warmup_from_history(&mut self, _ctx: &StrategyCtx, bars: &[BarEvent]) -> usize {
         let mut warmup = HybridIntradayRuntimeStrategy::new(self.config.clone());
         let mut processed = 0usize;
@@ -4808,6 +4951,10 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             risk_gate_pending_session_date,
             risk_gate_pending_shadow_pnl_points,
             risk_gate_pending_shadow_trade_count,
+            risk_gate_mr_enabled_current_session,
+            risk_gate_rolling_sum_lb120,
+            risk_gate_last_finalized_session_date,
+            risk_gate_ledger_rows_count,
         } = &state
         {
             self.active_cycle_id = active_cycle_id.as_deref().and_then(Self::parse_cycle_id);
@@ -4998,6 +5145,12 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                         shadow_trade_count: *risk_gate_pending_shadow_trade_count,
                     });
             }
+            self.risk_gate_mr_enabled_current_session = *risk_gate_mr_enabled_current_session;
+            self.risk_gate_rolling_sum_lb120 = *risk_gate_rolling_sum_lb120;
+            self.risk_gate_last_finalized_session_date = risk_gate_last_finalized_session_date
+                .as_deref()
+                .and_then(Self::parse_local_day);
+            self.risk_gate_ledger_rows_count = *risk_gate_ledger_rows_count;
             if *entry_ready && !self.signals_warmed() {
                 needs_resync = true;
             }

@@ -27,7 +27,7 @@ use crate::risk_gate_store::{
 use crate::state::{RuntimeState, StrategyState, StrategyStateEnvelopeCompat};
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
-    RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
+    RiskGateRuntimeState, RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
 };
 use crate::strategy_registry::{StrategyCapabilities, StrategyRegistry};
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
@@ -846,6 +846,10 @@ impl StrategyRuntime {
             "risk gate startup store bootstrap started"
         );
         let result = run_risk_gate_startup_store(&self.transport, &config).await?;
+        self.apply_risk_gate_materialized_state(
+            config.identity.profile_id.clone(),
+            &result.artifacts.materialized_state,
+        );
         self.audit_event(
             "risk_gate_startup_bootstrap",
             json!({
@@ -876,6 +880,23 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    fn apply_risk_gate_materialized_state(
+        &mut self,
+        profile_id: String,
+        state: &crate::strategies::hybrid_intraday::RiskGateMaterializedState,
+    ) {
+        let runtime_state = RiskGateRuntimeState {
+            profile_id,
+            last_finalized_session_date: state.last_finalized_session_date,
+            rolling_sum_lb120: state.rolling_sum_lb120,
+            mr_enabled_current_session: state.mr_enabled_current_session,
+            mr_enabled_next_session: state.mr_enabled_next_session,
+            ledger_rows_count: state.ledger_rows_count,
+        };
+        self.strategy.on_risk_gate_state(&runtime_state);
+        self.state.strategy_state = self.strategy.state().clone();
+    }
+
     async fn flush_risk_gate_session_finalizations(&mut self) -> Result<()> {
         let finalizations = self.strategy.risk_gate_session_finalizations();
         if finalizations.is_empty() {
@@ -902,7 +923,7 @@ impl StrategyRuntime {
 
         let mut acknowledged_dates = Vec::new();
         for finalization in &finalizations {
-            let summary = append_risk_gate_runtime_session(
+            let append_result = append_risk_gate_runtime_session(
                 &self.transport,
                 &config.identity,
                 finalization,
@@ -910,6 +931,13 @@ impl StrategyRuntime {
                 config.ledger_scan_count,
             )
             .await?;
+            if let Some(materialized_state) = append_result.materialized_state.as_ref() {
+                self.apply_risk_gate_materialized_state(
+                    config.identity.profile_id.clone(),
+                    materialized_state,
+                );
+            }
+            let summary = append_result.write_summary;
             self.audit_event(
                 "risk_gate_runtime_session_finalized",
                 json!({
