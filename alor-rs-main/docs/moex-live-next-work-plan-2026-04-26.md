@@ -76,6 +76,8 @@ Required before runtime promotion:
 - ensure Monday anchors use Friday or the latest earlier regular weekday;
 - add a BO gap-flatten assert for `force_exit_time = 23:30` (implemented in
   `hybrid_replay --assert-gap-flatten`; full candidate parity still pending);
+- add the `bo_new_k053` BO contour as an explicit replay profile
+  (`hybrid_replay --profile imoexf_bo_k053`);
 - reproduce the primary candidate against package reference files;
 - write a discrepancy note for any timestamp/fill-price differences.
   `docs/imoexf-hybrid-bo-carry-discrepancy-2026-04-26.md` already records the

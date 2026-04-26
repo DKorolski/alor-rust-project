@@ -80,11 +80,29 @@ impl WeekendPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReplayProfile {
+    BaselineRuntimeHybrid,
+    ImoexfBoK053,
+}
+
+impl ReplayProfile {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "baseline_runtime_hybrid" | "baseline" => Ok(Self::BaselineRuntimeHybrid),
+            "imoexf_bo_k053" | "bo_new_k053" => Ok(Self::ImoexfBoK053),
+            other => bail!("unsupported replay profile: {other}"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Cli {
     bundle_dir: PathBuf,
     split: Split,
     out_dir: PathBuf,
+    profile: ReplayProfile,
     check: bool,
     strict: bool,
     allow_non_strict: bool,
@@ -102,6 +120,7 @@ impl Default for Cli {
             bundle_dir: PathBuf::from(DEFAULT_BUNDLE_DIR),
             split: Split::Golden,
             out_dir: PathBuf::from(DEFAULT_OUT_DIR),
+            profile: ReplayProfile::BaselineRuntimeHybrid,
             check: false,
             strict: false,
             allow_non_strict: false,
@@ -194,6 +213,7 @@ struct FirstDivergence {
 struct ParityReport {
     bundle_dir: String,
     split: String,
+    profile: ReplayProfile,
     weekend_policy: WeekendPolicy,
     verify_checksums_result: String,
     expected_actions: usize,
@@ -294,7 +314,7 @@ fn main() -> Result<()> {
         bail!("prepared data is empty");
     }
 
-    let mut orchestrator = build_orchestrator();
+    let mut orchestrator = build_orchestrator(cli.profile);
     let mut state = EngineState::new(cli.cash, cli.commission);
     run_replay(&cli, &bars, &mut orchestrator, &mut state)?;
     let summary = build_summary(cli.split, cli.cash, &bars, &state);
@@ -306,6 +326,7 @@ fn main() -> Result<()> {
         ParityReport {
             bundle_dir: cli.bundle_dir.display().to_string(),
             split: cli.split.as_str().to_string(),
+            profile: cli.profile,
             weekend_policy: cli.weekend_policy,
             verify_checksums_result: if cli.verify_checksums {
                 "ok".to_string()
@@ -350,6 +371,10 @@ fn parse_cli() -> Result<Cli> {
                 let value = args.next().context("missing value for --out-dir")?;
                 cli.out_dir = PathBuf::from(value);
             }
+            "--profile" => {
+                let value = args.next().context("missing value for --profile")?;
+                cli.profile = ReplayProfile::parse(&value)?;
+            }
             "--weekend-policy" => {
                 let value = args.next().context("missing value for --weekend-policy")?;
                 cli.weekend_policy = WeekendPolicy::parse(&value)?;
@@ -377,7 +402,7 @@ fn parse_cli() -> Result<Cli> {
     Ok(cli)
 }
 
-fn build_orchestrator() -> HybridOrchestrator {
+fn build_orchestrator(profile: ReplayProfile) -> HybridOrchestrator {
     let mr = MeanReversionEngine::new(MeanReversionConfig {
         min_range_long: 0.013,
         max_range_long: 0.040,
@@ -393,16 +418,7 @@ fn build_orchestrator() -> HybridOrchestrator {
         session_end_time: NaiveTime::from_hms_opt(11, 59, 0).unwrap_or(NaiveTime::MIN),
         exit_offset: chrono::Duration::minutes(5),
     });
-    let br = IntradayBreakoutEngine::new(IntradayBreakoutConfig {
-        k: 0.55,
-        stop1_range: 0.51,
-        stop2_range: 0.35,
-        big_move_threshold: 0.025,
-        min_range: 0.0,
-        min_range_mode: MinRangeMode::Disabled,
-        exclude_weekends: true,
-        wait_hours: 3.0,
-    });
+    let br = IntradayBreakoutEngine::new(breakout_config(profile));
     HybridOrchestrator::new(
         mr,
         br,
@@ -412,6 +428,31 @@ fn build_orchestrator() -> HybridOrchestrator {
                 .unwrap_or(NaiveTime::MIN),
         },
     )
+}
+
+fn breakout_config(profile: ReplayProfile) -> IntradayBreakoutConfig {
+    match profile {
+        ReplayProfile::BaselineRuntimeHybrid => IntradayBreakoutConfig {
+            k: 0.55,
+            stop1_range: 0.51,
+            stop2_range: 0.35,
+            big_move_threshold: 0.025,
+            min_range: 0.0,
+            min_range_mode: MinRangeMode::Disabled,
+            exclude_weekends: true,
+            wait_hours: 3.0,
+        },
+        ReplayProfile::ImoexfBoK053 => IntradayBreakoutConfig {
+            k: 0.53,
+            stop1_range: 0.35,
+            stop2_range: 0.70,
+            big_move_threshold: 0.025,
+            min_range: 1.01,
+            min_range_mode: MinRangeMode::Absolute,
+            exclude_weekends: true,
+            wait_hours: 4.0,
+        },
+    }
 }
 
 fn read_prepared_bars(path: &Path, allow_non_strict: bool) -> Result<Vec<PreparedBar>> {
@@ -953,6 +994,7 @@ fn compare_with_expected(
     Ok(ParityReport {
         bundle_dir: cli.bundle_dir.display().to_string(),
         split: split.to_string(),
+        profile: cli.profile,
         weekend_policy: cli.weekend_policy,
         verify_checksums_result: if cli.verify_checksums {
             "ok".to_string()
