@@ -20,6 +20,9 @@ use alor_types::{MarketState, Scheduler};
 use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
+use crate::risk_gate_store::{
+    run_risk_gate_startup_store, startup_store_config_from_strategy_config,
+};
 use crate::state::{RuntimeState, StrategyState, StrategyStateEnvelopeCompat};
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
@@ -753,6 +756,7 @@ impl StrategyRuntime {
 
         self.load_snapshots().await?;
         self.load_runtime_state().await?;
+        self.bootstrap_risk_gate_startup_store().await?;
         self.notify_bootstrap_snapshot().await?;
         self.notify_runtime_state_restored().await?;
         self.warmup_strategy_indicators_from_history().await?;
@@ -822,6 +826,51 @@ impl StrategyRuntime {
         self.refresh_health_if_due().await?;
         self.log_live_guard_status_if_due().await?;
 
+        Ok(())
+    }
+
+    async fn bootstrap_risk_gate_startup_store(&mut self) -> Result<()> {
+        let finalized_at_utc = Utc::now().timestamp();
+        let Some(config) =
+            startup_store_config_from_strategy_config(&self.config.strategy, finalized_at_utc)?
+        else {
+            return Ok(());
+        };
+
+        info!(
+            strategy = %self.config.strategy.strategy_id,
+            profile = %config.identity.profile_id,
+            mode = ?config.mode,
+            "risk gate startup store bootstrap started"
+        );
+        let result = run_risk_gate_startup_store(&self.transport, &config).await?;
+        self.audit_event(
+            "risk_gate_startup_bootstrap",
+            json!({
+                "profile_id": config.identity.profile_id,
+                "mode": format!("{:?}", config.mode),
+                "decision": format!("{:?}", result.artifacts.decision),
+                "existing_records_loaded": result.existing_records_loaded,
+                "records_attempted": result.write_summary.attempted_records,
+                "records_inserted": result.write_summary.inserted_records,
+                "records_duplicate": result.write_summary.duplicate_records,
+                "state_refreshed": result.write_summary.state_refreshed,
+                "ledger_rows_count": result.artifacts.materialized_state.ledger_rows_count,
+                "seed_loaded": result.artifacts.materialized_state.seed_loaded,
+            }),
+        );
+        info!(
+            strategy = %self.config.strategy.strategy_id,
+            profile = %config.identity.profile_id,
+            mode = ?config.mode,
+            decision = ?result.artifacts.decision,
+            existing_records_loaded = result.existing_records_loaded,
+            records_attempted = result.write_summary.attempted_records,
+            records_inserted = result.write_summary.inserted_records,
+            records_duplicate = result.write_summary.duplicate_records,
+            state_refreshed = result.write_summary.state_refreshed,
+            "risk gate startup store bootstrap finished"
+        );
         Ok(())
     }
 
@@ -3075,10 +3124,7 @@ impl StrategyRuntime {
         true
     }
 
-    fn current_market_state(
-        &self,
-        created_ts_utc: i64,
-    ) -> Option<(MarketState, String)> {
+    fn current_market_state(&self, created_ts_utc: i64) -> Option<(MarketState, String)> {
         let periods = self.config.strategy.trading_periods.clone()?;
         let scheduler = Scheduler::new_with_fallback_offset_hours(
             periods,
@@ -3279,7 +3325,12 @@ impl StrategyRuntime {
                     for (intent, intent_class) in passthrough {
                         let action = self.intent_action_name(&intent);
                         if self
-                            .maybe_defer_exit_before_emit(ctx, created_ts_utc, intent.clone(), intent_class)
+                            .maybe_defer_exit_before_emit(
+                                ctx,
+                                created_ts_utc,
+                                intent.clone(),
+                                intent_class,
+                            )
                             .await?
                         {
                             continue;
@@ -3311,7 +3362,12 @@ impl StrategyRuntime {
                 for (intent, intent_class) in accepted {
                     let action = self.intent_action_name(&intent);
                     if self
-                        .maybe_defer_exit_before_emit(ctx, created_ts_utc, intent.clone(), intent_class)
+                        .maybe_defer_exit_before_emit(
+                            ctx,
+                            created_ts_utc,
+                            intent.clone(),
+                            intent_class,
+                        )
                         .await?
                     {
                         continue;
@@ -4566,7 +4622,8 @@ mod tests {
             .unwrap()
             .and_utc()
             .timestamp();
-        let ctx = runtime.strategy_ctx_with_last_bar_and_event_ts(Some(last_bar_ts), created_ts_utc);
+        let ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(Some(last_bar_ts), created_ts_utc);
         let intent = Intent::Place {
             price: 100.5,
             qty: 1.0,

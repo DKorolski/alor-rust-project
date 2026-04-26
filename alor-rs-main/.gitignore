@@ -52,3 +52,9 @@ paper_trades.jsonl
 /target-linux-amd64/
 docs/*.tar.gz
 docs/*-artifacts/
+!docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/
+docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/*
+!docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/SERVICE_BAR_EXCLUSION_BACKTEST.md
+!docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/RISK_GATE_SEED_STATE.md
+!docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv
+!docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26_metadata.json

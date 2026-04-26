@@ -468,6 +468,61 @@ close_hour = 21
 }
 
 #[test]
+fn loads_split_hybrid_riskgate_profile_fields() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let path = write_temp_config(
+        r#"
+[strategy.common]
+strategy_kind = "hybrid_intraday"
+symbol = "IMOEXF"
+qty = 1.0
+side = "buy"
+
+[strategy.hybrid_intraday]
+profile = "imoexf_primary_riskgate_high180_lb120"
+mr_variant = "high180"
+mr_gate_policy = "shadow_pnl_lb120_positive"
+risk_gate_mode = "bootstrap_from_seed"
+risk_gate_seed_file = "docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv"
+risk_gate_ledger_key = "runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120"
+model_session_start_time = "09:00:00"
+model_session_end_time = "23:49:59"
+bo_k = 0.53
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("hybrid settings");
+    let strategy = &settings.strategy;
+
+    assert_eq!(strategy.profile, "imoexf_primary_riskgate_high180_lb120");
+    assert_eq!(strategy.mr_variant, "high180");
+    assert_eq!(strategy.mr_gate_policy, "shadow_pnl_lb120_positive");
+    assert_eq!(strategy.risk_gate_mode, "bootstrap_from_seed");
+    assert_eq!(
+        strategy.risk_gate_seed_file.as_deref(),
+        Some("docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv")
+    );
+    assert_eq!(
+        strategy.risk_gate_ledger_key.as_deref(),
+        Some("runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120")
+    );
+    assert_eq!(strategy.model_session_start_time, "09:00:00");
+    assert_eq!(strategy.model_session_end_time, "23:49:59");
+    assert_eq!(strategy.bo_k, 0.53);
+    assert_eq!(
+        resolved.sources.strategy.hybrid_intraday,
+        strategy_runtime::config::ConfigSource::File
+    );
+}
+
+#[test]
 fn loads_split_alor_skeleton_sections() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);

@@ -44,9 +44,18 @@ Reasoning:
   weekday anchor contract.
 - `IMOEXF_MR_BO_SESSION_AUDIT.md`: audit of MR window, MR/BO overlap, and BO
   weekend/non-trading-gap behavior in the current replay artifact.
+- `SERVICE_BAR_EXCLUSION_BACKTEST.md`: backtest check showing that excluding
+  raw `08:50` service bars does not create regression and avoids non-tradable
+  executions.
+- `RISK_GATE_SEED_STATE.md`: seed/state instructions for
+  `riskgate_high180_lb120`.
 - `IMPLEMENTATION_TODO.md`: developer task list.
 - `REPLAY_CONTRACT.md`: required replay contract and acceptance criteria.
 - `imoexf_hybrid_mr_bo_manifest.csv`: frozen model/package manifest.
+- `riskgate_high180_lb120_seed_2026-04-26.csv`: daily seed state for the
+  High180 120-session MR risk gate.
+- `riskgate_high180_lb120_seed_2026-04-26_metadata.json`: seed generation
+  metadata and current gate summary.
 - `replay_source_runner.py`: Python reference runner used to generate artifacts.
 - `RUN_REFERENCE_REPLAY.md`: command for rerunning the Python reference replay.
 - `imoexf_mr_execution_economics_strategy_trades.csv`: MR source trades needed by
@@ -64,6 +73,7 @@ Reasoning:
 - Do not switch from `10m` close-bar contract to `1m` runtime bars for the parity
   verdict.
 - Do not trade Saturday/Sunday sessions.
+- Do not include pre-`09:00` service bars in model state or execution.
 - Do not use weekend calendar previous-day anchors for MR or BO.
 - Do not let weekend bars update the MR risk gate or create separate decision
   dates.

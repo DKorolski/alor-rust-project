@@ -2,6 +2,7 @@ pub mod config;
 pub mod health_server;
 pub mod live_guard;
 pub mod redis_transport;
+pub mod risk_gate_store;
 pub mod runtime;
 pub mod state;
 pub mod strategies;
@@ -275,6 +276,22 @@ pub enum StrategySpecificConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HybridIntradaySettings {
+    #[serde(default)]
+    pub profile: String,
+    #[serde(default)]
+    pub mr_variant: String,
+    #[serde(default)]
+    pub mr_gate_policy: String,
+    #[serde(default)]
+    pub risk_gate_mode: String,
+    #[serde(default)]
+    pub risk_gate_seed_file: Option<String>,
+    #[serde(default)]
+    pub risk_gate_ledger_key: Option<String>,
+    #[serde(default)]
+    pub model_session_start_time: String,
+    #[serde(default)]
+    pub model_session_end_time: String,
     pub mr_min_range_long: f64,
     pub mr_max_range_long: f64,
     pub mr_k_long: f64,
@@ -309,6 +326,14 @@ pub struct HybridIntradaySettings {
 impl Default for HybridIntradaySettings {
     fn default() -> Self {
         Self {
+            profile: "baseline_runtime_hybrid".to_string(),
+            mr_variant: "classic_prev_day_range".to_string(),
+            mr_gate_policy: "disabled".to_string(),
+            risk_gate_mode: "disabled".to_string(),
+            risk_gate_seed_file: None,
+            risk_gate_ledger_key: None,
+            model_session_start_time: String::new(),
+            model_session_end_time: String::new(),
             mr_min_range_long: 0.013,
             mr_max_range_long: 0.035,
             mr_k_long: 0.032,

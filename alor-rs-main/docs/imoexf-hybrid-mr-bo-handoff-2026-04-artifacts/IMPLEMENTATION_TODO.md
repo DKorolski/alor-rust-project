@@ -77,11 +77,17 @@ Implement and verify a Rust-compatible replay/runtime path for the updated
    Required behavior:
 
    - Keep a shadow PnL series for the fixed high180 MR contour.
-   - For each regular weekday decision date, compute rolling 120-day shadow PnL
-     shifted by one day.
+   - For each regular weekday decision date, compute rolling 120-session shadow
+     PnL shifted by one regular session.
    - Enable MR only when that shifted rolling PnL is positive.
    - Do not use the current day result to decide current day activation.
    - Do not create weekend decision dates from Saturday/Sunday bars.
+   - Continue updating the shadow High180 MR state and daily shadow PnL even
+     when real MR is disabled by the gate. The gate must not stop its own data
+     source.
+   - Emit an operator-visible warning if MR remains disabled for a long period
+     such as 60 regular sessions; this is a monitoring signal, not an automatic
+     override.
 
 6. Keep BO independent of the MR risk gate.
 

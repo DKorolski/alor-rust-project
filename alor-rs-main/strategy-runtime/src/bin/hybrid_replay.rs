@@ -5,12 +5,13 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use csv::{ReaderBuilder, WriterBuilder};
 use serde::{Deserialize, Serialize};
 use strategy_runtime::strategies::hybrid_intraday::{
-    Action, BreakoutEodMode, HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig,
-    IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine, MinRangeMode, Owner, Side,
+    Action, BreakoutEodMode, High180MrConfig, High180MrEngine, High180Open, High180Signal,
+    HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig, IntradayBreakoutEngine,
+    MeanReversionConfig, MeanReversionEngine, MinRangeMode, Owner, Side,
 };
 
 const DEFAULT_BUNDLE_DIR: &str = "pre_rust_handoff/replay_data/imoexf_2023_2026";
@@ -20,6 +21,9 @@ const DEFAULT_SIZE_PCT: f64 = 0.9;
 const DEFAULT_COMMISSION: f64 = 1.0 / 28_000.0;
 const NUMERIC_EPS: f64 = 1e-9;
 const SUMMARY_EPS: f64 = 1e-4;
+const RISK_GATE_LOOKBACK_SESSIONS: usize = 120;
+const RISK_GATE_MIN_HISTORY_SESSIONS: usize = 60;
+const RISK_GATE_MAKER_COST_POINTS: f64 = 0.1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Split {
@@ -274,13 +278,6 @@ struct ActiveBracket {
 }
 
 #[derive(Debug, Clone)]
-struct High180Open {
-    target_price: f64,
-    stop_price: f64,
-    max_hold: Duration,
-}
-
-#[derive(Debug, Clone)]
 struct EngineState {
     cash: f64,
     commission: f64,
@@ -480,137 +477,6 @@ fn breakout_config(profile: ReplayProfile) -> IntradayBreakoutConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct High180MrConfig {
-    min_rel_range: f64,
-    max_rel_range: f64,
-    k_long: f64,
-    k_short: f64,
-    stop_loss_mult: f64,
-    max_hold: Duration,
-}
-
-impl Default for High180MrConfig {
-    fn default() -> Self {
-        Self {
-            min_rel_range: 0.005,
-            max_rel_range: 0.050,
-            k_long: 0.085,
-            k_short: 0.090,
-            stop_loss_mult: 7.0,
-            max_hold: Duration::minutes(180),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct High180Signal {
-    side: Side,
-    target_price: f64,
-    stop_price: f64,
-    reason: &'static str,
-}
-
-#[derive(Debug, Clone)]
-struct High180MrEngine {
-    config: High180MrConfig,
-    current_day: Option<NaiveDate>,
-    day_high: Option<f64>,
-    day_low: Option<f64>,
-}
-
-impl High180MrEngine {
-    fn new(config: High180MrConfig) -> Self {
-        Self {
-            config,
-            current_day: None,
-            day_high: None,
-            day_low: None,
-        }
-    }
-
-    fn on_bar(&mut self, bar: &PreparedBar) {
-        if self.current_day != Some(bar.ts.date()) {
-            self.current_day = Some(bar.ts.date());
-            self.day_high = Some(bar.high);
-            self.day_low = Some(bar.low);
-            return;
-        }
-        self.day_high = Some(self.day_high.unwrap_or(bar.high).max(bar.high));
-        self.day_low = Some(self.day_low.unwrap_or(bar.low).min(bar.low));
-    }
-
-    fn evaluate_entry(&self, bar: &PreparedBar) -> Option<High180Signal> {
-        if bar.ts.time() > NaiveTime::from_hms_opt(11, 59, 59).unwrap_or(NaiveTime::MIN) {
-            return None;
-        }
-        if bar.close == 0.0 || bar.close_prev.is_nan() || bar.day_range_prev.is_nan() {
-            return None;
-        }
-        let rel_range = bar.day_range_prev / bar.close;
-        if !(self.config.min_rel_range < rel_range && rel_range < self.config.max_rel_range) {
-            return None;
-        }
-        let midpoint = (self.day_high? + self.day_low?) / 2.0;
-        if bar.close < bar.close_prev
-            && bar.close > bar.close_prev - self.config.k_long * bar.day_range_prev
-        {
-            let stop_distance = self.config.stop_loss_mult * (midpoint - bar.close).abs();
-            return Some(High180Signal {
-                side: Side::Long,
-                target_price: midpoint,
-                stop_price: bar.close - stop_distance,
-                reason: "morning_mean_reversion_long",
-            });
-        }
-        if bar.close > bar.close_prev
-            && bar.close < bar.close_prev + self.config.k_short * bar.day_range_prev
-        {
-            let stop_distance = self.config.stop_loss_mult * (bar.close - midpoint).abs();
-            return Some(High180Signal {
-                side: Side::Short,
-                target_price: midpoint,
-                stop_price: bar.close + stop_distance,
-                reason: "morning_mean_reversion_short",
-            });
-        }
-        None
-    }
-
-    fn evaluate_exit(
-        &self,
-        open: &High180Open,
-        position: &Position,
-        bar: &PreparedBar,
-    ) -> Option<(&'static str, f64)> {
-        if bar.ts <= position.entry_ts {
-            return None;
-        }
-        match position.side {
-            Side::Long => {
-                if bar.close >= open.target_price {
-                    return Some(("midpoint_take", bar.close));
-                }
-                if bar.close <= open.stop_price {
-                    return Some(("stop", bar.close));
-                }
-            }
-            Side::Short => {
-                if bar.close <= open.target_price {
-                    return Some(("midpoint_take", bar.close));
-                }
-                if bar.close >= open.stop_price {
-                    return Some(("stop", bar.close));
-                }
-            }
-        }
-        if bar.ts - position.entry_ts >= open.max_hold {
-            return Some(("time_stop", bar.close));
-        }
-        None
-    }
-}
-
 fn run_close_bar_high180_replay(
     cli: &Cli,
     bars: &[PreparedBar],
@@ -621,15 +487,14 @@ fn run_close_bar_high180_replay(
     let mut breakout = IntradayBreakoutEngine::new(breakout_config(cli.profile));
 
     for bar in bars {
-        let is_weekend = is_weekend_ts(bar.ts);
-        if is_weekend && matches!(cli.weekend_policy, WeekendPolicy::BaselineSkip) {
+        if !is_regular_tradable_bar(bar.ts) {
             continue;
         }
         if bar.close == 0.0 {
             continue;
         }
 
-        mr.on_bar(bar);
+        mr.on_bar(bar.ts, bar.high, bar.low);
         breakout.on_bar(bar.ts, bar.open, bar.high, bar.low, bar.close);
 
         if close_bar_high180_exit(bar, &mr, state) {
@@ -646,7 +511,9 @@ fn run_close_bar_high180_replay(
         }
         if state.position.is_none() {
             if mr_enabled_dates.contains(&bar.ts.date()) {
-                if let Some(signal) = mr.evaluate_entry(bar) {
+                if let Some(signal) =
+                    mr.evaluate_entry(bar.ts, bar.close, bar.close_prev, bar.day_range_prev)
+                {
                     open_close_bar_entry(cli, bar, signal, Owner::MeanReversion, state);
                     state.equity_curve.push((bar.ts, state.cash));
                     continue;
@@ -675,7 +542,7 @@ fn open_close_bar_entry(
         action: "submit_entry".to_string(),
         owner: owner.as_str().to_string(),
         side: signal.side.as_str().to_string(),
-        reason: signal.reason.to_string(),
+        reason: signal.reason.as_str().to_string(),
     });
     let size = close_bar_position_size(cli, state.cash, bar, signal.side);
     let entry_fee = (size.abs() as f64) * bar.close * state.commission;
@@ -688,11 +555,10 @@ fn open_close_bar_entry(
         size,
         entry_fee,
     });
-    state.high180_open = Some(High180Open {
-        target_price: signal.target_price,
-        stop_price: signal.stop_price,
-        max_hold: High180MrConfig::default().max_hold,
-    });
+    state.high180_open = Some(High180Open::from_signal(
+        &signal,
+        High180MrConfig::default(),
+    ));
 }
 
 fn open_breakout_close_bar_entry(
@@ -752,7 +618,9 @@ fn close_bar_high180_exit(
     let Some(open) = state.high180_open.clone() else {
         return false;
     };
-    let Some((reason, exit_price)) = mr.evaluate_exit(&open, &position, bar) else {
+    let Some((reason, exit_price)) =
+        mr.evaluate_exit(&open, position.entry_ts, position.side, bar.ts, bar.close)
+    else {
         return false;
     };
     state.action_rows.push(ActionRow {
@@ -812,17 +680,24 @@ fn riskgate_high180_lb120_enabled_dates(bars: &[PreparedBar]) -> BTreeSet<NaiveD
         *daily_pnl.entry(exit_date).or_insert(0.0) += pnl;
     }
 
-    let mut dates = BTreeSet::<NaiveDate>::new();
+    let mut date_set = BTreeSet::<NaiveDate>::new();
     for bar in bars {
-        if !is_weekend_ts(bar.ts) {
-            dates.insert(bar.ts.date());
+        if is_regular_tradable_bar(bar.ts) {
+            date_set.insert(bar.ts.date());
         }
     }
+    let dates = date_set.into_iter().collect::<Vec<_>>();
 
     let mut enabled = BTreeSet::<NaiveDate>::new();
-    for day in dates {
-        let start = day - Duration::days(120);
-        let trailing_pnl: f64 = daily_pnl.range(start..day).map(|(_, pnl)| *pnl).sum();
+    for (idx, day) in dates.iter().copied().enumerate() {
+        if idx < RISK_GATE_MIN_HISTORY_SESSIONS {
+            continue;
+        }
+        let start = idx.saturating_sub(RISK_GATE_LOOKBACK_SESSIONS);
+        let trailing_pnl: f64 = dates[start..idx]
+            .iter()
+            .map(|date| daily_pnl.get(date).copied().unwrap_or(0.0))
+            .sum();
         if trailing_pnl > 0.0 {
             enabled.insert(day);
         }
@@ -837,18 +712,20 @@ fn simulate_high180_shadow_daily_pnl(bars: &[PreparedBar]) -> Vec<(NaiveDate, f6
     let mut pnl_by_exit = Vec::new();
 
     for bar in bars {
-        if is_weekend_ts(bar.ts) || bar.close == 0.0 {
+        if !is_regular_tradable_bar(bar.ts) || bar.close == 0.0 {
             continue;
         }
-        mr.on_bar(bar);
+        mr.on_bar(bar.ts, bar.high, bar.low);
         let mut closed_this_bar = false;
         if let (Some(pos), Some(open)) = (position.clone(), high180_open.clone()) {
-            if let Some((_reason, exit_price)) = mr.evaluate_exit(&open, &pos, bar) {
+            if let Some((_reason, exit_price)) =
+                mr.evaluate_exit(&open, pos.entry_ts, pos.side, bar.ts, bar.close)
+            {
                 let pnl = if pos.size > 0 {
                     exit_price - pos.entry_price
                 } else {
                     pos.entry_price - exit_price
-                };
+                } - RISK_GATE_MAKER_COST_POINTS;
                 pnl_by_exit.push((bar.ts.date(), pnl));
                 position = None;
                 high180_open = None;
@@ -856,7 +733,9 @@ fn simulate_high180_shadow_daily_pnl(bars: &[PreparedBar]) -> Vec<(NaiveDate, f6
             }
         }
         if position.is_none() && !closed_this_bar {
-            if let Some(signal) = mr.evaluate_entry(bar) {
+            if let Some(signal) =
+                mr.evaluate_entry(bar.ts, bar.close, bar.close_prev, bar.day_range_prev)
+            {
                 let size = match signal.side {
                     Side::Long => 1,
                     Side::Short => -1,
@@ -869,11 +748,10 @@ fn simulate_high180_shadow_daily_pnl(bars: &[PreparedBar]) -> Vec<(NaiveDate, f6
                     size,
                     entry_fee: 0.0,
                 });
-                high180_open = Some(High180Open {
-                    target_price: signal.target_price,
-                    stop_price: signal.stop_price,
-                    max_hold: High180MrConfig::default().max_hold,
-                });
+                high180_open = Some(High180Open::from_signal(
+                    &signal,
+                    High180MrConfig::default(),
+                ));
             }
         }
     }
@@ -1150,6 +1028,15 @@ fn gap_flatten_violation(exit: &PendingExit, bar: &PreparedBar) -> Option<GapFla
 
 fn is_weekend_ts(ts: NaiveDateTime) -> bool {
     matches!(ts.weekday(), Weekday::Sat | Weekday::Sun)
+}
+
+fn is_regular_tradable_bar(ts: NaiveDateTime) -> bool {
+    if is_weekend_ts(ts) {
+        return false;
+    }
+    let start = NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN);
+    let end = NaiveTime::from_hms_opt(23, 49, 59).expect("valid model session end time");
+    ts.time() >= start && ts.time() <= end
 }
 
 fn process_active_bracket(
@@ -1679,4 +1566,66 @@ fn parse_ts(value: &str) -> Result<NaiveDateTime> {
 
 fn format_ts(ts: NaiveDateTime) -> String {
     ts.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar_at(hour: u32, minute: u32, high: f64, low: f64, close: f64) -> PreparedBar {
+        PreparedBar {
+            ts: NaiveDate::from_ymd_opt(2026, 1, 5)
+                .unwrap()
+                .and_hms_opt(hour, minute, 0)
+                .unwrap(),
+            open: close,
+            high,
+            low,
+            close,
+            close_prev: 100.0,
+            day_range_prev: 50.0,
+        }
+    }
+
+    #[test]
+    fn high180_long_requires_midpoint_above_entry_close() {
+        let mut engine = High180MrEngine::new(High180MrConfig::default());
+        let bar = bar_at(9, 0, 100.0, 90.0, 99.0);
+        engine.on_bar(bar.ts, bar.high, bar.low);
+
+        assert!(engine
+            .evaluate_entry(bar.ts, bar.close, bar.close_prev, bar.day_range_prev)
+            .is_none());
+    }
+
+    #[test]
+    fn high180_short_requires_midpoint_below_entry_close() {
+        let mut engine = High180MrEngine::new(High180MrConfig::default());
+        let bar = bar_at(9, 0, 110.0, 100.0, 101.0);
+        engine.on_bar(bar.ts, bar.high, bar.low);
+
+        assert!(engine
+            .evaluate_entry(bar.ts, bar.close, bar.close_prev, bar.day_range_prev)
+            .is_none());
+    }
+
+    #[test]
+    fn model_feed_excludes_service_and_weekend_bars() {
+        let weekday_preopen = NaiveDate::from_ymd_opt(2026, 1, 5)
+            .unwrap()
+            .and_hms_opt(8, 50, 0)
+            .unwrap();
+        let weekday_regular = NaiveDate::from_ymd_opt(2026, 1, 5)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        let weekend_regular = NaiveDate::from_ymd_opt(2026, 1, 10)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+
+        assert!(!is_regular_tradable_bar(weekday_preopen));
+        assert!(is_regular_tradable_bar(weekday_regular));
+        assert!(!is_regular_tradable_bar(weekend_regular));
+    }
 }

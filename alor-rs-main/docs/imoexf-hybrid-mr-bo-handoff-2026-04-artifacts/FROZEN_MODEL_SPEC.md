@@ -43,7 +43,7 @@ This means:
 
 - BO block: fixed `bo_new_k053`.
 - MR block: high-K midpoint-take MR contour.
-- MR risk gate: enable the MR contour only when its trailing 120-day shadow PnL is positive.
+- MR risk gate: enable the MR contour only when its trailing 120-session shadow PnL is positive.
 
 ## BO Block
 
@@ -161,10 +161,15 @@ riskgate_high180_lb120
 Gate rule:
 
 ```text
-Enable tomorrow's MR contour only if trailing 120 calendar-day shadow PnL
+Enable tomorrow's MR contour only if trailing 120 regular-session shadow PnL
 of the base contour is positive, using data available before tomorrow.
 Otherwise go to cash for the MR block.
 ```
+
+The shadow High180 MR contour must continue to run and update daily shadow PnL
+on every regular session even when real MR is disabled by the gate. Otherwise
+the gate can become a permanent off switch and will not match the frozen model
+contract.
 
 The BO block is not disabled by this MR gate.
 

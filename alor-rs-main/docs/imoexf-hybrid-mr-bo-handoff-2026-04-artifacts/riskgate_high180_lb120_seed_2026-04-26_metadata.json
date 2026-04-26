@@ -1,0 +1,41 @@
+{
+  "instrument": "IMOEXF",
+  "gate": "riskgate_high180_lb120",
+  "generated_for_date": "2026-04-26",
+  "raw_input": "analiz_alpha_si/moex_micro_live_audit_2026_04/cache/imoexf_2023-10-01_2026-04-21_raw.parquet",
+  "raw_first_ts": "2023-11-14 10:00:00",
+  "raw_last_ts": "2026-04-21 23:40:00",
+  "model_feed_contract": "Mon-Fri 09:00..23:49, no pre-09 service bars, no weekend bars",
+  "model_first_ts": "2023-11-14 10:00:00",
+  "model_last_ts": "2026-04-21 23:40:00",
+  "all_regular_sessions_available": 616,
+  "seed_retention_sessions": 180,
+  "seed_rows": 180,
+  "seed_first_date": "2025-08-06",
+  "seed_last_date": "2026-04-21",
+  "lookback_sessions": 120,
+  "min_history_sessions": 60,
+  "shadow_trade_count_in_seed": 161,
+  "shadow_pnl_points_in_seed": 156.4,
+  "last_120_shadow_pnl_points": 161.9,
+  "enabled_for_next_regular_session_from_last_120": true,
+  "note": "Current date 2026-04-26 is Sunday. Seed includes the latest regular session present in raw data and no weekend rows.",
+  "columns": [
+    "date",
+    "shadow_pnl_points",
+    "shadow_trade_count",
+    "rolling_120_pnl_before_session",
+    "mr_enabled_for_session",
+    "source",
+    "status"
+  ],
+  "mr_params": {
+    "k_long": 0.085,
+    "k_short": 0.09,
+    "range_gate": "0.005..0.050 exclusive",
+    "stop_loss_mult": 7.0,
+    "max_hold_minutes": 180,
+    "entry_window": "09:00..11:59",
+    "cost_points": 0.1
+  }
+}

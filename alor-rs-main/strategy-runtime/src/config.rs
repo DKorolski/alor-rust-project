@@ -561,6 +561,14 @@ struct MockLiveProbeConfigFile {
 struct HybridIntradayConfigFile {
     live_order_style: Option<String>,
     marketable_limit_offset_ticks: Option<i64>,
+    profile: Option<String>,
+    mr_variant: Option<String>,
+    mr_gate_policy: Option<String>,
+    risk_gate_mode: Option<String>,
+    risk_gate_seed_file: Option<String>,
+    risk_gate_ledger_key: Option<String>,
+    model_session_start_time: Option<String>,
+    model_session_end_time: Option<String>,
     mr_min_range_long: Option<f64>,
     mr_max_range_long: Option<f64>,
     mr_k_long: Option<f64>,
@@ -1144,6 +1152,30 @@ fn apply_hybrid_intraday_config_file(
     if let Some(settings) = strategy.hybrid_intraday_mut() {
         sources.hybrid_intraday = source;
         let strategy = &mut settings.strategy;
+        if let Some(value) = &hybrid_file.profile {
+            strategy.profile = value.clone();
+        }
+        if let Some(value) = &hybrid_file.mr_variant {
+            strategy.mr_variant = value.clone();
+        }
+        if let Some(value) = &hybrid_file.mr_gate_policy {
+            strategy.mr_gate_policy = value.clone();
+        }
+        if let Some(value) = &hybrid_file.risk_gate_mode {
+            strategy.risk_gate_mode = value.clone();
+        }
+        if let Some(value) = &hybrid_file.risk_gate_seed_file {
+            strategy.risk_gate_seed_file = Some(value.clone());
+        }
+        if let Some(value) = &hybrid_file.risk_gate_ledger_key {
+            strategy.risk_gate_ledger_key = Some(value.clone());
+        }
+        if let Some(value) = &hybrid_file.model_session_start_time {
+            strategy.model_session_start_time = value.clone();
+        }
+        if let Some(value) = &hybrid_file.model_session_end_time {
+            strategy.model_session_end_time = value.clone();
+        }
         if let Some(value) = hybrid_file.mr_min_range_long {
             strategy.mr_min_range_long = value;
         }

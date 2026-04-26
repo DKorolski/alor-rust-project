@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use chrono::Utc;
 use redis::RedisResult;
 use serde::de::DeserializeOwned;
@@ -13,6 +13,33 @@ use crate::strategy_host::{BarEvent, OrderEvent, PositionEvent, TradeEvent};
 use crate::RuntimeConfig;
 
 const PAYLOAD_FIELD: &str = "payload";
+const RISK_GATE_SESSION_WRITE_SCRIPT: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    return 0
+end
+redis.call('SET', KEYS[1], '1')
+local session_count = tonumber(ARGV[1])
+local idx = 2
+local xargs = {KEYS[2], '*'}
+for i = 1, session_count do
+    table.insert(xargs, ARGV[idx])
+    table.insert(xargs, ARGV[idx + 1])
+    idx = idx + 2
+end
+redis.call('XADD', unpack(xargs))
+local state_count = tonumber(ARGV[idx])
+idx = idx + 1
+if state_count > 0 then
+    local hargs = {KEYS[3]}
+    for i = 1, state_count do
+        table.insert(hargs, ARGV[idx])
+        table.insert(hargs, ARGV[idx + 1])
+        idx = idx + 2
+    end
+    redis.call('HSET', unpack(hargs))
+end
+return 1
+"#;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeMessage<T> {
@@ -26,6 +53,13 @@ pub struct RedisStreamMessage {
     pub stream: String,
     pub id: String,
     pub payload: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RedisStreamFieldMessage {
+    pub stream: String,
+    pub id: String,
+    pub fields: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +211,50 @@ impl RedisRuntimeTransport {
         Ok(values)
     }
 
+    pub async fn hset_fields(&self, key: &str, fields: &[(String, String)]) -> Result<()> {
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg(key);
+        for (field, value) in fields {
+            cmd.arg(field).arg(value);
+        }
+        let _: redis::Value = cmd.query_async(&mut conn).await?;
+        Ok(())
+    }
+
+    pub async fn write_risk_gate_session_if_new(
+        &self,
+        finalized_key: &str,
+        ledger_stream: &str,
+        state_key: &str,
+        session_fields: &[(String, String)],
+        state_fields: &[(String, String)],
+    ) -> Result<bool> {
+        if session_fields.is_empty() {
+            bail!("risk gate session write requires at least one ledger field");
+        }
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut cmd = redis::cmd("EVAL");
+        cmd.arg(RISK_GATE_SESSION_WRITE_SCRIPT)
+            .arg(3)
+            .arg(finalized_key)
+            .arg(ledger_stream)
+            .arg(state_key)
+            .arg(session_fields.len());
+        for (key, value) in session_fields {
+            cmd.arg(key).arg(value);
+        }
+        cmd.arg(state_fields.len());
+        for (key, value) in state_fields {
+            cmd.arg(key).arg(value);
+        }
+        let inserted: i64 = cmd.query_async(&mut conn).await?;
+        Ok(inserted == 1)
+    }
+
     pub async fn xlen(&self, stream: &str) -> Result<i64> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let len: i64 = redis::cmd("XLEN")
@@ -236,6 +314,30 @@ impl RedisRuntimeTransport {
             })
             .collect();
         Ok(payloads)
+    }
+
+    pub async fn xrevrange_last_n_fields(
+        &self,
+        stream: &str,
+        count: usize,
+    ) -> Result<Vec<RedisStreamFieldMessage>> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let reply: redis::Value = redis::cmd("XREVRANGE")
+            .arg(stream)
+            .arg("+")
+            .arg("-")
+            .arg("COUNT")
+            .arg(count)
+            .query_async(&mut conn)
+            .await?;
+        let entries = match reply {
+            redis::Value::Bulk(entries) => entries,
+            _ => return Ok(Vec::new()),
+        };
+        Ok(entries
+            .iter()
+            .filter_map(|entry| self.parse_field_entry(stream, entry))
+            .collect())
     }
 
     pub async fn xack(&self, stream: &str, message_id: &str) -> Result<()> {
@@ -455,6 +557,29 @@ impl RedisRuntimeTransport {
         })
     }
 
+    fn parse_field_entry(
+        &self,
+        stream_name: &str,
+        entry: &redis::Value,
+    ) -> Option<RedisStreamFieldMessage> {
+        let entry = match entry {
+            redis::Value::Bulk(values) => values,
+            _ => return None,
+        };
+        if entry.len() < 2 {
+            return None;
+        }
+        let message_id = match &entry[0] {
+            redis::Value::Data(data) => String::from_utf8_lossy(data).to_string(),
+            _ => return None,
+        };
+        Some(RedisStreamFieldMessage {
+            stream: stream_name.to_string(),
+            id: message_id,
+            fields: self.extract_fields(&entry[1]),
+        })
+    }
+
     fn extract_payload(&self, fields: &redis::Value) -> Option<String> {
         let fields = match fields {
             redis::Value::Bulk(values) => values,
@@ -468,6 +593,26 @@ impl RedisRuntimeTransport {
             }
         }
         None
+    }
+
+    fn extract_fields(&self, fields: &redis::Value) -> Vec<(String, String)> {
+        let fields = match fields {
+            redis::Value::Bulk(values) => values,
+            _ => return Vec::new(),
+        };
+        fields
+            .chunks(2)
+            .filter_map(|chunk| {
+                if let [redis::Value::Data(key), redis::Value::Data(value)] = chunk {
+                    Some((
+                        String::from_utf8_lossy(key).to_string(),
+                        String::from_utf8_lossy(value).to_string(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub async fn decode_entry<T: DeserializeOwned>(

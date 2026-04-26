@@ -23,6 +23,10 @@ and filters to:
 09:00:00..23:49:00
 ```
 
+Pre-`09:00` service bars such as `08:50` must remain raw/audit-only. They must
+not update MR midpoint state, BO state, risk-gate shadow state, or execution
+state.
+
 Do not use raw `1m` live-like feed as the parity verdict for this package.
 
 ## Weekend Session Contract

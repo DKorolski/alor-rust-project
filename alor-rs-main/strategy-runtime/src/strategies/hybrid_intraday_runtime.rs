@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use crate::state::StrategyState;
 use crate::strategies::hybrid_intraday::{
-    Action, BreakoutEodMode, EntryStyle, HybridOrchestrator, HybridOrchestratorConfig,
-    IntradayBreakoutConfig, IntradayBreakoutEngine, MeanReversionConfig, MeanReversionEngine,
-    Owner, ReasonCode, Side,
+    Action, BreakoutEodMode, EntrySignal, EntryStyle, High180MrConfig, High180MrEngine,
+    HybridOrchestrator, HybridOrchestratorConfig, IntradayBreakoutConfig, IntradayBreakoutEngine,
+    MeanReversionConfig, MeanReversionEngine, Owner, ReasonCode, Side,
 };
 use crate::strategies::market_buy_and_close::MarketBuyAndCloseLiveOrderStyle;
 use crate::strategy_host::{
@@ -22,6 +22,14 @@ use crate::strategy_host::{
 #[derive(Debug, Clone)]
 pub struct HybridIntradayRuntimeConfig {
     pub symbol: String,
+    pub profile: HybridIntradayProfile,
+    pub mr_variant: MeanReversionVariant,
+    pub mr_gate_policy: MrGatePolicy,
+    pub risk_gate_mode: RiskGateMode,
+    pub risk_gate_seed_file: Option<String>,
+    pub risk_gate_ledger_key: Option<String>,
+    pub model_session_start_time: Option<NaiveTime>,
+    pub model_session_end_time: Option<NaiveTime>,
     pub qty: f64,
     pub live_order_style: MarketBuyAndCloseLiveOrderStyle,
     pub tick_size: f64,
@@ -40,6 +48,34 @@ pub struct HybridIntradayRuntimeConfig {
     pub mr_config: MeanReversionConfig,
     pub breakout_config: IntradayBreakoutConfig,
     pub orchestrator_config: HybridOrchestratorConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HybridIntradayProfile {
+    BaselineRuntimeHybrid,
+    ImoexfPrimaryRiskgateHigh180Lb120,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeanReversionVariant {
+    ClassicPrevDayRange,
+    High180,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MrGatePolicy {
+    Disabled,
+    ShadowPnlLb120Positive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskGateMode {
+    Disabled,
+    BootstrapFromSeed,
+    NormalAppend,
+    RebuildFromHistory,
+    ShadowOnly,
+    Enforced,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +133,7 @@ enum TagRole {
 pub struct HybridIntradayRuntimeStrategy {
     config: HybridIntradayRuntimeConfig,
     orchestrator: HybridOrchestrator,
+    high180_mr: High180MrEngine,
     state: StrategyState,
     last_processed_bar_ts: Option<i64>,
     last_position_qty: f64,
@@ -172,9 +209,11 @@ impl HybridIntradayRuntimeStrategy {
         let mr = MeanReversionEngine::new(config.mr_config);
         let br = IntradayBreakoutEngine::new(config.breakout_config);
         let orchestrator = HybridOrchestrator::new(mr, br, config.orchestrator_config);
+        let high180_mr = High180MrEngine::new(High180MrConfig::default());
         Self {
             config,
             orchestrator,
+            high180_mr,
             state: StrategyState::Idle,
             last_processed_bar_ts: None,
             last_position_qty: 0.0,
@@ -261,6 +300,67 @@ impl HybridIntradayRuntimeStrategy {
 
     fn suppress_weekend_signal_generation(&self, dt_local: NaiveDateTime) -> bool {
         self.config.weekends_off && matches!(dt_local.weekday(), Weekday::Sat | Weekday::Sun)
+    }
+
+    fn suppress_non_model_session_bar(&self, dt_local: NaiveDateTime) -> Option<&'static str> {
+        if let Some(start) = self.config.model_session_start_time {
+            if dt_local.time() < start {
+                return Some("before_model_session_start");
+            }
+        }
+        if let Some(end) = self.config.model_session_end_time {
+            if dt_local.time() > end {
+                return Some("after_model_session_end");
+            }
+        }
+        None
+    }
+
+    fn uses_high180_mr(&self) -> bool {
+        self.config.mr_variant == MeanReversionVariant::High180
+    }
+
+    fn mr_gate_allows_current_session(&self) -> bool {
+        match self.config.mr_gate_policy {
+            MrGatePolicy::Disabled => true,
+            MrGatePolicy::ShadowPnlLb120Positive => {
+                !matches!(self.config.risk_gate_mode, RiskGateMode::Enforced)
+            }
+        }
+    }
+
+    fn high180_entry_signal(
+        &self,
+        dt_local: NaiveDateTime,
+        close: f64,
+        close_prev: f64,
+        day_range_prev: f64,
+    ) -> Option<EntrySignal> {
+        self.high180_mr
+            .evaluate_entry(dt_local, close, close_prev, day_range_prev)
+            .map(|signal| EntrySignal {
+                owner: Owner::MeanReversion,
+                side: signal.side,
+                entry_style: EntryStyle::Bracket,
+                reason: signal.reason,
+                stop_price: Some(signal.stop_price),
+                take_price: Some(signal.target_price),
+            })
+    }
+
+    fn high180_exit_reason(&self, dt_local: NaiveDateTime) -> Option<ReasonCode> {
+        if self.current_owner != Some(Owner::MeanReversion) {
+            return None;
+        }
+        let entry_ts = self
+            .active_cycle_id
+            .and_then(Self::cycle_ts_utc)
+            .and_then(|ts| self.utc_to_local_naive(ts))?;
+        let max_hold = self.high180_mr.config().max_hold;
+        if dt_local - entry_ts >= max_hold {
+            return Some(ReasonCode::MeanRevTimeCutoff);
+        }
+        None
     }
 
     fn breakout_eod_time(&self) -> NaiveTime {
@@ -1659,6 +1759,14 @@ mod tests {
     fn test_config() -> HybridIntradayRuntimeConfig {
         HybridIntradayRuntimeConfig {
             symbol: "IMOEXF".to_string(),
+            profile: HybridIntradayProfile::BaselineRuntimeHybrid,
+            mr_variant: MeanReversionVariant::ClassicPrevDayRange,
+            mr_gate_policy: MrGatePolicy::Disabled,
+            risk_gate_mode: RiskGateMode::Disabled,
+            risk_gate_seed_file: None,
+            risk_gate_ledger_key: None,
+            model_session_start_time: None,
+            model_session_end_time: None,
             qty: 1.0,
             live_order_style: MarketBuyAndCloseLiveOrderStyle::Market,
             tick_size: 0.5,
@@ -1743,6 +1851,94 @@ mod tests {
             v: 1.0,
             origin,
         }
+    }
+
+    #[test]
+    fn high180_live_variant_emits_midpoint_bracket_entry() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::High180;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(4.0);
+        strategy.entry_ready = true;
+        strategy.last_day_local =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 6).unwrap_or(chrono::NaiveDate::MIN));
+
+        let ctx = test_ctx(Some(0.0));
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 10, 0),
+                99.8,
+                101.0,
+                99.0,
+                99.8,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Classified {
+                intent,
+                intent_class: IntentClass::Entry
+            }] if matches!(intent.as_ref(), Intent::Market { side: OrderSide::Buy, .. })
+        ));
+        let pending = strategy.pending_entry.expect("pending high180 entry");
+        assert_eq!(pending.owner, Owner::MeanReversion);
+        assert_eq!(pending.entry_style, EntryStyle::Bracket);
+        assert_eq!(pending.take_price, Some(100.0));
+        assert!((pending.stop_price.unwrap_or_default() - 98.4).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn high180_live_variant_forces_exit_after_max_hold() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::High180;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        let entry_ts = ts_local(2026, 1, 6, 9, 0, 0);
+        let cycle_id = strategy.next_cycle_id(entry_ts);
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(cycle_id);
+        strategy.last_day_local =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 6).unwrap_or(chrono::NaiveDate::MIN));
+        strategy.orchestrator.restore(
+            crate::strategies::hybrid_intraday::orchestrator::HybridSnapshot {
+                state: crate::strategies::hybrid_intraday::HybridState::Open,
+                current_owner: Some(Owner::MeanReversion),
+                current_side: Some(Side::Long),
+                has_pending_entry: false,
+                overnight_exit_armed_date: None,
+            },
+        );
+
+        let ctx = test_ctx(Some(1.0));
+        let intents = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 12, 0, 0),
+                100.0,
+                100.5,
+                99.5,
+                100.0,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Classified {
+                intent,
+                intent_class: IntentClass::Exit
+            }] if matches!(intent.as_ref(), Intent::Market { side: OrderSide::Sell, .. })
+        ));
+        assert_eq!(
+            strategy.pending_exit.expect("pending exit").reason,
+            ReasonCode::MeanRevTimeCutoff
+        );
     }
 
     #[test]
@@ -3560,7 +3756,23 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             );
             return Vec::new();
         }
+        if let Some(reason) = self.suppress_non_model_session_bar(dt_local) {
+            self.last_processed_bar_ts = Some(bar.close_time_utc);
+            debug!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                ts_utc = bar.close_time_utc,
+                dt_local = %dt_local,
+                origin = ?bar.origin,
+                reason,
+                profile = ?self.config.profile,
+                "hybrid_model_session_bar_suppressed"
+            );
+            return Vec::new();
+        }
         self.update_day_aggregates(dt_local, bar.h, bar.l);
+        if self.uses_high180_mr() {
+            self.high180_mr.on_bar(dt_local, bar.h, bar.l);
+        }
         self.log_signal_warmup_status_if_changed(dt_local, bar.close_time_utc);
 
         let close_prev = self.prev_day_close().unwrap_or(bar.close);
@@ -3612,7 +3824,20 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 return intents;
             }
         }
-        let mut actions = self.orchestrator.on_bar(bar_input);
+        let mut actions = if self.uses_high180_mr() {
+            let mr_entry_signal = if self.mr_gate_allows_current_session() {
+                self.high180_entry_signal(dt_local, bar.close, close_prev, day_range_prev)
+            } else {
+                None
+            };
+            self.orchestrator.on_bar_with_mr_override(
+                bar_input,
+                mr_entry_signal,
+                self.high180_exit_reason(dt_local),
+            )
+        } else {
+            self.orchestrator.on_bar(bar_input)
+        };
         self.append_breakout_no_overnight_guard(
             &mut actions,
             dt_local,
@@ -4118,7 +4343,14 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 warmup.last_processed_bar_ts = Some(bar.close_time_utc);
                 continue;
             }
+            if warmup.suppress_non_model_session_bar(dt_local).is_some() {
+                warmup.last_processed_bar_ts = Some(bar.close_time_utc);
+                continue;
+            }
             warmup.update_day_aggregates(dt_local, bar.h, bar.l);
+            if warmup.uses_high180_mr() {
+                warmup.high180_mr.on_bar(dt_local, bar.h, bar.l);
+            }
             warmup
                 .orchestrator
                 .intraday_breakout
@@ -4139,6 +4371,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.current_day_high = warmup.current_day_high;
         self.current_day_low = warmup.current_day_low;
         self.prev_day_range = warmup.prev_day_range;
+        self.high180_mr = warmup.high180_mr;
         self.orchestrator
             .intraday_breakout
             .restore_snapshot(breakout.clone());

@@ -59,7 +59,7 @@ Validation gate:
 
 ## Workstream C: IMOEXF Hybrid MR + BO
 
-Status: `PRIMARY_REPLAY_SCAFFOLD_READY / MR_RISKGATE_PARITY_PENDING`.
+Status: `LIVE_HIGH180_READY / RISK_GATE_STARTUP_STORE_BOOTSTRAP_READY / RUNTIME_LEDGER_READ_WRITE_READY_FOR_SHADOW_VALIDATION`.
 
 The model is not considered broken. The remaining required blocker is
 replay/runtime parity around Backtrader next-bar fill semantics versus the Rust
@@ -67,30 +67,79 @@ bar/event no-overnight safety guard. A stricter runtime timer/event-loop hook is
 useful, but is explicitly a follow-up `nice to have`, not a blocker for the
 main patch line.
 
+Runtime integration review handoff:
+
+- `docs/imoexf-primary-runtime-integration-review-handoff-2026-04-26.md`
+
+First runtime-integration slice completed:
+
+- shared High180 MR module extracted from replay;
+- High180 MR branch wired into `HybridIntradayRuntimeStrategy` behind
+  `mr_variant = "high180"`;
+- risk-gate session ledger primitives, seed CSV parser, startup reconciliation
+  rules, next-session gate calculation, and deterministic startup planner added;
+- runtime-facing risk-gate store helper added for ledger/state read and guarded
+  startup-artifact persistence;
+- high-level startup-store path added for configured seed load, Redis ledger/state
+  read, deterministic plan, and guarded artifact persistence;
+- hybrid profile/risk-gate config fields added and covered by TOML tests;
+- optional model-session guard wired before live model-state updates;
+- live adapter currently fails fast if active risk-gate modes are configured
+  before the ledger/import flow is finished.
+
 Required before runtime promotion:
 
-- add or adapt a Rust `10m` replay harness;
-- implement the regular-weekday session policy;
-- ensure Saturday/Sunday bars are audit-visible but non-tradable (pending
-  order fills on weekend bars are now blocked in `baseline_skip` replay mode);
-- ensure Monday anchors use Friday or the latest earlier regular weekday;
-- add a BO gap-flatten assert for `force_exit_time = 23:30` (implemented in
-  `hybrid_replay --assert-gap-flatten`; full candidate parity still pending);
-- add the `bo_new_k053` BO contour as an explicit replay profile
-  (`hybrid_replay --profile imoexf_bo_k053`);
-- add the primary close-bar replay profile with high180 MR risk gate and
-  `bo_new_k053`
-  (`hybrid_replay --profile imoexf_primary_riskgate_k053`), including a BO
-  first-event `bo_gap_flatten` guard when a later same-day `23:30` bar is
-  unavailable; the parity report exposes `bo_gap_flatten_actions`;
-- reproduce the primary candidate against package reference files;
-- write a discrepancy note for any timestamp/fill-price differences.
-  `docs/imoexf-hybrid-bo-carry-discrepancy-2026-04-26.md` already records the
-  known BO cross-day reference carry class.
-- align the MR risk gate with the source package. The first Rust scaffold is
+- keep the implemented Rust `10m` replay harness and primary profile
+  (`hybrid_replay --profile imoexf_primary_riskgate_k053`) as the review path;
+- keep the implemented BO gap-flatten assert for `force_exit_time = 23:30`
+  (`hybrid_replay --assert-gap-flatten`);
+- keep the frozen IMOEXF model feed contour before any replay state update:
+  Monday-Friday regular tradable bars only, `09:00..23:49`. Raw/audit
+  pre-session/service bars such as `08:50` must remain outside MR midpoint,
+  BO anchor/level, risk-gate, entry/exit, and parity state.
+- use `scripts/build_imoexf_filtered_bundle.py` to regenerate the official
+  filtered parity bundle from raw/audit data through `2026-04-21` before the
+  final replay read;
+- use `scripts/run_imoexf_primary_parity_review.py` as the one-command review
+  path for bundle build, Rust replay, diagnostics, and consolidated report
+  generation;
+- publish one final parity report that separates MR signal drift, BO signal
+  drift, and BO execution-contract drift.
+  `docs/imoexf-primary-parity-review-report-2026-04-26.md` is the consolidated
+  review report, and `docs/imoexf-primary-parity-discrepancy-2026-04-26.md`
+  records the current layer split and the promotion gate;
+- use `scripts/imoexf_primary_parity_diff.py` or the same logic promoted into
+  Rust report output to keep signal drift separate from BO execution-contract
+  drift;
+- use `scripts/imoexf_mr_residual_diagnostic.py` for the MR residual read. It
+  reproduces the current diagnosis: saved-source MR drift is explained by old
+  service-bar midpoint effects, calendar-zero riskgate, and one BO gap-flatten
+  interaction;
+- use `scripts/imoexf_bo_execution_contract_diagnostic.py` for the BO read. It
+  normalizes saved source timestamps by the next-bar offset and shows that
+  entry-signal agreement is high (`361 / 370`) even though fill-level exact
+  parity is zero under Backtrader-vs-Rust execution semantics;
+- keep the MR risk gate aligned with the source package. The first Rust scaffold is
   documented in
-  `docs/imoexf-primary-riskgate-replay-progress-2026-04-26.md`; current MR
-  trade count is still too high and not parity-accepted.
+  `docs/imoexf-primary-riskgate-replay-progress-2026-04-26.md`; the gate and
+  high180 midpoint semantics are now source-aligned. The saved source reference
+  still carries old service-bar and calendar-zero riskgate semantics, so
+  official parity needs a refreshed filtered replay bundle/reference before
+  judging the final BO execution-contract drift.
+- treat `riskgate_high180_lb120_seed_2026-04-26.csv` as a one-time bootstrap
+  artifact only. After import, a runtime-owned regular-session ledger should be
+  the source of truth for the 120-session MR gate. Runtime must expose explicit
+  modes: `bootstrap_from_seed`, `normal_append`, and `rebuild_from_history`.
+  The accepted storage contract is a Redis stream
+  `runtime.riskgate.sessions.<strategy_id>.<profile_id>` plus a small
+  materialized state key `runtime.riskgate.state.<strategy_id>.<profile_id>`;
+  the ordinary strategy snapshot must not be the canonical gate ledger. Startup
+  bootstrap import/read/write is now wired into runtime; daily append and
+  enforced MR gate application remain after shadow validation;
+- decide explicitly whether Rust close-bar/no-overnight `bo_gap_flatten` is the
+  accepted runtime contract. If accepted and final report is clean, IMOEXF can
+  move to extended micro soak at size `1` with explicit MR/BO attribution
+  monitoring.
 
 Follow-up after main work:
 
