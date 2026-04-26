@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use csv::{ReaderBuilder, WriterBuilder};
 use serde::{Deserialize, Serialize};
 use strategy_runtime::strategies::hybrid_intraday::{
@@ -85,6 +85,7 @@ impl WeekendPolicy {
 enum ReplayProfile {
     BaselineRuntimeHybrid,
     ImoexfBoK053,
+    ImoexfPrimaryRiskgateK053,
 }
 
 impl ReplayProfile {
@@ -92,8 +93,15 @@ impl ReplayProfile {
         match value {
             "baseline_runtime_hybrid" | "baseline" => Ok(Self::BaselineRuntimeHybrid),
             "imoexf_bo_k053" | "bo_new_k053" => Ok(Self::ImoexfBoK053),
+            "imoexf_primary_riskgate_k053" | "hybrid_mr_riskgate_high180_lb120__bo_new_k053" => {
+                Ok(Self::ImoexfPrimaryRiskgateK053)
+            }
             other => bail!("unsupported replay profile: {other}"),
         }
+    }
+
+    fn uses_close_bar_high180_replay(self) -> bool {
+        matches!(self, Self::ImoexfPrimaryRiskgateK053)
     }
 }
 
@@ -223,6 +231,7 @@ struct ParityReport {
     assert_gap_flatten: bool,
     gap_flatten_violations: usize,
     first_gap_flatten_violation: Option<GapFlattenViolation>,
+    bo_gap_flatten_actions: usize,
     first_divergence: Option<FirstDivergence>,
     verdict: String,
 }
@@ -265,6 +274,13 @@ struct ActiveBracket {
 }
 
 #[derive(Debug, Clone)]
+struct High180Open {
+    target_price: f64,
+    stop_price: f64,
+    max_hold: Duration,
+}
+
+#[derive(Debug, Clone)]
 struct EngineState {
     cash: f64,
     commission: f64,
@@ -276,6 +292,7 @@ struct EngineState {
     pending_exit: Option<PendingExit>,
     position: Option<Position>,
     bracket: Option<ActiveBracket>,
+    high180_open: Option<High180Open>,
 }
 
 impl EngineState {
@@ -291,6 +308,7 @@ impl EngineState {
             pending_exit: None,
             position: None,
             bracket: None,
+            high180_open: None,
         }
     }
 
@@ -314,9 +332,13 @@ fn main() -> Result<()> {
         bail!("prepared data is empty");
     }
 
-    let mut orchestrator = build_orchestrator(cli.profile);
     let mut state = EngineState::new(cli.cash, cli.commission);
-    run_replay(&cli, &bars, &mut orchestrator, &mut state)?;
+    if cli.profile.uses_close_bar_high180_replay() {
+        run_close_bar_high180_replay(&cli, &bars, &mut state)?;
+    } else {
+        let mut orchestrator = build_orchestrator(cli.profile);
+        run_replay(&cli, &bars, &mut orchestrator, &mut state)?;
+    }
     let summary = build_summary(cli.split, cli.cash, &bars, &state);
 
     write_outputs(&cli, &state.action_rows, &state.trade_rows, &summary)?;
@@ -340,6 +362,7 @@ fn main() -> Result<()> {
             assert_gap_flatten: false,
             gap_flatten_violations: 0,
             first_gap_flatten_violation: None,
+            bo_gap_flatten_actions: 0,
             first_divergence: None,
             verdict: "SKIPPED".to_string(),
         }
@@ -442,17 +465,419 @@ fn breakout_config(profile: ReplayProfile) -> IntradayBreakoutConfig {
             exclude_weekends: true,
             wait_hours: 3.0,
         },
-        ReplayProfile::ImoexfBoK053 => IntradayBreakoutConfig {
-            k: 0.53,
-            stop1_range: 0.35,
-            stop2_range: 0.70,
-            big_move_threshold: 0.025,
-            min_range: 1.01,
-            min_range_mode: MinRangeMode::Absolute,
-            exclude_weekends: true,
-            wait_hours: 4.0,
-        },
+        ReplayProfile::ImoexfBoK053 | ReplayProfile::ImoexfPrimaryRiskgateK053 => {
+            IntradayBreakoutConfig {
+                k: 0.53,
+                stop1_range: 0.35,
+                stop2_range: 0.70,
+                big_move_threshold: 0.025,
+                min_range: 1.01,
+                min_range_mode: MinRangeMode::Absolute,
+                exclude_weekends: true,
+                wait_hours: 4.0,
+            }
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct High180MrConfig {
+    min_rel_range: f64,
+    max_rel_range: f64,
+    k_long: f64,
+    k_short: f64,
+    stop_loss_mult: f64,
+    max_hold: Duration,
+}
+
+impl Default for High180MrConfig {
+    fn default() -> Self {
+        Self {
+            min_rel_range: 0.005,
+            max_rel_range: 0.050,
+            k_long: 0.085,
+            k_short: 0.090,
+            stop_loss_mult: 7.0,
+            max_hold: Duration::minutes(180),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct High180Signal {
+    side: Side,
+    target_price: f64,
+    stop_price: f64,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct High180MrEngine {
+    config: High180MrConfig,
+    current_day: Option<NaiveDate>,
+    day_high: Option<f64>,
+    day_low: Option<f64>,
+}
+
+impl High180MrEngine {
+    fn new(config: High180MrConfig) -> Self {
+        Self {
+            config,
+            current_day: None,
+            day_high: None,
+            day_low: None,
+        }
+    }
+
+    fn on_bar(&mut self, bar: &PreparedBar) {
+        if self.current_day != Some(bar.ts.date()) {
+            self.current_day = Some(bar.ts.date());
+            self.day_high = Some(bar.high);
+            self.day_low = Some(bar.low);
+            return;
+        }
+        self.day_high = Some(self.day_high.unwrap_or(bar.high).max(bar.high));
+        self.day_low = Some(self.day_low.unwrap_or(bar.low).min(bar.low));
+    }
+
+    fn evaluate_entry(&self, bar: &PreparedBar) -> Option<High180Signal> {
+        if bar.ts.time() > NaiveTime::from_hms_opt(11, 59, 59).unwrap_or(NaiveTime::MIN) {
+            return None;
+        }
+        if bar.close == 0.0 || bar.close_prev.is_nan() || bar.day_range_prev.is_nan() {
+            return None;
+        }
+        let rel_range = bar.day_range_prev / bar.close;
+        if !(self.config.min_rel_range < rel_range && rel_range < self.config.max_rel_range) {
+            return None;
+        }
+        let midpoint = (self.day_high? + self.day_low?) / 2.0;
+        if bar.close < bar.close_prev
+            && bar.close > bar.close_prev - self.config.k_long * bar.day_range_prev
+        {
+            let stop_distance = self.config.stop_loss_mult * (midpoint - bar.close).abs();
+            return Some(High180Signal {
+                side: Side::Long,
+                target_price: midpoint,
+                stop_price: bar.close - stop_distance,
+                reason: "morning_mean_reversion_long",
+            });
+        }
+        if bar.close > bar.close_prev
+            && bar.close < bar.close_prev + self.config.k_short * bar.day_range_prev
+        {
+            let stop_distance = self.config.stop_loss_mult * (bar.close - midpoint).abs();
+            return Some(High180Signal {
+                side: Side::Short,
+                target_price: midpoint,
+                stop_price: bar.close + stop_distance,
+                reason: "morning_mean_reversion_short",
+            });
+        }
+        None
+    }
+
+    fn evaluate_exit(
+        &self,
+        open: &High180Open,
+        position: &Position,
+        bar: &PreparedBar,
+    ) -> Option<(&'static str, f64)> {
+        if bar.ts <= position.entry_ts {
+            return None;
+        }
+        match position.side {
+            Side::Long => {
+                if bar.close >= open.target_price {
+                    return Some(("midpoint_take", bar.close));
+                }
+                if bar.close <= open.stop_price {
+                    return Some(("stop", bar.close));
+                }
+            }
+            Side::Short => {
+                if bar.close <= open.target_price {
+                    return Some(("midpoint_take", bar.close));
+                }
+                if bar.close >= open.stop_price {
+                    return Some(("stop", bar.close));
+                }
+            }
+        }
+        if bar.ts - position.entry_ts >= open.max_hold {
+            return Some(("time_stop", bar.close));
+        }
+        None
+    }
+}
+
+fn run_close_bar_high180_replay(
+    cli: &Cli,
+    bars: &[PreparedBar],
+    state: &mut EngineState,
+) -> Result<()> {
+    let mr_enabled_dates = riskgate_high180_lb120_enabled_dates(bars);
+    let mut mr = High180MrEngine::new(High180MrConfig::default());
+    let mut breakout = IntradayBreakoutEngine::new(breakout_config(cli.profile));
+
+    for bar in bars {
+        let is_weekend = is_weekend_ts(bar.ts);
+        if is_weekend && matches!(cli.weekend_policy, WeekendPolicy::BaselineSkip) {
+            continue;
+        }
+        if bar.close == 0.0 {
+            continue;
+        }
+
+        mr.on_bar(bar);
+        breakout.on_bar(bar.ts, bar.open, bar.high, bar.low, bar.close);
+
+        if close_bar_high180_exit(bar, &mr, state) {
+            state
+                .equity_curve
+                .push((bar.ts, mark_to_market_equity(state, bar.close)));
+            continue;
+        }
+        if close_bar_breakout_exit(bar, &breakout, state) {
+            state
+                .equity_curve
+                .push((bar.ts, mark_to_market_equity(state, bar.close)));
+            continue;
+        }
+        if state.position.is_none() {
+            if mr_enabled_dates.contains(&bar.ts.date()) {
+                if let Some(signal) = mr.evaluate_entry(bar) {
+                    open_close_bar_entry(cli, bar, signal, Owner::MeanReversion, state);
+                    state.equity_curve.push((bar.ts, state.cash));
+                    continue;
+                }
+            }
+            if let Some(signal) = breakout.evaluate_entry(bar.ts, bar.close) {
+                open_breakout_close_bar_entry(cli, bar, signal.side, &mut breakout, state);
+            }
+        }
+        state
+            .equity_curve
+            .push((bar.ts, mark_to_market_equity(state, bar.close)));
+    }
+    Ok(())
+}
+
+fn open_close_bar_entry(
+    cli: &Cli,
+    bar: &PreparedBar,
+    signal: High180Signal,
+    owner: Owner,
+    state: &mut EngineState,
+) {
+    state.action_rows.push(ActionRow {
+        bar_ts: format_ts(bar.ts),
+        action: "submit_entry".to_string(),
+        owner: owner.as_str().to_string(),
+        side: signal.side.as_str().to_string(),
+        reason: signal.reason.to_string(),
+    });
+    let size = close_bar_position_size(cli, state.cash, bar, signal.side);
+    let entry_fee = (size.abs() as f64) * bar.close * state.commission;
+    state.cash -= entry_fee;
+    state.position = Some(Position {
+        owner,
+        side: signal.side,
+        entry_ts: bar.ts,
+        entry_price: bar.close,
+        size,
+        entry_fee,
+    });
+    state.high180_open = Some(High180Open {
+        target_price: signal.target_price,
+        stop_price: signal.stop_price,
+        max_hold: High180MrConfig::default().max_hold,
+    });
+}
+
+fn open_breakout_close_bar_entry(
+    cli: &Cli,
+    bar: &PreparedBar,
+    side: Side,
+    breakout: &mut IntradayBreakoutEngine,
+    state: &mut EngineState,
+) {
+    state.action_rows.push(ActionRow {
+        bar_ts: format_ts(bar.ts),
+        action: "submit_entry".to_string(),
+        owner: Owner::IntradayBreakout.as_str().to_string(),
+        side: side.as_str().to_string(),
+        reason: match side {
+            Side::Long => "breakout_long",
+            Side::Short => "breakout_short",
+        }
+        .to_string(),
+    });
+    let size = close_bar_position_size(cli, state.cash, bar, side);
+    let entry_fee = (size.abs() as f64) * bar.close * state.commission;
+    state.cash -= entry_fee;
+    state.position = Some(Position {
+        owner: Owner::IntradayBreakout,
+        side,
+        entry_ts: bar.ts,
+        entry_price: bar.close,
+        size,
+        entry_fee,
+    });
+    breakout.mark_entry(side);
+}
+
+fn close_bar_position_size(cli: &Cli, cash: f64, bar: &PreparedBar, side: Side) -> i64 {
+    let mut size = (cash * cli.size_pct / bar.close) as i64;
+    if size <= 0 {
+        size = 1;
+    }
+    match side {
+        Side::Long => size,
+        Side::Short => -size,
+    }
+}
+
+fn close_bar_high180_exit(
+    bar: &PreparedBar,
+    mr: &High180MrEngine,
+    state: &mut EngineState,
+) -> bool {
+    let Some(position) = state.position.clone() else {
+        return false;
+    };
+    if position.owner != Owner::MeanReversion {
+        return false;
+    }
+    let Some(open) = state.high180_open.clone() else {
+        return false;
+    };
+    let Some((reason, exit_price)) = mr.evaluate_exit(&open, &position, bar) else {
+        return false;
+    };
+    state.action_rows.push(ActionRow {
+        bar_ts: format_ts(bar.ts),
+        action: "submit_exit".to_string(),
+        owner: Owner::MeanReversion.as_str().to_string(),
+        side: String::new(),
+        reason: reason.to_string(),
+    });
+    close_trade(bar.ts, exit_price, &position, reason, state);
+    state.position = None;
+    state.high180_open = None;
+    true
+}
+
+fn close_bar_breakout_exit(
+    bar: &PreparedBar,
+    breakout: &IntradayBreakoutEngine,
+    state: &mut EngineState,
+) -> bool {
+    let Some(position) = state.position.clone() else {
+        return false;
+    };
+    if position.owner != Owner::IntradayBreakout {
+        return false;
+    }
+    if bar.ts.date() != position.entry_ts.date() {
+        state.action_rows.push(ActionRow {
+            bar_ts: format_ts(bar.ts),
+            action: "submit_exit".to_string(),
+            owner: Owner::IntradayBreakout.as_str().to_string(),
+            side: String::new(),
+            reason: "bo_gap_flatten".to_string(),
+        });
+        close_trade(bar.ts, bar.open, &position, "bo_gap_flatten", state);
+        state.position = None;
+        return true;
+    }
+    let Some(exit) = breakout.evaluate_exit(bar.ts, bar.close, position.side) else {
+        return false;
+    };
+    state.action_rows.push(ActionRow {
+        bar_ts: format_ts(bar.ts),
+        action: "submit_exit".to_string(),
+        owner: Owner::IntradayBreakout.as_str().to_string(),
+        side: String::new(),
+        reason: exit.reason.as_str().to_string(),
+    });
+    close_trade(bar.ts, bar.close, &position, exit.reason.as_str(), state);
+    state.position = None;
+    true
+}
+
+fn riskgate_high180_lb120_enabled_dates(bars: &[PreparedBar]) -> BTreeSet<NaiveDate> {
+    let mut daily_pnl = BTreeMap::<NaiveDate, f64>::new();
+    for (exit_date, pnl) in simulate_high180_shadow_daily_pnl(bars) {
+        *daily_pnl.entry(exit_date).or_insert(0.0) += pnl;
+    }
+
+    let mut dates = BTreeSet::<NaiveDate>::new();
+    for bar in bars {
+        if !is_weekend_ts(bar.ts) {
+            dates.insert(bar.ts.date());
+        }
+    }
+
+    let mut enabled = BTreeSet::<NaiveDate>::new();
+    for day in dates {
+        let start = day - Duration::days(120);
+        let trailing_pnl: f64 = daily_pnl.range(start..day).map(|(_, pnl)| *pnl).sum();
+        if trailing_pnl > 0.0 {
+            enabled.insert(day);
+        }
+    }
+    enabled
+}
+
+fn simulate_high180_shadow_daily_pnl(bars: &[PreparedBar]) -> Vec<(NaiveDate, f64)> {
+    let mut mr = High180MrEngine::new(High180MrConfig::default());
+    let mut position: Option<Position> = None;
+    let mut high180_open: Option<High180Open> = None;
+    let mut pnl_by_exit = Vec::new();
+
+    for bar in bars {
+        if is_weekend_ts(bar.ts) || bar.close == 0.0 {
+            continue;
+        }
+        mr.on_bar(bar);
+        let mut closed_this_bar = false;
+        if let (Some(pos), Some(open)) = (position.clone(), high180_open.clone()) {
+            if let Some((_reason, exit_price)) = mr.evaluate_exit(&open, &pos, bar) {
+                let pnl = if pos.size > 0 {
+                    exit_price - pos.entry_price
+                } else {
+                    pos.entry_price - exit_price
+                };
+                pnl_by_exit.push((bar.ts.date(), pnl));
+                position = None;
+                high180_open = None;
+                closed_this_bar = true;
+            }
+        }
+        if position.is_none() && !closed_this_bar {
+            if let Some(signal) = mr.evaluate_entry(bar) {
+                let size = match signal.side {
+                    Side::Long => 1,
+                    Side::Short => -1,
+                };
+                position = Some(Position {
+                    owner: Owner::MeanReversion,
+                    side: signal.side,
+                    entry_ts: bar.ts,
+                    entry_price: bar.close,
+                    size,
+                    entry_fee: 0.0,
+                });
+                high180_open = Some(High180Open {
+                    target_price: signal.target_price,
+                    stop_price: signal.stop_price,
+                    max_hold: High180MrConfig::default().max_hold,
+                });
+            }
+        }
+    }
+    pnl_by_exit
 }
 
 fn read_prepared_bars(path: &Path, allow_non_strict: bool) -> Result<Vec<PreparedBar>> {
@@ -1008,6 +1433,7 @@ fn compare_with_expected(
         assert_gap_flatten: false,
         gap_flatten_violations: 0,
         first_gap_flatten_violation: None,
+        bo_gap_flatten_actions: 0,
         first_divergence,
         verdict: verdict.to_string(),
     })
@@ -1021,6 +1447,11 @@ fn attach_gap_flatten_report(
     report.assert_gap_flatten = cli.assert_gap_flatten;
     report.gap_flatten_violations = state.gap_flatten_violations.len();
     report.first_gap_flatten_violation = state.gap_flatten_violations.first().cloned();
+    report.bo_gap_flatten_actions = state
+        .action_rows
+        .iter()
+        .filter(|row| row.reason == "bo_gap_flatten")
+        .count();
     if cli.assert_gap_flatten && !state.gap_flatten_violations.is_empty() {
         report.verdict = "FAIL".to_string();
     }

@@ -59,7 +59,7 @@ Validation gate:
 
 ## Workstream C: IMOEXF Hybrid MR + BO
 
-Status: `GAP_FLATTEN_ASSERT_ADDED / REPLAY_PARITY_IN_PROGRESS`.
+Status: `PRIMARY_REPLAY_SCAFFOLD_READY / MR_RISKGATE_PARITY_PENDING`.
 
 The model is not considered broken. The remaining required blocker is
 replay/runtime parity around Backtrader next-bar fill semantics versus the Rust
@@ -78,10 +78,19 @@ Required before runtime promotion:
   `hybrid_replay --assert-gap-flatten`; full candidate parity still pending);
 - add the `bo_new_k053` BO contour as an explicit replay profile
   (`hybrid_replay --profile imoexf_bo_k053`);
+- add the primary close-bar replay profile with high180 MR risk gate and
+  `bo_new_k053`
+  (`hybrid_replay --profile imoexf_primary_riskgate_k053`), including a BO
+  first-event `bo_gap_flatten` guard when a later same-day `23:30` bar is
+  unavailable; the parity report exposes `bo_gap_flatten_actions`;
 - reproduce the primary candidate against package reference files;
 - write a discrepancy note for any timestamp/fill-price differences.
   `docs/imoexf-hybrid-bo-carry-discrepancy-2026-04-26.md` already records the
   known BO cross-day reference carry class.
+- align the MR risk gate with the source package. The first Rust scaffold is
+  documented in
+  `docs/imoexf-primary-riskgate-replay-progress-2026-04-26.md`; current MR
+  trade count is still too high and not parity-accepted.
 
 Follow-up after main work:
 
