@@ -1,0 +1,13 @@
+.git
+.github
+.local
+.DS_Store
+.env
+.env.*
+assets
+reports
+alor-rs-main/target
+alor-rs-main/target-linux-amd64
+alor-rs-main/tmp
+alor-rs-main/docs
+alor-rs-main/data_samples

@@ -1,0 +1,63 @@
+#!/usr/bin/env expect -f
+#
+# One-shot SSH inventory for a VPS (docker compose paths, alor containers).
+# Requires: expect (brew install expect / apt install expect)
+#
+# Usage:
+#   export SSH_HOST=your.vps.ip
+#   export SSH_USER=root
+#   export SSH_PASS='your-password'
+#   ./scripts/vps_inventory.expect
+#
+# Do not commit passwords; prefer SSH keys for routine access.
+
+set timeout 120
+
+if {![info exists env(SSH_HOST)] || $env(SSH_HOST) eq ""} {
+    puts stderr "Set SSH_HOST (e.g. export SSH_HOST=1.2.3.4)"
+    exit 1
+}
+set host $env(SSH_HOST)
+
+set user root
+if {[info exists env(SSH_USER)] && $env(SSH_USER) ne ""} {
+    set user $env(SSH_USER)
+}
+
+if {![info exists env(SSH_PASS)] || $env(SSH_PASS) eq ""} {
+    puts stderr "Set SSH_PASS (non-interactive; use a subshell: SSH_PASS=... ./vps_inventory.expect)"
+    exit 1
+}
+set pass $env(SSH_PASS)
+
+# Single remote shell: discover compose projects and trading-related containers.
+set remote {sh -c 'echo "=== docker compose ls ==="; docker compose ls 2>&1; echo ""; echo "=== docker-compose.yml under /opt /home /srv ==="; find /opt /home /srv -maxdepth 8 -name docker-compose.yml 2>/dev/null | head -40; echo ""; echo "=== compose .env IMAGE lines (first hits) ==="; for f in $(find /opt /home /srv -maxdepth 8 -name docker-compose.yml 2>/dev/null | head -15); do d=$(dirname "$f"); egrep -h "^IMAGE_TAG=|^GATEWAY_IMAGE|^RUNTIME_IMAGE" "$d/.env" 2>/dev/null | head -5 && echo "  (dir $d)"; done; echo ""; echo "=== docker ps (alor) ==="; docker ps -a --format "{{.Names}}\t{{.Image}}" 2>/dev/null | grep -iE "alor|sessiongap|hybrid|usdrubf" || docker ps -a --format "{{.Names}}\t{{.Image}}" 2>/dev/null | head -20'}
+
+spawn ssh -o BatchMode=no -o StrictHostKeyChecking=accept-new $user@$host $remote
+
+expect {
+    -re "(?i)Are you sure you want to continue connecting" {
+        send "yes\r"
+        exp_continue
+    }
+    -re "(?i)password:" {
+        send "$pass\r"
+    }
+    timeout {
+        puts stderr "ssh timed out"
+        exit 1
+    }
+}
+
+expect {
+    -re "(?i)Permission denied" {
+        puts stderr "authentication failed"
+        exit 1
+    }
+    eof
+}
+
+catch wait result
+set code [lindex $result 3]
+if {$code eq ""} { set code 0 }
+exit $code
