@@ -1644,13 +1644,24 @@ mod tests {
     }
 
     fn test_bar(ts_utc: i64, close: f64, origin: DataOrigin) -> BarEvent {
+        test_bar_ohlc(ts_utc, close, close, close, close, origin)
+    }
+
+    fn test_bar_ohlc(
+        ts_utc: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        origin: DataOrigin,
+    ) -> BarEvent {
         BarEvent {
             symbol: "IMOEXF".to_string(),
             close_time_utc: ts_utc,
             close,
-            o: close,
-            h: close,
-            l: close,
+            o: open,
+            h: high,
+            l: low,
             v: 1.0,
             origin,
         }
@@ -1830,6 +1841,64 @@ mod tests {
         assert_eq!(strategy.last_warmup_log, Some(true));
         assert!(strategy.entry_ready);
         assert_eq!(strategy.prev_day_range, Some(0.0));
+    }
+
+    #[test]
+    fn weekend_bars_do_not_become_monday_anchor_when_weekends_off() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+
+        let friday = test_bar_ohlc(
+            ts_local(2026, 4, 17, 23, 40, 0),
+            100.0,
+            110.0,
+            90.0,
+            100.0,
+            DataOrigin::History,
+        );
+        let saturday = test_bar_ohlc(
+            ts_local(2026, 4, 18, 10, 0, 0),
+            200.0,
+            220.0,
+            180.0,
+            200.0,
+            DataOrigin::History,
+        );
+        let sunday = test_bar_ohlc(
+            ts_local(2026, 4, 19, 10, 0, 0),
+            300.0,
+            330.0,
+            270.0,
+            300.0,
+            DataOrigin::History,
+        );
+        let monday = test_bar_ohlc(
+            ts_local(2026, 4, 20, 9, 0, 0),
+            101.0,
+            102.0,
+            100.0,
+            101.0,
+            DataOrigin::History,
+        );
+
+        let _ = strategy.on_bar(&ctx, &friday);
+        assert_eq!(strategy.last_bar_close, Some(100.0));
+
+        let _ = strategy.on_bar(&ctx, &saturday);
+        let _ = strategy.on_bar(&ctx, &sunday);
+        assert_eq!(strategy.last_bar_close, Some(100.0));
+        assert_eq!(
+            strategy.last_processed_bar_ts,
+            Some(ts_local(2026, 4, 19, 10, 0, 0))
+        );
+
+        let _ = strategy.on_bar(&ctx, &monday);
+        assert_eq!(strategy.prev_day_close, Some(100.0));
+        assert_eq!(strategy.prev_day_range, Some(20.0));
+        assert_eq!(
+            strategy.last_day_local,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap())
+        );
     }
 
     #[test]
@@ -2316,7 +2385,7 @@ mod tests {
     }
 
     #[test]
-    fn weekend_bar_updates_state_but_does_not_emit_intents() {
+    fn weekend_bar_does_not_update_weekday_state_or_emit_intents() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.set_state(StrategyState::HybridIntradayRuntime {
             active_cycle_id: None,
@@ -2385,13 +2454,17 @@ mod tests {
 
         assert!(intents.is_empty());
         assert!(strategy.pending_entry.is_none());
-        assert_eq!(strategy.last_bar_close, Some(99.95));
+        assert_eq!(strategy.last_bar_close, Some(99.90));
         assert_eq!(
             strategy.last_day_local,
-            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap())
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 6).unwrap())
         );
-        assert_eq!(strategy.current_day_high, Some(99.95));
-        assert_eq!(strategy.current_day_low, Some(99.95));
+        assert_eq!(strategy.current_day_high, Some(100.0));
+        assert_eq!(strategy.current_day_low, Some(99.5));
+        assert_eq!(
+            strategy.last_processed_bar_ts,
+            Some(ts_local(2026, 3, 7, 10, 0, 0))
+        );
     }
 
     #[test]
@@ -3306,6 +3379,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let Some(dt_local) = self.utc_to_local_naive(bar.close_time_utc) else {
             return Vec::new();
         };
+        if self.suppress_weekend_signal_generation(dt_local) {
+            self.last_processed_bar_ts = Some(bar.close_time_utc);
+            debug!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                ts_utc = bar.close_time_utc,
+                dt_local = %dt_local,
+                origin = ?bar.origin,
+                "hybrid_weekend_bar_suppressed"
+            );
+            return Vec::new();
+        }
         self.update_day_aggregates(dt_local, bar.h, bar.l);
         self.log_signal_warmup_status_if_changed(dt_local, bar.close_time_utc);
 
@@ -3357,11 +3441,6 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.sync_state();
                 return intents;
             }
-        }
-        if self.suppress_weekend_signal_generation(dt_local) {
-            self.orchestrator.warm_bar(bar_input);
-            self.sync_state();
-            return Vec::new();
         }
         let actions = self.orchestrator.on_bar(bar_input);
         if !actions.is_empty() {
@@ -3859,6 +3938,10 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             let Some(dt_local) = warmup.utc_to_local_naive(bar.close_time_utc) else {
                 continue;
             };
+            if warmup.suppress_weekend_signal_generation(dt_local) {
+                warmup.last_processed_bar_ts = Some(bar.close_time_utc);
+                continue;
+            }
             warmup.update_day_aggregates(dt_local, bar.h, bar.l);
             warmup
                 .orchestrator
