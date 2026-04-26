@@ -457,6 +457,11 @@ fn run_replay(
     state: &mut EngineState,
 ) -> Result<()> {
     for bar in bars {
+        let is_weekend = matches!(bar.ts.weekday(), Weekday::Sat | Weekday::Sun);
+        if is_weekend && matches!(cli.weekend_policy, WeekendPolicy::BaselineSkip) {
+            continue;
+        }
+
         if state.pending_entry.is_some() {
             process_pending_entry(bar, orchestrator, state);
         }
@@ -464,11 +469,6 @@ fn run_replay(
             process_pending_exit(bar, orchestrator, state);
         }
         process_active_bracket(bar, orchestrator, state);
-
-        let is_weekend = matches!(bar.ts.weekday(), Weekday::Sat | Weekday::Sun);
-        if is_weekend && matches!(cli.weekend_policy, WeekendPolicy::BaselineSkip) {
-            continue;
-        }
 
         if bar.close == 0.0 {
             continue;

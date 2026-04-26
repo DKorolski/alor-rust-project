@@ -71,7 +71,8 @@ Required before runtime promotion:
 
 - add or adapt a Rust `10m` replay harness;
 - implement the regular-weekday session policy;
-- ensure Saturday/Sunday bars are audit-visible but non-tradable;
+- ensure Saturday/Sunday bars are audit-visible but non-tradable (pending
+  order fills on weekend bars are now blocked in `baseline_skip` replay mode);
 - ensure Monday anchors use Friday or the latest earlier regular weekday;
 - add a BO gap-flatten assert for `force_exit_time = 23:30` (implemented in
   `hybrid_replay --assert-gap-flatten`; full candidate parity still pending);
