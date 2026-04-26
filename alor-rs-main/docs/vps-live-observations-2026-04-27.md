@@ -5,9 +5,16 @@
 Stack:
 
 - `trading-hybrid`
+- `trading-alor-usdrubf`
+- `trading-sessiongap`
 - symbol: `IMOEXF`
+- symbol: `USDRUBF`
 - portfolio: `7502SN6`
+- portfolio: `7502T0U`
+- portfolio: `7502MIW`
 - rollout target: IMOEXF High180 MR + BO `riskgate-shadow` validation
+- rollout target: alor-USDRUBF `mr_k_short = 0.035` challenger validation
+- rollout target: SessionGap challenger config staging only
 - time window: pre-open, around `02:00 MSK`
 
 ## Rollout Summary
@@ -181,3 +188,133 @@ At the first fresh regular `10m` bar:
 The IMOEXF risk-gate shadow-validation rollout is installed and clean at the
 pre-open state level. The only open operational check is the first fresh live
 bar transition on 2026-04-27.
+
+## Alor-USDRUBF Challenger Rollout
+
+The `trading-alor-usdrubf` stack was checked after the IMOEXF rollout because
+the live work plan also contains a small USDRUBF Hybrid challenger:
+
+```text
+baseline mr_k_short = 0.045
+challenger mr_k_short = 0.035
+mr_force_exit_time = 11:50:00
+bo_k = 0.45
+bo_eod_exit_time = 23:30:00
+```
+
+Preflight broker snapshot was flat:
+
+```text
+USDRUBF qty = 0.0
+```
+
+The challenger config was copied to the VPS:
+
+```text
+/opt/trading-alor-usdrubf/configs/runtime.alor_usdrubf.live.7502T0U.challenger_mr035.toml
+```
+
+Active post-rollout config:
+
+```text
+GATEWAY_CONFIG=/configs/gateway.alor_usdrubf.live.7502T0U.toml
+RUNTIME_CONFIG=/configs/runtime.alor_usdrubf.live.7502T0U.challenger_mr035.toml
+GATEWAY_IMAGE_TAG=manual-5430299
+RUNTIME_IMAGE_TAG=sha-4a0a266
+```
+
+The runtime was restarted from zero by clearing only the transient lifecycle
+streams and runtime state:
+
+```text
+cleared:
+runtime.state.alor_usdrubf_hybrid_v1.live.usdrubf.7502T0U
+cmd.orders.7502T0U
+cmd.acks.7502T0U
+broker.orders.7502T0U
+broker.trades.7502T0U
+broker.positions.7502T0U
+```
+
+Market-data bars and broker snapshots were not cleared.
+
+Resolved runtime config confirmed the challenger:
+
+```text
+config_path = /configs/runtime.alor_usdrubf.live.7502T0U.challenger_mr035.toml
+mr_k_short = 0.035
+mr_force_exit_time = 11:50:00
+bo_k = 0.45
+```
+
+Post-reset state:
+
+```text
+hybrid_state = flat
+open_position_qty = 0.0
+pending_request_ids = []
+tracked_order_ids = []
+entry_intent_inflight = false
+exit_intent_inflight = false
+seen_trade_ids = []
+```
+
+Post-reset stream lengths:
+
+```text
+cmd.orders.7502T0U = 0
+cmd.acks.7502T0U = 0
+broker.orders.7502T0U = 0
+broker.trades.7502T0U = 0
+broker.positions.7502T0U = 0
+```
+
+No runtime or gateway `WARN` / `ERROR` lines were observed after the restart in
+the pre-open verification window.
+
+## SessionGap Challenger Staging
+
+`trading-sessiongap` was not switched away from the current live baseline. This
+matches the work-plan rule that SessionGap TP-short challengers should be
+validated separately, not promoted silently as production defaults.
+
+Active config remains:
+
+```text
+RUNTIME_CONFIG=/configs/runtime.sessiongap.live.7502MIW.toml
+signal_minute = 50
+wait_hours = 3
+k_tp_short = 0.28
+k_sl_short = 0.65
+k_tp_long = 0.28
+k_sl_long = 0.68
+max_entry_hour = 16
+close_hour = 23
+close_minute = 49
+```
+
+The challenger configs were staged on the VPS for future controlled validation:
+
+```text
+/opt/trading-sessiongap/configs/runtime.sessiongap.live.7502MIW.challenger_tp_short_050.toml
+/opt/trading-sessiongap/configs/runtime.sessiongap.live.7502MIW.challenger_tp_short_060.toml
+```
+
+The stack remained healthy and flat in the broker snapshot:
+
+```text
+USDRUBF qty = 0.0
+cmd.orders.7502MIW = 0
+cmd.acks.7502MIW = 0
+broker.orders.7502MIW = 0
+broker.trades.7502MIW = 0
+```
+
+## Additional Watchpoints
+
+- `trading-alor-usdrubf` should leave pre-open `SyncingHistory` only after the
+  first fresh `10m` live bar on 2026-04-27.
+- First alor-USDRUBF MR event should be checked specifically for the narrower
+  `mr_k_short = 0.035` trigger behavior.
+- SessionGap remains baseline; do not interpret staged challenger files as an
+  active parameter change.
