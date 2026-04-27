@@ -440,3 +440,97 @@ trading-alor-usdrubf    healthy
 
 Fresh logs after cleanup did not show new `WARN`, `ERROR`, `NOGROUP`,
 `failed`, or `rejected` lines.
+
+## Post-Open Log Check
+
+Time:
+
+```text
+2026-04-27 09:11 MSK
+```
+
+All three stacks received fresh `10m` bars and reached `LiveReady / ALLOWED`:
+
+```text
+sessiongap:
+  live_guard_changed -> ALLOWED at 06:00:02 UTC
+  md.bars.7502MIW.10m = 451
+  runtime.state.session_gap_standalone.live.7502MIW = 359
+
+hybrid IMOEXF:
+  live_guard_changed -> ALLOWED at 06:00:11 UTC
+  md.bars.7502SN6.10m = 1188
+  runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6 = 4
+
+alor-USDRUBF:
+  live_guard_changed -> ALLOWED at 06:00:04 UTC
+  md.bars.7502T0U.10m = 630
+  runtime.state.alor_usdrubf_hybrid_v1.live.usdrubf.7502T0U = 4
+```
+
+No strategy positions or active command lifecycle entries were present:
+
+```text
+sessiongap:
+  phase = Flat
+  cmd.orders = 0
+  cmd.acks = 0
+  broker.orders = 0
+  broker.trades = 0
+  broker snapshot: USDRUBF qty = 0.0
+
+hybrid IMOEXF:
+  last_position_qty = 0.0
+  current_owner = null
+  pending_* = null
+  deferred_* = null
+  cmd.orders = 0
+  cmd.acks = 0
+  broker.orders = 0
+  broker.trades = 0
+  broker snapshot: no IMOEXF position
+
+alor-USDRUBF:
+  hybrid_state = flat
+  open_position_qty = 0.0
+  pending_request_ids = []
+  tracked_order_ids = []
+  cmd.orders = 0
+  cmd.acks = 0
+  broker.orders = 0
+  broker.trades = 0
+  broker snapshot: no USDRUBF position
+```
+
+Hybrid risk-gate live state after the first bar:
+
+```text
+entry_ready = true
+risk_gate_shadow_session_date = 2026-04-27
+risk_gate_mr_enabled_current_session = true
+risk_gate_rolling_sum_lb120 = 161.90000000000012
+risk_gate_ledger_rows_count = 180
+```
+
+Fresh runtime and gateway logs after open did not show new `WARN`, `ERROR`,
+`NOGROUP`, `rejected`, `panic`, or `failed` lines. Gateway supervisor lines
+showed:
+
+```text
+bars live_seen = true
+positions_synced = true
+orders_synced = true
+stop_orders_synced = true
+cws_authorization = true
+```
+
+Resource snapshot after open:
+
+```text
+load average = 1.21 / 0.70 / 0.47
+RAM available = 5.3 GiB
+swap used = 28 MiB
+disk = 37G used / 79G total / 38G free / 50%
+```
+
+Verdict: post-open state is clean across the three live stacks.
