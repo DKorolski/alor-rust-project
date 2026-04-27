@@ -318,3 +318,60 @@ broker.trades.7502MIW = 0
   `mr_k_short = 0.035` trigger behavior.
 - SessionGap remains baseline; do not interpret staged challenger files as an
   active parameter change.
+
+## Pre-Open Log Check
+
+Time:
+
+```text
+2026-04-27 08:18-08:20 MSK
+```
+
+All three stacks were checked before the regular MOEX session open:
+
+```text
+trading-sessiongap      healthy, flat, no command/order/trade streams
+trading-hybrid          healthy, flat, no command/order/trade streams
+trading-alor-usdrubf    healthy, flat, no command/order/trade streams
+```
+
+Active configs:
+
+```text
+sessiongap:      /configs/runtime.sessiongap.live.7502MIW.toml
+hybrid IMOEXF:   /configs/runtime.hybrid.live.7502SN6.riskgate-shadow.toml
+alor-USDRUBF:    /configs/runtime.alor_usdrubf.live.7502T0U.challenger_mr035.toml
+```
+
+Broker snapshots showed no strategy positions:
+
+```text
+7502MIW: USDRUBF qty = 0.0
+7502SN6: no IMOEXF position in snapshot
+7502T0U: no USDRUBF position in snapshot
+```
+
+One pre-open operational issue was found on `trading-hybrid`: after the
+from-zero Redis cleanup, the empty command stream no longer had the gateway
+consumer group:
+
+```text
+cmd.orders.7502SN6 / gateway-commands -> NOGROUP
+```
+
+This was repaired without adding commands or restarting the stack:
+
+```text
+XGROUP CREATE cmd.orders.7502SN6 gateway-commands $ MKSTREAM
+```
+
+Post-repair state:
+
+```text
+cmd.orders.7502SN6 = 0
+gateway-commands pending = 0
+fresh gateway WARN/ERROR since repair = none
+fresh runtime WARN/ERROR since repair = none
+```
+
+Verdict: the three live stacks are ready for the first fresh `10m` bar check.
