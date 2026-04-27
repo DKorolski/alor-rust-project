@@ -375,3 +375,68 @@ fresh runtime WARN/ERROR since repair = none
 ```
 
 Verdict: the three live stacks are ready for the first fresh `10m` bar check.
+
+## Safe Resource Cleanup
+
+Time:
+
+```text
+2026-04-27 08:59 MSK
+```
+
+The VPS resource check before cleanup showed no active pressure:
+
+```text
+load average = 0.29 / 0.26 / 0.26
+RAM available = 5.3 GiB
+swap used = 28 MiB
+disk before = 47G used / 79G total / 29G free / 63%
+```
+
+Redis memory stayed below the configured 1 GiB container limit:
+
+```text
+sessiongap redis      used_memory = 413.96M
+hybrid redis          used_memory = 433.63M
+alor-usdrubf redis    used_memory = 464.17M
+```
+
+Cleanup actions were limited to inactive artifacts:
+
+```text
+deleted old backup:
+/opt/trading-hybrid/volumes/redis.bak.pre-from-zero-20260418-104553
+
+docker image prune -f
+```
+
+The old backup was not part of the active Redis volume:
+
+```text
+active hybrid Redis volume = /opt/trading-hybrid/volumes/redis
+deleted backup size = 3.0G
+```
+
+Docker prune was intentionally run without `-a`, so only dangling images were
+removed and tagged rollback images were left in place.
+
+Post-cleanup result:
+
+```text
+disk after = 37G used / 79G total / 38G free / 50%
+docker dangling image space reclaimed = 6.316GB
+hybrid active volume size = 300M
+sessiongap active volume size = 322M
+alor-usdrubf active volume size = 347M
+```
+
+All three trading stacks stayed healthy after cleanup:
+
+```text
+trading-sessiongap      healthy
+trading-hybrid          healthy
+trading-alor-usdrubf    healthy
+```
+
+Fresh logs after cleanup did not show new `WARN`, `ERROR`, `NOGROUP`,
+`failed`, or `rejected` lines.
