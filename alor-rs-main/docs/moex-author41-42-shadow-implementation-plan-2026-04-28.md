@@ -52,8 +52,9 @@ Engineering read:
 - RI is the stronger cross-instrument confirmation in this branch.
 - Gate 5 implementation sensitivity remains positive across tested stress
   scenarios.
-- True `1m` roll reconstruction is still pending, so the first Rust contour
-  must explicitly accept a frozen `10m` runtime contract or block promotion.
+- The first Rust contour explicitly accepts the frozen `10m`
+  switch-continuous runtime contract for RI shadow. True `1m` roll
+  reconstruction is deferred and must not block this initial shadow line.
 
 ### IMOEXF
 
@@ -260,8 +261,9 @@ Acceptance:
 - exit reason;
 - daily PnL.
 
-For RI, explicitly decide whether the first pass accepts the `10m` contract or
-waits for true `1m` roll reconstruction.
+For RI, the first pass uses the accepted frozen `10m` switch-continuous
+contract. True `1m` roll reconstruction is a follow-up validation line, not a
+blocker for initial shadow replay.
 
 ### WP5. Combo Arbitration Replay
 
@@ -339,33 +341,36 @@ NO-GO if:
 - K values or filters are changed during implementation;
 - no-overlap is approximated instead of reproduced;
 - paper/live order paths are enabled before replay parity;
-- RI `10m` versus true `1m` decision remains implicit;
+- RI implementation silently drifts away from the accepted `10m`
+  switch-continuous contract;
 - IMOEXF concentration watchlist is ignored.
 
-## Open Engineering Decisions
+## Accepted Decisions
 
 1. RI feed source:
 
 ```text
-Accept frozen 10m switch-continuous contract for first shadow, or first rebuild
-true 1m roll reconstruction.
+Use frozen 10m switch-continuous contract for first shadow.
+Defer true 1m roll reconstruction to a follow-up validation line.
 ```
 
-2. Runtime placement:
+## Open Engineering Decisions
+
+1. Runtime placement:
 
 ```text
 Prefer a separate shadow/replay component or runner rather than extending the
 current live hybrid order-emitting stack immediately.
 ```
 
-3. Persistence:
+2. Persistence:
 
 ```text
 Shadow journal can be append-only files/Redis streams, but it must be clearly
 separate from live strategy state and order lifecycle state.
 ```
 
-4. IMOEXF relationship to current live hybrid:
+3. IMOEXF relationship to current live hybrid:
 
 ```text
 Run as passive observer beside the existing hybrid, not as replacement logic.
