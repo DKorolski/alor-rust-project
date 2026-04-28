@@ -557,3 +557,46 @@ Next step:
 Add a prepared 10m ModelBar CSV loader and compare replay output against
 ri_author41_mr_primary source trades/daily rows.
 ```
+
+### 2026-04-28 Prepared 10m ModelBar CSV Loader
+
+Added a Rust-side loader for exported prepared `10m` model bars.
+
+Supported input contract:
+
+```text
+timestamp column: ts_local | datetime | timestamp | ts | dt
+required OHLC:    open, high, low, close
+optional volume:  volume | vol, default 0.0
+timestamp format: YYYY-MM-DD HH:MM:SS or YYYY-MM-DDTHH:MM:SS
+```
+
+Important boundary:
+
+```text
+The research package currently keeps RI prepared source bars as parquet.
+Rust replay does not pull parquet/arrow into strategy-runtime. The expected
+handoff path is: research/export prepared 10m bars -> CSV -> load_model_bars.
+```
+
+This keeps `strategy-runtime` lightweight and preserves the separation between
+research data preparation and replay/runtime logic.
+
+Updated test coverage:
+
+```text
+cargo test -p strategy-runtime moex_author41_42 -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 13 tests
+```
+
+Next step:
+
+```text
+Add Author41 replay/source comparison helpers for trade count, timestamp/side
+matching and daily PnL drift buckets.
+```

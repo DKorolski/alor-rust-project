@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -617,6 +617,29 @@ fn build_daily_anchors(bars: &[ModelBar]) -> BTreeMap<NaiveDate, DailyAnchor> {
     anchors
 }
 
+pub fn load_model_bars<R: Read>(reader: R) -> Result<Vec<ModelBar>> {
+    let mut csv = csv::Reader::from_reader(reader);
+    let headers = csv.headers().context("read model bar headers")?.clone();
+    let mut bars = Vec::new();
+    for record in csv.records() {
+        let record = record.context("read model bar row")?;
+        bars.push(ModelBar {
+            ts_local: parse_ts(first_required_field(
+                &headers,
+                &record,
+                &["ts_local", "datetime", "timestamp", "ts", "dt"],
+            )?)?,
+            open: parse_f64(required_field(&headers, &record, "open")?, "open")?,
+            high: parse_f64(required_field(&headers, &record, "high")?, "high")?,
+            low: parse_f64(required_field(&headers, &record, "low")?, "low")?,
+            close: parse_f64(required_field(&headers, &record, "close")?, "close")?,
+            volume: first_f64(&headers, &record, &["volume", "vol"]).unwrap_or(0.0),
+        });
+    }
+    bars.sort_by_key(|bar| bar.ts_local);
+    Ok(bars)
+}
+
 pub fn load_source_trades<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec<SourceTrade>> {
     let mut csv = csv::Reader::from_reader(reader);
     let headers = csv
@@ -680,6 +703,17 @@ pub fn load_source_daily<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec
     Ok(rows)
 }
 
+fn first_required_field<'a>(
+    headers: &csv::StringRecord,
+    record: &'a csv::StringRecord,
+    names: &[&str],
+) -> Result<&'a str> {
+    names
+        .iter()
+        .find_map(|name| field(headers, record, name))
+        .ok_or_else(|| anyhow!("missing required field; tried {}", names.join("|")))
+}
+
 fn required_field<'a>(
     headers: &csv::StringRecord,
     record: &'a csv::StringRecord,
@@ -721,6 +755,7 @@ fn parse_f64(value: &str, field_name: &str) -> Result<f64> {
 
 fn parse_ts(value: &str) -> Result<NaiveDateTime> {
     NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S"))
         .with_context(|| format!("parse timestamp {value:?}"))
 }
 
@@ -1049,6 +1084,44 @@ mod tests {
             result.trades[0].entry_ts.date(),
             NaiveDate::from_ymd_opt(2026, 5, 4).unwrap()
         );
+    }
+
+    #[test]
+    fn loads_prepared_model_bars_with_common_timestamp_columns() {
+        let csv = "\
+datetime,open,high,low,close,vol
+2026-04-28 10:10:00,99.5,99.5,99.0,99.0,11
+2026-04-28 10:00:00,100.0,100.2,99.9,100.1,10
+";
+
+        let bars = load_model_bars(csv.as_bytes()).expect("load prepared bars");
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].ts_local, dt((2026, 4, 28), (10, 0, 0)));
+        assert_eq!(bars[0].volume, 10.0);
+        assert_eq!(bars[1].ts_local, dt((2026, 4, 28), (10, 10, 0)));
+    }
+
+    #[test]
+    fn loaded_model_bars_can_feed_author41_replay() {
+        let csv = "\
+ts_local,open,high,low,close,volume
+2026-04-27 09:00:00,100.0,101.0,99.0,100.0,1
+2026-04-27 23:40:00,100.0,102.0,98.0,100.0,1
+2026-04-28 08:50:00,200.0,250.0,50.0,200.0,1
+2026-04-28 10:00:00,100.0,100.2,99.9,100.1,1
+2026-04-28 10:10:00,99.5,99.5,99.0,99.0,1
+";
+
+        let bars = load_model_bars(csv.as_bytes()).expect("load prepared bars");
+        let result = replay_author41(
+            &bars,
+            Author41Config::ri_dual_no_overlap_plateau(),
+            RegularSessionPolicy::moex_10m(),
+        );
+
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].entry_ts, dt((2026, 4, 28), (10, 0, 0)));
+        assert_eq!(result.daily.len(), 2);
     }
 
     #[test]
