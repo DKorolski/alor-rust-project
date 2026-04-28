@@ -648,3 +648,78 @@ Export the research RI prepared 10m parquet feed to CSV, run Rust Author41
 replay over it, and compare against ri_author41_mr_primary source trades/daily
 with the new comparison helper.
 ```
+
+### 2026-04-28 RI Author41 Source-Contract Parity
+
+Ran Rust Author41 replay against the real RI prepared 10m feed exported from:
+
+```text
+analiz_alpha_si/moex_ri_author41_long_horizon_2026_04/cache/ri_2019-01-01_2026-03-27_prepared.parquet
+```
+
+Exported handoff CSV shape:
+
+```text
+rows: 154534
+columns: datetime, open, high, low, close, volume
+```
+
+Important source-contract finding:
+
+```text
+ri_author41_mr_primary / dual_no_overlap_plateau is not a single symmetric
+Author41 config in the source runner.
+```
+
+The fixed package summary row displays the default dual metadata, but the
+actual selected trades are built from two side-specific plateau components and
+then no-overlap merged:
+
+```text
+short plateau: K=0.20, K2=0.020, StopK=0.75, range=0.005..0.100
+long plateau:  K=0.11, K2=0.005, StopK=1.00, range=0.005..0.100
+merge:         sort by entry_ts, drop trades whose entry_ts <= last accepted exit_ts
+```
+
+Rust now represents this as `replay_ri_author41_dual_no_overlap_source`.
+
+Replay command:
+
+```text
+cargo run -p strategy-runtime --bin moex_author41_replay -- \
+  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
+  --source-trades-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_trades.csv \
+  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --model-id ri_author41_mr_primary \
+  --out-json docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_author41_replay_comparison.json
+```
+
+Result:
+
+```text
+source_trades:          1995
+actual_trades:          1995
+trade_key_matches:      1995
+trade_exact_matches:    1995
+missing_source_trades:  0
+extra_actual_trades:    0
+source_daily_rows:      1812
+actual_daily_rows:      1812
+daily_exact_matches:    1812
+daily_pnl_mismatches:   0
+source_total_pnl:       171270.0
+actual_total_pnl:       171270.0
+```
+
+Status:
+
+```text
+RI Author41 MR standalone replay: EXACT_SOURCE_PARITY on prepared 10m feed.
+```
+
+Next step:
+
+```text
+Implement RI Author42 BO standalone replay, then build RI 41+42 no-overlap
+combo replay on top of exact Author41 MR.
+```

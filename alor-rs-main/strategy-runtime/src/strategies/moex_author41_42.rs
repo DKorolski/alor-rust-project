@@ -270,6 +270,38 @@ impl Author41Config {
         }
     }
 
+    pub fn ri_plateau_short_source() -> Self {
+        Self {
+            side_mode: Author41SideMode::Short,
+            k: 0.20,
+            k2: 0.020,
+            stop_k: 0.75,
+            min_range: 0.005,
+            max_range: 0.100,
+            max_entries_per_day: 2,
+            entry_end: NaiveTime::from_hms_opt(12, 0, 0).unwrap_or(NaiveTime::MIN),
+            time_exit: NaiveTime::from_hms_opt(20, 0, 0).unwrap_or(NaiveTime::MIN),
+            breakeven_after_bars: 20,
+            roundtrip_cost_points: 2.0,
+        }
+    }
+
+    pub fn ri_plateau_long_source() -> Self {
+        Self {
+            side_mode: Author41SideMode::Long,
+            k: 0.11,
+            k2: 0.005,
+            stop_k: 1.00,
+            min_range: 0.005,
+            max_range: 0.100,
+            max_entries_per_day: 2,
+            entry_end: NaiveTime::from_hms_opt(12, 0, 0).unwrap_or(NaiveTime::MIN),
+            time_exit: NaiveTime::from_hms_opt(20, 0, 0).unwrap_or(NaiveTime::MIN),
+            breakeven_after_bars: 20,
+            roundtrip_cost_points: 2.0,
+        }
+    }
+
     pub fn imoexf_boundary_short() -> Self {
         Self {
             side_mode: Author41SideMode::Short,
@@ -284,6 +316,73 @@ impl Author41Config {
             breakeven_after_bars: 20,
             roundtrip_cost_points: 0.1,
         }
+    }
+}
+
+pub fn replay_ri_author41_dual_no_overlap_source(
+    bars: &[ModelBar],
+    session_policy: RegularSessionPolicy,
+) -> Author41ReplayResult {
+    let mut filtered: Vec<ModelBar> = bars
+        .iter()
+        .copied()
+        .filter(|bar| session_policy.is_model_bar(bar.ts_local))
+        .collect();
+    filtered.sort_by_key(|bar| bar.ts_local);
+
+    let short = replay_author41(
+        &filtered,
+        Author41Config::ri_plateau_short_source(),
+        session_policy,
+    );
+    let long = replay_author41(
+        &filtered,
+        Author41Config::ri_plateau_long_source(),
+        session_policy,
+    );
+
+    let mut candidates = short.trades;
+    candidates.extend(long.trades);
+    candidates.sort_by_key(|trade| trade.entry_ts);
+
+    let mut accepted = Vec::new();
+    let mut last_exit = NaiveDateTime::MIN;
+    for trade in candidates {
+        if trade.entry_ts <= last_exit {
+            continue;
+        }
+        last_exit = trade.exit_ts;
+        accepted.push(trade);
+    }
+
+    let mut daily_map: BTreeMap<NaiveDate, Author41DailyPnl> = filtered
+        .iter()
+        .map(|bar| {
+            (
+                bar.ts_local.date(),
+                Author41DailyPnl {
+                    date: bar.ts_local.date(),
+                    pnl_points: 0.0,
+                    trades: 0,
+                },
+            )
+        })
+        .collect();
+    for trade in &accepted {
+        let row = daily_map
+            .entry(trade.exit_ts.date())
+            .or_insert(Author41DailyPnl {
+                date: trade.exit_ts.date(),
+                pnl_points: 0.0,
+                trades: 0,
+            });
+        row.pnl_points += trade.net_points;
+        row.trades += 1;
+    }
+
+    Author41ReplayResult {
+        trades: accepted,
+        daily: daily_map.into_values().collect(),
     }
 }
 
@@ -338,7 +437,7 @@ pub struct Author41ReplayResult {
     pub daily: Vec<Author41DailyPnl>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Author41ReplayComparison {
     pub source_trades: usize,
     pub actual_trades: usize,
@@ -1003,6 +1102,25 @@ mod tests {
         assert!((trade.exit_price - 111_845.0).abs() < 1e-9);
         assert_eq!(trade.exit_reason, "stop");
         assert!((trade.net_points + 1_927.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ri_source_plateau_side_configs_match_fixed_artifact_components() {
+        let short = Author41Config::ri_plateau_short_source();
+        assert_eq!(short.side_mode, Author41SideMode::Short);
+        assert_eq!(short.k, 0.20);
+        assert_eq!(short.k2, 0.020);
+        assert_eq!(short.stop_k, 0.75);
+        assert_eq!(short.min_range, 0.005);
+        assert_eq!(short.max_range, 0.100);
+
+        let long = Author41Config::ri_plateau_long_source();
+        assert_eq!(long.side_mode, Author41SideMode::Long);
+        assert_eq!(long.k, 0.11);
+        assert_eq!(long.k2, 0.005);
+        assert_eq!(long.stop_k, 1.00);
+        assert_eq!(long.min_range, 0.005);
+        assert_eq!(long.max_range, 0.100);
     }
 
     #[test]

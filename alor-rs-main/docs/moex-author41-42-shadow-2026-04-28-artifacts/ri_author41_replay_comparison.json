@@ -1,0 +1,23 @@
+{
+  "profile_id": "ri_author41_42_primary_combo_cost2",
+  "author41_variant": "dual_no_overlap_plateau",
+  "model_id": "ri_author41_mr_primary",
+  "bars_loaded": 154534,
+  "comparison": {
+    "source_trades": 1995,
+    "actual_trades": 1995,
+    "trade_key_matches": 1995,
+    "trade_exact_matches": 1995,
+    "trade_point_mismatches": 0,
+    "missing_source_trades": 0,
+    "extra_actual_trades": 0,
+    "source_daily_rows": 1812,
+    "actual_daily_rows": 1812,
+    "daily_exact_matches": 1812,
+    "daily_pnl_mismatches": 0,
+    "missing_source_daily": 0,
+    "extra_actual_daily": 0,
+    "source_total_pnl": 171270.0,
+    "actual_total_pnl": 171270.0
+  }
+}
