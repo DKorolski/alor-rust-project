@@ -693,3 +693,193 @@ live_guard = BLOCKED waiting_for_next_bar_after_restart
 
 This is an intended from-zero clean restart after manual flatten. Runtime should
 only become live-eligible after the next fresh `10m` bar.
+
+## Evening Checkpoint: All Systems + RI Shadow
+
+Observation time:
+
+```text
+2026-04-28 18:35 MSK
+host = nektodk.ispvds.com
+```
+
+### VPS Resources
+
+The VPS remained healthy after the RI shadow rollout and the three live stacks
+continued running:
+
+```text
+load average = 0.24, 0.33, 0.43
+RAM          = 7.7Gi total, 2.9Gi used, 4.8Gi available
+swap         = 52Mi / 3.9Gi
+disk /       = 42G / 79G, 56% used
+```
+
+Container memory:
+
+```text
+sessiongap redis      = 579.7MiB / 1GiB
+alor-usdrubf redis    = 646.0MiB / 1GiB
+hybrid redis          = 605.1MiB / 1GiB
+RI shadow redis       = 8.7MiB / 768MiB
+RI shadow gateway     = 3.4MiB
+RI shadow runner      = 1.3MiB
+```
+
+No resource-pressure signature was observed.
+
+### Shared Transport Event
+
+All three live gateways saw the same transport reset cluster around
+`2026-04-28 12:20 MSK`:
+
+```text
+sessiongap    cws/ws reset without close handshake, pending_count=0
+hybrid        cws/ws reset without close handshake, pending_count=0
+alor-usdrubf  cws/ws reset without close handshake, pending_count=0
+```
+
+Recovery was successful:
+
+```text
+sessiongap    live_guard ALLOWED again at 12:30:07 MSK
+hybrid        live_guard ALLOWED again at 12:30:08 MSK
+alor-usdrubf  live_guard ALLOWED again at 12:30:03 MSK
+```
+
+Interpretation: this was a shared Alor/WebSocket transport reset, not a local
+VPS resource issue. There were no pending CWS commands at the reset moment in
+the checked logs.
+
+### SessionGap USDRUBF (`7502MIW`)
+
+SessionGap completed a clean one-shot lifecycle:
+
+```text
+13:00:01 MSK  entry emitted, buy 1 USDRUBF
+13:00:02 MSK  entry fill @ 75.05
+13:10:02 MSK  exit emitted, sell 1 USDRUBF
+13:10:03 MSK  exit fill @ 75.08
+```
+
+Broker snapshot after the cycle:
+
+```text
+USDRUBF qty = 0.0
+latest exit order = filled sell 1
+```
+
+Verdict: штатно. Action-scoped `create:limit` path was used and accepted.
+
+### Hybrid IMOEXF (`7502SN6`, riskgate-shadow)
+
+Risk-gate startup used the existing ledger, not seed reimport:
+
+```text
+decision = UseExistingLedger
+ledger_rows_count = 181
+last_finalized_session_date = 2026-04-27
+rolling_sum_lb120 = 154.5000000000001
+mr_enabled_current_session = true
+mr_enabled_next_session = true
+```
+
+After the manual MR cleanup and from-zero restart, the runtime waited for a new
+bar as expected. At `12:20 MSK`, while still in `SyncingGap`, it generated a BO
+short signal but did not emit it:
+
+```text
+dt_local = 2026-04-28 12:20:00
+owner = IntradayBreakout
+side = Short
+can_emit = false
+can_execute = false
+```
+
+After the gateway recovered and the runtime returned to `LiveReady`, BO entry
+was emitted and accepted:
+
+```text
+12:50:00 MSK  submit_entry owner=IntradayBreakout side=Short
+12:50:00 MSK  intent_emitted request_id=7093a557-c13f-5556-b9d8-579f632bd2b8
+12:50:01 MSK  fill sell 1 IMOEXF @ 2712.0
+```
+
+Current broker snapshot at the evening check:
+
+```text
+IMOEXF qty = -1.0
+avg_price = 2712.0
+owner/comment = BO entry
+```
+
+Verdict: BO short is live and expected to be managed by the hybrid BO lifecycle.
+No protective TP/SL is expected for BO; protective TP/SL belongs to the MR
+component only.
+
+Watchpoint: verify same-day BO exit / EOD flatten later in the session.
+
+### Alor-USDRUBF Hybrid (`7502T0U`)
+
+No fresh USDRUBF trade lifecycle appeared in the checked `06:00 UTC+` window.
+The stack experienced the shared transport reset and recovered:
+
+```text
+12:20 MSK  live_guard BLOCKED due gateway/ws/cws
+12:30 MSK  live_guard ALLOWED
+```
+
+Broker position stream tail showed only RUB cash positions in the latest
+entries, with no fresh open USDRUBF position in the sampled tail.
+
+Verdict: штатно / idle in this observation window.
+
+### RI Author41/42 Shadow
+
+The new RI shadow contour remained isolated and healthy:
+
+```text
+compose project = trading-ri-shadow
+gateway ticker  = RIM6
+model stream    = md.bars.RI.10m
+runner symbol   = RIM6
+stream XLEN     = 275
+consumer group  = moex-author41-42-shadow-ri
+pending         = 0
+lag             = 0
+journal rows    = 34
+```
+
+The Alor subscription to generic `RI` had failed earlier with:
+
+```text
+Instrument with symbol RI was not found in exchange MOEX
+```
+
+The active `RIM6` subscription works and produces `10m` bars. The RI contour is
+shadow-only; no RI order-emitting runtime is running.
+
+Operational nuance: the RI shadow gateway uses the same `7502SN6` portfolio for
+transport auth, so its isolated Redis receives portfolio position snapshots
+including the live IMOEXF BO short. This does not mean RI shadow is trading; it
+only reflects the account-level positions subscription.
+
+### Evening Verdict
+
+The systems are operationally healthy at the checkpoint:
+
+```text
+sessiongap       clean entry/exit, flat
+hybrid           BO short open as expected after from-zero restart
+alor-usdrubf     idle/flat in sampled tail
+RI shadow        collecting RIM6 10m data and writing journal
+VPS resources    normal
+```
+
+Known watchpoints:
+
+```text
+1. Confirm hybrid BO same-day/EOD exit later today.
+2. Watch Redis memory, especially alor-usdrubf and hybrid, after the retention changes.
+3. Review RI shadow journal after a full session for rolling-vs-finalized output semantics.
+```
