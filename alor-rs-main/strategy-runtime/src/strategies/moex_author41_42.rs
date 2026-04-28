@@ -1,5 +1,6 @@
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use anyhow::{Context, Result, anyhow};
@@ -325,6 +326,19 @@ pub struct Author41Trade {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Author41DailyPnl {
+    pub date: NaiveDate,
+    pub pnl_points: f64,
+    pub trades: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Author41ReplayResult {
+    pub trades: Vec<Author41Trade>,
+    pub daily: Vec<Author41DailyPnl>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct OpenAuthor41Position {
     side: ShadowSide,
     entry_ts: NaiveDateTime,
@@ -507,6 +521,100 @@ impl Author41Engine {
             entry_index_for_day: pos.entry_index_for_day,
         }
     }
+}
+
+pub fn replay_author41(
+    bars: &[ModelBar],
+    config: Author41Config,
+    session_policy: RegularSessionPolicy,
+) -> Author41ReplayResult {
+    let mut filtered: Vec<ModelBar> = bars
+        .iter()
+        .copied()
+        .filter(|bar| session_policy.is_model_bar(bar.ts_local))
+        .collect();
+    filtered.sort_by_key(|bar| bar.ts_local);
+
+    let anchors = build_daily_anchors(&filtered);
+    let mut engine = Author41Engine::new(config);
+    let mut trades = Vec::new();
+    let mut daily_map: BTreeMap<NaiveDate, Author41DailyPnl> = filtered
+        .iter()
+        .map(|bar| {
+            (
+                bar.ts_local.date(),
+                Author41DailyPnl {
+                    date: bar.ts_local.date(),
+                    pnl_points: 0.0,
+                    trades: 0,
+                },
+            )
+        })
+        .collect();
+
+    for bar in filtered {
+        let date = bar.ts_local.date();
+        let anchor = anchors.get(&date).copied();
+        for trade in engine.on_bar(bar, anchor) {
+            let row = daily_map
+                .entry(trade.exit_ts.date())
+                .or_insert(Author41DailyPnl {
+                    date: trade.exit_ts.date(),
+                    pnl_points: 0.0,
+                    trades: 0,
+                });
+            row.pnl_points += trade.net_points;
+            row.trades += 1;
+            trades.push(trade);
+        }
+    }
+
+    Author41ReplayResult {
+        trades,
+        daily: daily_map.into_values().collect(),
+    }
+}
+
+fn build_daily_anchors(bars: &[ModelBar]) -> BTreeMap<NaiveDate, DailyAnchor> {
+    #[derive(Debug, Clone, Copy)]
+    struct DayStats {
+        high: f64,
+        low: f64,
+        close: f64,
+    }
+
+    let mut by_day: BTreeMap<NaiveDate, DayStats> = BTreeMap::new();
+    for bar in bars {
+        by_day
+            .entry(bar.ts_local.date())
+            .and_modify(|stats| {
+                stats.high = stats.high.max(bar.high);
+                stats.low = stats.low.min(bar.low);
+                stats.close = bar.close;
+            })
+            .or_insert(DayStats {
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+            });
+    }
+
+    let mut anchors = BTreeMap::new();
+    let mut previous: Option<DayStats> = None;
+    for (date, stats) in by_day {
+        if let Some(prev) = previous {
+            anchors.insert(
+                date,
+                DailyAnchor {
+                    prev_close: prev.close,
+                    prev_low: prev.low,
+                    prev_range: prev.high - prev.low,
+                },
+            );
+        }
+        previous = Some(stats);
+    }
+    anchors
 }
 
 pub fn load_source_trades<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec<SourceTrade>> {
@@ -819,6 +927,128 @@ mod tests {
             Some(valid_anchor),
         );
         assert!(engine.position.is_none());
+    }
+
+    #[test]
+    fn replay_author41_builds_previous_regular_day_anchor_and_daily_pnl() {
+        let bars = vec![
+            ModelBar {
+                ts_local: dt((2026, 4, 27), (9, 0, 0)),
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.0,
+                volume: 1.0,
+            },
+            ModelBar {
+                ts_local: dt((2026, 4, 27), (23, 40, 0)),
+                open: 100.0,
+                high: 102.0,
+                low: 98.0,
+                close: 100.0,
+                volume: 1.0,
+            },
+            ModelBar {
+                ts_local: dt((2026, 4, 28), (8, 50, 0)),
+                open: 200.0,
+                high: 250.0,
+                low: 50.0,
+                close: 200.0,
+                volume: 1.0,
+            },
+            ModelBar {
+                ts_local: dt((2026, 4, 28), (10, 0, 0)),
+                open: 100.0,
+                high: 100.2,
+                low: 99.9,
+                close: 100.1,
+                volume: 1.0,
+            },
+            ModelBar {
+                ts_local: dt((2026, 4, 28), (10, 10, 0)),
+                open: 99.5,
+                high: 99.5,
+                low: 99.0,
+                close: 99.0,
+                volume: 1.0,
+            },
+        ];
+
+        let result = replay_author41(
+            &bars,
+            Author41Config::ri_dual_no_overlap_plateau(),
+            RegularSessionPolicy::moex_10m(),
+        );
+
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].entry_ts, dt((2026, 4, 28), (10, 0, 0)));
+        assert_eq!(result.trades[0].exit_ts, dt((2026, 4, 28), (10, 10, 0)));
+        assert_eq!(result.trades[0].exit_reason, "take_author_close");
+        assert!((result.trades[0].net_points + 0.9).abs() < 1e-9);
+
+        assert_eq!(result.daily.len(), 2);
+        assert_eq!(
+            result.daily[0].date,
+            NaiveDate::from_ymd_opt(2026, 4, 27).unwrap()
+        );
+        assert_eq!(result.daily[0].pnl_points, 0.0);
+        assert_eq!(
+            result.daily[1].date,
+            NaiveDate::from_ymd_opt(2026, 4, 28).unwrap()
+        );
+        assert!((result.daily[1].pnl_points + 0.9).abs() < 1e-9);
+        assert_eq!(result.daily[1].trades, 1);
+    }
+
+    #[test]
+    fn replay_author41_uses_previous_regular_day_not_weekend_gap() {
+        let bars = vec![
+            ModelBar {
+                ts_local: dt((2026, 5, 1), (23, 40, 0)),
+                open: 100.0,
+                high: 102.0,
+                low: 98.0,
+                close: 100.0,
+                volume: 1.0,
+            },
+            ModelBar {
+                ts_local: dt((2026, 5, 2), (10, 0, 0)),
+                open: 500.0,
+                high: 600.0,
+                low: 400.0,
+                close: 500.0,
+                volume: 1.0,
+            },
+            ModelBar {
+                ts_local: dt((2026, 5, 4), (10, 0, 0)),
+                open: 100.0,
+                high: 100.2,
+                low: 99.9,
+                close: 100.1,
+                volume: 1.0,
+            },
+            ModelBar {
+                ts_local: dt((2026, 5, 4), (10, 10, 0)),
+                open: 99.5,
+                high: 99.5,
+                low: 99.0,
+                close: 99.0,
+                volume: 1.0,
+            },
+        ];
+
+        let result = replay_author41(
+            &bars,
+            Author41Config::ri_dual_no_overlap_plateau(),
+            RegularSessionPolicy::moex_10m(),
+        );
+
+        assert_eq!(result.daily.len(), 2);
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(
+            result.trades[0].entry_ts.date(),
+            NaiveDate::from_ymd_opt(2026, 5, 4).unwrap()
+        );
     }
 
     #[test]

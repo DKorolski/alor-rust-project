@@ -516,3 +516,44 @@ Next step:
 Run the RI Author41 engine over prepared 10m bars and compare against
 ri_author41_mr_primary source trades/daily rows.
 ```
+
+### 2026-04-28 RI Author41 Replay Orchestration
+
+Added the first replay-level orchestration for Author41 MR over prepared
+`ModelBar` arrays.
+
+Implemented replay behavior:
+
+- filter all input bars through the frozen regular-session policy before any
+  state update;
+- build previous regular-day anchors from filtered 10m bars;
+- run the standalone `Author41Engine` in timestamp order;
+- aggregate per-session daily PnL rows for source parity comparison;
+- ignore pre-session/service bars and weekend bars for anchors, entries, exits
+  and daily rows.
+
+This keeps the Author41 shadow path aligned with the handoff rule:
+
+```text
+raw/audit bars may contain service/weekend data,
+but model state only sees regular weekday 09:00..23:49 bars.
+```
+
+Updated test coverage:
+
+```text
+cargo test -p strategy-runtime moex_author41_42 -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 11 tests
+```
+
+Next step:
+
+```text
+Add a prepared 10m ModelBar CSV loader and compare replay output against
+ri_author41_mr_primary source trades/daily rows.
+```
