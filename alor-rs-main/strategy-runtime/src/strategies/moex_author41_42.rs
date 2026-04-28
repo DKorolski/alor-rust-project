@@ -476,6 +476,113 @@ pub fn replay_author42(
     Author42ReplayResult { trades, daily }
 }
 
+pub fn replay_ri_author41_42_combo_cost2(
+    bars: &[ModelBar],
+    session_policy: RegularSessionPolicy,
+) -> ComboReplayResult {
+    let profile = ModelProfile::ri_shadow_10m();
+    let author41 = replay_ri_author41_dual_no_overlap_source(bars, session_policy);
+    let author42 = replay_author42(bars, Author42Config::ri_grid_k042_both(), session_policy);
+    replay_combo_from_components(&profile, &author41, &author42)
+}
+
+pub fn replay_combo_from_components(
+    profile: &ModelProfile,
+    author41: &Author41ReplayResult,
+    author42: &Author42ReplayResult,
+) -> ComboReplayResult {
+    let accepted_author42 = filter_author42_non_overlapping(&author42.trades, &author41.trades);
+
+    let mut rows: BTreeMap<NaiveDate, ComboDailyPnl> = BTreeMap::new();
+    for row in &author41.daily {
+        rows.entry(row.date).or_insert_with(|| ComboDailyPnl {
+            date: row.date,
+            author41_pnl: 0.0,
+            author42_pnl: 0.0,
+            author41_trades: 0,
+            author42_trades: 0,
+            pnl_points: 0.0,
+            trades: 0,
+        });
+    }
+    for row in &author42.daily {
+        rows.entry(row.date).or_insert_with(|| ComboDailyPnl {
+            date: row.date,
+            author41_pnl: 0.0,
+            author42_pnl: 0.0,
+            author41_trades: 0,
+            author42_trades: 0,
+            pnl_points: 0.0,
+            trades: 0,
+        });
+    }
+
+    for trade in &author41.trades {
+        let row = rows
+            .entry(trade.exit_ts.date())
+            .or_insert_with(|| ComboDailyPnl {
+                date: trade.exit_ts.date(),
+                author41_pnl: 0.0,
+                author42_pnl: 0.0,
+                author41_trades: 0,
+                author42_trades: 0,
+                pnl_points: 0.0,
+                trades: 0,
+            });
+        row.author41_pnl += trade.net_points;
+    }
+    for trade in &accepted_author42 {
+        let row = rows
+            .entry(trade.exit_ts.date())
+            .or_insert_with(|| ComboDailyPnl {
+                date: trade.exit_ts.date(),
+                author41_pnl: 0.0,
+                author42_pnl: 0.0,
+                author41_trades: 0,
+                author42_trades: 0,
+                pnl_points: 0.0,
+                trades: 0,
+            });
+        row.author42_pnl += trade.gross_points - profile.author42_cost_points;
+        row.author42_trades += 1;
+    }
+
+    let mut daily: Vec<ComboDailyPnl> = rows
+        .into_values()
+        .map(|mut row| {
+            // The frozen combo artifact stores Author41 "trades" as active-day
+            // count, while the detailed trade log above keeps true trade count.
+            row.author41_trades = u32::from(row.author41_pnl.abs() > 0.0);
+            row.pnl_points = row.author41_pnl + row.author42_pnl;
+            row.trades = row.author41_trades + row.author42_trades;
+            row
+        })
+        .collect();
+    daily.sort_by_key(|row| row.date);
+
+    ComboReplayResult {
+        author41_trades: author41.trades.clone(),
+        author42_trades: accepted_author42,
+        daily,
+    }
+}
+
+fn filter_author42_non_overlapping(
+    candidate: &[Author42Trade],
+    blocker: &[Author41Trade],
+) -> Vec<Author42Trade> {
+    candidate
+        .iter()
+        .filter(|trade| {
+            !blocker.iter().any(|mr| {
+                trade.entry_ts.date() == mr.entry_ts.date()
+                    && trade.entry_ts.max(mr.entry_ts) < trade.exit_ts.min(mr.exit_ts)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 fn run_author42_day(
     date: NaiveDate,
     day: &[ModelBar],
@@ -920,6 +1027,46 @@ pub struct Author42ReplayComparison {
     pub extra_actual_daily: usize,
     pub source_total_pnl: f64,
     pub actual_total_pnl: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComboDailyPnl {
+    pub date: NaiveDate,
+    pub author41_pnl: f64,
+    pub author42_pnl: f64,
+    pub author41_trades: u32,
+    pub author42_trades: u32,
+    pub pnl_points: f64,
+    pub trades: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComboReplayResult {
+    pub author41_trades: Vec<Author41Trade>,
+    pub author42_trades: Vec<Author42Trade>,
+    pub daily: Vec<ComboDailyPnl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ComboReplayComparison {
+    pub source_daily_rows: usize,
+    pub actual_daily_rows: usize,
+    pub daily_exact_matches: usize,
+    pub daily_pnl_mismatches: usize,
+    pub component_pnl_mismatches: usize,
+    pub trade_count_mismatches: usize,
+    pub missing_source_daily: usize,
+    pub extra_actual_daily: usize,
+    pub source_total_pnl: f64,
+    pub actual_total_pnl: f64,
+    pub source_author41_total_pnl: f64,
+    pub actual_author41_total_pnl: f64,
+    pub source_author42_total_pnl: f64,
+    pub actual_author42_total_pnl: f64,
+    pub source_total_trades: f64,
+    pub actual_total_trades: u32,
+    pub actual_author41_trades: usize,
+    pub actual_author42_trades: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1393,6 +1540,84 @@ pub fn compare_author42_replay(
         extra_actual_daily,
         source_total_pnl: source_daily.iter().map(|row| row.pnl_points).sum(),
         actual_total_pnl: actual.daily.iter().map(|row| row.pnl_points).sum(),
+    }
+}
+
+pub fn compare_combo_replay(
+    actual: &ComboReplayResult,
+    source_daily: &[SourceDaily],
+    tolerance: f64,
+) -> ComboReplayComparison {
+    let source_daily_by_date: BTreeMap<NaiveDate, &SourceDaily> =
+        source_daily.iter().map(|row| (row.date, row)).collect();
+    let actual_daily_by_date: BTreeMap<NaiveDate, &ComboDailyPnl> =
+        actual.daily.iter().map(|row| (row.date, row)).collect();
+
+    let mut daily_exact_matches = 0;
+    let mut daily_pnl_mismatches = 0;
+    let mut component_pnl_mismatches = 0;
+    let mut trade_count_mismatches = 0;
+    let mut missing_source_daily = 0;
+
+    for (date, source) in &source_daily_by_date {
+        let Some(actual_row) = actual_daily_by_date.get(date) else {
+            missing_source_daily += 1;
+            continue;
+        };
+
+        let pnl_ok = close_enough(actual_row.pnl_points, source.pnl_points, tolerance);
+        let author41_ok = source
+            .author41_pnl
+            .map(|pnl| close_enough(actual_row.author41_pnl, pnl, tolerance))
+            .unwrap_or(true);
+        let author42_ok = source
+            .author42_pnl
+            .map(|pnl| close_enough(actual_row.author42_pnl, pnl, tolerance))
+            .unwrap_or(true);
+        let trades_ok = source
+            .trades
+            .map(|trades| close_enough(actual_row.trades as f64, trades, tolerance))
+            .unwrap_or(true);
+
+        if pnl_ok && author41_ok && author42_ok && trades_ok {
+            daily_exact_matches += 1;
+        } else {
+            if !pnl_ok {
+                daily_pnl_mismatches += 1;
+            }
+            if !author41_ok || !author42_ok {
+                component_pnl_mismatches += 1;
+            }
+            if !trades_ok {
+                trade_count_mismatches += 1;
+            }
+        }
+    }
+
+    let extra_actual_daily = actual_daily_by_date
+        .keys()
+        .filter(|date| !source_daily_by_date.contains_key(date))
+        .count();
+
+    ComboReplayComparison {
+        source_daily_rows: source_daily.len(),
+        actual_daily_rows: actual.daily.len(),
+        daily_exact_matches,
+        daily_pnl_mismatches,
+        component_pnl_mismatches,
+        trade_count_mismatches,
+        missing_source_daily,
+        extra_actual_daily,
+        source_total_pnl: source_daily.iter().map(|row| row.pnl_points).sum(),
+        actual_total_pnl: actual.daily.iter().map(|row| row.pnl_points).sum(),
+        source_author41_total_pnl: source_daily.iter().filter_map(|row| row.author41_pnl).sum(),
+        actual_author41_total_pnl: actual.daily.iter().map(|row| row.author41_pnl).sum(),
+        source_author42_total_pnl: source_daily.iter().filter_map(|row| row.author42_pnl).sum(),
+        actual_author42_total_pnl: actual.daily.iter().map(|row| row.author42_pnl).sum(),
+        source_total_trades: source_daily.iter().filter_map(|row| row.trades).sum(),
+        actual_total_trades: actual.daily.iter().map(|row| row.trades).sum(),
+        actual_author41_trades: actual.author41_trades.len(),
+        actual_author42_trades: actual.author42_trades.len(),
     }
 }
 
@@ -2124,5 +2349,109 @@ ri_author42_bo_primary,2019-01-04,0.0,0,friday,,, \n";
         assert_eq!(bo.len(), 1);
         assert_eq!(bo[0].pnl_points, 0.0);
         assert_eq!(bo[0].skipped.as_deref(), Some("friday"));
+    }
+
+    #[test]
+    fn combo_drops_bo_interval_overlap_and_applies_author42_cost2() {
+        let profile = ModelProfile::ri_shadow_10m();
+        let author41 = Author41ReplayResult {
+            trades: vec![Author41Trade {
+                side: ShadowSide::Short,
+                entry_ts: dt((2026, 4, 28), (10, 0, 0)),
+                exit_ts: dt((2026, 4, 28), (11, 0, 0)),
+                entry_price: 100.0,
+                exit_price: 95.0,
+                gross_points: 5.0,
+                net_points: 3.0,
+                exit_reason: "take_author_close".to_string(),
+                bars_held: 6,
+                entry_index_for_day: 1,
+            }],
+            daily: vec![Author41DailyPnl {
+                date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                pnl_points: 3.0,
+                trades: 1,
+            }],
+        };
+        let author42 = Author42ReplayResult {
+            trades: vec![
+                Author42Trade {
+                    side: ShadowSide::Long,
+                    entry_ts: dt((2026, 4, 28), (10, 30, 0)),
+                    exit_ts: dt((2026, 4, 28), (12, 0, 0)),
+                    entry_price: 100.0,
+                    exit_price: 110.0,
+                    gross_points: 10.0,
+                    pnl_points: 10.0,
+                    exit_reason: "time_exit_same_bar_close".to_string(),
+                    bars_held: 9,
+                },
+                Author42Trade {
+                    side: ShadowSide::Short,
+                    entry_ts: dt((2026, 4, 28), (12, 10, 0)),
+                    exit_ts: dt((2026, 4, 28), (13, 0, 0)),
+                    entry_price: 120.0,
+                    exit_price: 115.0,
+                    gross_points: 5.0,
+                    pnl_points: 5.0,
+                    exit_reason: "time_exit_same_bar_close".to_string(),
+                    bars_held: 5,
+                },
+            ],
+            daily: vec![Author42DailyPnl {
+                date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                pnl_points: 15.0,
+                trades: 2,
+                skipped: String::new(),
+            }],
+        };
+
+        let combo = replay_combo_from_components(&profile, &author41, &author42);
+
+        assert_eq!(combo.author42_trades.len(), 1);
+        assert_eq!(
+            combo.author42_trades[0].entry_ts,
+            dt((2026, 4, 28), (12, 10, 0))
+        );
+        assert_eq!(combo.daily.len(), 1);
+        assert_eq!(combo.daily[0].author41_pnl, 3.0);
+        assert_eq!(combo.daily[0].author42_pnl, 3.0);
+        assert_eq!(combo.daily[0].pnl_points, 6.0);
+        assert_eq!(combo.daily[0].trades, 2);
+    }
+
+    #[test]
+    fn compares_combo_components_and_total_daily_pnl() {
+        let actual = ComboReplayResult {
+            author41_trades: Vec::new(),
+            author42_trades: Vec::new(),
+            daily: vec![ComboDailyPnl {
+                date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                author41_pnl: 3.0,
+                author42_pnl: 4.0,
+                author41_trades: 1,
+                author42_trades: 1,
+                pnl_points: 7.0,
+                trades: 2,
+            }],
+        };
+        let source = vec![SourceDaily {
+            fixed_model_id: "ri_author41_42_primary_combo_cost2".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+            pnl_points: 7.0,
+            author41_pnl: Some(3.0),
+            author42_pnl: Some(4.0),
+            trades: Some(2.0),
+            skipped: None,
+        }];
+
+        let comparison = compare_combo_replay(&actual, &source, 1e-9);
+
+        assert_eq!(comparison.daily_exact_matches, 1);
+        assert_eq!(comparison.daily_pnl_mismatches, 0);
+        assert_eq!(comparison.component_pnl_mismatches, 0);
+        assert_eq!(comparison.trade_count_mismatches, 0);
+        assert_eq!(comparison.source_total_pnl, 7.0);
+        assert_eq!(comparison.actual_total_pnl, 7.0);
     }
 }

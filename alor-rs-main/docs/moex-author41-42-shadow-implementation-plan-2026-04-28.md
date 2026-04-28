@@ -791,3 +791,79 @@ Build RI 41+42 combo replay:
 Author41 exact MR + Author42 exact BO + no-overlap removal + Author42 cost2
 implementation challenger accounting.
 ```
+
+### 2026-04-28 RI Author41+42 Combo Source-Contract Parity
+
+Added combo replay for the frozen RI implementation challenger:
+
+```text
+model_id: ri_author41_42_primary_combo_cost2
+variant:  ri_41dual_42best_cost2_nooverlap
+```
+
+Implemented combo contract:
+
+- Author41 MR uses exact `replay_ri_author41_dual_no_overlap_source`;
+- Author42 BO uses exact `grid_k0.42_both`;
+- MR intervals have priority;
+- BO trades are dropped when `max(bo.entry_ts, mr.entry_ts) < min(bo.exit_ts, mr.exit_ts)`
+  on the same session date;
+- accepted BO trades are accounted as `gross_points - 2.0`;
+- combo daily rows preserve separate Author41/Author42 component PnL.
+
+Important source artifact nuance:
+
+```text
+combo daily `author41_trades` is an active-day count from the source builder,
+not the physical Author41 trade count.
+```
+
+Rust mirrors that daily artifact convention for source parity while also
+reporting physical diagnostics:
+
+```text
+actual_author41_trades: 1995
+actual_author42_trades: 971
+```
+
+Replay command:
+
+```text
+cargo run -p strategy-runtime --bin moex_author41_42_combo_replay -- \
+  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
+  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --model-id ri_author41_42_primary_combo_cost2 \
+  --out-json docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_author41_42_combo_replay_comparison.json
+```
+
+Result:
+
+```text
+source_daily_rows:           1812
+actual_daily_rows:           1812
+daily_exact_matches:         1812
+daily_pnl_mismatches:        0
+component_pnl_mismatches:    0
+trade_count_mismatches:      0
+missing_source_daily:        0
+extra_actual_daily:          0
+source_total_pnl:            322268.0
+actual_total_pnl:            322268.0
+source_author41_total_pnl:   171270.0
+actual_author41_total_pnl:   171270.0
+source_author42_total_pnl:   150998.0
+actual_author42_total_pnl:   150998.0
+```
+
+Status:
+
+```text
+RI Author41+42 combo replay: EXACT_SOURCE_PARITY on prepared 10m feed.
+```
+
+Next step:
+
+```text
+Move from replay parity into shadow journal/admission wiring, keeping
+emit_orders=false and preserving the frozen 10m contract boundary.
+```
