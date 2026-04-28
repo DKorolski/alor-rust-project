@@ -308,11 +308,12 @@ three and should continue to be watched during the reduced-retention soak.
 
 ## Verdict
 
-The 2026-04-27 patched/parameter-updated live session was operationally clean:
+The 2026-04-27 patched/parameter-updated live session and the 2026-04-28
+pre-open check were operationally clean:
 
 - `sessiongap` stayed flat with no trading activity.
-- `hybrid IMOEXF` stayed flat with risk-gate shadow state loaded and no stale
-  pending/deferred state.
+- `hybrid IMOEXF` stayed flat at pre-open with risk-gate shadow state loaded
+  and no stale pending/deferred state.
 - `alor-USDRUBF` produced one BO short round-trip and returned to broker-flat
   with clean acknowledgements and fills.
 
@@ -320,3 +321,269 @@ The only recurring noise was external reconnect-class gateway WARN traffic. It
 did not coincide with live command failures in this observation window.
 
 The next observation point is the first fresh `10m` live bar on 2026-04-28.
+
+## Intraday Incident: Hybrid IMOEXF MR Protective Double Exit
+
+Status:
+
+- incident date: `2026-04-28`
+- stack: `trading-hybrid`
+- portfolio: `7502SN6`
+- symbol: `IMOEXF`
+- cycle: `69f04ce000`
+- strategy owner: `MR`
+- runtime config: `runtime.hybrid.live.7502SN6.riskgate-shadow.toml`
+- runtime action taken: `strategy-runtime` stopped
+- broker action taken: manual flatten sell `1` IMOEXF
+- final broker position: `IMOEXF qty = 0.0`
+
+### What Happened
+
+The MR branch entered short and attempted to install protective exits:
+
+```text
+ENTRY:
+  request_id = 11ab20d7-161e-5c95-8ba3-4dd8ba6577b0
+  action = place
+  side = sell
+  price = 2732.0
+  broker_order_id = 2033126183784160153
+  trade = sell 1 @ 2732.5
+
+TP:
+  request_id = c9cb04fd-3d99-5e7c-b177-990e4ea7cebf
+  action = place
+  side = buy
+  price = 2732.25
+  status = error
+  error_code = cws_error
+  error_msg = cws disconnected: protocol_reset_without_close_handshake
+
+SL:
+  request_id = 054c03f1-476a-5e80-ac87-5e001c02e76a
+  action = create_stop_limit
+  side = buy
+  trigger_price = 2734.25
+  price = 2734.75
+  stop_order_id = 119698842
+  generated exchange_order_id = 2033126183784162963
+  trade = buy 1 @ 2734.0
+```
+
+The SL-generated exchange order was reported in broker streams with
+`request_id = null`, while retaining the strategy comment:
+
+```text
+HYB|sid=hybrid_imoexf|c=69f04ce000|o=MR|r=SL
+```
+
+Runtime classified the SL fill as `orphan_trade` and did not retire the MR
+cycle before emitting a normal exit:
+
+```text
+EXIT:
+  request_id = 70c77fb0-ffc0-5c17-9d1c-661a1237aac2
+  action = place
+  side = buy
+  price = 2733.5
+  broker_order_id = 2033126183784162978
+  trade = buy 1 @ 2733.5
+```
+
+Net broker flow:
+
+```text
+sell 1 @ 2732.5   # MR entry
+buy  1 @ 2734.0   # SL protective fill
+buy  1 @ 2733.5   # extra runtime exit
+```
+
+This left the broker long `IMOEXF +1` while runtime moved into
+`safe_mode_close_only` with `recovered_position_owner_unknown`.
+
+### Manual Flatten
+
+The first manual flatten attempt used a malformed Redis payload and was ignored
+by gateway:
+
+```text
+cmd.orders.7502SN6 payload = schema_version:1
+```
+
+The corrected manual flatten was sent as a normal aggressive sell limit:
+
+```text
+request_id = 4a3ebe82-9fa6-45a2-9892-60853686a493
+action = place
+side = sell
+price = 2700.0
+comment = MANUAL|flatten|hybrid_incident_20260428
+ack = accepted
+broker_order_id = 2033126183784165562
+trade = sell 1 @ 2733.5
+```
+
+Final broker snapshot:
+
+```text
+IMOEXF qty = 0.0
+avg_price = 0.0
+```
+
+The `trading-hybrid-strategy-runtime-1` container remains stopped. It should not
+be restarted on the old runtime state.
+
+### Classification
+
+This incident is not signal logic drift and not a market-order behavior issue.
+The observed strategy/broker actions were limit/protective-limit paths:
+
+- entry was a normal limit sell;
+- TP was a normal limit buy attempt and failed on `cws_error`;
+- SL was a stop-limit buy, accepted and filled;
+- the extra exit was a normal limit buy;
+- manual flatten was an aggressive limit sell.
+
+Root cause class:
+
+```text
+protective_stop_fill_lineage_gap + double_exit_race
+```
+
+Action-scoped routing check:
+
+```text
+ENTRY Place + Entry:
+  action-scoped create:limit
+
+TP Place + ProtectiveRepair:
+  legacy long-lived create:limit
+  failure = protocol_reset_without_close_handshake
+
+SL CreateStopLimit + ProtectiveRepair:
+  action-scoped create:stopLimit
+
+EXIT Place + Exit:
+  action-scoped create:limit
+
+CLEANUP Cancel:
+  action-scoped delete:limit
+
+MANUAL FLATTEN Place + Exit:
+  action-scoped create:limit
+```
+
+So the stack did not fully regress to the legacy CWS path. The regression gap
+was narrower and more specific: protective TP was encoded as a `Place` command
+with `IntentClass::ProtectiveRepair`, while gateway action-scoped routing only
+covered `Place + Entry`, `Place + Exit`, `CreateStopLimit + ProtectiveRepair`,
+and cleanup actions.
+
+The gateway/broker provided enough lineage through `stop_order_id`,
+`exchange_order_id`, and the strategy comment, but runtime did not reconcile the
+SL-generated fill as a valid protective exit for cycle `69f04ce000` before
+allowing the additional normal exit.
+
+### Required Patch Direction
+
+Patch before restart:
+
+- Route `Place + IntentClass::ProtectiveRepair` through the action-scoped
+  `create:limit` path when `action_scope_enable_create_limit = true`.
+- Treat filled stop-limit exchange orders linked by `stop_order_id`,
+  `exchange_order_id`, or `HYB|...|c=<cycle>|...|r=SL/TP` comment as valid
+  protective fills, not generic orphan trades.
+- On a valid protective TP/SL fill, atomically retire the active owner/cycle,
+  clear pending protective and pending exit state, and suppress further normal
+  exits for that cycle.
+- Make protective cleanup idempotent: `Order to cancel not found` is benign when
+  broker state already shows the target order filled or the cycle flat.
+- Add a regression test for: TP install fails on `cws_error`, SL stop-limit
+  fills with missing `request_id`, runtime receives an exit signal, and no
+  second buy is emitted.
+- Restart the hybrid target stack only from a clean broker-flat state and a
+  from-zero runtime state after the patch.
+
+### Hotfix Rollout
+
+Applied hotfix:
+
+```text
+alor-gateway/src/services/command_consumer.rs:
+  Place + IntentClass::ProtectiveRepair -> ActionScoped
+  when action_scope_enable_create_limit = true
+
+test:
+  cargo test -p alor-gateway \
+    execution_path_respects_phase_flags_for_entry_exit_and_cancel
+```
+
+Local test result:
+
+```text
+PASS
+```
+
+VPS rollout:
+
+```text
+stack = trading-hybrid
+previous gateway image = manual-5430299
+new gateway image = manual-5430299-protplace-20260428
+runtime image = manual-2d1803e-riskgate
+gateway config = /configs/gateway.hybrid.live.7502SN6.action-scoped.toml
+runtime config = /configs/runtime.hybrid.live.7502SN6.riskgate-shadow.toml
+```
+
+Build note:
+
+```text
+The patched gateway image was built locally on the VPS.
+GHCR push was attempted but rejected due to token scope:
+permission_denied: The token provided does not match expected scopes.
+The VPS rollout uses the locally available Docker image tag.
+```
+
+From-zero runtime restart:
+
+```text
+deleted runtime state stream:
+  runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6
+
+reset consumer group to latest stream id:
+  strategy-runtime-hybrid-riskgate-shadow-7502SN6
+
+streams reset:
+  md.bars.7502SN6.10m
+  broker.orders.7502SN6
+  broker.trades.7502SN6
+  broker.positions.7502SN6
+  cmd.acks.7502SN6
+  cmd.orders.7502SN6
+```
+
+Risk-gate ledger was intentionally preserved:
+
+```text
+risk_gate_mode = NormalAppend
+decision = UseExistingLedger
+ledger_rows_count = 181
+last_finalized_session_date = 2026-04-27
+rolling_sum_lb120 = 154.5000000000001
+mr_enabled_current_session = true
+mr_enabled_next_session = true
+```
+
+Post-rollout status:
+
+```text
+trading-hybrid-alor-gateway-1       healthy
+trading-hybrid-strategy-runtime-1   healthy
+broker positions                    {}
+broker stop_orders                  {}
+live_guard                          BLOCKED waiting_for_next_bar_after_restart
+```
+
+The `waiting_for_next_bar_after_restart` block is expected after a clean
+consumer-tail reset. Trading should become eligible only after the next fresh
+`10m` live bar is consumed.

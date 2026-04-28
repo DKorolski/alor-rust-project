@@ -836,6 +836,11 @@ fn execution_path_for_command(
         (&CommandAction::Place(_), IntentClass::Exit) if config.action_scope_enable_exit => {
             CommandExecutionPath::ActionScoped
         }
+        (&CommandAction::Place(_), IntentClass::ProtectiveRepair)
+            if config.action_scope_enable_create_limit =>
+        {
+            CommandExecutionPath::ActionScoped
+        }
         (&CommandAction::Market(_), IntentClass::Entry | IntentClass::Exit)
             if config.action_scope_enable_market =>
         {
@@ -1676,6 +1681,13 @@ mod tests {
             CommandExecutionPath::ActionScoped
         );
 
+        let mut protective_place = place.clone();
+        protective_place.intent_class = Some(IntentClass::ProtectiveRepair);
+        assert_eq!(
+            execution_path_for_command(&protective_place, &config),
+            CommandExecutionPath::ActionScoped
+        );
+
         let mut cancel = sample_command(chrono::Utc::now().timestamp(), None);
         cancel.action = CommandAction::Cancel(alor_protocol::CancelOrder { order_id: 42 });
         assert_eq!(
@@ -1754,6 +1766,10 @@ mod tests {
         );
 
         config.action_scope_enable_create_limit = false;
+        assert_eq!(
+            execution_path_for_command(&protective_place, &config),
+            CommandExecutionPath::LegacyLongLived
+        );
         assert_eq!(
             execution_path_for_command(&create_stop, &config),
             CommandExecutionPath::LegacyLongLived

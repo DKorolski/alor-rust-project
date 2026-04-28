@@ -2,6 +2,8 @@
 # Action-scoped control CWS rollout:
 # - entry `Place + IntentClass::Entry` = action-scoped
 # - exit/flatten `Place + IntentClass::Exit` = action-scoped
+# - protective TP `Place + IntentClass::ProtectiveRepair` = action-scoped
+# - protective SL `CreateStopLimit + IntentClass::ProtectiveRepair` = action-scoped
 # - cancel cleanup = action-scoped
 # - replace remains disabled here
 BAR_DUMP_PATH="./bars.7502SN6.csv"
