@@ -913,3 +913,49 @@ Remaining WP6 gap:
 Full bar-level skipped-signal explanations are not yet emitted. The current
 slice explains admitted trades and BO drops caused by MR overlap.
 ```
+
+### 2026-04-28 RI Shadow Admission Runner Scaffold
+
+Added a separate shadow-only Redis bars runner:
+
+```text
+strategy-runtime/src/bin/moex_author41_42_shadow_runner.rs
+```
+
+Design boundary:
+
+- reads only the configured Redis bars stream;
+- creates its own consumer group;
+- warmups from recent bars;
+- writes append-only JSONL shadow journal records;
+- acknowledges only its own consumed bar messages;
+- does not read order/ack/trade/position streams;
+- does not publish command messages;
+- does not implement `Strategy` and is not wired into `StrategyRuntime`.
+
+Example command:
+
+```text
+cargo run -p strategy-runtime --bin moex_author41_42_shadow_runner -- \
+  --redis-url redis://127.0.0.1/ \
+  --bars-stream md.bars.RI.10m \
+  --consumer-group moex-author41-42-shadow-ri \
+  --consumer-name moex-author41-42-shadow-ri-1 \
+  --symbol RI \
+  --timezone-offset-hours 3 \
+  --warmup-count 5000 \
+  --out-journal-jsonl ./strategy-runtime/moex_author41_42_shadow_ri.jsonl
+```
+
+Operational defaults:
+
+- warmup records are used for dedupe/context but are not written unless
+  `--write-warmup` is set;
+- use `--truncate` for a clean local journal file;
+- use `--once` for startup/warmup smoke without tailing the stream.
+
+Safety status:
+
+```text
+SHADOW_ADMISSION_SCAFFOLD_READY / NO_ORDER_EMISSION_PATH
+```

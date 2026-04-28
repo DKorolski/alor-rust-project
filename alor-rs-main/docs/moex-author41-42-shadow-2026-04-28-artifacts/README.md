@@ -74,3 +74,20 @@ cargo run -p strategy-runtime --bin moex_author41_42_combo_replay -- \
 
 Journal smoke result: `3228` JSONL records. This optional file is a local
 diagnostic and is not tracked in this artifact set.
+
+Live-shadow runner scaffold:
+
+```text
+cargo run -p strategy-runtime --bin moex_author41_42_shadow_runner -- \
+  --redis-url redis://127.0.0.1/ \
+  --bars-stream md.bars.RI.10m \
+  --consumer-group moex-author41-42-shadow-ri \
+  --consumer-name moex-author41-42-shadow-ri-1 \
+  --symbol RI \
+  --timezone-offset-hours 3 \
+  --warmup-count 5000 \
+  --out-journal-jsonl ./strategy-runtime/moex_author41_42_shadow_ri.jsonl
+```
+
+This runner is shadow-only. It reads bars and writes JSONL records; it is not
+wired into order command emission.
