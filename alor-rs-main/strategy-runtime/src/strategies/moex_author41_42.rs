@@ -1,5 +1,8 @@
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
+
+use anyhow::{Context, Result, anyhow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -211,6 +214,148 @@ impl ShadowJournalRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceTrade {
+    pub fixed_model_id: String,
+    pub side: ShadowSide,
+    pub entry_ts: NaiveDateTime,
+    pub exit_ts: NaiveDateTime,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub points: f64,
+    pub exit_reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceDaily {
+    pub fixed_model_id: String,
+    pub date: NaiveDate,
+    pub pnl_points: f64,
+    pub author41_pnl: Option<f64>,
+    pub author42_pnl: Option<f64>,
+    pub trades: Option<f64>,
+    pub skipped: Option<String>,
+}
+
+pub fn load_source_trades<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec<SourceTrade>> {
+    let mut csv = csv::Reader::from_reader(reader);
+    let headers = csv
+        .headers()
+        .context("read trade artifact headers")?
+        .clone();
+    let mut rows = Vec::new();
+    for record in csv.records() {
+        let record = record.context("read trade artifact row")?;
+        if field(&headers, &record, "fixed_model_id") != Some(fixed_model_id) {
+            continue;
+        }
+        rows.push(SourceTrade {
+            fixed_model_id: fixed_model_id.to_string(),
+            side: parse_side(required_field(&headers, &record, "side")?)?,
+            entry_ts: parse_ts(required_field(&headers, &record, "entry_ts")?)?,
+            exit_ts: parse_ts(required_field(&headers, &record, "exit_ts")?)?,
+            entry_price: parse_f64(
+                required_field(&headers, &record, "entry_price")?,
+                "entry_price",
+            )?,
+            exit_price: parse_f64(
+                required_field(&headers, &record, "exit_price")?,
+                "exit_price",
+            )?,
+            points: first_f64(
+                &headers,
+                &record,
+                &["net_points", "points_pnl", "pnl_points"],
+            )
+            .ok_or_else(|| anyhow!("missing trade points column for {fixed_model_id}"))?,
+            exit_reason: required_field(&headers, &record, "exit_reason")?.to_string(),
+        });
+    }
+    Ok(rows)
+}
+
+pub fn load_source_daily<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec<SourceDaily>> {
+    let mut csv = csv::Reader::from_reader(reader);
+    let headers = csv
+        .headers()
+        .context("read daily artifact headers")?
+        .clone();
+    let mut rows = Vec::new();
+    for record in csv.records() {
+        let record = record.context("read daily artifact row")?;
+        if field(&headers, &record, "fixed_model_id") != Some(fixed_model_id) {
+            continue;
+        }
+        rows.push(SourceDaily {
+            fixed_model_id: fixed_model_id.to_string(),
+            date: parse_date(required_field(&headers, &record, "date")?)?,
+            pnl_points: first_f64(&headers, &record, &["pnl", "pnl_points"])
+                .ok_or_else(|| anyhow!("missing daily pnl column for {fixed_model_id}"))?,
+            author41_pnl: first_f64(&headers, &record, &["author41_pnl"]),
+            author42_pnl: first_f64(&headers, &record, &["author42_pnl"]),
+            trades: first_f64(&headers, &record, &["trades"]),
+            skipped: field(&headers, &record, "skipped").map(str::to_string),
+        });
+    }
+    Ok(rows)
+}
+
+fn required_field<'a>(
+    headers: &csv::StringRecord,
+    record: &'a csv::StringRecord,
+    name: &str,
+) -> Result<&'a str> {
+    field(headers, record, name).ok_or_else(|| anyhow!("missing required field {name}"))
+}
+
+fn field<'a>(
+    headers: &csv::StringRecord,
+    record: &'a csv::StringRecord,
+    name: &str,
+) -> Option<&'a str> {
+    let idx = headers.iter().position(|header| header == name)?;
+    let value = record.get(idx)?.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("nan") {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn first_f64(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Option<f64> {
+    names
+        .iter()
+        .filter_map(|name| field(headers, record, name).and_then(|value| value.parse().ok()))
+        .next()
+}
+
+fn parse_f64(value: &str, field_name: &str) -> Result<f64> {
+    value
+        .parse::<f64>()
+        .with_context(|| format!("parse {field_name}={value:?}"))
+}
+
+fn parse_ts(value: &str) -> Result<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .with_context(|| format!("parse timestamp {value:?}"))
+}
+
+fn parse_date(value: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").with_context(|| format!("parse date {value:?}"))
+}
+
+fn parse_side(value: &str) -> Result<ShadowSide> {
+    match value {
+        "long" => Ok(ShadowSide::Long),
+        "short" => Ok(ShadowSide::Short),
+        other => Err(anyhow!("unsupported side {other:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
@@ -282,5 +427,55 @@ mod tests {
         let json = serde_json::to_string(&record).expect("serialize shadow record");
         assert!(json.contains("author42_bo"));
         assert!(!json.contains("request_id"));
+    }
+
+    #[test]
+    fn loads_source_trades_across_component_column_variants() {
+        let csv = "\
+fixed_model_id,side,entry_ts,exit_ts,entry_price,exit_price,net_points,points_pnl,pnl_points,exit_reason\n\
+imoexf_author41_mr_primary,short,2023-11-15 09:00:00,2023-11-15 09:10:00,3205.0,3195.0,9.9,,,take_author_close\n\
+ri_author41_mr_primary,short,2019-01-04 10:00:00,2019-01-04 18:40:00,109920.0,111845.0,, -1927.0,,stop\n\
+ri_author42_bo_primary,long,2019-01-09 18:00:00,2019-01-09 23:00:00,113920.0,114470.0,,,550.0,time_exit_same_bar_close\n";
+
+        let imoexf = load_source_trades(csv.as_bytes(), "imoexf_author41_mr_primary")
+            .expect("load imoexf trades");
+        assert_eq!(imoexf.len(), 1);
+        assert_eq!(imoexf[0].side, ShadowSide::Short);
+        assert_eq!(imoexf[0].points, 9.9);
+
+        let ri = load_source_trades(csv.as_bytes(), "ri_author41_mr_primary")
+            .expect("load ri mr trades");
+        assert_eq!(ri.len(), 1);
+        assert_eq!(ri[0].points, -1927.0);
+
+        let bo = load_source_trades(csv.as_bytes(), "ri_author42_bo_primary")
+            .expect("load ri bo trades");
+        assert_eq!(bo.len(), 1);
+        assert_eq!(bo[0].side, ShadowSide::Long);
+        assert_eq!(bo[0].points, 550.0);
+    }
+
+    #[test]
+    fn loads_combo_daily_from_pnl_column() {
+        let csv = "\
+fixed_model_id,date,pnl_points,trades,skipped,author41_pnl,author42_pnl,pnl\n\
+ri_author41_42_primary_combo_cost2,2019-01-03,,0,,0.0,0.0,0.0\n\
+ri_author41_42_primary_combo_cost2,2019-01-04,,1,,-1927.0,0.0,-1927.0\n\
+ri_author42_bo_primary,2019-01-04,0.0,0,friday,,, \n";
+
+        let combo = load_source_daily(csv.as_bytes(), "ri_author41_42_primary_combo_cost2")
+            .expect("load combo daily");
+        assert_eq!(combo.len(), 2);
+        assert_eq!(combo[1].date, NaiveDate::from_ymd_opt(2019, 1, 4).unwrap());
+        assert_eq!(combo[1].pnl_points, -1927.0);
+        assert_eq!(combo[1].author41_pnl, Some(-1927.0));
+        assert_eq!(combo[1].author42_pnl, Some(0.0));
+        assert_eq!(combo[1].trades, Some(1.0));
+
+        let bo =
+            load_source_daily(csv.as_bytes(), "ri_author42_bo_primary").expect("load bo daily");
+        assert_eq!(bo.len(), 1);
+        assert_eq!(bo[0].pnl_points, 0.0);
+        assert_eq!(bo[0].skipped.as_deref(), Some("friday"));
     }
 }

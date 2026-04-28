@@ -425,3 +425,37 @@ Result:
 ```text
 PASS: 4 tests
 ```
+
+### 2026-04-28 Artifact Loader
+
+Extended the scaffold with source artifact readers for the fixed handoff CSVs:
+
+```text
+fixed_candidate_trades.csv
+fixed_candidate_daily.csv
+```
+
+The loader handles the mixed source-column conventions used by the package:
+
+```text
+IMOEXF Author41 MR trades: net_points
+RI Author41 MR trades:     points_pnl
+Author42 BO trades:        pnl_points
+Combo daily rows:          pnl
+```
+
+This keeps the next replay/parity step honest: component trades and combo daily
+rows are read as source artifacts first, before any Rust model logic tries to
+reproduce them.
+
+Updated test coverage:
+
+```text
+cargo test -p strategy-runtime moex_author41_42 -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 6 tests
+```
