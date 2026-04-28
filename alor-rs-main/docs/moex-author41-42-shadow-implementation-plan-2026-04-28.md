@@ -867,3 +867,49 @@ Next step:
 Move from replay parity into shadow journal/admission wiring, keeping
 emit_orders=false and preserving the frozen 10m contract boundary.
 ```
+
+### 2026-04-28 RI Combo Shadow Journal Slice
+
+Added an offline/replay shadow journal surface for the RI combo runner. This is
+not live or paper admission wiring; it only serializes replay decisions for
+review.
+
+Implemented journal coverage:
+
+- accepted Author41 MR trades;
+- accepted Author42 BO trades after no-overlap arbitration;
+- Author42 BO candidates dropped because of MR interval overlap;
+- component id, model variant, entry/exit timestamps, side, exit reason,
+  overlap decision and shadow PnL where applicable.
+
+Journal command:
+
+```text
+cargo run -p strategy-runtime --bin moex_author41_42_combo_replay -- \
+  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
+  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --model-id ri_author41_42_primary_combo_cost2 \
+  --out-json /tmp/ri_author41_42_combo_replay_check.json \
+  --out-journal-jsonl /tmp/ri_author41_42_combo_shadow_journal_check.jsonl
+```
+
+Smoke result:
+
+```text
+journal_records: 3228
+tests:           PASS 19
+```
+
+Safety note:
+
+```text
+This is still replay-only. It does not implement Strategy, does not publish
+Intent, and does not connect to live/paper order emission.
+```
+
+Remaining WP6 gap:
+
+```text
+Full bar-level skipped-signal explanations are not yet emitted. The current
+slice explains admitted trades and BO drops caused by MR overlap.
+```

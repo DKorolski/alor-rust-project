@@ -60,3 +60,17 @@ Combo result: exact daily/source parity, 1812/1812 daily rows, total PnL
 Note: combo artifact trade counts follow the source daily convention where
 Author41 daily trades are active-day counts. The JSON also reports physical
 diagnostics: Author41 trades `1995`, accepted Author42 trades `971`.
+
+Optional shadow journal smoke command:
+
+```text
+cargo run -p strategy-runtime --bin moex_author41_42_combo_replay -- \
+  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
+  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --model-id ri_author41_42_primary_combo_cost2 \
+  --out-json /tmp/ri_author41_42_combo_replay_check.json \
+  --out-journal-jsonl /tmp/ri_author41_42_combo_shadow_journal_check.jsonl
+```
+
+Journal smoke result: `3228` JSONL records. This optional file is a local
+diagnostic and is not tracked in this artifact set.

@@ -486,6 +486,121 @@ pub fn replay_ri_author41_42_combo_cost2(
     replay_combo_from_components(&profile, &author41, &author42)
 }
 
+pub fn build_ri_author41_42_combo_shadow_journal(
+    bars: &[ModelBar],
+    session_policy: RegularSessionPolicy,
+) -> Vec<ShadowJournalRecord> {
+    let profile = ModelProfile::ri_shadow_10m();
+    let author41 = replay_ri_author41_dual_no_overlap_source(bars, session_policy);
+    let author42 = replay_author42(bars, Author42Config::ri_grid_k042_both(), session_policy);
+
+    let mut records = Vec::new();
+    for trade in &author41.trades {
+        records.push(author41_trade_journal_record(&profile, trade));
+    }
+    for trade in &author42.trades {
+        let dropped = author41.trades.iter().any(|mr| {
+            trade.entry_ts.date() == mr.entry_ts.date()
+                && trade.entry_ts.max(mr.entry_ts) < trade.exit_ts.min(mr.exit_ts)
+        });
+        records.push(author42_trade_journal_record(
+            &profile,
+            trade,
+            if dropped {
+                OverlapDecision::DroppedMrOverlap
+            } else {
+                OverlapDecision::Accepted
+            },
+        ));
+    }
+
+    records.sort_by(|left, right| {
+        (
+            left.bar_ts_local,
+            component_sort_key(left.component),
+            left.scheduled_exit_ts_local,
+        )
+            .cmp(&(
+                right.bar_ts_local,
+                component_sort_key(right.component),
+                right.scheduled_exit_ts_local,
+            ))
+    });
+    records
+}
+
+fn author41_trade_journal_record(
+    profile: &ModelProfile,
+    trade: &Author41Trade,
+) -> ShadowJournalRecord {
+    ShadowJournalRecord {
+        instrument: profile.instrument,
+        profile_id: profile.profile_id,
+        component: Component::Author41Mr,
+        model_variant_id: profile.author41_variant.to_string(),
+        bar_ts_local: trade.entry_ts,
+        timeframe: profile.timeframe.to_string(),
+        prev_regular_date: None,
+        prev_close: None,
+        prev_high: None,
+        prev_low: None,
+        prev_range: None,
+        trigger_long: None,
+        trigger_short: None,
+        condition_values: Vec::new(),
+        side: Some(trade.side),
+        skip_reason: None,
+        scheduled_entry_ts_local: Some(trade.entry_ts),
+        scheduled_entry_price: Some(trade.entry_price),
+        scheduled_exit_ts_local: Some(trade.exit_ts),
+        exit_reason: Some(trade.exit_reason.clone()),
+        overlap_decision: OverlapDecision::Accepted,
+        shadow_pnl_points: Some(trade.net_points),
+        feed_quality_flags: Vec::new(),
+    }
+}
+
+fn author42_trade_journal_record(
+    profile: &ModelProfile,
+    trade: &Author42Trade,
+    overlap_decision: OverlapDecision,
+) -> ShadowJournalRecord {
+    let accepted = overlap_decision == OverlapDecision::Accepted;
+    ShadowJournalRecord {
+        instrument: profile.instrument,
+        profile_id: profile.profile_id,
+        component: Component::Author42Bo,
+        model_variant_id: profile.author42_variant.to_string(),
+        bar_ts_local: trade.entry_ts,
+        timeframe: profile.timeframe.to_string(),
+        prev_regular_date: None,
+        prev_close: None,
+        prev_high: None,
+        prev_low: None,
+        prev_range: None,
+        trigger_long: None,
+        trigger_short: None,
+        condition_values: Vec::new(),
+        side: Some(trade.side),
+        skip_reason: (!accepted).then(|| "mr_interval_overlap".to_string()),
+        scheduled_entry_ts_local: Some(trade.entry_ts),
+        scheduled_entry_price: Some(trade.entry_price),
+        scheduled_exit_ts_local: Some(trade.exit_ts),
+        exit_reason: Some(trade.exit_reason.clone()),
+        overlap_decision,
+        shadow_pnl_points: accepted.then_some(trade.gross_points - profile.author42_cost_points),
+        feed_quality_flags: Vec::new(),
+    }
+}
+
+fn component_sort_key(component: Component) -> u8 {
+    match component {
+        Component::Author41Mr => 0,
+        Component::Author42Bo => 1,
+        Component::Combo => 2,
+    }
+}
+
 pub fn replay_combo_from_components(
     profile: &ModelProfile,
     author41: &Author41ReplayResult,
@@ -2453,5 +2568,65 @@ ri_author42_bo_primary,2019-01-04,0.0,0,friday,,, \n";
         assert_eq!(comparison.trade_count_mismatches, 0);
         assert_eq!(comparison.source_total_pnl, 7.0);
         assert_eq!(comparison.actual_total_pnl, 7.0);
+    }
+
+    #[test]
+    fn combo_shadow_journal_records_accepted_and_dropped_bo() {
+        let profile = ModelProfile::ri_shadow_10m();
+        let mr = Author41Trade {
+            side: ShadowSide::Short,
+            entry_ts: dt((2026, 4, 28), (10, 0, 0)),
+            exit_ts: dt((2026, 4, 28), (11, 0, 0)),
+            entry_price: 100.0,
+            exit_price: 95.0,
+            gross_points: 5.0,
+            net_points: 3.0,
+            exit_reason: "take_author_close".to_string(),
+            bars_held: 6,
+            entry_index_for_day: 1,
+        };
+        let dropped_bo = Author42Trade {
+            side: ShadowSide::Long,
+            entry_ts: dt((2026, 4, 28), (10, 30, 0)),
+            exit_ts: dt((2026, 4, 28), (12, 0, 0)),
+            entry_price: 100.0,
+            exit_price: 110.0,
+            gross_points: 10.0,
+            pnl_points: 10.0,
+            exit_reason: "time_exit_same_bar_close".to_string(),
+            bars_held: 9,
+        };
+        let accepted_bo = Author42Trade {
+            side: ShadowSide::Short,
+            entry_ts: dt((2026, 4, 28), (12, 10, 0)),
+            exit_ts: dt((2026, 4, 28), (13, 0, 0)),
+            entry_price: 120.0,
+            exit_price: 115.0,
+            gross_points: 5.0,
+            pnl_points: 5.0,
+            exit_reason: "time_exit_same_bar_close".to_string(),
+            bars_held: 5,
+        };
+
+        let mr_record = author41_trade_journal_record(&profile, &mr);
+        let dropped_record =
+            author42_trade_journal_record(&profile, &dropped_bo, OverlapDecision::DroppedMrOverlap);
+        let accepted_record =
+            author42_trade_journal_record(&profile, &accepted_bo, OverlapDecision::Accepted);
+
+        assert_eq!(mr_record.component, Component::Author41Mr);
+        assert_eq!(mr_record.overlap_decision, OverlapDecision::Accepted);
+        assert_eq!(mr_record.shadow_pnl_points, Some(3.0));
+        assert_eq!(
+            dropped_record.overlap_decision,
+            OverlapDecision::DroppedMrOverlap
+        );
+        assert_eq!(
+            dropped_record.skip_reason.as_deref(),
+            Some("mr_interval_overlap")
+        );
+        assert_eq!(dropped_record.shadow_pnl_points, None);
+        assert_eq!(accepted_record.overlap_decision, OverlapDecision::Accepted);
+        assert_eq!(accepted_record.shadow_pnl_points, Some(3.0));
     }
 }
