@@ -387,3 +387,41 @@ RI Author41 standalone -> RI Author42 standalone -> RI combo no-overlap
 Only after RI replay parity is explainable should we attach live shadow
 journaling. IMOEXF should follow as a passive/watchlist contour using the same
 framework.
+
+## Implementation Progress
+
+### 2026-04-28 Scaffold
+
+Created a separate `strategy-runtime` model module:
+
+```text
+strategy-runtime/src/strategies/moex_author41_42.rs
+```
+
+Scope of this scaffold:
+
+- frozen RI and IMOEXF profile registry;
+- accepted RI `10m` switch-continuous shadow profile;
+- IMOEXF passive-shadow/watchlist profile;
+- regular MOEX `10m` feed guard (`Mon-Fri 09:00..23:49`);
+- shadow journal record schema;
+- explicit shadow/replay modes that cannot emit orders.
+
+Safety boundary:
+
+```text
+The scaffold does not implement Strategy and does not return Intent.
+It is therefore not connected to live/paper order emission.
+```
+
+Initial test coverage:
+
+```text
+cargo test -p strategy-runtime moex_author41_42 -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 4 tests
+```
