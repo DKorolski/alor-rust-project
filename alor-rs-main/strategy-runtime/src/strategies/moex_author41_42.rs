@@ -237,6 +237,278 @@ pub struct SourceDaily {
     pub skipped: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Author41Config {
+    pub side_mode: Author41SideMode,
+    pub k: f64,
+    pub k2: f64,
+    pub stop_k: f64,
+    pub min_range: f64,
+    pub max_range: f64,
+    pub max_entries_per_day: u32,
+    pub entry_end: NaiveTime,
+    pub time_exit: NaiveTime,
+    pub breakeven_after_bars: u32,
+    pub roundtrip_cost_points: f64,
+}
+
+impl Author41Config {
+    pub fn ri_dual_no_overlap_plateau() -> Self {
+        Self {
+            side_mode: Author41SideMode::Dual,
+            k: 0.07,
+            k2: 0.005,
+            stop_k: 0.58,
+            min_range: 0.016,
+            max_range: 0.045,
+            max_entries_per_day: 2,
+            entry_end: NaiveTime::from_hms_opt(12, 0, 0).unwrap_or(NaiveTime::MIN),
+            time_exit: NaiveTime::from_hms_opt(20, 0, 0).unwrap_or(NaiveTime::MIN),
+            breakeven_after_bars: 20,
+            roundtrip_cost_points: 2.0,
+        }
+    }
+
+    pub fn imoexf_boundary_short() -> Self {
+        Self {
+            side_mode: Author41SideMode::Short,
+            k: 0.16,
+            k2: 0.020,
+            stop_k: 0.58,
+            min_range: 0.005,
+            max_range: 0.075,
+            max_entries_per_day: 2,
+            entry_end: NaiveTime::from_hms_opt(12, 0, 0).unwrap_or(NaiveTime::MIN),
+            time_exit: NaiveTime::from_hms_opt(20, 0, 0).unwrap_or(NaiveTime::MIN),
+            breakeven_after_bars: 20,
+            roundtrip_cost_points: 0.1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Author41SideMode {
+    Long,
+    Short,
+    Dual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelBar {
+    pub ts_local: NaiveDateTime,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DailyAnchor {
+    pub prev_close: f64,
+    pub prev_low: f64,
+    pub prev_range: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Author41Trade {
+    pub side: ShadowSide,
+    pub entry_ts: NaiveDateTime,
+    pub exit_ts: NaiveDateTime,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub gross_points: f64,
+    pub net_points: f64,
+    pub exit_reason: String,
+    pub bars_held: u32,
+    pub entry_index_for_day: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OpenAuthor41Position {
+    side: ShadowSide,
+    entry_ts: NaiveDateTime,
+    entry_price: f64,
+    prev_close: f64,
+    prev_range: f64,
+    bars_held: u32,
+    entry_index_for_day: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Author41Engine {
+    config: Author41Config,
+    current_date: Option<NaiveDate>,
+    day_entries: u32,
+    position: Option<OpenAuthor41Position>,
+}
+
+impl Author41Engine {
+    pub fn new(config: Author41Config) -> Self {
+        Self {
+            config,
+            current_date: None,
+            day_entries: 0,
+            position: None,
+        }
+    }
+
+    pub fn on_bar(&mut self, bar: ModelBar, anchor: Option<DailyAnchor>) -> Vec<Author41Trade> {
+        if self.current_date != Some(bar.ts_local.date()) {
+            self.current_date = Some(bar.ts_local.date());
+            self.day_entries = 0;
+            self.position = None;
+        }
+
+        let mut trades = Vec::new();
+        if let Some(pos) = self.position.as_mut() {
+            pos.bars_held += 1;
+            if let Some((exit_price, reason)) = Self::exit_signal(self.config, pos, bar) {
+                let closed =
+                    Self::close_position(self.config, pos, bar.ts_local, exit_price, reason);
+                trades.push(closed);
+                self.position = None;
+            }
+        }
+
+        if self.position.is_some() {
+            return trades;
+        }
+        if self.day_entries >= self.config.max_entries_per_day {
+            return trades;
+        }
+        if bar.ts_local.time() > self.config.entry_end {
+            return trades;
+        }
+
+        let Some(anchor) = anchor else {
+            return trades;
+        };
+        if !anchor.prev_close.is_finite()
+            || !anchor.prev_range.is_finite()
+            || !anchor.prev_low.is_finite()
+            || anchor.prev_range <= 0.0
+            || anchor.prev_low <= 0.0
+        {
+            return trades;
+        }
+        let rel_range = anchor.prev_range / anchor.prev_low;
+        if !rel_range.is_finite()
+            || !(self.config.min_range < rel_range && rel_range < self.config.max_range)
+        {
+            return trades;
+        }
+
+        let side = self.entry_side(bar.close, anchor);
+        if let Some(side) = side {
+            self.day_entries += 1;
+            self.position = Some(OpenAuthor41Position {
+                side,
+                entry_ts: bar.ts_local,
+                entry_price: bar.close,
+                prev_close: anchor.prev_close,
+                prev_range: anchor.prev_range,
+                bars_held: 0,
+                entry_index_for_day: self.day_entries,
+            });
+        }
+
+        trades
+    }
+
+    pub fn force_close_at_last_bar(&mut self, bar: ModelBar) -> Option<Author41Trade> {
+        let pos = self.position.take()?;
+        Some(Self::close_position(
+            self.config,
+            &pos,
+            bar.ts_local,
+            bar.close,
+            "forced_last_bar_close",
+        ))
+    }
+
+    fn entry_side(&self, close: f64, anchor: DailyAnchor) -> Option<ShadowSide> {
+        let short_signal = close > anchor.prev_close
+            && close < anchor.prev_close + self.config.k * anchor.prev_range;
+        let long_signal = close < anchor.prev_close
+            && close > anchor.prev_close - self.config.k * anchor.prev_range;
+
+        match self.config.side_mode {
+            Author41SideMode::Short if short_signal => Some(ShadowSide::Short),
+            Author41SideMode::Long if long_signal => Some(ShadowSide::Long),
+            Author41SideMode::Dual if short_signal => Some(ShadowSide::Short),
+            Author41SideMode::Dual if long_signal => Some(ShadowSide::Long),
+            _ => None,
+        }
+    }
+
+    fn exit_signal(
+        config: Author41Config,
+        pos: &OpenAuthor41Position,
+        bar: ModelBar,
+    ) -> Option<(f64, &'static str)> {
+        match pos.side {
+            ShadowSide::Short => {
+                let stop_price = pos.prev_close + config.stop_k * pos.prev_range;
+                let take_price = pos.prev_close - config.k2 * pos.prev_range;
+                if bar.high >= stop_price {
+                    Some((stop_price, "stop"))
+                } else if bar.close < take_price {
+                    Some((bar.close, "take_author_close"))
+                } else if bar.ts_local.time() >= config.time_exit {
+                    Some((bar.close, "time_exit"))
+                } else if pos.bars_held > config.breakeven_after_bars && bar.low <= pos.entry_price
+                {
+                    Some((pos.entry_price, "breakeven_limit"))
+                } else {
+                    None
+                }
+            }
+            ShadowSide::Long => {
+                let stop_price = pos.prev_close - config.stop_k * pos.prev_range;
+                let take_price = pos.prev_close + config.k2 * pos.prev_range;
+                if bar.low <= stop_price {
+                    Some((stop_price, "stop"))
+                } else if bar.close > take_price {
+                    Some((bar.close, "take_author_close"))
+                } else if bar.ts_local.time() >= config.time_exit {
+                    Some((bar.close, "time_exit"))
+                } else if pos.bars_held > config.breakeven_after_bars && bar.high >= pos.entry_price
+                {
+                    Some((pos.entry_price, "breakeven_limit"))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn close_position(
+        config: Author41Config,
+        pos: &OpenAuthor41Position,
+        exit_ts: NaiveDateTime,
+        exit_price: f64,
+        reason: &'static str,
+    ) -> Author41Trade {
+        let gross_points = match pos.side {
+            ShadowSide::Short => pos.entry_price - exit_price,
+            ShadowSide::Long => exit_price - pos.entry_price,
+        };
+        Author41Trade {
+            side: pos.side,
+            entry_ts: pos.entry_ts,
+            exit_ts,
+            entry_price: pos.entry_price,
+            exit_price,
+            gross_points,
+            net_points: gross_points - config.roundtrip_cost_points,
+            exit_reason: reason.to_string(),
+            bars_held: pos.bars_held,
+            entry_index_for_day: pos.entry_index_for_day,
+        }
+    }
+}
+
 pub fn load_source_trades<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec<SourceTrade>> {
     let mut csv = csv::Reader::from_reader(reader);
     let headers = csv
@@ -427,6 +699,126 @@ mod tests {
         let json = serde_json::to_string(&record).expect("serialize shadow record");
         assert!(json.contains("author42_bo"));
         assert!(!json.contains("request_id"));
+    }
+
+    #[test]
+    fn ri_author41_short_entry_and_stop_match_source_contract() {
+        let mut engine = Author41Engine::new(Author41Config::ri_dual_no_overlap_plateau());
+        let anchor = DailyAnchor {
+            prev_close: 109_800.0,
+            prev_low: 100_000.0,
+            prev_range: 3_525.862_068_965_517,
+        };
+
+        let trades = engine.on_bar(
+            ModelBar {
+                ts_local: dt((2019, 1, 4), (10, 0, 0)),
+                open: 109_900.0,
+                high: 109_950.0,
+                low: 109_800.0,
+                close: 109_920.0,
+                volume: 1.0,
+            },
+            Some(anchor),
+        );
+        assert!(trades.is_empty());
+
+        let trades = engine.on_bar(
+            ModelBar {
+                ts_local: dt((2019, 1, 4), (18, 40, 0)),
+                open: 111_000.0,
+                high: 111_900.0,
+                low: 110_900.0,
+                close: 111_800.0,
+                volume: 1.0,
+            },
+            Some(anchor),
+        );
+
+        assert_eq!(trades.len(), 1);
+        let trade = &trades[0];
+        assert_eq!(trade.side, ShadowSide::Short);
+        assert_eq!(trade.entry_ts, dt((2019, 1, 4), (10, 0, 0)));
+        assert_eq!(trade.exit_ts, dt((2019, 1, 4), (18, 40, 0)));
+        assert!((trade.exit_price - 111_845.0).abs() < 1e-9);
+        assert_eq!(trade.exit_reason, "stop");
+        assert!((trade.net_points + 1_927.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ri_author41_dual_prefers_short_when_both_would_not_apply() {
+        let mut engine = Author41Engine::new(Author41Config::ri_dual_no_overlap_plateau());
+        let anchor = DailyAnchor {
+            prev_close: 100.0,
+            prev_low: 90.0,
+            prev_range: 3.0,
+        };
+
+        engine.on_bar(
+            ModelBar {
+                ts_local: dt((2026, 4, 28), (9, 0, 0)),
+                open: 100.0,
+                high: 100.2,
+                low: 99.9,
+                close: 100.1,
+                volume: 1.0,
+            },
+            Some(anchor),
+        );
+        let trade = engine
+            .force_close_at_last_bar(ModelBar {
+                ts_local: dt((2026, 4, 28), (23, 40, 0)),
+                open: 99.0,
+                high: 99.0,
+                low: 99.0,
+                close: 99.0,
+                volume: 1.0,
+            })
+            .expect("position should be open");
+
+        assert_eq!(trade.side, ShadowSide::Short);
+        assert_eq!(trade.exit_reason, "forced_last_bar_close");
+    }
+
+    #[test]
+    fn author41_blocks_out_of_contract_range_and_after_entry_window() {
+        let mut engine = Author41Engine::new(Author41Config::ri_dual_no_overlap_plateau());
+        let too_small_range = DailyAnchor {
+            prev_close: 100.0,
+            prev_low: 100.0,
+            prev_range: 1.0,
+        };
+        let valid_anchor = DailyAnchor {
+            prev_close: 100.0,
+            prev_low: 90.0,
+            prev_range: 3.0,
+        };
+
+        engine.on_bar(
+            ModelBar {
+                ts_local: dt((2026, 4, 28), (10, 0, 0)),
+                open: 100.0,
+                high: 100.1,
+                low: 100.0,
+                close: 100.05,
+                volume: 1.0,
+            },
+            Some(too_small_range),
+        );
+        assert!(engine.position.is_none());
+
+        engine.on_bar(
+            ModelBar {
+                ts_local: dt((2026, 4, 28), (12, 10, 0)),
+                open: 100.0,
+                high: 100.1,
+                low: 100.0,
+                close: 100.05,
+                volume: 1.0,
+            },
+            Some(valid_anchor),
+        );
+        assert!(engine.position.is_none());
     }
 
     #[test]

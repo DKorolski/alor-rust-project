@@ -459,3 +459,60 @@ Result:
 ```text
 PASS: 6 tests
 ```
+
+### 2026-04-28 RI Author41 Standalone Engine Skeleton
+
+Added the first standalone Author41 MR engine layer inside the shadow/replay
+module.
+
+Implemented frozen parameters:
+
+```text
+RI Author41: dual_no_overlap_plateau
+timeframe:   10m
+side_mode:   dual
+K:           0.07
+K2:          0.005
+StopK:       0.58
+MinRange:    0.016
+MaxRange:    0.045
+max entries: 2 per day
+entry end:   12:00
+time exit:   20:00
+cost:        2.0 points roundtrip
+```
+
+Covered logic:
+
+- range guard by `prev_range / prev_low`;
+- long/short entry triggers;
+- stop exit;
+- `take_author_close`;
+- `time_exit`;
+- `breakeven_limit`;
+- replay-tail `forced_last_bar_close` safety.
+
+Safety boundary remains unchanged:
+
+```text
+The engine is not wired into Strategy and cannot emit Intent/order commands.
+```
+
+Updated test coverage:
+
+```text
+cargo test -p strategy-runtime moex_author41_42 -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 9 tests
+```
+
+Next step:
+
+```text
+Run the RI Author41 engine over prepared 10m bars and compare against
+ri_author41_mr_primary source trades/daily rows.
+```
