@@ -102,7 +102,8 @@ mr_k_short = 0.055
 mr_take_k_short = 0.16
 mr_stop_k_short = 0.43
 mr_session_end_time = "11:59:00"
-mr_exit_offset_min = 5
+# 10m feed: force MR exit on the 11:50 model bar, before BO becomes eligible at 12:00.
+mr_exit_offset_min = 10
 bo_k = 0.53
 bo_stop1_range = 0.51
 bo_stop2_range = 0.35

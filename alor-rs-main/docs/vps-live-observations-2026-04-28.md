@@ -587,3 +587,109 @@ live_guard                          BLOCKED waiting_for_next_bar_after_restart
 The `waiting_for_next_bar_after_restart` block is expected after a clean
 consumer-tail reset. Trading should become eligible only after the next fresh
 `10m` live bar is consumed.
+
+### Follow-up: MR Exit Before BO Window
+
+Later in the same session, the patched hybrid stack entered a new MR long:
+
+```text
+dt_local = 2026-04-28 10:20:00
+owner = MeanReversion
+side = Long
+entry = buy 1 IMOEXF
+tp = sell limit @ 2733.5
+sl = sell stop-limit @ 2701.5
+cycle = 69f05fa000
+```
+
+At `11:57 MSK`, runtime state still showed the MR long open:
+
+```text
+current_owner = mean_reversion
+current_side = long
+last_position_qty = 1.0
+tp_order_id = 2033126183784193232
+sl_stop_order_id = 119710160
+last_processed_bar_ts = 2026-04-28 11:40:00 MSK
+```
+
+The configured MR cutoff was:
+
+```text
+mr_session_end_time = 11:59:00
+mr_exit_offset_min = 5
+```
+
+On a `10m` feed, this means the effective cutoff is `11:54`, so the first bar
+that can satisfy `dt >= 11:54` is the `12:00` model bar. That is too late for
+the intended engineering contract: MR must be flat before BO becomes eligible at
+`12:00 MSK`.
+
+Manual intervention:
+
+```text
+runtime stopped
+TP limit canceled:
+  order_id = 2033126183784193232
+  request_id = 6b687dec-e6ca-4625-a82c-5f105a7b6daf
+  ack = accepted
+
+SL stop-limit deleted:
+  stop_order_id = 119710160
+  request_id = 6baeaae0-d14b-4724-8866-a5b8b5ddaf64
+  ack = accepted
+
+manual flatten sell:
+  request_id = d2b278e3-7a55-4290-b78f-e9091ffccf03
+  order_id = 2033126183784245382
+  comment = MANUAL|flatten|hybrid_mr_before_bo_20260428
+  ack = accepted
+  fill = sell 1
+```
+
+Broker state after manual intervention:
+
+```text
+IMOEXF qty = 0.0
+TP status = canceled
+SL status = canceled
+```
+
+Config patch:
+
+```text
+mr_session_end_time = 11:59:00
+mr_exit_offset_min = 10
+```
+
+With a `10m` model feed, this makes the effective MR cutoff `11:49`, so the
+exit should be emitted on the `11:50` model bar, before BO becomes eligible at
+`12:00`.
+
+Restart:
+
+```text
+runtime state stream deleted:
+  runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6
+
+consumer group reset to latest stream ids:
+  strategy-runtime-hybrid-riskgate-shadow-7502SN6
+
+risk-gate ledger preserved:
+  decision = UseExistingLedger
+  ledger_rows_count = 181
+  last_finalized_session_date = 2026-04-27
+  rolling_sum_lb120 = 154.5000000000001
+```
+
+Post-restart status:
+
+```text
+runtime config loaded with mr_exit_offset_min = 10
+broker flat before runtime start
+runtime healthy
+live_guard = BLOCKED waiting_for_next_bar_after_restart
+```
+
+This is an intended from-zero clean restart after manual flatten. Runtime should
+only become live-eligible after the next fresh `10m` bar.
