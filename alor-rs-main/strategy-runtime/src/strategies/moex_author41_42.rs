@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -319,6 +319,59 @@ impl Author41Config {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Author42Config {
+    pub k: f64,
+    pub stop_hour_k: f64,
+    pub stop_k: f64,
+    pub side_mode: Author42SideMode,
+    pub min_prev_hl_ratio: f64,
+    pub prev_extreme_move: f64,
+    pub first_hour_extreme_k: f64,
+    pub use_first_hour_extreme_filter: bool,
+    pub exclude_friday: bool,
+    pub exclude_june_window: bool,
+    pub allow_reentry_on_day_extreme: bool,
+    pub roundtrip_cost_points: f64,
+    pub exit_time: NaiveTime,
+}
+
+impl Author42Config {
+    pub fn ri_grid_k042_both() -> Self {
+        Self {
+            k: 0.42,
+            stop_hour_k: 0.50,
+            stop_k: 0.18,
+            side_mode: Author42SideMode::Both,
+            min_prev_hl_ratio: 1.01,
+            prev_extreme_move: 0.025,
+            first_hour_extreme_k: 1.50,
+            use_first_hour_extreme_filter: true,
+            exclude_friday: true,
+            exclude_june_window: true,
+            allow_reentry_on_day_extreme: true,
+            roundtrip_cost_points: 0.0,
+            exit_time: NaiveTime::from_hms_opt(23, 0, 0).unwrap_or(NaiveTime::MIN),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Author42SideMode {
+    Long,
+    Short,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Author42DailyContext {
+    prev_close: f64,
+    prev2_close: f64,
+    prev_range: f64,
+    prev_hl_ratio: f64,
+    prev_ret: f64,
+}
+
 pub fn replay_ri_author41_dual_no_overlap_source(
     bars: &[ModelBar],
     session_policy: RegularSessionPolicy,
@@ -386,6 +439,373 @@ pub fn replay_ri_author41_dual_no_overlap_source(
     }
 }
 
+pub fn replay_author42(
+    bars: &[ModelBar],
+    config: Author42Config,
+    session_policy: RegularSessionPolicy,
+) -> Author42ReplayResult {
+    let mut filtered: Vec<ModelBar> = bars
+        .iter()
+        .copied()
+        .filter(|bar| session_policy.is_model_bar(bar.ts_local))
+        .collect();
+    filtered.sort_by_key(|bar| bar.ts_local);
+
+    let contexts = build_author42_daily_context(&filtered);
+    let mut by_day: BTreeMap<NaiveDate, Vec<ModelBar>> = BTreeMap::new();
+    for bar in filtered {
+        by_day.entry(bar.ts_local.date()).or_default().push(bar);
+    }
+
+    let mut trades = Vec::new();
+    let mut daily = Vec::new();
+    for (date, day) in by_day {
+        let Some(ctx) = contexts.get(&date).copied() else {
+            daily.push(Author42DailyPnl {
+                date,
+                pnl_points: 0.0,
+                trades: 0,
+                skipped: "missing_context".to_string(),
+            });
+            continue;
+        };
+        let (day_trades, day_row) = run_author42_day(date, &day, ctx, config);
+        trades.extend(day_trades);
+        daily.push(day_row);
+    }
+    Author42ReplayResult { trades, daily }
+}
+
+fn run_author42_day(
+    date: NaiveDate,
+    day: &[ModelBar],
+    ctx: Author42DailyContext,
+    config: Author42Config,
+) -> (Vec<Author42Trade>, Author42DailyPnl) {
+    if config.exclude_friday && date.weekday().number_from_monday() == 5 {
+        return (
+            Vec::new(),
+            Author42DailyPnl {
+                date,
+                pnl_points: 0.0,
+                trades: 0,
+                skipped: "friday".to_string(),
+            },
+        );
+    }
+    if config.exclude_june_window && in_author_june_window(date) {
+        return (
+            Vec::new(),
+            Author42DailyPnl {
+                date,
+                pnl_points: 0.0,
+                trades: 0,
+                skipped: "june_window".to_string(),
+            },
+        );
+    }
+    if !all_finite(&[
+        ctx.prev_close,
+        ctx.prev2_close,
+        ctx.prev_range,
+        ctx.prev_hl_ratio,
+        ctx.prev_ret,
+    ]) {
+        return (
+            Vec::new(),
+            Author42DailyPnl {
+                date,
+                pnl_points: 0.0,
+                trades: 0,
+                skipped: "missing_context".to_string(),
+            },
+        );
+    }
+    if ctx.prev_range <= 0.0 || ctx.prev_close <= 0.0 {
+        return (
+            Vec::new(),
+            Author42DailyPnl {
+                date,
+                pnl_points: 0.0,
+                trades: 0,
+                skipped: "bad_context".to_string(),
+            },
+        );
+    }
+
+    let range_ok = ctx.prev_hl_ratio > config.min_prev_hl_ratio;
+    let mut buy_trig = range_ok && ctx.prev_ret > -config.prev_extreme_move;
+    let mut short_trig = range_ok && ctx.prev_ret < config.prev_extreme_move;
+    match config.side_mode {
+        Author42SideMode::Long => short_trig = false,
+        Author42SideMode::Short => buy_trig = false,
+        Author42SideMode::Both => {}
+    }
+
+    let start_ts = day[0].ts_local;
+    let first_idx = (day.len() >= 6).then_some(5);
+    let mut long_level = None;
+    let mut short_level = None;
+    let mut trade_allowed = true;
+    let mut was_long_today = false;
+    let mut was_short_today = false;
+    let mut pos: Option<OpenAuthor42Position> = None;
+    let mut pending: Option<Author42Pending> = None;
+    let mut day_hh = f64::NEG_INFINITY;
+    let mut day_ll = f64::INFINITY;
+    let mut pnl = 0.0;
+    let mut trades = Vec::new();
+
+    for (i, bar) in day.iter().copied().enumerate() {
+        if let Some(pending_action) = pending.take() {
+            match pending_action {
+                Author42Pending::Exit(reason) => {
+                    if let Some(open) = pos.take() {
+                        let trade = close_author42_position(
+                            open,
+                            bar.ts_local,
+                            bar.open,
+                            reason,
+                            config.roundtrip_cost_points,
+                        );
+                        pnl += trade.pnl_points;
+                        trades.push(trade);
+                    }
+                }
+                Author42Pending::Entry(side) => {
+                    if pos.is_none() {
+                        pos = Some(OpenAuthor42Position {
+                            side,
+                            entry_ts: bar.ts_local,
+                            entry_price: bar.open,
+                            bars_held: 0,
+                        });
+                        match side {
+                            ShadowSide::Long => was_long_today = true,
+                            ShadowSide::Short => was_short_today = true,
+                        }
+                    }
+                }
+            }
+        }
+
+        day_hh = day_hh.max(bar.high);
+        day_ll = day_ll.min(bar.low);
+
+        if let Some(open) = pos.as_mut() {
+            open.bars_held += 1;
+            if bar.ts_local.time() >= config.exit_time {
+                let trade = close_author42_position(
+                    *open,
+                    bar.ts_local,
+                    bar.close,
+                    "time_exit_same_bar_close",
+                    config.roundtrip_cost_points,
+                );
+                pnl += trade.pnl_points;
+                trades.push(trade);
+                pos = None;
+                continue;
+            }
+
+            match open.side {
+                ShadowSide::Long => {
+                    if bar.close < ctx.prev_close + config.stop_k * ctx.prev_range {
+                        pending = Some(Author42Pending::Exit("stop_emergency_long_next_open"));
+                    } else if is_author42_hour_check(bar.ts_local, start_ts)
+                        && bar.close < ctx.prev_close + config.stop_hour_k * ctx.prev_range
+                    {
+                        pending = Some(Author42Pending::Exit("stop_hour_long_next_open"));
+                    }
+                }
+                ShadowSide::Short => {
+                    if bar.close > ctx.prev_close - config.stop_k * ctx.prev_range {
+                        pending = Some(Author42Pending::Exit("stop_emergency_short_next_open"));
+                    } else if is_author42_hour_check(bar.ts_local, start_ts)
+                        && bar.close > ctx.prev_close - config.stop_hour_k * ctx.prev_range
+                    {
+                        pending = Some(Author42Pending::Exit("stop_hour_short_next_open"));
+                    }
+                }
+            }
+        }
+
+        if Some(i) == first_idx {
+            let first_bar = day[0];
+            long_level = Some(
+                (ctx.prev_close + config.k * ctx.prev_range)
+                    .max(bar.close)
+                    .max(first_bar.high),
+            );
+            short_level = Some(
+                (ctx.prev_close - config.k * ctx.prev_range)
+                    .min(bar.close)
+                    .min(first_bar.low),
+            );
+            if config.use_first_hour_extreme_filter
+                && (bar.close - ctx.prev_close).abs() > config.first_hour_extreme_k * ctx.prev_range
+            {
+                trade_allowed = false;
+            }
+        }
+
+        if pending.is_some() || pos.is_some() || !trade_allowed {
+            continue;
+        }
+        let (Some(long_level), Some(short_level)) = (long_level, short_level) else {
+            continue;
+        };
+        if bar.ts_local.time() >= config.exit_time || i + 1 >= day.len() {
+            continue;
+        }
+
+        if config.allow_reentry_on_day_extreme {
+            if was_long_today && bar.high >= day_hh && bar.ts_local.time() < config.exit_time {
+                pending = Some(Author42Pending::Entry(ShadowSide::Long));
+                continue;
+            }
+            if was_short_today && bar.low <= day_ll && bar.ts_local.time() < config.exit_time {
+                pending = Some(Author42Pending::Entry(ShadowSide::Short));
+                continue;
+            }
+        }
+
+        if is_author42_hour_check(bar.ts_local, start_ts) {
+            if buy_trig && bar.close > long_level {
+                pending = Some(Author42Pending::Entry(ShadowSide::Long));
+            } else if short_trig && bar.close < short_level {
+                pending = Some(Author42Pending::Entry(ShadowSide::Short));
+            }
+        }
+    }
+
+    if let Some(open) = pos.take() {
+        let last = day[day.len() - 1];
+        let trade = close_author42_position(
+            open,
+            last.ts_local,
+            last.close,
+            "forced_last_bar_close",
+            config.roundtrip_cost_points,
+        );
+        pnl += trade.pnl_points;
+        trades.push(trade);
+    }
+
+    (
+        trades.clone(),
+        Author42DailyPnl {
+            date,
+            pnl_points: pnl,
+            trades: trades.len() as u32,
+            skipped: String::new(),
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OpenAuthor42Position {
+    side: ShadowSide,
+    entry_ts: NaiveDateTime,
+    entry_price: f64,
+    bars_held: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Author42Pending {
+    Entry(ShadowSide),
+    Exit(&'static str),
+}
+
+fn close_author42_position(
+    pos: OpenAuthor42Position,
+    exit_ts: NaiveDateTime,
+    exit_price: f64,
+    reason: &'static str,
+    cost_points: f64,
+) -> Author42Trade {
+    let gross_points = match pos.side {
+        ShadowSide::Long => exit_price - pos.entry_price,
+        ShadowSide::Short => pos.entry_price - exit_price,
+    };
+    Author42Trade {
+        side: pos.side,
+        entry_ts: pos.entry_ts,
+        exit_ts,
+        entry_price: pos.entry_price,
+        exit_price,
+        gross_points,
+        pnl_points: gross_points - cost_points,
+        exit_reason: reason.to_string(),
+        bars_held: pos.bars_held,
+    }
+}
+
+fn build_author42_daily_context(bars: &[ModelBar]) -> BTreeMap<NaiveDate, Author42DailyContext> {
+    #[derive(Debug, Clone, Copy)]
+    struct DayStats {
+        high: f64,
+        low: f64,
+        close: f64,
+    }
+
+    let mut by_day: BTreeMap<NaiveDate, DayStats> = BTreeMap::new();
+    for bar in bars {
+        by_day
+            .entry(bar.ts_local.date())
+            .and_modify(|stats| {
+                stats.high = stats.high.max(bar.high);
+                stats.low = stats.low.min(bar.low);
+                stats.close = bar.close;
+            })
+            .or_insert(DayStats {
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+            });
+    }
+
+    let mut contexts = BTreeMap::new();
+    let mut prev2_close: Option<f64> = None;
+    let mut prev: Option<DayStats> = None;
+    for (date, stats) in by_day {
+        if let (Some(prev), Some(prev2_close)) = (prev, prev2_close) {
+            let prev_range = prev.high - prev.low;
+            contexts.insert(
+                date,
+                Author42DailyContext {
+                    prev_close: prev.close,
+                    prev2_close,
+                    prev_range,
+                    prev_hl_ratio: prev.high / prev.low,
+                    prev_ret: prev.close / prev2_close - 1.0,
+                },
+            );
+        }
+        prev2_close = prev.map(|stats: DayStats| stats.close);
+        prev = Some(stats);
+    }
+    contexts
+}
+
+fn all_finite(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn in_author_june_window(date: NaiveDate) -> bool {
+    let Some(start) = NaiveDate::from_ymd_opt(date.year(), 5, 21) else {
+        return false;
+    };
+    let Some(end) = NaiveDate::from_ymd_opt(date.year(), 7, 1) else {
+        return false;
+    };
+    start <= date && date <= end
+}
+
+fn is_author42_hour_check(ts: NaiveDateTime, start_ts: NaiveDateTime) -> bool {
+    ts.time().minute() == 50 && ts > start_ts + chrono::Duration::minutes(50)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Author41SideMode {
     Long,
@@ -439,6 +859,52 @@ pub struct Author41ReplayResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Author41ReplayComparison {
+    pub source_trades: usize,
+    pub actual_trades: usize,
+    pub trade_key_matches: usize,
+    pub trade_exact_matches: usize,
+    pub trade_point_mismatches: usize,
+    pub missing_source_trades: usize,
+    pub extra_actual_trades: usize,
+    pub source_daily_rows: usize,
+    pub actual_daily_rows: usize,
+    pub daily_exact_matches: usize,
+    pub daily_pnl_mismatches: usize,
+    pub missing_source_daily: usize,
+    pub extra_actual_daily: usize,
+    pub source_total_pnl: f64,
+    pub actual_total_pnl: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Author42Trade {
+    pub side: ShadowSide,
+    pub entry_ts: NaiveDateTime,
+    pub exit_ts: NaiveDateTime,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub gross_points: f64,
+    pub pnl_points: f64,
+    pub exit_reason: String,
+    pub bars_held: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Author42DailyPnl {
+    pub date: NaiveDate,
+    pub pnl_points: f64,
+    pub trades: u32,
+    pub skipped: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Author42ReplayResult {
+    pub trades: Vec<Author42Trade>,
+    pub daily: Vec<Author42DailyPnl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Author42ReplayComparison {
     pub source_trades: usize,
     pub actual_trades: usize,
     pub trade_key_matches: usize,
@@ -826,6 +1292,92 @@ pub fn compare_author41_replay(
         .count();
 
     Author41ReplayComparison {
+        source_trades: source_trades.len(),
+        actual_trades: actual.trades.len(),
+        trade_key_matches,
+        trade_exact_matches,
+        trade_point_mismatches,
+        missing_source_trades,
+        extra_actual_trades,
+        source_daily_rows: source_daily.len(),
+        actual_daily_rows: actual.daily.len(),
+        daily_exact_matches,
+        daily_pnl_mismatches,
+        missing_source_daily,
+        extra_actual_daily,
+        source_total_pnl: source_daily.iter().map(|row| row.pnl_points).sum(),
+        actual_total_pnl: actual.daily.iter().map(|row| row.pnl_points).sum(),
+    }
+}
+
+pub fn compare_author42_replay(
+    actual: &Author42ReplayResult,
+    source_trades: &[SourceTrade],
+    source_daily: &[SourceDaily],
+    tolerance: f64,
+) -> Author42ReplayComparison {
+    let mut actual_by_key: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for trade in &actual.trades {
+        actual_by_key
+            .entry(trade_key(trade.side, trade.entry_ts, trade.exit_ts))
+            .or_default()
+            .push(trade.pnl_points);
+    }
+
+    let mut trade_key_matches = 0;
+    let mut trade_exact_matches = 0;
+    let mut trade_point_mismatches = 0;
+    let mut missing_source_trades = 0;
+
+    for source in source_trades {
+        let key = trade_key(source.side, source.entry_ts, source.exit_ts);
+        let Some(points) = actual_by_key.get_mut(&key) else {
+            missing_source_trades += 1;
+            continue;
+        };
+        trade_key_matches += 1;
+        if let Some(idx) = points
+            .iter()
+            .position(|actual_points| close_enough(*actual_points, source.points, tolerance))
+        {
+            trade_exact_matches += 1;
+            points.remove(idx);
+        } else {
+            trade_point_mismatches += 1;
+            points.pop();
+        }
+    }
+
+    let extra_actual_trades = actual_by_key.values().map(Vec::len).sum();
+
+    let source_daily_by_date: BTreeMap<NaiveDate, f64> = source_daily
+        .iter()
+        .map(|row| (row.date, row.pnl_points))
+        .collect();
+    let actual_daily_by_date: BTreeMap<NaiveDate, f64> = actual
+        .daily
+        .iter()
+        .map(|row| (row.date, row.pnl_points))
+        .collect();
+
+    let mut daily_exact_matches = 0;
+    let mut daily_pnl_mismatches = 0;
+    let mut missing_source_daily = 0;
+    for (date, source_pnl) in &source_daily_by_date {
+        match actual_daily_by_date.get(date) {
+            Some(actual_pnl) if close_enough(*actual_pnl, *source_pnl, tolerance) => {
+                daily_exact_matches += 1;
+            }
+            Some(_) => daily_pnl_mismatches += 1,
+            None => missing_source_daily += 1,
+        }
+    }
+    let extra_actual_daily = actual_daily_by_date
+        .keys()
+        .filter(|date| !source_daily_by_date.contains_key(date))
+        .count();
+
+    Author42ReplayComparison {
         source_trades: source_trades.len(),
         actual_trades: actual.trades.len(),
         trade_key_matches,

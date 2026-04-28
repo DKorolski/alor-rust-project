@@ -723,3 +723,71 @@ Next step:
 Implement RI Author42 BO standalone replay, then build RI 41+42 no-overlap
 combo replay on top of exact Author41 MR.
 ```
+
+### 2026-04-28 RI Author42 BO Source-Contract Parity
+
+Added standalone Rust replay for the RI Author42 BO sleeve:
+
+```text
+model_id: ri_author42_bo_primary
+variant:  grid_k0.42_both
+K:        0.42
+feed:     prepared RI 10m switch-continuous bars
+```
+
+Implemented source contract:
+
+- regular weekday/session feed guard before state updates;
+- previous-day context with `prev_close`, `prev2_close`, `prev_range`,
+  `prev_hl_ratio`, `prev_ret`;
+- `XX:50` 10m hourly check reconstruction;
+- first-hour context at bar index `5`;
+- long/short thresholds from `prev_close +/- K * prev_range`;
+- Friday exclusion;
+- reconstructed seasonal exclusion `May 21 .. July 1`;
+- first-hour extreme filter;
+- next-bar-open entry and stop reactions;
+- same-bar close timed exit at `23:00`;
+- last-bar forced close fallback.
+
+Replay command:
+
+```text
+cargo run -p strategy-runtime --bin moex_author42_replay -- \
+  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
+  --source-trades-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_trades.csv \
+  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --model-id ri_author42_bo_primary \
+  --out-json docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_author42_replay_comparison.json
+```
+
+Result:
+
+```text
+source_trades:          1233
+actual_trades:          1233
+trade_key_matches:      1233
+trade_exact_matches:    1233
+missing_source_trades:  0
+extra_actual_trades:    0
+source_daily_rows:      1812
+actual_daily_rows:      1812
+daily_exact_matches:    1812
+daily_pnl_mismatches:   0
+source_total_pnl:       149470.0
+actual_total_pnl:       149470.0
+```
+
+Status:
+
+```text
+RI Author42 BO standalone replay: EXACT_SOURCE_PARITY on prepared 10m feed.
+```
+
+Next step:
+
+```text
+Build RI 41+42 combo replay:
+Author41 exact MR + Author42 exact BO + no-overlap removal + Author42 cost2
+implementation challenger accounting.
+```
