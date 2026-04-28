@@ -339,6 +339,25 @@ pub struct Author41ReplayResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Author41ReplayComparison {
+    pub source_trades: usize,
+    pub actual_trades: usize,
+    pub trade_key_matches: usize,
+    pub trade_exact_matches: usize,
+    pub trade_point_mismatches: usize,
+    pub missing_source_trades: usize,
+    pub extra_actual_trades: usize,
+    pub source_daily_rows: usize,
+    pub actual_daily_rows: usize,
+    pub daily_exact_matches: usize,
+    pub daily_pnl_mismatches: usize,
+    pub missing_source_daily: usize,
+    pub extra_actual_daily: usize,
+    pub source_total_pnl: f64,
+    pub actual_total_pnl: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct OpenAuthor41Position {
     side: ShadowSide,
     entry_ts: NaiveDateTime,
@@ -640,6 +659,92 @@ pub fn load_model_bars<R: Read>(reader: R) -> Result<Vec<ModelBar>> {
     Ok(bars)
 }
 
+pub fn compare_author41_replay(
+    actual: &Author41ReplayResult,
+    source_trades: &[SourceTrade],
+    source_daily: &[SourceDaily],
+    tolerance: f64,
+) -> Author41ReplayComparison {
+    let mut actual_by_key: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for trade in &actual.trades {
+        actual_by_key
+            .entry(trade_key(trade.side, trade.entry_ts, trade.exit_ts))
+            .or_default()
+            .push(trade.net_points);
+    }
+
+    let mut trade_key_matches = 0;
+    let mut trade_exact_matches = 0;
+    let mut trade_point_mismatches = 0;
+    let mut missing_source_trades = 0;
+
+    for source in source_trades {
+        let key = trade_key(source.side, source.entry_ts, source.exit_ts);
+        let Some(points) = actual_by_key.get_mut(&key) else {
+            missing_source_trades += 1;
+            continue;
+        };
+        trade_key_matches += 1;
+        if let Some(idx) = points
+            .iter()
+            .position(|actual_points| close_enough(*actual_points, source.points, tolerance))
+        {
+            trade_exact_matches += 1;
+            points.remove(idx);
+        } else {
+            trade_point_mismatches += 1;
+            points.pop();
+        }
+    }
+
+    let extra_actual_trades = actual_by_key.values().map(Vec::len).sum();
+
+    let source_daily_by_date: BTreeMap<NaiveDate, f64> = source_daily
+        .iter()
+        .map(|row| (row.date, row.pnl_points))
+        .collect();
+    let actual_daily_by_date: BTreeMap<NaiveDate, f64> = actual
+        .daily
+        .iter()
+        .map(|row| (row.date, row.pnl_points))
+        .collect();
+
+    let mut daily_exact_matches = 0;
+    let mut daily_pnl_mismatches = 0;
+    let mut missing_source_daily = 0;
+    for (date, source_pnl) in &source_daily_by_date {
+        match actual_daily_by_date.get(date) {
+            Some(actual_pnl) if close_enough(*actual_pnl, *source_pnl, tolerance) => {
+                daily_exact_matches += 1;
+            }
+            Some(_) => daily_pnl_mismatches += 1,
+            None => missing_source_daily += 1,
+        }
+    }
+    let extra_actual_daily = actual_daily_by_date
+        .keys()
+        .filter(|date| !source_daily_by_date.contains_key(date))
+        .count();
+
+    Author41ReplayComparison {
+        source_trades: source_trades.len(),
+        actual_trades: actual.trades.len(),
+        trade_key_matches,
+        trade_exact_matches,
+        trade_point_mismatches,
+        missing_source_trades,
+        extra_actual_trades,
+        source_daily_rows: source_daily.len(),
+        actual_daily_rows: actual.daily.len(),
+        daily_exact_matches,
+        daily_pnl_mismatches,
+        missing_source_daily,
+        extra_actual_daily,
+        source_total_pnl: source_daily.iter().map(|row| row.pnl_points).sum(),
+        actual_total_pnl: actual.daily.iter().map(|row| row.pnl_points).sum(),
+    }
+}
+
 pub fn load_source_trades<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec<SourceTrade>> {
     let mut csv = csv::Reader::from_reader(reader);
     let headers = csv
@@ -701,6 +806,18 @@ pub fn load_source_daily<R: Read>(reader: R, fixed_model_id: &str) -> Result<Vec
         });
     }
     Ok(rows)
+}
+
+fn trade_key(side: ShadowSide, entry_ts: NaiveDateTime, exit_ts: NaiveDateTime) -> String {
+    let side = match side {
+        ShadowSide::Long => "long",
+        ShadowSide::Short => "short",
+    };
+    format!("{side}|{entry_ts}|{exit_ts}")
+}
+
+fn close_enough(left: f64, right: f64, tolerance: f64) -> bool {
+    (left - right).abs() <= tolerance
 }
 
 fn first_required_field<'a>(
@@ -1122,6 +1239,171 @@ ts_local,open,high,low,close,volume
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].entry_ts, dt((2026, 4, 28), (10, 0, 0)));
         assert_eq!(result.daily.len(), 2);
+    }
+
+    #[test]
+    fn compares_author41_replay_against_source_artifacts() {
+        let actual = Author41ReplayResult {
+            trades: vec![Author41Trade {
+                side: ShadowSide::Short,
+                entry_ts: dt((2026, 4, 28), (10, 0, 0)),
+                exit_ts: dt((2026, 4, 28), (10, 10, 0)),
+                entry_price: 100.1,
+                exit_price: 99.0,
+                gross_points: 1.1,
+                net_points: -0.9,
+                exit_reason: "take_author_close".to_string(),
+                bars_held: 1,
+                entry_index_for_day: 1,
+            }],
+            daily: vec![
+                Author41DailyPnl {
+                    date: NaiveDate::from_ymd_opt(2026, 4, 27).unwrap(),
+                    pnl_points: 0.0,
+                    trades: 0,
+                },
+                Author41DailyPnl {
+                    date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                    pnl_points: -0.9,
+                    trades: 1,
+                },
+            ],
+        };
+        let source_trades = vec![SourceTrade {
+            fixed_model_id: "ri_author41_mr_primary".to_string(),
+            side: ShadowSide::Short,
+            entry_ts: dt((2026, 4, 28), (10, 0, 0)),
+            exit_ts: dt((2026, 4, 28), (10, 10, 0)),
+            entry_price: 100.1,
+            exit_price: 99.0,
+            points: -0.9,
+            exit_reason: "take_author_close".to_string(),
+        }];
+        let source_daily = vec![
+            SourceDaily {
+                fixed_model_id: "ri_author41_mr_primary".to_string(),
+                date: NaiveDate::from_ymd_opt(2026, 4, 27).unwrap(),
+                pnl_points: 0.0,
+                author41_pnl: None,
+                author42_pnl: None,
+                trades: Some(0.0),
+                skipped: None,
+            },
+            SourceDaily {
+                fixed_model_id: "ri_author41_mr_primary".to_string(),
+                date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                pnl_points: -0.9,
+                author41_pnl: None,
+                author42_pnl: None,
+                trades: Some(1.0),
+                skipped: None,
+            },
+        ];
+
+        let comparison = compare_author41_replay(&actual, &source_trades, &source_daily, 1e-9);
+        assert_eq!(comparison.source_trades, 1);
+        assert_eq!(comparison.actual_trades, 1);
+        assert_eq!(comparison.trade_key_matches, 1);
+        assert_eq!(comparison.trade_exact_matches, 1);
+        assert_eq!(comparison.trade_point_mismatches, 0);
+        assert_eq!(comparison.missing_source_trades, 0);
+        assert_eq!(comparison.extra_actual_trades, 0);
+        assert_eq!(comparison.daily_exact_matches, 2);
+        assert_eq!(comparison.daily_pnl_mismatches, 0);
+        assert_eq!(comparison.missing_source_daily, 0);
+        assert_eq!(comparison.extra_actual_daily, 0);
+        assert_eq!(comparison.source_total_pnl, -0.9);
+        assert_eq!(comparison.actual_total_pnl, -0.9);
+    }
+
+    #[test]
+    fn comparison_separates_missing_extra_and_point_drift() {
+        let actual = Author41ReplayResult {
+            trades: vec![
+                Author41Trade {
+                    side: ShadowSide::Short,
+                    entry_ts: dt((2026, 4, 28), (10, 0, 0)),
+                    exit_ts: dt((2026, 4, 28), (10, 10, 0)),
+                    entry_price: 100.1,
+                    exit_price: 99.0,
+                    gross_points: 1.1,
+                    net_points: -1.0,
+                    exit_reason: "take_author_close".to_string(),
+                    bars_held: 1,
+                    entry_index_for_day: 1,
+                },
+                Author41Trade {
+                    side: ShadowSide::Long,
+                    entry_ts: dt((2026, 4, 29), (10, 0, 0)),
+                    exit_ts: dt((2026, 4, 29), (10, 10, 0)),
+                    entry_price: 99.0,
+                    exit_price: 100.0,
+                    gross_points: 1.0,
+                    net_points: -1.0,
+                    exit_reason: "extra".to_string(),
+                    bars_held: 1,
+                    entry_index_for_day: 1,
+                },
+            ],
+            daily: vec![Author41DailyPnl {
+                date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                pnl_points: -1.0,
+                trades: 1,
+            }],
+        };
+        let source_trades = vec![
+            SourceTrade {
+                fixed_model_id: "ri_author41_mr_primary".to_string(),
+                side: ShadowSide::Short,
+                entry_ts: dt((2026, 4, 28), (10, 0, 0)),
+                exit_ts: dt((2026, 4, 28), (10, 10, 0)),
+                entry_price: 100.1,
+                exit_price: 99.0,
+                points: -0.9,
+                exit_reason: "take_author_close".to_string(),
+            },
+            SourceTrade {
+                fixed_model_id: "ri_author41_mr_primary".to_string(),
+                side: ShadowSide::Short,
+                entry_ts: dt((2026, 4, 30), (10, 0, 0)),
+                exit_ts: dt((2026, 4, 30), (10, 10, 0)),
+                entry_price: 100.0,
+                exit_price: 101.0,
+                points: -3.0,
+                exit_reason: "missing".to_string(),
+            },
+        ];
+        let source_daily = vec![
+            SourceDaily {
+                fixed_model_id: "ri_author41_mr_primary".to_string(),
+                date: NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                pnl_points: -0.9,
+                author41_pnl: None,
+                author42_pnl: None,
+                trades: None,
+                skipped: None,
+            },
+            SourceDaily {
+                fixed_model_id: "ri_author41_mr_primary".to_string(),
+                date: NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(),
+                pnl_points: -3.0,
+                author41_pnl: None,
+                author42_pnl: None,
+                trades: None,
+                skipped: None,
+            },
+        ];
+
+        let comparison = compare_author41_replay(&actual, &source_trades, &source_daily, 1e-9);
+        assert_eq!(comparison.trade_key_matches, 1);
+        assert_eq!(comparison.trade_exact_matches, 0);
+        assert_eq!(comparison.trade_point_mismatches, 1);
+        assert_eq!(comparison.missing_source_trades, 1);
+        assert_eq!(comparison.extra_actual_trades, 1);
+        assert_eq!(comparison.daily_exact_matches, 0);
+        assert_eq!(comparison.daily_pnl_mismatches, 1);
+        assert_eq!(comparison.missing_source_daily, 1);
+        assert_eq!(comparison.extra_actual_daily, 0);
     }
 
     #[test]

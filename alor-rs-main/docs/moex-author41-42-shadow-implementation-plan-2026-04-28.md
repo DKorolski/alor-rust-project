@@ -600,3 +600,51 @@ Next step:
 Add Author41 replay/source comparison helpers for trade count, timestamp/side
 matching and daily PnL drift buckets.
 ```
+
+### 2026-04-28 Author41 Replay/Source Comparison Helper
+
+Added comparison summary for Rust Author41 replay versus frozen source
+artifacts.
+
+The helper reports:
+
+- source/actual trade counts;
+- trade key matches by `side + entry_ts + exit_ts`;
+- exact trade matches by key plus PnL tolerance;
+- trade point mismatches;
+- missing source trades;
+- extra actual trades;
+- source/actual daily row counts;
+- exact daily PnL matches;
+- daily PnL mismatches;
+- missing/extra daily rows;
+- source/actual total PnL.
+
+This is deliberately a summary-level comparator, not a promotion verdict. It
+creates the review surface needed to separate:
+
+```text
+signal drift
+execution-contract drift
+feed/preparation drift
+```
+
+Updated test coverage:
+
+```text
+cargo test -p strategy-runtime moex_author41_42 -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 15 tests
+```
+
+Next step:
+
+```text
+Export the research RI prepared 10m parquet feed to CSV, run Rust Author41
+replay over it, and compare against ri_author41_mr_primary source trades/daily
+with the new comparison helper.
+```
