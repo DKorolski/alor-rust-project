@@ -191,3 +191,108 @@ Follow-up checks:
 2. Continue watching Redis memory; live Redis is now ~62-67% of 1GiB.
 3. Review RI shadow after a full day to decide whether finalized-only output is needed.
 ```
+
+## Safe Redis Trim
+
+Observation / operation time:
+
+```text
+2026-04-29 09:39-09:43 MSK
+```
+
+Precondition:
+
+```text
+sessiongap       flat; latest futures position sample USDRUBF qty=0.0
+hybrid           flat; latest futures position sample IMOEXF qty=0.0
+alor-usdrubf     flat/idle; latest position tail only RUB cash
+```
+
+The first maintenance trim was run online, without stopping containers.
+
+Script:
+
+```text
+/opt/trading-maintenance/redis_safe_trim.sh
+```
+
+Guardrails:
+
+```text
+mode supports --dry-run and --apply
+only explicit stream whitelist is trimmed
+runtime.state.* is protected
+runtime.riskgate.* is protected
+no FLUSHDB / key deletion
+```
+
+Whitelist limits:
+
+```text
+events.health       -> 10000
+broker.snapshots.*  -> 10000
+broker.positions.*  -> 5000
+broker.orders.*     -> 5000
+broker.trades.*     -> 5000
+cmd.orders.*        -> 5000
+cmd.acks.*          -> 5000
+md.bars.*           -> 3000
+```
+
+Dry-run showed that only these oversized streams required trimming:
+
+```text
+events.health
+broker.snapshots.*
+```
+
+The first apply used approximate `XTRIM MAXLEN ~`, which was too soft and only
+trimmed in large chunks. The script was then corrected to exact
+`XTRIM MAXLEN =` and re-run.
+
+Final memory after exact trim:
+
+```text
+sessiongap redis      637.6MiB -> 88.9MiB
+hybrid redis          659.6MiB -> 94.1MiB
+alor-usdrubf redis    685.2MiB -> 87.9MiB
+```
+
+Final stream lengths:
+
+```text
+sessiongap events.health          ~10004
+sessiongap broker.snapshots       ~10003
+hybrid events.health              ~10002
+hybrid broker.snapshots           ~10003
+alor-usdrubf events.health        ~10002
+alor-usdrubf broker.snapshots     10000
+```
+
+Protected keys remained present:
+
+```text
+runtime.state.session_gap_standalone.live.7502MIW
+runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6
+runtime.state.alor_usdrubf_hybrid_v1.live.usdrubf.7502T0U
+runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120 = 182 rows
+```
+
+Post-trim checks:
+
+```text
+all live containers remained healthy
+no recent ERROR / panic / Connection refused / NOGROUP / xreadgroup failed
+bars/orders/trades/positions streams preserved
+```
+
+Verdict: online safe trim succeeded. It materially reduced Redis memory without
+touching runtime state or riskgate history.
+
+Follow-up:
+
+```text
+1. Keep the script as manual maintenance until one more observation confirms no side effects.
+2. Then add a nightly timer/cron for the same whitelist trim, preferably outside active trading hours.
+3. Keep weekend cleanup as a separate manual audit, not an automatic broad prune.
+```
