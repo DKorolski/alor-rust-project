@@ -296,3 +296,60 @@ Follow-up:
 2. Then add a nightly timer/cron for the same whitelist trim, preferably outside active trading hours.
 3. Keep weekend cleanup as a separate manual audit, not an automatic broad prune.
 ```
+
+### Post-trim Control Check
+
+Observation time:
+
+```text
+2026-04-29 09:50 MSK
+```
+
+Container state:
+
+```text
+sessiongap runtime/gateway/redis       up; runtime and gateway healthy
+hybrid runtime/gateway/redis           up; runtime and gateway healthy
+alor-usdrubf runtime/gateway/redis     up; runtime and gateway healthy
+ri-shadow runner/gateway/redis         up
+```
+
+Redis memory after a short live continuation window:
+
+```text
+sessiongap redis       75.32M
+hybrid redis           81.01M
+alor-usdrubf redis     66.40M
+ri-shadow redis        70.60M / 512M
+```
+
+Recent log scan since trim:
+
+```text
+strategy runtimes: no recent WARN / ERROR / panic / Connection refused / broken pipe / xreadgroup failed / timeout
+gateways:          no recent WARN / ERROR / panic / Connection refused / broken pipe / timeout
+```
+
+Protected state check:
+
+```text
+runtime.state.session_gap_standalone.live.7502MIW                         present
+runtime.state.hybrid_intraday.live.action_scoped.imoexf.7502SN6           present
+runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6         present
+runtime.state.alor_usdrubf_hybrid_v1.live.usdrubf.7502T0U                 present
+runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120      present
+runtime.riskgate.state.hybrid_imoexf.imoexf_primary_high180_lb120         present
+```
+
+Stream lengths continue to sit near the intended caps while new live events are
+being appended:
+
+```text
+sessiongap events.health / broker.snapshots       ~10092 / ~10048
+hybrid events.health / broker.snapshots           ~10090 / ~10045
+alor-usdrubf events.health / broker.snapshots     ~10089 / ~10042
+```
+
+Verdict: no immediate post-trim side effects observed. Keep the manual trim
+script available, but do not enable an automatic scheduler until at least one
+more live-session checkpoint confirms stable behavior.
