@@ -500,6 +500,7 @@ struct StrategyConfigFile {
     hybrid_intraday: Option<HybridIntradayConfigFile>,
     alor_usdrubf_hybrid: Option<AlorUsdrubfHybridConfigFile>,
     alor_skeleton: Option<AlorUsdrubfHybridConfigFile>,
+    ri_author41_42: Option<RiAuthor4142ConfigFile>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -648,6 +649,15 @@ struct AlorUsdrubfHybridConfigFile {
     enable_live_execution: Option<bool>,
     use_fixed_live_size: Option<bool>,
     live_fixed_units: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RiAuthor4142ConfigFile {
+    profile_id: Option<String>,
+    timeframe: Option<String>,
+    mode: Option<String>,
+    allow_order_emission: Option<bool>,
+    execution_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1334,6 +1344,29 @@ fn apply_alor_usdrubf_hybrid_config_file(
     }
 }
 
+fn apply_ri_author41_42_config_file(
+    strategy: &mut StrategyConfig,
+    ri_file: &RiAuthor4142ConfigFile,
+) {
+    if let Some(settings) = strategy.ri_author41_42_mut() {
+        if let Some(value) = &ri_file.profile_id {
+            settings.profile_id = value.clone();
+        }
+        if let Some(value) = &ri_file.timeframe {
+            settings.timeframe = value.clone();
+        }
+        if let Some(value) = &ri_file.mode {
+            settings.mode = value.clone();
+        }
+        if let Some(value) = ri_file.allow_order_emission {
+            settings.allow_order_emission = value;
+        }
+        if let Some(value) = &ri_file.execution_path {
+            settings.execution_path = value.clone();
+        }
+    }
+}
+
 fn validate_matching_strategy_specific_sections(
     strategy_file: &StrategyConfigFile,
     kind: StrategyKind,
@@ -1360,6 +1393,9 @@ fn validate_matching_strategy_specific_sections(
     }
     if strategy_file.alor_skeleton.is_some() && kind != StrategyKind::AlorUsdrubfHybrid {
         mismatches.push("strategy.alor_skeleton");
+    }
+    if strategy_file.ri_author41_42.is_some() && kind != StrategyKind::RiAuthor4142 {
+        mismatches.push("strategy.ri_author41_42");
     }
 
     if mismatches.is_empty() {
@@ -1607,6 +1643,9 @@ pub fn load_runtime_config(
                     alor_file,
                     ConfigSource::File,
                 );
+            }
+            if let Some(ri_file) = &strategy_file.ri_author41_42 {
+                apply_ri_author41_42_config_file(&mut strategy, ri_file);
             }
         }
         if let Some(runtime_file) = &file_config.runtime {
@@ -2248,6 +2287,7 @@ fn parse_strategy_kind(value: &str) -> Result<StrategyKind> {
         "hybrid_intraday" | "hybridintraday" | "hybrid" => Ok(StrategyKind::HybridIntraday),
         "alor_usdrubf_hybrid" | "alorusdrubfhybrid" => Ok(StrategyKind::AlorUsdrubfHybrid),
         "alor_skeleton" | "alorskeleton" | "alor" => Ok(StrategyKind::AlorUsdrubfHybrid),
+        "ri_author41_42" | "riauthor4142" | "ri_author4142" => Ok(StrategyKind::RiAuthor4142),
         _ => Err(anyhow!("unknown strategy_kind: {value}")),
     }
 }

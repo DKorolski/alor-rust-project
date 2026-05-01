@@ -10,6 +10,10 @@ use crate::strategies::hybrid_intraday_runtime::{
     HybridIntradayProfile, HybridIntradayRuntimeConfig, HybridIntradayRuntimeStrategy,
     MeanReversionVariant, MrGatePolicy, RiskGateMode,
 };
+use crate::strategies::ri_author41_42_live::{
+    RiAuthor4142ExecutionPath, RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy,
+    RiAuthor4142RuntimeMode,
+};
 use crate::strategies::session_gap_standalone::{
     SessionGapStandaloneConfig, SessionGapStandaloneStrategy,
 };
@@ -259,6 +263,39 @@ impl HybridIntradayAdapter {
         Ok(Box::new(HybridIntradayRuntimeStrategy::new(
             strategy_config,
         )))
+    }
+}
+
+pub(crate) struct RiAuthor4142Adapter;
+
+impl RiAuthor4142Adapter {
+    pub(crate) fn from_strategy_config(config: &StrategyConfig) -> Result<RiAuthor4142LiveConfig> {
+        let settings = match config.specific() {
+            StrategySpecificConfig::RiAuthor4142(settings) => settings,
+            other => {
+                bail!(
+                    "strategy kind {:?} requires RiAuthor4142 payload, found {:?}",
+                    config.strategy_kind,
+                    other.kind()
+                )
+            }
+        };
+
+        Ok(RiAuthor4142LiveConfig {
+            symbol: config.symbol.clone(),
+            profile_id: settings.profile_id.clone(),
+            timeframe: settings.timeframe.clone(),
+            mode: RiAuthor4142RuntimeMode::parse(&settings.mode)?,
+            allow_order_emission: settings.allow_order_emission,
+            execution_path: RiAuthor4142ExecutionPath::parse(&settings.execution_path)?,
+            qty: config.qty.max(1.0),
+            timezone_offset_hours: config.timezone_offset_hours,
+        })
+    }
+
+    pub(crate) fn create(config: &StrategyConfig) -> Result<BoxedStrategy> {
+        let strategy_config = Self::from_strategy_config(config)?;
+        Ok(Box::new(RiAuthor4142LiveStrategy::new(strategy_config)?))
     }
 }
 

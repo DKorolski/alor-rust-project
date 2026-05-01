@@ -424,6 +424,29 @@ pub enum StrategyState {
         #[serde(default)]
         open_position_stop2: Option<f64>,
     },
+    #[serde(rename = "RiAuthor41_42Live")]
+    RiAuthor4142Live {
+        #[serde(default)]
+        mode: String,
+        #[serde(default)]
+        profile_id: String,
+        #[serde(default)]
+        timeframe: String,
+        #[serde(default)]
+        allow_order_emission: bool,
+        #[serde(default)]
+        execution_path: String,
+        #[serde(default)]
+        last_bar_ts: Option<i64>,
+        #[serde(default)]
+        last_model_bar_ts: Option<i64>,
+        #[serde(default)]
+        model_bars_seen: u64,
+        #[serde(default)]
+        suppressed_service_bars: u64,
+        #[serde(default)]
+        live_adapter_enabled: bool,
+    },
     CancelSent {
         cancel_request_id: Uuid,
         order_id: i64,

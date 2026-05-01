@@ -237,6 +237,15 @@ pub struct AlorUsdrubfHybridSettings {
     pub live_fixed_units: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiAuthor4142Settings {
+    pub profile_id: String,
+    pub timeframe: String,
+    pub mode: String,
+    pub allow_order_emission: bool,
+    pub execution_path: String,
+}
+
 impl Default for AlorUsdrubfHybridSettings {
     fn default() -> Self {
         Self {
@@ -263,6 +272,18 @@ impl Default for AlorUsdrubfHybridSettings {
     }
 }
 
+impl Default for RiAuthor4142Settings {
+    fn default() -> Self {
+        Self {
+            profile_id: "ri_author41_42_primary_combo_cost2".to_string(),
+            timeframe: "10m".to_string(),
+            mode: "shadow".to_string(),
+            allow_order_emission: false,
+            execution_path: "action_scoped_only".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StrategySpecificConfig {
     LimitCancel(LimitCancelSettings),
@@ -272,6 +293,7 @@ pub enum StrategySpecificConfig {
     MockLiveProbe(MockLiveProbeSettings),
     HybridIntraday(HybridIntradayStrategySettings),
     AlorUsdrubfHybrid(AlorUsdrubfHybridSettings),
+    RiAuthor4142(RiAuthor4142Settings),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -479,6 +501,7 @@ impl StrategySpecificConfig {
             StrategyKind::AlorUsdrubfHybrid => {
                 Self::AlorUsdrubfHybrid(AlorUsdrubfHybridSettings::default())
             }
+            StrategyKind::RiAuthor4142 => Self::RiAuthor4142(RiAuthor4142Settings::default()),
         }
     }
 
@@ -491,6 +514,7 @@ impl StrategySpecificConfig {
             StrategySpecificConfig::MockLiveProbe(_) => StrategyKind::MockLiveProbe,
             StrategySpecificConfig::HybridIntraday(_) => StrategyKind::HybridIntraday,
             StrategySpecificConfig::AlorUsdrubfHybrid(_) => StrategyKind::AlorUsdrubfHybrid,
+            StrategySpecificConfig::RiAuthor4142(_) => StrategyKind::RiAuthor4142,
         }
     }
 }
@@ -513,6 +537,8 @@ pub enum StrategyKind {
     MockLiveProbe,
     HybridIntraday,
     AlorUsdrubfHybrid,
+    #[serde(rename = "ri_author41_42")]
+    RiAuthor4142,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -689,6 +715,20 @@ impl StrategyConfig {
     pub fn alor_skeleton_mut(&mut self) -> Option<&mut AlorUsdrubfHybridSettings> {
         self.alor_usdrubf_hybrid_mut()
     }
+
+    pub fn ri_author41_42(&self) -> Option<&RiAuthor4142Settings> {
+        match &self.specific {
+            StrategySpecificConfig::RiAuthor4142(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn ri_author41_42_mut(&mut self) -> Option<&mut RiAuthor4142Settings> {
+        match &mut self.specific {
+            StrategySpecificConfig::RiAuthor4142(settings) => Some(settings),
+            _ => None,
+        }
+    }
 }
 
 impl Deref for StrategyConfig {
@@ -715,6 +755,7 @@ impl StrategyKind {
             StrategyKind::MockLiveProbe => "mock_live_probe",
             StrategyKind::HybridIntraday => "hybrid_intraday",
             StrategyKind::AlorUsdrubfHybrid => "alor_usdrubf_hybrid_v1",
+            StrategyKind::RiAuthor4142 => "ri_author41_42",
         }
     }
 }

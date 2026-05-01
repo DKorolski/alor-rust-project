@@ -247,6 +247,57 @@ trade_log = "./backtest.log"
 }
 
 #[test]
+fn loads_ri_author41_42_shadow_config() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_ID",
+        "STRATEGY_KIND",
+        "SYMBOL",
+        "QTY",
+        "TRADE_MODE",
+        "ALLOW_LIVE_ORDERS",
+        "PAPER_ENABLED",
+        "SNAPSHOTS_STREAM",
+    ]);
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_id = "ri_author41_42.shadow.test"
+strategy_kind = "ri_author41_42"
+symbol = "RIM6"
+qty = 1
+tick_size = 10
+timezone_offset_hours = 3
+
+[strategy.ri_author41_42]
+profile_id = "ri_author41_42_primary_combo_cost2"
+timeframe = "10m"
+mode = "shadow"
+allow_order_emission = false
+execution_path = "action_scoped_only"
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::RiAuthor4142
+    );
+    assert_eq!(resolved.config.strategy.symbol, "RIM6");
+    let settings = resolved
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("ri settings");
+    assert_eq!(settings.profile_id, "ri_author41_42_primary_combo_cost2");
+    assert_eq!(settings.timeframe, "10m");
+    assert_eq!(settings.mode, "shadow");
+    assert!(!settings.allow_order_emission);
+    assert_eq!(settings.execution_path, "action_scoped_only");
+}
+
+#[test]
 fn loads_paper_report_paths() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&[

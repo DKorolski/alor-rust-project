@@ -5,7 +5,8 @@ use crate::strategies::mock_live_probe::{
 };
 use crate::strategies::toy_session_timing::{ToySessionTimingConfig, ToySessionTimingStrategy};
 use crate::strategy_adapters::{
-    AlorUsdrubfHybridAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter,
+    AlorUsdrubfHybridAdapter, HybridIntradayAdapter, RiAuthor4142Adapter,
+    SessionGapStandaloneAdapter,
 };
 use crate::strategy_host::Strategy;
 use crate::{StrategyConfig, StrategyKind, StrategySpecificConfig};
@@ -88,6 +89,17 @@ impl StrategyRegistry {
                 kind: StrategyKind::AlorUsdrubfHybrid,
                 display_name: "AlorUsdrubfHybrid",
                 factory: create_alor_usdrubf_hybrid,
+                capabilities: StrategyCapabilities {
+                    uses_bootstrap_snapshot: true,
+                    uses_runtime_state_restore: true,
+                    uses_history_warmup: true,
+                    uses_stop_orders: false,
+                },
+            },
+            StrategyDescriptor {
+                kind: StrategyKind::RiAuthor4142,
+                display_name: "RiAuthor4142",
+                factory: create_ri_author4142,
                 capabilities: StrategyCapabilities {
                     uses_bootstrap_snapshot: true,
                     uses_runtime_state_restore: true,
@@ -256,6 +268,10 @@ fn create_alor_usdrubf_hybrid(config: &StrategyConfig) -> Result<BoxedStrategy> 
     AlorUsdrubfHybridAdapter::create(config)
 }
 
+fn create_ri_author4142(config: &StrategyConfig) -> Result<BoxedStrategy> {
+    RiAuthor4142Adapter::create(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{StrategyCapabilities, StrategyDescriptor, StrategyRegistry};
@@ -282,6 +298,7 @@ mod tests {
                 StrategyKind::MockLiveProbe,
                 StrategyKind::HybridIntraday,
                 StrategyKind::AlorUsdrubfHybrid,
+                StrategyKind::RiAuthor4142,
             ]
         );
     }
@@ -341,6 +358,7 @@ mod tests {
             StrategyKind::MockLiveProbe,
             StrategyKind::HybridIntraday,
             StrategyKind::AlorUsdrubfHybrid,
+            StrategyKind::RiAuthor4142,
         ] {
             let _strategy = registry
                 .create(&sample_strategy_config(kind))
@@ -388,6 +406,19 @@ mod tests {
             .expect("alor skeleton descriptor");
         assert_eq!(
             alor.capabilities,
+            StrategyCapabilities {
+                uses_bootstrap_snapshot: true,
+                uses_runtime_state_restore: true,
+                uses_history_warmup: true,
+                uses_stop_orders: false,
+            }
+        );
+
+        let ri = registry
+            .descriptor(StrategyKind::RiAuthor4142)
+            .expect("ri author41/42 descriptor");
+        assert_eq!(
+            ri.capabilities,
             StrategyCapabilities {
                 uses_bootstrap_snapshot: true,
                 uses_runtime_state_restore: true,

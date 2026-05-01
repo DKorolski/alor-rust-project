@@ -231,6 +231,323 @@ shadow journal retained separately for review
 
 Do not reuse shadow runner state as live order state.
 
+## Engineering Architecture Model
+
+The live RI contour should be built as a staged extension around the existing
+Author41/42 model module, not as a rewrite of the current shadow runner.
+
+High-level shape:
+
+```text
+10m RI feed
+  -> feed guard / session policy
+  -> Author41/42 model core
+  -> decision journal
+  -> live adapter gate
+  -> Strategy Intent
+  -> runtime command builder
+  -> action-scoped gateway path
+  -> broker events / reconciliation
+```
+
+### Code Placement
+
+Existing model code should remain the source for signal semantics:
+
+```text
+strategy-runtime/src/strategies/moex_author41_42.rs
+```
+
+New live contour code should be isolated, for example:
+
+```text
+strategy-runtime/src/strategies/ri_author41_42_live.rs
+```
+
+or, if the first implementation is deliberately split into smaller pieces:
+
+```text
+strategy-runtime/src/strategies/ri_author41_42/
+  mod.rs
+  state.rs
+  adapter.rs
+  lifecycle.rs
+  journal.rs
+```
+
+The existing shadow runner should remain a shadow/diagnostic tool:
+
+```text
+strategy-runtime/src/bin/moex_author41_42_shadow_runner.rs
+```
+
+It should not become the live order-emitting process.
+
+### StrategyKind And Config Boundary
+
+Add a dedicated strategy kind only when the live skeleton is ready:
+
+```text
+StrategyKind::RiAuthor41_42
+```
+
+The config should be explicit about mode and order-emission permission:
+
+```toml
+[strategy]
+strategy_kind = "ri_author41_42"
+strategy_id = "ri_author41_42.micro.7502XXX"
+symbol = "RIM6"
+timeframe = "10m"
+profile_id = "ri_author41_42_primary_combo_cost2"
+mode = "shadow"              # shadow | dry_run | micro_live
+allow_order_emission = false # must remain false until GO
+qty = 1
+execution_path = "action_scoped_only"
+```
+
+The presence of a live-capable strategy kind must not imply live permission.
+Order emission must require both:
+
+```text
+mode = micro_live
+allow_order_emission = true
+```
+
+and the regular runtime `allow_live_orders` gate.
+
+### Model Core Contract
+
+The model core should expose deterministic decisions without knowing about
+broker state:
+
+```text
+ModelInput:
+  closed 10m bar
+  regular session context
+  prior regular-day anchors
+  current component state
+
+ModelOutput:
+  component = author41_mr | author42_bo
+  decision = enter | exit | suppress | hold
+  side
+  model timestamps
+  reason
+  no-overlap decision
+  shadow pnl fields where available
+```
+
+The model core must not create `Intent` directly. This keeps signal parity and
+execution semantics separate.
+
+### Live Adapter Contract
+
+The live adapter is the only layer that converts model decisions into runtime
+intents.
+
+Responsibilities:
+
+- check `mode` and `allow_order_emission`;
+- enforce one active component at a time;
+- translate accepted entries/exits into `Intent::Market` or `Intent::Place`
+  according to the frozen live contract;
+- add `IntentClass::Entry` / `IntentClass::Exit` explicitly;
+- attach operator-readable comments/tags;
+- suppress or defer decisions when the exchange window is closed;
+- never emit if broker/runtime state is ambiguous.
+
+The adapter should log every decision as one of:
+
+```text
+shadow_recorded
+intent_suppressed
+intent_deferred
+intent_emitted
+manual_intervention_required
+```
+
+### State Boundaries
+
+RI should keep separate state layers.
+
+Model/live strategy state:
+
+```text
+current_component_owner
+current_cycle_id
+current_side
+pending_entry_request_id
+pending_exit_request_id
+last_model_bar_ts
+last_decision_hash
+deferred_exit
+broker_position_view
+```
+
+Shadow journal:
+
+```text
+append-only model decisions and finalized shadow records
+```
+
+Command lifecycle:
+
+```text
+runtime command stream / ack stream / broker events
+```
+
+Operational observation:
+
+```text
+daily VPS notes and compacted review artifacts
+```
+
+The live strategy state must not be rebuilt from the shadow journal. Shadow
+journal is evidence, not live state.
+
+### Broker Reconciliation Model
+
+On startup and after reconnect, RI must reconcile:
+
+```text
+broker position
+working orders
+runtime pending request ids
+current component owner
+```
+
+Conservative rule:
+
+```text
+If broker state is not flat and runtime cannot prove ownership, block new
+entries and emit manual_intervention_required.
+```
+
+Exit intents may remain allowed under a strict safety path if the position side
+and quantity are known.
+
+### Execution Model
+
+Initial micro-live should prefer the simplest executable order surface:
+
+```text
+entry = market or clearly marketable limit, action-scoped
+exit  = market or clearly marketable limit, action-scoped
+protective exchange-native TP/SL = not in P0 unless model contract requires it
+```
+
+Rationale:
+
+- the Author41/42 frozen model does not require exchange-native protective
+  stop-limit orders as its primary semantics;
+- previous live incidents showed protective CWS paths are more operationally
+  fragile;
+- the first RI micro goal is model-transfer validation, not maximizing
+  execution finesse.
+
+If later RI needs passive/limit execution, add it as a separate execution
+profile after the marketable P0 contour is validated.
+
+### Observability Contract
+
+Minimum live logs:
+
+```text
+ri_model_decision
+ri_no_overlap_suppressed
+ri_intent_suppressed
+ri_intent_deferred
+ri_intent_emitted
+ri_command_accepted
+ri_command_rejected
+ri_position_reconciled
+ri_gap_flatten_triggered
+ri_manual_intervention_required
+```
+
+Every emitted command must be traceable by:
+
+```text
+component
+cycle_id
+model_signal_ts
+bar_ts
+request_id
+intent_class
+execution_path
+broker_order_id
+```
+
+### Work Allowed Before GO/NO-GO
+
+The following work can proceed while RI shadow soak continues:
+
+- architecture and live contract documentation;
+- config schema scaffolding with `allow_order_emission=false` default;
+- isolated strategy skeleton registered behind tests;
+- model-output-to-decision data structures;
+- shadow/dry-run adapter that produces no intents;
+- journal/observability schema;
+- action-scoped path tests for command classes;
+- from-zero runbook and VPS config templates with live disabled.
+
+The following must wait for GO/NO-GO:
+
+- enabling `mode = micro_live`;
+- setting `allow_order_emission=true`;
+- deploying a live order-emitting RI service;
+- increasing size above `1`;
+- adding more complex execution profiles.
+
+## Implementation Checkpoint
+
+### 2026-05-01 Safe Scaffold
+
+Implemented a first safe runtime scaffold:
+
+```text
+StrategyKind::RiAuthor4142
+external config value = "ri_author41_42"
+module = strategy-runtime/src/strategies/ri_author41_42_live.rs
+```
+
+Scope:
+
+- dedicated `strategy_kind`;
+- config payload under `[strategy.ri_author41_42]`;
+- runtime modes: `shadow`, `dry_run`, `micro_live`;
+- execution path enum with only `action_scoped_only`;
+- strategy state payload for RI scaffold counters;
+- registry integration;
+- config loader support;
+- disabled shadow config template:
+  `configs/runtime.ri_author41_42.shadow.example.toml`.
+
+Safety behavior:
+
+```text
+mode = shadow         -> allowed, emits no intents
+mode = dry_run        -> allowed, emits no intents
+mode = micro_live     -> rejected until GO/NO-GO
+allow_order_emission=true -> rejected until GO/NO-GO
+```
+
+The scaffold observes bars and updates local model-bar counters, but it does
+not yet adapt Author41/42 model decisions into live intents.
+
+Validation:
+
+```text
+cargo test -p strategy-runtime
+```
+
+Result:
+
+```text
+PASS
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document
