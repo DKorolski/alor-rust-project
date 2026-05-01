@@ -752,6 +752,30 @@ Validation:
 cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
 ```
 
+### 2026-05-01 Runtime-State Restore Guard
+
+Added the first conservative RI runtime-state restore guard.
+
+Current behavior:
+
+- empty restored runtime state keeps RI in `flat`;
+- restored pending request ids enter `manual_intervention_required`;
+- restored known order ids enter `manual_intervention_required`;
+- no order is emitted by any restore path.
+
+This closes the other stale-tail class before GO/NO-GO:
+
+```text
+bootstrap snapshot tail -> manual intervention
+runtime persisted tail  -> manual intervention
+```
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document

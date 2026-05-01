@@ -696,6 +696,33 @@ impl RiAuthor4142LiveStrategy {
         }
     }
 
+    fn handle_runtime_state_restored(&mut self, state: &RuntimeStateRestored) {
+        let reason = if !state.pending_requests.is_empty() {
+            Some(format!(
+                "runtime_restore_pending_requests:{}",
+                state.pending_requests.len()
+            ))
+        } else if !state.known_order_ids.is_empty() {
+            Some(format!(
+                "runtime_restore_known_order_ids:{}",
+                state.known_order_ids.len()
+            ))
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            self.enter_manual_intervention_required(reason);
+        } else {
+            info!(
+                target: "strategy_runtime::ri_author41_42_live",
+                action = "ri_runtime_state_restored_clean",
+                mode = self.config.mode.as_str(),
+                live_adapter_enabled = false,
+            );
+        }
+    }
+
     fn transition_to_dry_run_in_position(&mut self, decision: &RiAuthor4142ModelDecision) {
         let cycle_id = format!(
             "{}:{}",
@@ -825,7 +852,7 @@ impl Strategy for RiAuthor4142LiveStrategy {
         _ctx: &StrategyCtx,
         state: &RuntimeStateRestored,
     ) -> Vec<Intent> {
-        let _ = state;
+        self.handle_runtime_state_restored(state);
         Vec::new()
     }
 
@@ -976,11 +1003,13 @@ mod tests {
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
     };
     use crate::strategy_host::{
-        BootstrapSnapshot, OrderEvent, PositionEvent, StopOrderEvent, Strategy,
+        BootstrapSnapshot, OrderEvent, PositionEvent, RuntimeStateRestored, StopOrderEvent,
+        Strategy,
     };
     use alor_protocol::{IntentClass, Side as OrderSide};
     use chrono::{NaiveDate, NaiveDateTime};
     use std::collections::HashMap;
+    use uuid::Uuid;
 
     fn default_config() -> RiAuthor4142LiveConfig {
         RiAuthor4142LiveConfig {
@@ -1332,6 +1361,57 @@ mod tests {
 
         let _ = strategy.on_bootstrap_snapshot(&test_ctx(), &snapshot);
 
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::ManualInterventionRequired.as_str())
+        );
+    }
+
+    #[test]
+    fn runtime_state_restore_empty_keeps_flat_phase() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let state = RuntimeStateRestored {
+            known_order_ids: Vec::new(),
+            pending_requests: Vec::new(),
+        };
+
+        let intents = strategy.on_runtime_state_restored(&test_ctx(), &state);
+
+        assert!(intents.is_empty());
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
+    }
+
+    #[test]
+    fn runtime_state_restore_pending_requests_require_manual_intervention() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let state = RuntimeStateRestored {
+            known_order_ids: Vec::new(),
+            pending_requests: vec![Uuid::nil()],
+        };
+
+        let intents = strategy.on_runtime_state_restored(&test_ctx(), &state);
+
+        assert!(intents.is_empty());
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::ManualInterventionRequired.as_str())
+        );
+    }
+
+    #[test]
+    fn runtime_state_restore_known_orders_require_manual_intervention() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let state = RuntimeStateRestored {
+            known_order_ids: vec![42],
+            pending_requests: Vec::new(),
+        };
+
+        let intents = strategy.on_runtime_state_restored(&test_ctx(), &state);
+
+        assert!(intents.is_empty());
         assert_eq!(
             strategy.phase_for_test().as_deref(),
             Some(RiAuthor4142Phase::ManualInterventionRequired.as_str())
