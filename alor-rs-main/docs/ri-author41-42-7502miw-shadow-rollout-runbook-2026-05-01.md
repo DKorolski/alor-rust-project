@@ -140,6 +140,25 @@ RI decisions:
 tail -n 50 reports/ri_author41_42_7502MIW_decisions.jsonl
 ```
 
+Structured journal review:
+
+```text
+python3 scripts/ri_author41_42_journal_review.py \
+  reports/ri_author41_42_7502MIW_decisions.jsonl \
+  --strict-pre-go \
+  --tail 20 \
+  --out-md reports/ri_author41_42_7502MIW_journal_review.md
+```
+
+Expected pre-GO review result:
+
+- status is `PASS`;
+- no live-emission evidence rows;
+- no duplicate `shadow_recorded` decision keys;
+- all rows use `execution_path=action_scoped_only`;
+- adapter decisions are limited to `shadow_recorded`,
+  `intent_suppressed`, and `manual_intervention_required`.
+
 RI commands should remain empty:
 
 ```text
