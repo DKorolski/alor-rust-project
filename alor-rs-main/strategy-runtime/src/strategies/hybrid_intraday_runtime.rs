@@ -978,6 +978,28 @@ impl HybridIntradayRuntimeStrategy {
         }
     }
 
+    fn is_terminal_order_status(status: &str) -> bool {
+        matches!(
+            status,
+            "filled" | "canceled" | "cancelled" | "expired" | "rejected"
+        )
+    }
+
+    fn is_terminal_stop_order_status(status: &str) -> bool {
+        matches!(
+            status,
+            "filled"
+                | "canceled"
+                | "cancelled"
+                | "expired"
+                | "rejected"
+                | "executed"
+                | "triggered"
+                | "done"
+                | "completed"
+        )
+    }
+
     fn build_comment(
         &self,
         ctx: &StrategyCtx,
@@ -2632,6 +2654,108 @@ mod tests {
             strategy.pending_exit.map(|pending| pending.reason),
             Some(ReasonCode::BreakoutEodExit)
         );
+    }
+
+    #[test]
+    fn terminal_historical_order_does_not_seed_stale_cycle_for_new_bo_entry() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+
+        let _ = strategy.on_order(
+            &ctx,
+            &OrderEvent {
+                order_id: 2033126196669077802,
+                request_id: None,
+                symbol: "IMOEXF".to_string(),
+                status: "filled".to_string(),
+                side: "sell".to_string(),
+                order_type: "limit".to_string(),
+                qty: 1.0,
+                filled: 1.0,
+                price: 2650.5,
+                existing: true,
+                comment: Some(tag("BO", "69f04ce000", "ENTRY")),
+                ts_utc: ts_local(2026, 4, 28, 9, 0, 0),
+            },
+        );
+        assert!(strategy.active_cycle_id.is_none());
+
+        strategy.entry_ready = true;
+        let entry_ts = ts_local(2026, 5, 1, 12, 50, 0);
+        let intents = strategy.map_action_to_intents(
+            &ctx,
+            entry_ts,
+            true,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::IntradayBreakout,
+                side: Side::Short,
+                entry_style: EntryStyle::Market,
+                reason: ReasonCode::BreakoutShort,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        assert_eq!(intents.len(), 1);
+        assert_eq!(
+            strategy.active_cycle_local_day(),
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 1).unwrap())
+        );
+
+        let _ = strategy.on_position(
+            &ctx,
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 2650.5,
+                ts_utc: entry_ts + 1,
+            },
+        );
+
+        let mut actions = Vec::new();
+        strategy.append_breakout_no_overnight_guard(
+            &mut actions,
+            chrono::NaiveDate::from_ymd_opt(2026, 5, 1)
+                .unwrap()
+                .and_hms_opt(13, 0, 0)
+                .unwrap(),
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 1).unwrap()),
+            true,
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn working_tagged_order_can_restore_active_cycle() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+
+        let _ = strategy.on_order(
+            &ctx,
+            &OrderEvent {
+                order_id: 111,
+                request_id: None,
+                symbol: "IMOEXF".to_string(),
+                status: "working".to_string(),
+                side: "sell".to_string(),
+                order_type: "limit".to_string(),
+                qty: 1.0,
+                filled: 0.0,
+                price: 101.0,
+                existing: true,
+                comment: Some(tag("MR", "abc1230001", "TP")),
+                ts_utc: 1_700_000_301,
+            },
+        );
+
+        assert_eq!(
+            strategy
+                .active_cycle_id
+                .map(|id| HybridIntradayRuntimeStrategy::format_cycle_id(&id)),
+            Some("abc1230001".to_string())
+        );
+        assert!(strategy.working_orders.contains(&111));
     }
 
     #[test]
@@ -4474,9 +4598,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         if !is_ours {
             return Vec::new();
         }
-        self.ensure_active_cycle_from_comment(ord.comment.as_deref());
         let mut intents = Vec::new();
         let status = ord.status.to_ascii_lowercase();
+        if !Self::is_terminal_order_status(&status) {
+            self.ensure_active_cycle_from_comment(ord.comment.as_deref());
+        }
         let tag = Self::parse_hybrid_tag(ord.comment.as_deref());
         if tag.as_ref().and_then(|v| v.role) == Some(TagRole::Tp) {
             self.pending_tp_request_id = None;
@@ -4504,10 +4630,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.tp_order_id = None;
             }
         }
-        if matches!(
-            status.as_str(),
-            "filled" | "canceled" | "cancelled" | "expired" | "rejected"
-        ) {
+        if Self::is_terminal_order_status(&status) {
             self.working_orders.remove(&ord.order_id);
         } else if ord.order_id > 0 {
             self.working_orders.insert(ord.order_id);
@@ -4524,9 +4647,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         if !is_ours {
             return Vec::new();
         }
-        self.ensure_active_cycle_from_comment(ord.comment.as_deref());
         let mut intents = Vec::new();
         let status = ord.status.to_ascii_lowercase();
+        if !Self::is_terminal_stop_order_status(&status) {
+            self.ensure_active_cycle_from_comment(ord.comment.as_deref());
+        }
         let tag = Self::parse_hybrid_tag(ord.comment.as_deref());
         if tag.as_ref().and_then(|v| v.role) == Some(TagRole::Sl) {
             self.pending_sl_request_id = None;
@@ -4572,18 +4697,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 self.sl_exchange_order_id = None;
             }
         }
-        if matches!(
-            status.as_str(),
-            "filled"
-                | "canceled"
-                | "cancelled"
-                | "expired"
-                | "rejected"
-                | "executed"
-                | "triggered"
-                | "done"
-                | "completed"
-        ) {
+        if Self::is_terminal_stop_order_status(&status) {
             self.working_stop_orders.remove(&ord.stop_order_id);
         } else if !ord.stop_order_id.trim().is_empty() {
             self.working_stop_orders.insert(ord.stop_order_id.clone());

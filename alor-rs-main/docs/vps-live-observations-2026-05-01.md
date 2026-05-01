@@ -498,3 +498,76 @@ RI_AUTHOR41_42_7502MIW_SHADOW_CONTOUR_DEPLOYED
 PRE_GO_SHADOW_ONLY_VALIDATION_PASS
 CONTINUE_OBSERVATION_7_TO_14_TRADING_SESSIONS
 ```
+
+## Hybrid IMOEXF BO Stale Cycle Follow-Up
+
+Observation time:
+
+```text
+2026-05-01 15:30 MSK
+```
+
+Observed sequence:
+
+```text
+2026-05-01 12:50 MSK  BO short entry emitted, accepted, filled
+2026-05-01 13:00 MSK  breakout_no_overnight_guard_exit fired
+2026-05-01 13:00 MSK  BO exit emitted, accepted, filled
+latest broker snapshot IMOEXF qty = 0
+```
+
+The execution path itself was healthy:
+
+```text
+entry request accepted
+entry execution confirmed
+exit request accepted
+exit execution confirmed
+no CWS reject/error path observed
+```
+
+The suspicious field was lifecycle state:
+
+```text
+active_cycle_day = 2026-04-28
+cycle_id = 69f04ce000
+dt_local = 2026-05-01 13:00:00
+```
+
+Interpretation:
+
+```text
+This is not a broker-flat failure and not a CWS/action-scoped regression.
+The position was closed safely, but the BO no-overnight guard appears to have
+used a stale historical cycle id restored from old HYB-tagged order events.
+That can make a fresh same-day BO position look like an overnight carry.
+```
+
+Patch line prepared:
+
+```text
+terminal historical order events no longer seed active_cycle_id from HYB tags
+working tagged orders/stop-orders still can restore active_cycle_id
+bootstrap working-order recovery remains intact
+```
+
+Regression tests added:
+
+```text
+terminal_historical_order_does_not_seed_stale_cycle_for_new_bo_entry
+working_tagged_order_can_restore_active_cycle
+```
+
+Local validation:
+
+```text
+cargo test -p strategy-runtime hybrid_intraday_runtime --lib
+57 passed
+```
+
+Status:
+
+```text
+HYBRID_BO_STALE_CYCLE_ID_PATCH_PREPARED
+REBUILD_AND_ROLLOUT_REQUIRED_BEFORE_NEXT_VALIDATION_READ
+```
