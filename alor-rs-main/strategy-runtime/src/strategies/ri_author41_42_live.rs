@@ -14,6 +14,7 @@ use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
     RuntimeStateRestored, Strategy, StrategyCtx,
 };
+use alor_protocol::{IntentClass, Side as OrderSide};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +150,20 @@ impl RiAuthor4142Side {
             Self::Short => "short",
         }
     }
+
+    fn entry_order_side(self) -> OrderSide {
+        match self {
+            Self::Long => OrderSide::Buy,
+            Self::Short => OrderSide::Sell,
+        }
+    }
+
+    fn exit_order_side(self) -> OrderSide {
+        match self {
+            Self::Long => OrderSide::Sell,
+            Self::Short => OrderSide::Buy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -162,6 +177,43 @@ pub struct RiAuthor4142ModelDecision {
     pub reason: String,
     pub overlap_decision: String,
     pub shadow_pnl_points: Option<f64>,
+    pub decision_key: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RiAuthor4142CandidateRole {
+    Entry,
+    Exit,
+}
+
+impl RiAuthor4142CandidateRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Entry => "entry",
+            Self::Exit => "exit",
+        }
+    }
+
+    fn intent_class(self) -> IntentClass {
+        match self {
+            Self::Entry => IntentClass::Entry,
+            Self::Exit => IntentClass::Exit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiAuthor4142CandidateIntent {
+    pub role: RiAuthor4142CandidateRole,
+    pub component: RiAuthor4142Component,
+    pub side: OrderSide,
+    pub qty: f64,
+    pub order_style: &'static str,
+    pub intent_class: IntentClass,
+    pub scheduled_ts_local: NaiveDateTime,
+    pub comment: String,
+    pub execution_path: RiAuthor4142ExecutionPath,
     pub decision_key: String,
 }
 
@@ -354,10 +406,128 @@ impl RiAuthor4142LiveStrategy {
                 self.log_transition("suppressed", "ri_intent_suppressed", decision);
             }
             RiAuthor4142DecisionAction::Enter => {
+                let candidates = self.candidate_intents_for_decision(decision);
+                if candidates.is_empty() {
+                    self.log_manual_intervention_required(
+                        decision,
+                        "accepted_model_decision_without_complete_entry_exit_candidate",
+                    );
+                    return;
+                }
+                for candidate in &candidates {
+                    self.log_candidate_intent_suppressed(candidate, decision);
+                }
                 self.transition_to_dry_run_in_position(decision);
                 self.transition_to_flat_after_scheduled_exit(decision);
             }
         }
+    }
+
+    fn candidate_intents_for_decision(
+        &self,
+        decision: &RiAuthor4142ModelDecision,
+    ) -> Vec<RiAuthor4142CandidateIntent> {
+        if decision.action != RiAuthor4142DecisionAction::Enter {
+            return Vec::new();
+        }
+        let Some(model_side) = decision.side else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        if let Some(entry_ts) = decision.scheduled_entry_ts_local {
+            candidates.push(self.build_candidate_intent(
+                decision,
+                RiAuthor4142CandidateRole::Entry,
+                model_side.entry_order_side(),
+                entry_ts,
+            ));
+        }
+        if let Some(exit_ts) = decision.scheduled_exit_ts_local {
+            candidates.push(self.build_candidate_intent(
+                decision,
+                RiAuthor4142CandidateRole::Exit,
+                model_side.exit_order_side(),
+                exit_ts,
+            ));
+        }
+        candidates
+    }
+
+    fn build_candidate_intent(
+        &self,
+        decision: &RiAuthor4142ModelDecision,
+        role: RiAuthor4142CandidateRole,
+        side: OrderSide,
+        scheduled_ts_local: NaiveDateTime,
+    ) -> RiAuthor4142CandidateIntent {
+        RiAuthor4142CandidateIntent {
+            role,
+            component: decision.component,
+            side,
+            qty: self.config.qty,
+            order_style: "market_p0",
+            intent_class: role.intent_class(),
+            scheduled_ts_local,
+            comment: self.candidate_comment(decision, role),
+            execution_path: self.config.execution_path,
+            decision_key: decision.decision_key.clone(),
+        }
+    }
+
+    fn candidate_comment(
+        &self,
+        decision: &RiAuthor4142ModelDecision,
+        role: RiAuthor4142CandidateRole,
+    ) -> String {
+        format!(
+            "ri_author41_42:{}:{}:{}",
+            self.config.profile_id,
+            decision.component.as_str(),
+            role.as_str()
+        )
+    }
+
+    fn log_candidate_intent_suppressed(
+        &self,
+        candidate: &RiAuthor4142CandidateIntent,
+        decision: &RiAuthor4142ModelDecision,
+    ) {
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_candidate_intent_suppressed",
+            suppression_reason = "pre_go_order_emission_disabled",
+            role = candidate.role.as_str(),
+            component = candidate.component.as_str(),
+            model_side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
+            order_side = ?candidate.side,
+            qty = candidate.qty,
+            order_style = candidate.order_style,
+            intent_class = ?candidate.intent_class,
+            scheduled_ts_local = %candidate.scheduled_ts_local,
+            comment = %candidate.comment,
+            execution_path = candidate.execution_path.as_str(),
+            decision_key = %candidate.decision_key,
+            mode = self.config.mode.as_str(),
+            allow_order_emission = self.config.allow_order_emission,
+            live_adapter_enabled = false,
+        );
+    }
+
+    fn log_manual_intervention_required(
+        &self,
+        decision: &RiAuthor4142ModelDecision,
+        reason: &'static str,
+    ) {
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_manual_intervention_required",
+            reason,
+            component = decision.component.as_str(),
+            side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
+            decision_key = %decision.decision_key,
+            mode = self.config.mode.as_str(),
+            live_adapter_enabled = false,
+        );
     }
 
     fn transition_to_dry_run_in_position(&mut self, decision: &RiAuthor4142ModelDecision) {
@@ -578,13 +748,14 @@ fn decision_key(record: &ShadowJournalRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_finalized_record, RiAuthor4142DecisionAction, RiAuthor4142ExecutionPath,
-        RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy, RiAuthor4142Phase,
-        RiAuthor4142RuntimeMode,
+        is_finalized_record, RiAuthor4142CandidateRole, RiAuthor4142DecisionAction,
+        RiAuthor4142ExecutionPath, RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy,
+        RiAuthor4142Phase, RiAuthor4142RuntimeMode,
     };
     use crate::strategies::moex_author41_42::{
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
     };
+    use alor_protocol::{IntentClass, Side as OrderSide};
     use chrono::{NaiveDate, NaiveDateTime};
 
     fn default_config() -> RiAuthor4142LiveConfig {
@@ -691,6 +862,54 @@ mod tests {
             strategy.phase_for_test().as_deref(),
             Some(RiAuthor4142Phase::Flat.as_str())
         );
+    }
+
+    #[test]
+    fn accepted_decision_builds_entry_and_exit_candidates() {
+        let strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let record = sample_record(OverlapDecision::Accepted, "time_exit_same_bar_close");
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "decision-key".to_string(),
+        )
+        .expect("decision");
+
+        let candidates = strategy.candidate_intents_for_decision(&decision);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].role, RiAuthor4142CandidateRole::Entry);
+        assert_eq!(candidates[0].side, OrderSide::Sell);
+        assert_eq!(candidates[0].qty, 1.0);
+        assert_eq!(candidates[0].order_style, "market_p0");
+        assert_eq!(candidates[0].intent_class, IntentClass::Entry);
+        assert_eq!(
+            candidates[0].execution_path,
+            RiAuthor4142ExecutionPath::ActionScopedOnly
+        );
+        assert!(candidates[0].comment.contains("author42_bo:entry"));
+        assert_eq!(candidates[1].role, RiAuthor4142CandidateRole::Exit);
+        assert_eq!(candidates[1].side, OrderSide::Buy);
+        assert_eq!(candidates[1].intent_class, IntentClass::Exit);
+        assert_eq!(
+            candidates[1].execution_path,
+            RiAuthor4142ExecutionPath::ActionScopedOnly
+        );
+        assert!(candidates[1].comment.contains("author42_bo:exit"));
+    }
+
+    #[test]
+    fn suppressed_decision_builds_no_candidate_intents() {
+        let strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let record = sample_record(OverlapDecision::DroppedMrOverlap, "mr_interval_overlap");
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "decision-key".to_string(),
+        )
+        .expect("decision");
+
+        let candidates = strategy.candidate_intents_for_decision(&decision);
+
+        assert!(candidates.is_empty());
     }
 
     fn sample_record(overlap_decision: OverlapDecision, reason: &str) -> ShadowJournalRecord {

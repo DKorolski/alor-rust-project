@@ -621,6 +621,38 @@ Result:
 PASS: 8 RI live scaffold tests
 ```
 
+### 2026-05-01 Candidate Intent Adapter
+
+Added the pre-GO candidate intent adapter.
+
+Current behavior:
+
+- accepted finalized model decision is translated into internal candidate
+  `entry` and `exit` legs;
+- candidate legs use `market_p0` order style, explicit `IntentClass::Entry` /
+  `IntentClass::Exit`, configured quantity, operator comment tag, and
+  `action_scoped_only` execution path;
+- candidate legs are logged as `ri_candidate_intent_suppressed` with
+  `suppression_reason=pre_go_order_emission_disabled`;
+- dropped MR/BO overlap decisions produce no candidate intent;
+- `Vec<Intent>` remains empty in every currently allowed mode;
+- `micro_live` and `allow_order_emission=true` remain rejected until GO/NO-GO.
+
+This is intentionally a contract rehearsal, not live execution. The adapter
+proves the shape of future orders while keeping broker emission impossible.
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 10 RI live scaffold tests
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document
