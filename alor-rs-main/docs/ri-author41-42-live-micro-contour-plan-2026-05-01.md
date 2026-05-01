@@ -863,6 +863,17 @@ Added focused RI live-strategy tests for two guardrails:
 This keeps the frozen RI model contract aligned with the handoff bundle and
 prevents a quiet regression back toward mixed raw/audit feed semantics.
 
+Also hardened the RI `7502MIW` gateway config test so it locks the deployment
+contract more tightly:
+
+- `RIM6` only;
+- `tf_sec=600`;
+- MOEX/RFUD instrument context;
+- regular `09:00..23:49` weekday session policy;
+- action-scoped CWS mode with market/create/delete/exit enabled;
+- replace-limit disabled for the first contour;
+- action-scope token refresh enabled.
+
 ### 2026-05-01 Simple Contract Roll Policy
 
 Added the simple RI futures roll policy to the live contract.

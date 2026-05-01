@@ -1759,10 +1759,21 @@ refresh_token = "   "
         let resolved = AlorGatewayConfig::from_file_with_sources(path).expect("load config");
 
         assert_eq!(resolved.config.portfolio, "7502MIW");
+        assert_eq!(resolved.config.exchange, "MOEX");
+        assert_eq!(resolved.config.instrument_group, "RFUD");
         assert_eq!(resolved.config.symbols, vec!["RIM6".to_string()]);
         assert_eq!(resolved.config.tf_sec, 600);
+        assert_eq!(resolved.config.max_silence_bars_sec, 1200);
+        assert_eq!(resolved.config.history_sessions, 6);
+        assert_eq!(resolved.config.history_days_back, 6);
         assert_eq!(resolved.config.health_listen_addr, "127.0.0.1:8084");
         assert_eq!(resolved.config.price_step, 10.0);
+        assert_eq!(resolved.config.volume_step, 1.0);
+        assert_eq!(
+            resolved.config.log_positions_filter,
+            vec!["RIM6".to_string()]
+        );
+        assert!(!resolved.config.log_existing_snapshot_orders);
         assert_eq!(
             resolved.config.control_cws_mode,
             ControlCwsMode::ActionScoped
@@ -1771,6 +1782,28 @@ refresh_token = "   "
         assert!(resolved.config.action_scope_enable_create_limit);
         assert!(resolved.config.action_scope_enable_delete_limit);
         assert!(resolved.config.action_scope_enable_exit);
+        assert!(!resolved.config.action_scope_enable_replace_limit);
+        assert!(
+            resolved
+                .config
+                .action_scope_force_token_refresh_before_authorize
+        );
+        assert_eq!(resolved.config.action_scope_max_session_lifetime_ms, 15_000);
+        let trading_periods = resolved
+            .config
+            .trading_periods
+            .as_ref()
+            .expect("trading periods");
+        assert!(trading_periods.weekends_off);
+        assert_eq!(trading_periods.timezone_offset_hours, 3);
+        assert_eq!(
+            trading_periods.session_start,
+            chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            trading_periods.session_end,
+            chrono::NaiveTime::from_hms_opt(23, 49, 59).unwrap()
+        );
 
         unsafe {
             std::env::remove_var("ALOR_REFRESH_TOKEN");
