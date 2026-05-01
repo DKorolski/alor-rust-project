@@ -622,6 +622,80 @@ impl RiAuthor4142LiveStrategy {
         );
     }
 
+    fn enter_manual_intervention_required(&mut self, reason: String) {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            current_component,
+            current_side,
+            current_cycle_id,
+            current_entry_ts_local,
+            current_exit_ts_local,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            *phase = RiAuthor4142Phase::ManualInterventionRequired
+                .as_str()
+                .to_string();
+            *current_component = None;
+            *current_side = None;
+            *current_cycle_id = None;
+            *current_entry_ts_local = None;
+            *current_exit_ts_local = None;
+            *last_transition_reason = Some(reason.clone());
+        }
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_manual_intervention_required",
+            reason = %reason,
+            mode = self.config.mode.as_str(),
+            live_adapter_enabled = false,
+        );
+    }
+
+    fn handle_bootstrap_snapshot(&mut self, snapshot: &BootstrapSnapshot) {
+        let symbol = self.config.symbol.as_str();
+        let position_qty = snapshot
+            .positions_strategy
+            .get(symbol)
+            .map(|position| position.qty)
+            .unwrap_or(0.0);
+        let working_orders = snapshot
+            .working_orders_strategy
+            .values()
+            .filter(|order| order.symbol == symbol)
+            .count();
+        let working_stop_orders = snapshot
+            .working_stop_orders_strategy
+            .values()
+            .filter(|order| order.symbol == symbol)
+            .count();
+        let reason = if position_qty.abs() > f64::EPSILON {
+            Some(format!("bootstrap_non_flat_position_qty:{position_qty}"))
+        } else if working_orders > 0 {
+            Some(format!("bootstrap_working_orders:{working_orders}"))
+        } else if working_stop_orders > 0 {
+            Some(format!(
+                "bootstrap_working_stop_orders:{working_stop_orders}"
+            ))
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            self.enter_manual_intervention_required(reason);
+        } else {
+            info!(
+                target: "strategy_runtime::ri_author41_42_live",
+                action = "ri_bootstrap_reconciled_flat",
+                symbol,
+                snapshot_ts_utc = ?snapshot.snapshot_ts_utc,
+                mode = self.config.mode.as_str(),
+                live_adapter_enabled = false,
+            );
+        }
+    }
+
     fn transition_to_dry_run_in_position(&mut self, decision: &RiAuthor4142ModelDecision) {
         let cycle_id = format!(
             "{}:{}",
@@ -740,8 +814,9 @@ impl Strategy for RiAuthor4142LiveStrategy {
     fn on_bootstrap_snapshot(
         &mut self,
         _ctx: &StrategyCtx,
-        _snapshot: &BootstrapSnapshot,
+        snapshot: &BootstrapSnapshot,
     ) -> Vec<Intent> {
+        self.handle_bootstrap_snapshot(snapshot);
         Vec::new()
     }
 
@@ -900,9 +975,12 @@ mod tests {
     use crate::strategies::moex_author41_42::{
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
     };
-    use crate::strategy_host::Strategy;
+    use crate::strategy_host::{
+        BootstrapSnapshot, OrderEvent, PositionEvent, StopOrderEvent, Strategy,
+    };
     use alor_protocol::{IntentClass, Side as OrderSide};
     use chrono::{NaiveDate, NaiveDateTime};
+    use std::collections::HashMap;
 
     fn default_config() -> RiAuthor4142LiveConfig {
         RiAuthor4142LiveConfig {
@@ -1145,6 +1223,121 @@ mod tests {
         assert!(strategy.journal_records_for_test().is_empty());
     }
 
+    #[test]
+    fn bootstrap_flat_without_working_orders_keeps_flat_phase() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let snapshot = BootstrapSnapshot {
+            positions_strategy: HashMap::new(),
+            working_orders_strategy: HashMap::new(),
+            working_stop_orders_strategy: HashMap::new(),
+            snapshot_ts_utc: Some(1_776_000_000),
+        };
+
+        let _ = strategy.on_bootstrap_snapshot(&test_ctx(), &snapshot);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
+    }
+
+    #[test]
+    fn bootstrap_non_flat_position_requires_manual_intervention() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let mut positions_strategy = HashMap::new();
+        positions_strategy.insert(
+            "RIM6".to_string(),
+            PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: -1.0,
+                existing: true,
+                avg_price: 100_000.0,
+                ts_utc: 1_776_000_000,
+            },
+        );
+        let snapshot = BootstrapSnapshot {
+            positions_strategy,
+            working_orders_strategy: HashMap::new(),
+            working_stop_orders_strategy: HashMap::new(),
+            snapshot_ts_utc: Some(1_776_000_000),
+        };
+
+        let _ = strategy.on_bootstrap_snapshot(&test_ctx(), &snapshot);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::ManualInterventionRequired.as_str())
+        );
+    }
+
+    #[test]
+    fn bootstrap_working_orders_require_manual_intervention() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let mut working_orders_strategy = HashMap::new();
+        working_orders_strategy.insert(
+            42,
+            OrderEvent {
+                order_id: 42,
+                symbol: "RIM6".to_string(),
+                status: "working".to_string(),
+                side: "buy".to_string(),
+                qty: 1.0,
+                existing: true,
+                ..OrderEvent::default()
+            },
+        );
+        let snapshot = BootstrapSnapshot {
+            positions_strategy: HashMap::new(),
+            working_orders_strategy,
+            working_stop_orders_strategy: HashMap::new(),
+            snapshot_ts_utc: Some(1_776_000_000),
+        };
+
+        let _ = strategy.on_bootstrap_snapshot(&test_ctx(), &snapshot);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::ManualInterventionRequired.as_str())
+        );
+    }
+
+    #[test]
+    fn bootstrap_working_stop_orders_require_manual_intervention() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let mut working_stop_orders_strategy = HashMap::new();
+        working_stop_orders_strategy.insert(
+            "sl-42".to_string(),
+            StopOrderEvent {
+                stop_order_id: "sl-42".to_string(),
+                symbol: "RIM6".to_string(),
+                status: "working".to_string(),
+                side: "sell".to_string(),
+                qty: 1.0,
+                existing: true,
+                exchange_order_id: None,
+                filled: 0.0,
+                stop_price: 99_000.0,
+                price: 98_990.0,
+                comment: None,
+                end_time: None,
+                ts_utc: 1_776_000_000,
+            },
+        );
+        let snapshot = BootstrapSnapshot {
+            positions_strategy: HashMap::new(),
+            working_orders_strategy: HashMap::new(),
+            working_stop_orders_strategy,
+            snapshot_ts_utc: Some(1_776_000_000),
+        };
+
+        let _ = strategy.on_bootstrap_snapshot(&test_ctx(), &snapshot);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::ManualInterventionRequired.as_str())
+        );
+    }
+
     fn sample_record(overlap_decision: OverlapDecision, reason: &str) -> ShadowJournalRecord {
         ShadowJournalRecord {
             instrument: Instrument::Ri,
@@ -1179,5 +1372,23 @@ mod tests {
             .unwrap()
             .and_hms_opt(hour, minute, second)
             .unwrap()
+    }
+
+    fn test_ctx() -> crate::StrategyCtx {
+        crate::StrategyCtx {
+            strategy_id: "ri_author41_42.shadow.test".to_string(),
+            portfolio: "demo".to_string(),
+            exchange: "MOEX".to_string(),
+            symbol: "RIM6".to_string(),
+            tick_size: 10.0,
+            trade_mode: crate::TradeMode::Live,
+            paper_execution_mode: crate::PaperExecutionMode::LiveOnly,
+            allow_live_orders: false,
+            gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
+            position_qty: None,
+            event_ts_utc: 1_776_000_000,
+            now_ts_utc: 1_776_000_000,
+            last_bar_ts: None,
+        }
     }
 }

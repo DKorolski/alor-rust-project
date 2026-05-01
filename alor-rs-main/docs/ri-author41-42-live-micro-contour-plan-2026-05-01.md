@@ -725,6 +725,33 @@ cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
 cargo test -p strategy-runtime flush_strategy_journal_records_writes_ri_jsonl
 ```
 
+### 2026-05-01 Bootstrap Reconcile Skeleton
+
+Added the first conservative RI bootstrap/reconcile guard.
+
+Current behavior:
+
+- clean bootstrap snapshot keeps RI in `flat`;
+- non-flat broker position for the RI symbol enters
+  `manual_intervention_required`;
+- working regular orders for the RI symbol enter `manual_intervention_required`;
+- working stop orders for the RI symbol enter `manual_intervention_required`;
+- no order is emitted by any bootstrap path;
+- journal remains evidence-only and is not used to restore live state.
+
+This matches the current pre-GO safety policy:
+
+```text
+If broker/runtime state is ambiguous, block strategy ownership and require
+operator review instead of adopting stale state.
+```
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document
