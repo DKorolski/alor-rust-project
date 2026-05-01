@@ -305,6 +305,60 @@ decision_journal_append = true
 }
 
 #[test]
+fn loads_ri_author41_42_7502miw_shadow_config() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let path = repo_root.join("configs/runtime.ri_author41_42.shadow.7502MIW.toml");
+
+    let resolved = load_runtime_config(path, false).expect("load ri 7502MIW config");
+
+    assert_eq!(resolved.config.portfolio, "7502MIW");
+    assert_eq!(
+        resolved.config.consumer_group,
+        "strategy-runtime-ri-author41-42-shadow-7502MIW"
+    );
+    assert_eq!(resolved.config.streams.bars, "md.bars.7502MIW.RIM6.10m");
+    assert_eq!(
+        resolved.config.streams.commands,
+        "cmd.orders.7502MIW.ri_author41_42.shadow"
+    );
+    assert_eq!(
+        resolved.config.streams.acks,
+        "cmd.acks.7502MIW.ri_author41_42.shadow"
+    );
+    assert_eq!(
+        resolved.config.streams.health.as_deref(),
+        Some("events.health.ri_author41_42.7502MIW")
+    );
+    assert_eq!(
+        resolved.config.streams.runtime_state,
+        "runtime.state.ri_author41_42.shadow.7502MIW"
+    );
+    assert_eq!(
+        resolved.config.trade_mode,
+        strategy_runtime::TradeMode::Paper
+    );
+    assert!(!resolved.config.allow_live_orders);
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::RiAuthor4142
+    );
+    assert_eq!(resolved.config.strategy.symbol, "RIM6");
+    let settings = resolved
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("ri settings");
+    assert_eq!(settings.mode, "shadow");
+    assert!(!settings.allow_order_emission);
+    assert_eq!(settings.execution_path, "action_scoped_only");
+}
+
+#[test]
 fn loads_paper_report_paths() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&[

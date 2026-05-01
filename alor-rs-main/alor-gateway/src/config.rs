@@ -1740,4 +1740,40 @@ refresh_token = "   "
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn loads_ri_author41_42_7502miw_gateway_config() {
+        let _guard = env_lock().lock().expect("lock env");
+        unsafe {
+            std::env::set_var("ALOR_REFRESH_TOKEN", "test-token");
+        }
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .to_path_buf();
+        let path = repo_root
+            .join("configs/gateway.ri_author41_42.shadow.7502MIW.toml")
+            .to_string_lossy()
+            .to_string();
+
+        let resolved = AlorGatewayConfig::from_file_with_sources(path).expect("load config");
+
+        assert_eq!(resolved.config.portfolio, "7502MIW");
+        assert_eq!(resolved.config.symbols, vec!["RIM6".to_string()]);
+        assert_eq!(resolved.config.tf_sec, 600);
+        assert_eq!(resolved.config.health_listen_addr, "127.0.0.1:8084");
+        assert_eq!(resolved.config.price_step, 10.0);
+        assert_eq!(
+            resolved.config.control_cws_mode,
+            ControlCwsMode::ActionScoped
+        );
+        assert!(resolved.config.action_scope_enable_market);
+        assert!(resolved.config.action_scope_enable_create_limit);
+        assert!(resolved.config.action_scope_enable_delete_limit);
+        assert!(resolved.config.action_scope_enable_exit);
+
+        unsafe {
+            std::env::remove_var("ALOR_REFRESH_TOKEN");
+        }
+    }
 }

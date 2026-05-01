@@ -819,6 +819,39 @@ Validation:
 cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
 ```
 
+### 2026-05-01 7502MIW Shadow Configs
+
+Prepared portfolio-specific shadow configs:
+
+```text
+configs/runtime.ri_author41_42.shadow.7502MIW.toml
+configs/gateway.ri_author41_42.shadow.7502MIW.toml
+```
+
+Important isolation rules:
+
+- `7502MIW` may also host sessiongap on `USDRUBF`;
+- RI uses `RIM6`, but runtime bar streams must not mix symbols;
+- RI runtime therefore reads `md.bars.7502MIW.RIM6.10m`, not the portfolio-wide
+  `md.bars.7502MIW.10m`;
+- RI commands/acks are also shadow-isolated:
+  `cmd.orders.7502MIW.ri_author41_42.shadow` and
+  `cmd.acks.7502MIW.ri_author41_42.shadow`;
+- RI shadow runtime uses `trade_mode=paper` with `allow_live_orders=false`
+  while consuming live Redis bars;
+- live order emission remains disabled by both runtime and strategy config.
+
+When using `alor_gateway_transport_runner`, apply matching stream overrides for
+the RI gateway process:
+
+```text
+STREAM_BARS=md.bars.7502MIW.RIM6.10m
+STREAM_HEALTH=events.health.ri_author41_42.7502MIW
+STREAM_COMMANDS=cmd.orders.7502MIW.ri_author41_42.shadow
+STREAM_ACKS=cmd.acks.7502MIW.ri_author41_42.shadow
+CONSUMER_GROUP=gateway-commands-ri-author41-42-shadow-7502MIW
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document

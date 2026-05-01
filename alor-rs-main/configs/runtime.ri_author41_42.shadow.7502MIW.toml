@@ -1,8 +1,8 @@
 redis_url = "redis://127.0.0.1/"
-portfolio = "7502XXX"
+portfolio = "7502MIW"
 exchange = "MOEX"
-source = "strategy-runtime"
-consumer_group = "strategy-runtime-ri-author41-42-shadow-7502XXX"
+source = "strategy-runtime-ri-author41-42-shadow"
+consumer_group = "strategy-runtime-ri-author41-42-shadow-7502MIW"
 consumer_name = "auto"
 reset_state_on_start = false
 
@@ -23,16 +23,18 @@ listen_addr = "127.0.0.1:8094"
 expose_metrics = false
 
 [streams]
-bars = "md.bars.7502XXX.10m"
-orders = "broker.orders.7502XXX"
-trades = "broker.trades.7502XXX"
-positions = "broker.positions.7502XXX"
-commands = "cmd.orders.7502XXX"
-acks = "cmd.acks.7502XXX"
-snapshots = "broker.snapshots.7502XXX"
-health = "events.health"
+# Symbol-scoped bar stream is intentional. The 7502MIW portfolio may also run
+# sessiongap on USDRUBF; RI must not consume mixed portfolio-level bars.
+bars = "md.bars.7502MIW.RIM6.10m"
+orders = "broker.orders.7502MIW"
+trades = "broker.trades.7502MIW"
+positions = "broker.positions.7502MIW"
+commands = "cmd.orders.7502MIW.ri_author41_42.shadow"
+acks = "cmd.acks.7502MIW.ri_author41_42.shadow"
+snapshots = "broker.snapshots.7502MIW"
+health = "events.health.ri_author41_42.7502MIW"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.ri_author41_42.shadow.7502XXX"
+runtime_state = "runtime.state.ri_author41_42.shadow.7502MIW"
 
 [read]
 block_ms = 500
@@ -51,7 +53,7 @@ health = 5000
 runtime_state = 500
 
 [strategy]
-strategy_id = "ri_author41_42.shadow.7502XXX"
+strategy_id = "ri_author41_42.shadow.7502MIW"
 strategy_kind = "ri_author41_42"
 symbol = "RIM6"
 qty = 1.0
@@ -82,15 +84,15 @@ timeframe = "10m"
 mode = "shadow"
 allow_order_emission = false
 execution_path = "action_scoped_only"
-decision_journal_path = "./reports/ri_author41_42_decisions.jsonl"
+decision_journal_path = "./reports/ri_author41_42_7502MIW_decisions.jsonl"
 decision_journal_append = true
 
 [paper]
 enabled = false
 output = "stdout"
-file_path = "./reports/paper_ri_author41_42_shadow.jsonl"
-trades_csv = "./reports/trades_ri_author41_42_shadow.csv"
-summary_json = "./reports/summary_ri_author41_42_shadow.json"
+file_path = "./reports/paper_ri_author41_42_7502MIW_shadow.jsonl"
+trades_csv = "./reports/trades_ri_author41_42_7502MIW_shadow.csv"
+summary_json = "./reports/summary_ri_author41_42_7502MIW_shadow.json"
 append = false
 
 [backtest]
