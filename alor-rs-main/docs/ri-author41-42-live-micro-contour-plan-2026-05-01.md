@@ -776,6 +776,24 @@ Validation:
 cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
 ```
 
+### 2026-05-01 Live Contract Document
+
+Added the first standalone RI live contract:
+
+```text
+docs/ri-author41-42-live-contract-2026-05-01.md
+```
+
+The contract freezes the current pre-GO operating boundary:
+
+- isolated `ri_author41_42` contour;
+- frozen 10m model layer;
+- regular weekday model feed only;
+- MR/BO no-overlap;
+- no-overnight / gap-flatten safety rule;
+- `action_scoped_only` execution path;
+- `micro_live` and `allow_order_emission=true` blocked until GO/NO-GO.
+
 ## Work Packages
 
 ### WP1. Live Contract Document

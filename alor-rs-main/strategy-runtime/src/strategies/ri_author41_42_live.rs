@@ -997,7 +997,7 @@ mod tests {
     use super::{
         is_finalized_record, RiAuthor4142CandidateRole, RiAuthor4142DecisionAction,
         RiAuthor4142ExecutionPath, RiAuthor4142JournalDecision, RiAuthor4142LiveConfig,
-        RiAuthor4142LiveStrategy, RiAuthor4142Phase, RiAuthor4142RuntimeMode,
+        RiAuthor4142LiveStrategy, RiAuthor4142Phase, RiAuthor4142RuntimeMode, RiAuthor4142Side,
     };
     use crate::strategies::moex_author41_42::{
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
@@ -1050,6 +1050,15 @@ mod tests {
             .expect_err("micro_live must remain blocked")
             .to_string();
         assert!(err.contains("micro_live mode is blocked"));
+    }
+
+    #[test]
+    fn legacy_execution_path_is_rejected() {
+        let err = RiAuthor4142ExecutionPath::parse("legacy_long_lived")
+            .expect_err("legacy cws path must not be accepted")
+            .to_string();
+
+        assert!(err.contains("unsupported ri_author41_42 execution_path"));
     }
 
     #[test]
@@ -1148,6 +1157,47 @@ mod tests {
             RiAuthor4142ExecutionPath::ActionScopedOnly
         );
         assert!(candidates[1].comment.contains("author42_bo:exit"));
+    }
+
+    #[test]
+    fn candidate_adapter_keeps_all_roles_action_scoped_only() {
+        let strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let cases = [
+            (Component::Author41Mr, ShadowSide::Long, "author41_mr"),
+            (Component::Author42Bo, ShadowSide::Short, "author42_bo"),
+        ];
+
+        for (component, side, component_label) in cases {
+            let mut record = sample_record(OverlapDecision::Accepted, "time_exit_same_bar_close");
+            record.component = component;
+            record.side = Some(side);
+            let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+                record,
+                format!("{component_label}-decision-key"),
+            )
+            .expect("decision");
+
+            let candidates = strategy.candidate_intents_for_decision(&decision);
+
+            assert_eq!(candidates.len(), 2);
+            assert_eq!(decision.side, Some(RiAuthor4142Side::from_shadow(side)));
+            for candidate in candidates {
+                assert_eq!(
+                    candidate.execution_path,
+                    RiAuthor4142ExecutionPath::ActionScopedOnly
+                );
+                assert_eq!(candidate.order_style, "market_p0");
+                assert!(candidate.comment.contains(component_label));
+                match candidate.role {
+                    RiAuthor4142CandidateRole::Entry => {
+                        assert_eq!(candidate.intent_class, IntentClass::Entry);
+                    }
+                    RiAuthor4142CandidateRole::Exit => {
+                        assert_eq!(candidate.intent_class, IntentClass::Exit);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

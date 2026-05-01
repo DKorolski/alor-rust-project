@@ -1,0 +1,174 @@
+# RI Author41/42 Live Contract
+
+Date: 2026-05-01
+
+Status: `PRE_GO_SHADOW_ONLY`
+
+This document freezes the first engineering contract for the isolated RI
+Author41/42 live contour. It is intentionally conservative: the strategy may
+run in shadow/dry-run modes, but live order emission remains blocked until a
+separate GO/NO-GO decision.
+
+## Scope
+
+The live contour is an isolated strategy:
+
+```text
+strategy_kind = ri_author41_42
+profile_id = ri_author41_42_primary_combo_cost2
+timeframe = 10m
+symbol = RIM6
+qty = 1
+```
+
+Current allowed modes:
+
+- `shadow`
+- `dry_run`
+
+Blocked until GO/NO-GO:
+
+- `micro_live`
+- `allow_order_emission = true`
+
+## Model Contract
+
+The model source is the frozen RI Author41/42 10m handoff profile.
+
+The runtime must not retune:
+
+- Author41 MR parameters;
+- Author42 BO parameters;
+- overlap arbitration;
+- cost conventions;
+- source exit reason taxonomy.
+
+The model feed contract is:
+
+- 10m bars only;
+- regular weekday model session only;
+- no weekend model bars;
+- no pre-session/service bars in model state;
+- raw/audit feeds may retain service bars, but they are not model inputs.
+
+## Component Contract
+
+Components:
+
+- `author41_mr`
+- `author42_bo`
+
+Overlap rule:
+
+- MR and BO must not create simultaneous live exposure;
+- accepted decisions may produce one entry leg and one exit leg;
+- dropped overlap decisions are journaled as suppressions, not as live intents.
+
+## Execution Contract
+
+RI live execution is action-scoped only.
+
+Required config:
+
+```text
+execution_path = action_scoped_only
+```
+
+Legacy long-lived CWS is not an accepted primary path for RI commands.
+
+Candidate order style:
+
+```text
+market_p0
+```
+
+Candidate intent classes:
+
+- entry leg -> `IntentClass::Entry`
+- exit leg -> `IntentClass::Exit`
+- future safety flatten leg -> `IntentClass::Exit`
+
+The adapter may build candidate intents before GO, but it must suppress them
+and write observation records. It must not return order-emitting `Intent`s
+while `micro_live` and `allow_order_emission=true` are blocked.
+
+## Safety Contract
+
+Startup and restart must be conservative:
+
+- non-flat broker snapshot -> `manual_intervention_required`;
+- working order snapshot -> `manual_intervention_required`;
+- working stop-order snapshot -> `manual_intervention_required`;
+- restored pending request ids -> `manual_intervention_required`;
+- restored known order ids -> `manual_intervention_required`;
+- empty broker/runtime state may remain `flat`.
+
+No-overnight rule:
+
+- BO must not carry across non-tradable gaps in live/micro contour;
+- gap flatten is a live safety overlay, not a frozen parity claim.
+
+Closed-window rule:
+
+- closed-window exits must not become stale live pending state;
+- preferred behavior is pre-emit defer/safety handling before broker command
+  emission;
+- gateway reject handling remains a residual safety net.
+
+## State Boundaries
+
+Shadow/model journal:
+
+- source for observed model decisions and dry-run evidence;
+- not a live position source.
+
+Runtime state:
+
+- current operational phase;
+- current dry-run component/side/cycle;
+- pending restore guards.
+
+Broker truth:
+
+- startup flat check;
+- working order scan;
+- manual flat check before any future micro-live rollout.
+
+## Observability Contract
+
+Every observed decision should preserve:
+
+- component;
+- cycle id;
+- model signal timestamp;
+- bar timestamp;
+- side;
+- entry/exit reason;
+- no-overlap decision;
+- emit/defer/suppress decision;
+- request id when emitted;
+- broker order id when accepted;
+- position before/after when known.
+
+Pre-GO journal records must show:
+
+```text
+adapter_decision = shadow_recorded | intent_suppressed | manual_intervention_required
+execution_path = action_scoped_only
+request_id = null
+broker_order_id = null
+```
+
+## Promotion Gate
+
+RI can be considered for micro-live size 1 only after:
+
+- 3-5 additional post-watermark trading sessions are reviewed;
+- finalized shadow journal is duplicate-free;
+- model decisions remain explainable against the 10m feed;
+- action-scoped coverage is confirmed for all future RI command classes;
+- from-zero runbook is ready;
+- broker/account is manually confirmed flat with no working orders.
+
+Any legacy CWS primary path, stale pending tail, request-id skew, BO/MR live
+overlap, or overnight carry possibility is a NO-GO.
