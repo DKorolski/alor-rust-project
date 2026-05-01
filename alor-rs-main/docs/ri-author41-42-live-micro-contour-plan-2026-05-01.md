@@ -653,6 +653,39 @@ Result:
 PASS: 10 RI live scaffold tests
 ```
 
+### 2026-05-01 Decision Journal Schema
+
+Added the first structured RI journal schema.
+
+Current behavior:
+
+- every finalized model decision records a `shadow_recorded` journal row;
+- dropped overlap decisions record an `intent_suppressed` row;
+- accepted decisions record separate suppressed candidate `entry` and `exit`
+  rows;
+- journal fields cover component, cycle id, model/bar timestamps, side,
+  role, reason, overlap decision, adapter decision, request/broker ids,
+  position before/after placeholders, candidate order side/qty/style/class,
+  execution path, and decision key;
+- records are kept in an internal bounded buffer for now;
+- no runtime/file/Redis writer is enabled yet.
+
+This intentionally keeps the journal as evidence, not live state. The next
+engineering step can attach a runtime-owned append-only writer to this schema
+without changing model or adapter semantics.
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 12 RI live scaffold tests
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document

@@ -217,6 +217,37 @@ pub struct RiAuthor4142CandidateIntent {
     pub decision_key: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RiAuthor4142JournalDecision {
+    ShadowRecorded,
+    IntentSuppressed,
+    ManualInterventionRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiAuthor4142JournalRecord {
+    pub component: String,
+    pub cycle_id: String,
+    pub model_signal_ts_local: String,
+    pub bar_ts_local: String,
+    pub side: Option<String>,
+    pub role: Option<String>,
+    pub entry_exit_reason: String,
+    pub no_overlap_decision: String,
+    pub adapter_decision: RiAuthor4142JournalDecision,
+    pub request_id: Option<String>,
+    pub broker_order_id: Option<String>,
+    pub position_before: Option<f64>,
+    pub position_after: Option<f64>,
+    pub candidate_order_side: Option<OrderSide>,
+    pub candidate_qty: Option<f64>,
+    pub candidate_order_style: Option<String>,
+    pub candidate_intent_class: Option<IntentClass>,
+    pub execution_path: String,
+    pub decision_key: String,
+}
+
 impl RiAuthor4142LiveConfig {
     pub fn validate_pre_go(&self) -> Result<()> {
         if self.execution_path != RiAuthor4142ExecutionPath::ActionScopedOnly {
@@ -244,6 +275,7 @@ pub struct RiAuthor4142LiveStrategy {
     session_policy: RegularSessionPolicy,
     model_bars: Vec<ModelBar>,
     emitted_decision_keys: HashSet<String>,
+    journal_records: Vec<RiAuthor4142JournalRecord>,
     state: StrategyState,
 }
 
@@ -278,6 +310,7 @@ impl RiAuthor4142LiveStrategy {
             session_policy,
             model_bars: Vec::new(),
             emitted_decision_keys: HashSet::new(),
+            journal_records: Vec::new(),
         })
     }
 
@@ -362,6 +395,7 @@ impl RiAuthor4142LiveStrategy {
                 continue;
             };
             self.record_decision_state(&decision);
+            self.record_shadow_journal(&decision);
             self.log_decision(&decision);
             self.apply_dry_run_decision(&decision);
             decisions.push(decision);
@@ -403,11 +437,16 @@ impl RiAuthor4142LiveStrategy {
     fn apply_dry_run_decision(&mut self, decision: &RiAuthor4142ModelDecision) {
         match decision.action {
             RiAuthor4142DecisionAction::Suppress => {
+                self.record_suppressed_journal(decision);
                 self.log_transition("suppressed", "ri_intent_suppressed", decision);
             }
             RiAuthor4142DecisionAction::Enter => {
                 let candidates = self.candidate_intents_for_decision(decision);
                 if candidates.is_empty() {
+                    self.record_manual_intervention_journal(
+                        decision,
+                        "accepted_model_decision_without_complete_entry_exit_candidate",
+                    );
                     self.log_manual_intervention_required(
                         decision,
                         "accepted_model_decision_without_complete_entry_exit_candidate",
@@ -415,6 +454,7 @@ impl RiAuthor4142LiveStrategy {
                     return;
                 }
                 for candidate in &candidates {
+                    self.record_candidate_suppressed_journal(candidate, decision);
                     self.log_candidate_intent_suppressed(candidate, decision);
                 }
                 self.transition_to_dry_run_in_position(decision);
@@ -451,6 +491,58 @@ impl RiAuthor4142LiveStrategy {
             ));
         }
         candidates
+    }
+
+    fn record_shadow_journal(&mut self, decision: &RiAuthor4142ModelDecision) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::ShadowRecorded,
+            None,
+            None,
+        ));
+    }
+
+    fn record_suppressed_journal(&mut self, decision: &RiAuthor4142ModelDecision) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::IntentSuppressed,
+            None,
+            None,
+        ));
+    }
+
+    fn record_candidate_suppressed_journal(
+        &mut self,
+        candidate: &RiAuthor4142CandidateIntent,
+        decision: &RiAuthor4142ModelDecision,
+    ) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::IntentSuppressed,
+            Some(candidate),
+            None,
+        ));
+    }
+
+    fn record_manual_intervention_journal(
+        &mut self,
+        decision: &RiAuthor4142ModelDecision,
+        reason: &'static str,
+    ) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::ManualInterventionRequired,
+            None,
+            Some(reason),
+        ));
+    }
+
+    fn push_journal_record(&mut self, record: RiAuthor4142JournalRecord) {
+        self.journal_records.push(record);
+        if self.journal_records.len() > 10_000 {
+            let excess = self.journal_records.len() - 10_000;
+            self.journal_records.drain(..excess);
+        }
     }
 
     fn build_candidate_intent(
@@ -621,6 +713,10 @@ impl RiAuthor4142LiveStrategy {
             _ => None,
         }
     }
+
+    pub fn journal_records_for_test(&self) -> &[RiAuthor4142JournalRecord] {
+        &self.journal_records
+    }
 }
 
 impl Strategy for RiAuthor4142LiveStrategy {
@@ -706,6 +802,46 @@ impl RiAuthor4142ModelDecision {
     }
 }
 
+impl RiAuthor4142JournalRecord {
+    fn from_decision(
+        decision: &RiAuthor4142ModelDecision,
+        adapter_decision: RiAuthor4142JournalDecision,
+        candidate: Option<&RiAuthor4142CandidateIntent>,
+        reason_override: Option<&str>,
+    ) -> Self {
+        let cycle_id = format!(
+            "{}:{}",
+            decision.component.as_str(),
+            decision.model_signal_ts_local.format("%Y%m%d%H%M%S")
+        );
+        Self {
+            component: decision.component.as_str().to_string(),
+            cycle_id,
+            model_signal_ts_local: decision.model_signal_ts_local.to_string(),
+            bar_ts_local: decision.model_signal_ts_local.to_string(),
+            side: decision.side.map(|side| side.as_str().to_string()),
+            role: candidate.map(|candidate| candidate.role.as_str().to_string()),
+            entry_exit_reason: reason_override
+                .unwrap_or(decision.reason.as_str())
+                .to_string(),
+            no_overlap_decision: decision.overlap_decision.clone(),
+            adapter_decision,
+            request_id: None,
+            broker_order_id: None,
+            position_before: None,
+            position_after: None,
+            candidate_order_side: candidate.map(|candidate| candidate.side),
+            candidate_qty: candidate.map(|candidate| candidate.qty),
+            candidate_order_style: candidate.map(|candidate| candidate.order_style.to_string()),
+            candidate_intent_class: candidate.map(|candidate| candidate.intent_class),
+            execution_path: candidate
+                .map(|candidate| candidate.execution_path.as_str().to_string())
+                .unwrap_or_else(|| "not_applicable_pre_go".to_string()),
+            decision_key: decision.decision_key.clone(),
+        }
+    }
+}
+
 fn non_zero_or_close(value: f64, close: f64) -> f64 {
     if value != 0.0 {
         value
@@ -749,8 +885,8 @@ fn decision_key(record: &ShadowJournalRecord) -> String {
 mod tests {
     use super::{
         is_finalized_record, RiAuthor4142CandidateRole, RiAuthor4142DecisionAction,
-        RiAuthor4142ExecutionPath, RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy,
-        RiAuthor4142Phase, RiAuthor4142RuntimeMode,
+        RiAuthor4142ExecutionPath, RiAuthor4142JournalDecision, RiAuthor4142LiveConfig,
+        RiAuthor4142LiveStrategy, RiAuthor4142Phase, RiAuthor4142RuntimeMode,
     };
     use crate::strategies::moex_author41_42::{
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
@@ -910,6 +1046,72 @@ mod tests {
         let candidates = strategy.candidate_intents_for_decision(&decision);
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn accepted_decision_records_shadow_and_candidate_journal_entries() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let record = sample_record(OverlapDecision::Accepted, "time_exit_same_bar_close");
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "decision-key".to_string(),
+        )
+        .expect("decision");
+
+        strategy.record_shadow_journal(&decision);
+        strategy.apply_dry_run_decision(&decision);
+
+        let journal = strategy.journal_records_for_test();
+        assert_eq!(journal.len(), 3);
+        assert_eq!(
+            journal[0].adapter_decision,
+            RiAuthor4142JournalDecision::ShadowRecorded
+        );
+        assert_eq!(journal[0].component, "author42_bo");
+        assert_eq!(journal[0].cycle_id, "author42_bo:20260501130000");
+        assert_eq!(journal[0].side.as_deref(), Some("short"));
+        assert_eq!(journal[0].role, None);
+        assert_eq!(journal[0].request_id, None);
+        assert_eq!(journal[0].broker_order_id, None);
+        assert_eq!(
+            journal[1].adapter_decision,
+            RiAuthor4142JournalDecision::IntentSuppressed
+        );
+        assert_eq!(journal[1].role.as_deref(), Some("entry"));
+        assert_eq!(journal[1].candidate_order_side, Some(OrderSide::Sell));
+        assert_eq!(journal[1].candidate_intent_class, Some(IntentClass::Entry));
+        assert_eq!(journal[1].execution_path, "action_scoped_only");
+        assert_eq!(journal[2].role.as_deref(), Some("exit"));
+        assert_eq!(journal[2].candidate_order_side, Some(OrderSide::Buy));
+        assert_eq!(journal[2].candidate_intent_class, Some(IntentClass::Exit));
+    }
+
+    #[test]
+    fn suppressed_decision_records_shadow_and_suppression_journal_entries() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let record = sample_record(OverlapDecision::DroppedMrOverlap, "mr_interval_overlap");
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "decision-key".to_string(),
+        )
+        .expect("decision");
+
+        strategy.record_shadow_journal(&decision);
+        strategy.apply_dry_run_decision(&decision);
+
+        let journal = strategy.journal_records_for_test();
+        assert_eq!(journal.len(), 2);
+        assert_eq!(
+            journal[0].adapter_decision,
+            RiAuthor4142JournalDecision::ShadowRecorded
+        );
+        assert_eq!(
+            journal[1].adapter_decision,
+            RiAuthor4142JournalDecision::IntentSuppressed
+        );
+        assert_eq!(journal[1].role, None);
+        assert_eq!(journal[1].entry_exit_reason, "mr_interval_overlap");
+        assert_eq!(journal[1].candidate_order_side, None);
     }
 
     fn sample_record(overlap_decision: OverlapDecision, reason: &str) -> ShadowJournalRecord {
