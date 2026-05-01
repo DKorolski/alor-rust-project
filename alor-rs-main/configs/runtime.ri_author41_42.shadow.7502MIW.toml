@@ -84,15 +84,15 @@ timeframe = "10m"
 mode = "shadow"
 allow_order_emission = false
 execution_path = "action_scoped_only"
-decision_journal_path = "./reports/ri_author41_42_7502MIW_decisions.jsonl"
+decision_journal_path = "/reports/ri_author41_42_7502MIW_decisions.jsonl"
 decision_journal_append = true
 
 [paper]
 enabled = false
 output = "stdout"
-file_path = "./reports/paper_ri_author41_42_7502MIW_shadow.jsonl"
-trades_csv = "./reports/trades_ri_author41_42_7502MIW_shadow.csv"
-summary_json = "./reports/summary_ri_author41_42_7502MIW_shadow.json"
+file_path = "/reports/paper_ri_author41_42_7502MIW_shadow.jsonl"
+trades_csv = "/reports/trades_ri_author41_42_7502MIW_shadow.csv"
+summary_json = "/reports/summary_ri_author41_42_7502MIW_shadow.json"
 append = false
 
 [backtest]

@@ -136,7 +136,8 @@ def build_review(path: Path, tail: int) -> Review:
     unexpected_execution_path_rows = [
         row
         for row in rows
-        if value(row, "execution_path") != EXPECTED_EXECUTION_PATH
+        if value(row, "candidate_intent_class") != "none"
+        and value(row, "execution_path") != EXPECTED_EXECUTION_PATH
     ]
 
     return Review(

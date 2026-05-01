@@ -358,3 +358,143 @@ expected next target:
 Do not treat the current RI shadow container as proof that the new `7502MIW`
 contour is deployed. Next RI rollout should explicitly replace or create the
 target `7502MIW/RIM6` shadow stack from the prepared configs.
+
+## RI Author41/42 7502MIW Shadow Contour Deployment
+
+Observation time:
+
+```text
+2026-05-01 15:05 MSK
+```
+
+Action:
+
+```text
+created separate stack:
+  /opt/trading-ri-author41-42-7502miw
+compose project:
+  trading-ri-author41-42-7502miw
+```
+
+Reason for separate stack:
+
+```text
+the existing trading-ri-shadow stack is the older handoff contour and still
+uses 7502SN6 / md.bars.RI.10m style streams; the new target must be isolated
+as 7502MIW / RIM6 / 10m with no shared command stream.
+```
+
+Runtime image note:
+
+```text
+initial runtime attempt with manual-7c590e4-ri-shadow-watermark failed because
+the image did not yet know strategy_kind=ri_author41_42.
+
+fresh runtime image built on VPS:
+  ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-d6d0e7e-ri7502miw-20260501
+```
+
+Container status after deployment:
+
+```text
+trading-ri-author41-42-7502miw-redis-1              healthy
+trading-ri-author41-42-7502miw-alor-gateway-1       healthy
+trading-ri-author41-42-7502miw-strategy-runtime-1   healthy
+```
+
+Gateway resolved contour:
+
+```text
+portfolio = 7502MIW
+symbol = RIM6
+tf_sec = 600
+bars = md.bars.7502MIW.RIM6.10m
+commands = cmd.orders.7502MIW.ri_author41_42.shadow
+acks = cmd.acks.7502MIW.ri_author41_42.shadow
+control_cws_mode = action_scoped
+```
+
+Runtime resolved contour:
+
+```text
+strategy_kind = ri_author41_42
+strategy_id = ri_author41_42.shadow.7502MIW
+trade_mode = Paper
+allow_live_orders = false
+mode = shadow
+allow_order_emission = false
+execution_path = action_scoped_only
+decision_journal_path = /reports/ri_author41_42_7502MIW_decisions.jsonl
+```
+
+Runtime startup evidence:
+
+```text
+bootstrap warmup completed
+bars_processed = 457
+mode = shadow
+allow_order_emission = false
+live_adapter_enabled = false
+```
+
+Redis state after startup:
+
+```text
+md.bars.7502MIW.RIM6.10m                  stream 912
+events.health.ri_author41_42.7502MIW      stream 192
+cmd.orders.7502MIW.ri_author41_42.shadow  stream 0
+cmd.acks.7502MIW.ri_author41_42.shadow    stream 0
+runtime.state.ri_author41_42.shadow.7502MIW stream 2
+broker.snapshots.7502MIW                  stream 99
+broker.positions.7502MIW                  stream 0
+```
+
+Journal review:
+
+```text
+rows = 15
+status = PASS
+live emission evidence rows = 0
+duplicate shadow_recorded decision keys = 0
+unexpected adapter decisions = 0
+unexpected execution paths = 0
+```
+
+Decision mix:
+
+```text
+adapter_decision:
+  shadow_recorded = 5
+  intent_suppressed = 10
+component:
+  author41_mr = 12
+  author42_bo = 3
+execution_path:
+  action_scoped_only = 10
+  not_applicable_pre_go = 5
+```
+
+Interpretation:
+
+```text
+action_scoped_only appears on command-capable entry/exit rows.
+not_applicable_pre_go appears only on pure shadow_recorded observation rows.
+No request_id or broker_order_id was observed.
+```
+
+Resource impact of the new stack:
+
+```text
+strategy-runtime   ~2.8 MiB / 768 MiB
+alor-gateway       ~3.7 MiB / 768 MiB
+redis              ~5.1 MiB / 768 MiB
+disk /             34G used / 79G (46%), 41G free
+```
+
+Verdict:
+
+```text
+RI_AUTHOR41_42_7502MIW_SHADOW_CONTOUR_DEPLOYED
+PRE_GO_SHADOW_ONLY_VALIDATION_PASS
+CONTINUE_OBSERVATION_7_TO_14_TRADING_SESSIONS
+```

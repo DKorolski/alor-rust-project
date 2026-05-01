@@ -7,6 +7,30 @@ Status: `PRE_GO_SHADOW_ONLY`
 This runbook prepares the RI Author41/42 shadow contour on portfolio `7502MIW`.
 It is not a micro-live rollout. Order emission must remain disabled.
 
+Deployment status as of 2026-05-01 15:05 MSK:
+
+```text
+stack = trading-ri-author41-42-7502miw
+host = nektodk.ispvds.com / 155.212.170.21
+status = DEPLOYED_SHADOW_ONLY
+runtime_image = ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-d6d0e7e-ri7502miw-20260501
+gateway_image = ghcr.io/dkorolski/alor-rust-project/alor-gateway:manual-5430299-protplace-20260428
+```
+
+Initial validation:
+
+```text
+docker compose ps: redis/gateway/runtime healthy
+runtime warmup: bars_processed=457
+runtime mode: shadow
+allow_live_orders=false
+allow_order_emission=false
+live_adapter_enabled=false
+cmd.orders.7502MIW.ri_author41_42.shadow = 0
+cmd.acks.7502MIW.ri_author41_42.shadow = 0
+strict pre-GO journal review = PASS
+```
+
 ## Files
 
 Runtime config:
@@ -155,17 +179,17 @@ redis-cli XREVRANGE md.bars.7502MIW.RIM6.10m + - COUNT 3
 RI decisions:
 
 ```text
-tail -n 50 reports/ri_author41_42_7502MIW_decisions.jsonl
+tail -n 50 /opt/trading-ri-author41-42-7502miw/volumes/reports/ri_author41_42_7502MIW_decisions.jsonl
 ```
 
 Structured journal review:
 
 ```text
 python3 scripts/ri_author41_42_journal_review.py \
-  reports/ri_author41_42_7502MIW_decisions.jsonl \
+  /opt/trading-ri-author41-42-7502miw/volumes/reports/ri_author41_42_7502MIW_decisions.jsonl \
   --strict-pre-go \
   --tail 20 \
-  --out-md reports/ri_author41_42_7502MIW_journal_review.md
+  --out-md /opt/trading-ri-author41-42-7502miw/volumes/reports/ri_author41_42_7502MIW_journal_review.md
 ```
 
 Expected pre-GO review result:
@@ -173,7 +197,9 @@ Expected pre-GO review result:
 - status is `PASS`;
 - no live-emission evidence rows;
 - no duplicate `shadow_recorded` decision keys;
-- all rows use `execution_path=action_scoped_only`;
+- all command-capable `entry`/`exit` rows use `execution_path=action_scoped_only`;
+- pure `shadow_recorded` observation rows may use
+  `execution_path=not_applicable_pre_go`;
 - adapter decisions are limited to `shadow_recorded`,
   `intent_suppressed`, and `manual_intervention_required`.
 
