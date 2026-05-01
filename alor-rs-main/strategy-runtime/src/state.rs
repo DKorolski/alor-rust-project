@@ -445,6 +445,10 @@ pub enum StrategyState {
         #[serde(default)]
         suppressed_service_bars: u64,
         #[serde(default)]
+        model_decisions_seen: u64,
+        #[serde(default)]
+        last_decision_key: Option<String>,
+        #[serde(default)]
         live_adapter_enabled: bool,
     },
     CancelSent {

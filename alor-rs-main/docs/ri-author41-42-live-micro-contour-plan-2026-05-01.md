@@ -548,6 +548,42 @@ Result:
 PASS
 ```
 
+### 2026-05-01 ModelDecision Dry-Run Layer
+
+Added a safe `ModelDecision` bridge inside the RI scaffold.
+
+Scope:
+
+- keep an in-memory canonical `10m` model-bar buffer;
+- reuse the existing Author41/42 shadow engine:
+  `build_ri_author41_42_combo_shadow_journal`;
+- convert finalized shadow records into internal dry-run decisions;
+- map accepted MR/BO records to `enter` decisions;
+- map BO records dropped by MR overlap to `suppress` decisions;
+- log `ri_model_decision`;
+- keep `Vec<Intent>` empty in all modes currently allowed before GO/NO-GO.
+
+Provisional-tail guard:
+
+```text
+same-day forced_last_bar_close records are not treated as finalized decisions
+```
+
+This preserves the watermark fix semantics and avoids reintroducing duplicate
+same-day BO tail artifacts through the future live scaffold.
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 6 RI live scaffold tests
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document
