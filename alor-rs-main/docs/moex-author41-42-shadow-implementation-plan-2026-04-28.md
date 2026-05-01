@@ -959,3 +959,66 @@ Safety status:
 ```text
 SHADOW_ADMISSION_SCAFFOLD_READY / NO_ORDER_EMISSION_PATH
 ```
+
+### 2026-05-01 RI Shadow Journal Watermark Patch
+
+Live RI shadow soak exposed a journal-finalization issue rather than a model
+signal issue.
+
+Observed symptom:
+
+```text
+2026-04-28: 62 journal records = MR 1 + BO 61
+```
+
+Root cause:
+
+```text
+The runner rebuilds the full replay on every incoming bar. While a BO position
+is still open, the replay tail closes it at the current last bar with
+forced_last_bar_close. Each new bar moved scheduled_exit_ts_local forward, so
+the append-only journal saw repeated provisional versions of the same BO
+candidate as distinct records.
+```
+
+Patch:
+
+```text
+Same-day forced_last_bar_close records are treated as provisional in live
+shadow mode and are not written until they belong to a previous regular
+session. Same-day non-forced exits remain finalized and are written
+immediately.
+```
+
+Validation:
+
+```text
+cargo test -p strategy-runtime finalized -- --nocapture
+cargo test -p strategy-runtime same_day_forced_tail_record_is_provisional -- --nocapture
+cargo test -p strategy-runtime moex_author41_42 -- --nocapture
+```
+
+Result:
+
+```text
+PASS: runner watermark tests
+PASS: 19 moex_author41_42 tests
+```
+
+VPS rollout:
+
+```text
+image = ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-7c590e4-ri-shadow-watermark
+stack = trading-ri-shadow
+scope = ri-shadow-runner only
+```
+
+Pre-patch journal was archived and compacted for review:
+
+```text
+rows_before = 78
+rows_after  = 6
+2026-04-28: MR 1, BO 1
+2026-04-29: MR 1, BO 1
+2026-04-30: MR 2, BO 0
+```

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use alor_protocol::{Envelope, MessageType, SCHEMA_VERSION};
 use anyhow::{bail, Context, Result};
-use chrono::{FixedOffset, TimeZone};
+use chrono::{FixedOffset, NaiveDate, TimeZone};
 use strategy_runtime::strategies::moex_author41_42::{
     build_ri_author41_42_combo_shadow_journal, ModelBar, RegularSessionPolicy, ShadowJournalRecord,
 };
@@ -101,7 +101,12 @@ async fn main() -> Result<()> {
                                 &bars,
                                 RegularSessionPolicy::moex_10m(),
                             );
-                            let written = write_new_records(&mut writer, &mut seen_records, &records)?;
+                            let written = write_finalized_records(
+                                &mut writer,
+                                &mut seen_records,
+                                &records,
+                                latest_regular_date(&bars),
+                            )?;
                             if written > 0 {
                                 info!(
                                     message_id = ack_id,
@@ -387,6 +392,42 @@ fn write_new_records(
     Ok(written)
 }
 
+fn write_finalized_records(
+    writer: &mut BufWriter<File>,
+    seen_records: &mut HashSet<String>,
+    records: &[ShadowJournalRecord],
+    latest_regular_date: Option<NaiveDate>,
+) -> Result<usize> {
+    let Some(latest_regular_date) = latest_regular_date else {
+        return Ok(0);
+    };
+    let finalized: Vec<_> = records
+        .iter()
+        .filter(|record| is_finalized_live_record(record, latest_regular_date))
+        .cloned()
+        .collect();
+    write_new_records(writer, seen_records, &finalized)
+}
+
+fn latest_regular_date(bars: &[ModelBar]) -> Option<NaiveDate> {
+    let policy = RegularSessionPolicy::moex_10m();
+    bars.iter()
+        .rev()
+        .find(|bar| policy.is_model_bar(bar.ts_local))
+        .map(|bar| bar.ts_local.date())
+}
+
+fn is_finalized_live_record(record: &ShadowJournalRecord, latest_regular_date: NaiveDate) -> bool {
+    let record_date = record.bar_ts_local.date();
+    if record_date < latest_regular_date {
+        return true;
+    }
+    if record_date > latest_regular_date {
+        return false;
+    }
+    record.exit_reason.as_deref() != Some("forced_last_bar_close")
+}
+
 fn record_key(record: &ShadowJournalRecord) -> String {
     format!(
         "{:?}|{}|{:?}|{:?}|{:?}|{:?}",
@@ -425,4 +466,84 @@ fn print_usage() {
   [--write-warmup] \\
   [--once]"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDate, NaiveDateTime};
+    use strategy_runtime::strategies::moex_author41_42::{
+        Component, Instrument, OverlapDecision, ProfileId, ShadowSide,
+    };
+
+    fn dt(date: (i32, u32, u32), time: (u32, u32, u32)) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(date.0, date.1, date.2)
+            .unwrap()
+            .and_hms_opt(time.0, time.1, time.2)
+            .unwrap()
+    }
+
+    fn record(entry: NaiveDateTime, exit: NaiveDateTime, reason: &str) -> ShadowJournalRecord {
+        ShadowJournalRecord {
+            instrument: Instrument::Ri,
+            profile_id: ProfileId::RiAuthor41_42PrimaryComboCost2,
+            component: Component::Author42Bo,
+            model_variant_id: "grid_k0.42_both".to_string(),
+            bar_ts_local: entry,
+            timeframe: "10m".to_string(),
+            prev_regular_date: None,
+            prev_close: None,
+            prev_high: None,
+            prev_low: None,
+            prev_range: None,
+            trigger_long: None,
+            trigger_short: None,
+            condition_values: Vec::new(),
+            side: Some(ShadowSide::Short),
+            skip_reason: None,
+            scheduled_entry_ts_local: Some(entry),
+            scheduled_entry_price: Some(100.0),
+            scheduled_exit_ts_local: Some(exit),
+            exit_reason: Some(reason.to_string()),
+            overlap_decision: OverlapDecision::Accepted,
+            shadow_pnl_points: Some(1.0),
+            feed_quality_flags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn same_day_forced_tail_record_is_provisional() {
+        let latest = NaiveDate::from_ymd_opt(2026, 4, 28).unwrap();
+        let rec = record(
+            dt((2026, 4, 28), (13, 0, 0)),
+            dt((2026, 4, 28), (18, 0, 0)),
+            "forced_last_bar_close",
+        );
+
+        assert!(!is_finalized_live_record(&rec, latest));
+    }
+
+    #[test]
+    fn previous_day_forced_tail_record_is_finalized() {
+        let latest = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
+        let rec = record(
+            dt((2026, 4, 28), (13, 0, 0)),
+            dt((2026, 4, 28), (23, 0, 0)),
+            "forced_last_bar_close",
+        );
+
+        assert!(is_finalized_live_record(&rec, latest));
+    }
+
+    #[test]
+    fn same_day_non_forced_record_is_finalized() {
+        let latest = NaiveDate::from_ymd_opt(2026, 4, 28).unwrap();
+        let rec = record(
+            dt((2026, 4, 28), (9, 40, 0)),
+            dt((2026, 4, 28), (10, 10, 0)),
+            "take_author_close",
+        );
+
+        assert!(is_finalized_live_record(&rec, latest));
+    }
 }

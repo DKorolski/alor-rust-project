@@ -112,3 +112,118 @@ Follow-up:
 2. Keep logging split-regime days explicitly (USDRUBF inactive vs IMOEXF/RI active).
 3. If hybrid redis approaches ~600M and growth accelerates, run safe trim in non-trading window.
 ```
+
+## Redis Safe Trim Automation
+
+The whitelist Redis trim was extended to include `trading-ri-shadow-redis-1`
+and installed as a daily systemd timer:
+
+```text
+service = trading-redis-safe-trim.service
+timer   = trading-redis-safe-trim.timer
+time    = daily 03:10 MSK
+log     = /var/log/trading-redis-safe-trim.log
+script  = /opt/trading-maintenance/redis_safe_trim.sh --apply
+```
+
+The script remains whitelist-only:
+
+```text
+trimmed:
+  events.health
+  broker.snapshots.*
+  broker.positions.*
+  broker.orders.*
+  broker.trades.*
+  cmd.orders.*
+  cmd.acks.*
+  md.bars.*
+
+protected:
+  runtime.state.*
+  runtime.riskgate.*
+```
+
+Manual apply result at `2026-05-01 10:35 MSK`:
+
+```text
+sessiongap redis      302.0M -> 65.63M
+hybrid redis          510.3M -> 104.01M
+alor-usdrubf redis    327.0M -> 70.31M
+RI shadow redis       339.0M -> 94.32M
+```
+
+Post-trim check:
+
+```text
+all containers remained up/healthy
+no fresh runtime errors, xreadgroup failures, NOGROUP, or BusyLoading signatures
+next timer run = 2026-05-02 03:10 MSK
+```
+
+Verdict: safe trim automation is active and validated by one manual apply.
+
+## RI Shadow Journal Watermark Fix
+
+The initial RI shadow journal showed inflated counts:
+
+```text
+2026-04-28: 62 records, MR 1, BO 61, total shadow_pnl +59396
+```
+
+Root cause:
+
+```text
+The live shadow runner rebuilds replay state after every incoming bar.
+An open BO candidate was provisionally closed at the current tail bar as
+forced_last_bar_close. Because the provisional scheduled_exit_ts changed on
+each new bar, the append-only journal treated each tail update as a new record.
+```
+
+The runner was patched so same-day `forced_last_bar_close` records are treated
+as provisional and are not written until the record belongs to a previous
+regular session. Non-forced same-day exits still write immediately.
+
+Deployment:
+
+```text
+new image = ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-7c590e4-ri-shadow-watermark
+service   = trading-ri-shadow-ri-shadow-runner-1
+scope     = runner only; gateway/redis unchanged; no order-emission path
+```
+
+The pre-patch journal was archived and compacted:
+
+```text
+raw archive:
+  /opt/trading-ri-shadow/volumes/reports/moex_author41_42_shadow_ri.pre_watermark_20260501-104001.jsonl
+
+compacted view:
+  /opt/trading-ri-shadow/volumes/reports/moex_author41_42_shadow_ri.pre_watermark_20260501-104001.compacted.jsonl
+```
+
+Compacted read:
+
+```text
+rows_before = 78
+rows_after  = 6
+
+2026-04-28: MR 1, BO 1, shadow_pnl +1816
+2026-04-29: MR 1, BO 1, shadow_pnl -34
+2026-04-30: MR 2, BO 0, shadow_pnl +356
+```
+
+The active journal was reset after archive:
+
+```text
+/opt/trading-ri-shadow/volumes/reports/moex_author41_42_shadow_ri.jsonl = 0 rows at restart
+runner warmup_bars = 488
+runner warmup_records = 6
+write_warmup = false
+consumer lag = 0
+pending = 0
+```
+
+Verdict: the previous `BO 61` count was a journal-finalization artifact, not 61
+independent RI BO trades. Future live journal rows should represent finalized
+shadow decisions rather than moving tail snapshots.

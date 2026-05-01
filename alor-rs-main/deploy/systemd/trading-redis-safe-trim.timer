@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Trading Redis safe trim daily outside main MOEX sessions
+
+[Timer]
+OnCalendar=*-*-* 03:10:00 Europe/Moscow
+Persistent=true
+Unit=trading-redis-safe-trim.service
+
+[Install]
+WantedBy=timers.target
