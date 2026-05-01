@@ -9,6 +9,10 @@ This note locks the immediate tuning direction for:
 
 It is intentionally narrow: keep baseline logic stable, test only targeted challengers.
 
+Related MR comparison memo:
+
+- `docs/alor-usdrubf-mr-model-comparison-2026-04-27.md`
+
 ## 1) SessionGap USDRUBF
 
 ### Keep as baseline runtime contract

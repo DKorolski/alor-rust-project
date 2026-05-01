@@ -14,6 +14,12 @@ Status:
 IMPLEMENTATION_PLANNING / SHADOW_ONLY
 ```
 
+Live/micro follow-up contour:
+
+```text
+ri-author41-42-live-micro-contour-plan-2026-05-01.md
+```
+
 This note translates the frozen Author41+42 handoff bundle into an engineering
 plan for Rust/runtime work. It does not authorize live orders or paper orders.
 

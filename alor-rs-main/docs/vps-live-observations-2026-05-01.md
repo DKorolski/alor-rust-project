@@ -227,3 +227,30 @@ pending = 0
 Verdict: the previous `BO 61` count was a journal-finalization artifact, not 61
 independent RI BO trades. Future live journal rows should represent finalized
 shadow decisions rather than moving tail snapshots.
+
+## RI Shadow Rollout Gate
+
+Operator decision after the watermark fix:
+
+```text
+Keep RI Author41/42 in shadow observation for another 3-5 trading sessions.
+Do not promote validation status yet.
+```
+
+Rationale:
+
+- the journal-finalization bug is now patched, but the active post-patch
+  journal has not yet accumulated enough finalized records;
+- the compacted pre-patch read is useful, but promotion should be based on
+  clean post-watermark live rows;
+- watchpoints for the next 3-5 trading sessions:
+  - no duplicate same-day provisional BO records;
+  - active journal appends only finalized decisions;
+  - Redis consumer remains `lag=0`, `pending=0`;
+  - MR/BO attribution remains plausible against the live RIM6 10m feed.
+
+Status:
+
+```text
+RI_SHADOW_WATERMARK_PATCHED / OBSERVE_3_TO_5_MORE_TRADING_SESSIONS
+```
