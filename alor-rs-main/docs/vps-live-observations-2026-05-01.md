@@ -571,3 +571,85 @@ Status:
 HYBRID_BO_STALE_CYCLE_ID_PATCH_PREPARED
 REBUILD_AND_ROLLOUT_REQUIRED_BEFORE_NEXT_VALIDATION_READ
 ```
+
+## Hybrid IMOEXF Stale-Cycle Patch Rollout
+
+Rollout window:
+
+```text
+2026-05-01 15:41-15:51 MSK
+```
+
+Pre-rollout safety checks:
+
+```text
+IMOEXF broker position qty = 0
+broker snapshot positions = {}
+broker snapshot stop_orders = {}
+no active working orders observed
+no new strategy intents in the last 30 minutes before rollout
+```
+
+Rolled out image:
+
+```text
+ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-512b8e1-hybrid-stalecycle-20260501
+```
+
+Runtime reset scope:
+
+```text
+Deleted:
+runtime.state.hybrid_intraday.live.action_scoped.imoexf.7502SN6
+runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6
+
+Preserved:
+runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120
+runtime.riskgate.state.hybrid_imoexf.imoexf_primary_high180_lb120
+runtime.riskgate.finalized.hybrid_imoexf.imoexf_primary_high180_lb120.*
+broker snapshots / market data / command and ack streams
+```
+
+Post-restart checks:
+
+```text
+containers healthy: redis, alor-gateway, strategy-runtime
+runtime live guard: ALLOWED
+risk gate decision: UseExistingLedger
+risk gate existing_records_loaded = 184
+risk gate records_inserted = 0
+risk gate records_duplicate = 0
+mr_enabled_current_session = true
+rolling_sum_lb120 = 192.5000000000002
+last_finalized_session_date = 2026-04-30
+broker snapshot positions = {}
+broker snapshot stop_orders = {}
+runtime state active_cycle_id = null
+runtime state current_owner = null
+runtime state last_position_qty = 0.0
+risk_gate_shadow_session_date = 2026-05-01
+```
+
+Notes:
+
+```text
+The rollout intentionally reset only runtime-owned operational state.
+The riskgate ledger was kept as the canonical long-lived risk memory.
+
+After from-zero startup the live guard remained blocked until a fresh live
+bar after the startup replay boundary. This was expected and prevented replay
+tail execution immediately after restart. At 15:51:54 MSK the guard moved to
+ALLOWED with reasons_after = [].
+
+One orphan_trade warning was observed from the already closed 2026-05-01
+trade path. It did not restore active_cycle_id and broker state remained flat.
+```
+
+Status:
+
+```text
+PATCHED_IMAGE_DEPLOYED
+FROM_ZERO_RUNTIME_STATE_CLEAN
+RISK_GATE_LEDGER_PRESERVED
+LIVE_READY_CONFIRMED_AFTER_FRESH_BAR
+```
