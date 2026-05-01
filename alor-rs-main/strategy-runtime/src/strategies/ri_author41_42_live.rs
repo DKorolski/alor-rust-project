@@ -1029,11 +1029,11 @@ mod tests {
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
     };
     use crate::strategy_host::{
-        BootstrapSnapshot, OrderEvent, PositionEvent, RuntimeStateRestored, StopOrderEvent,
-        Strategy,
+        BarEvent, BootstrapSnapshot, DataOrigin, OrderEvent, PositionEvent, RuntimeStateRestored,
+        StopOrderEvent, Strategy,
     };
     use alor_protocol::{IntentClass, Side as OrderSide};
-    use chrono::{NaiveDate, NaiveDateTime};
+    use chrono::{Duration, NaiveDate, NaiveDateTime};
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -1079,12 +1079,52 @@ mod tests {
     }
 
     #[test]
+    fn non_10m_timeframe_is_rejected() {
+        let mut config = default_config();
+        config.timeframe = "1m".to_string();
+
+        let err = RiAuthor4142LiveStrategy::new(config)
+            .expect_err("RI frozen model must stay on 10m")
+            .to_string();
+        assert!(err.contains("frozen model requires 10m timeframe"));
+    }
+
+    #[test]
     fn legacy_execution_path_is_rejected() {
         let err = RiAuthor4142ExecutionPath::parse("legacy_long_lived")
             .expect_err("legacy cws path must not be accepted")
             .to_string();
 
         assert!(err.contains("unsupported ri_author41_42 execution_path"));
+    }
+
+    #[test]
+    fn model_feed_guard_excludes_service_weekend_and_history_gap_bars() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+
+        let service_bar = bar(dt(2026, 5, 1, 8, 50, 0), DataOrigin::Live);
+        let weekend_bar = bar(dt(2026, 5, 2, 10, 0, 0), DataOrigin::Live);
+        let history_gap_bar = bar(dt(2026, 5, 1, 10, 0, 0), DataOrigin::HistoryGap);
+        let regular_bar = bar(dt(2026, 5, 1, 10, 10, 0), DataOrigin::Live);
+
+        assert!(strategy.update_bar_state(&service_bar).is_empty());
+        assert!(strategy.update_bar_state(&weekend_bar).is_empty());
+        assert!(strategy.update_bar_state(&history_gap_bar).is_empty());
+        assert!(strategy.update_bar_state(&regular_bar).is_empty());
+
+        assert_eq!(strategy.model_bars.len(), 1);
+        assert_eq!(strategy.model_bars[0].ts_local, dt(2026, 5, 1, 10, 10, 0));
+        if let crate::state::StrategyState::RiAuthor4142Live {
+            model_bars_seen,
+            suppressed_service_bars,
+            ..
+        } = &strategy.state
+        {
+            assert_eq!(*model_bars_seen, 1);
+            assert_eq!(*suppressed_service_bars, 3);
+        } else {
+            panic!("unexpected strategy state");
+        }
     }
 
     #[test]
@@ -1556,6 +1596,19 @@ mod tests {
             .unwrap()
             .and_hms_opt(hour, minute, second)
             .unwrap()
+    }
+
+    fn bar(dt_local: NaiveDateTime, origin: DataOrigin) -> BarEvent {
+        BarEvent {
+            symbol: "RIM6".to_string(),
+            close_time_utc: (dt_local - Duration::hours(3)).and_utc().timestamp(),
+            close: 100_000.0,
+            o: 99_990.0,
+            h: 100_010.0,
+            l: 99_980.0,
+            v: 10.0,
+            origin,
+        }
     }
 
     fn test_ctx() -> crate::StrategyCtx {

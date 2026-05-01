@@ -852,6 +852,17 @@ STREAM_ACKS=cmd.acks.7502MIW.ri_author41_42.shadow
 CONSUMER_GROUP=gateway-commands-ri-author41-42-shadow-7502MIW
 ```
 
+### 2026-05-01 Pre-GO Guard Test Hardening
+
+Added focused RI live-strategy tests for two guardrails:
+
+- reject non-`10m` runtime timeframe before strategy construction;
+- keep service, weekend, and `HistoryGap` bars out of RI model state while
+  allowing regular weekday `10m` live bars.
+
+This keeps the frozen RI model contract aligned with the handoff bundle and
+prevents a quiet regression back toward mixed raw/audit feed semantics.
+
 ### 2026-05-01 Simple Contract Roll Policy
 
 Added the simple RI futures roll policy to the live contract.
