@@ -90,6 +90,24 @@ Expected before first start:
 - RI ack stream should be empty or inactive;
 - no requirement to clear sessiongap streams.
 
+If an older RI shadow stack already exists on the VPS, verify it is not being
+mistaken for the new `7502MIW/RIM6` target. The old contour may show streams
+such as:
+
+```text
+md.bars.RI.10m
+broker.snapshots.7502SN6
+cmd.orders.7502SN6
+```
+
+Those streams do not satisfy this runbook. The target contour must use:
+
+```text
+md.bars.7502MIW.RIM6.10m
+cmd.orders.7502MIW.ri_author41_42.shadow
+cmd.acks.7502MIW.ri_author41_42.shadow
+```
+
 ## Start Sequence
 
 1. Copy the runtime and gateway configs to the VPS config directory.

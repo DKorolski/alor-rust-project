@@ -254,3 +254,107 @@ Status:
 ```text
 RI_SHADOW_WATERMARK_PATCHED / OBSERVE_3_TO_5_MORE_TRADING_SESSIONS
 ```
+
+## VPS Resource Maintenance Check
+
+Observation time:
+
+```text
+2026-05-01 14:38 MSK
+host = nektodk.ispvds.com
+```
+
+Pre-cleanup resource state:
+
+```text
+RAM available:       6.2G / 7.7G
+Swap used:           55M / 3.9G
+Disk /:              40G used / 79G (54%), 35G free
+Docker reclaimable:  8.46G
+systemd journal:     2.3G
+```
+
+Redis memory before targeted trim:
+
+```text
+sessiongap redis      83.48M
+alor-usdrubf redis    88.70M
+hybrid redis          129.40M
+RI shadow redis       116.89M / 512M
+```
+
+Safe cleanup applied online:
+
+```text
+docker image prune -f
+journalctl --vacuum-size=512M
+XTRIM events.health MAXLEN ~ 5000 on all four Redis containers
+```
+
+Scope intentionally not touched:
+
+```text
+runtime.state.*
+runtime.riskgate.*
+broker.snapshots.*
+broker.orders/trades/positions
+md.bars.*
+cmd.orders / cmd.acks
+```
+
+Post-cleanup resource state:
+
+```text
+RAM available:       6.3G / 7.7G
+Disk /:              34G used / 79G (45%), 42G free
+Docker images:       3.74G total, 3.68G still reclaimable tagged old images
+systemd journal:     486.7M
+```
+
+Redis memory after health-stream trim:
+
+```text
+sessiongap redis      36.75M, events.health ~= 5006
+alor-usdrubf redis    42.03M, events.health ~= 5006
+hybrid redis          82.77M, events.health ~= 5006
+RI shadow redis       70.29M, events.health ~= 5006
+```
+
+Container status after cleanup:
+
+```text
+all 12 containers remained Up
+live strategy/runtime containers remained healthy where healthcheck exists
+```
+
+Verdict:
+
+```text
+Resource state is safe. No Redis pressure or disk pressure remains after
+online cleanup.
+```
+
+Operational note:
+
+The current `trading-ri-shadow` deployment still appears to be the older RI
+shadow contour:
+
+```text
+redis keys observed:
+  md.bars.RI.10m
+  broker.snapshots.7502SN6
+  cmd.orders.7502SN6
+```
+
+This does not match the new prepared `7502MIW/RIM6` runbook contour:
+
+```text
+expected next target:
+  md.bars.7502MIW.RIM6.10m
+  cmd.orders.7502MIW.ri_author41_42.shadow
+  cmd.acks.7502MIW.ri_author41_42.shadow
+```
+
+Do not treat the current RI shadow container as proof that the new `7502MIW`
+contour is deployed. Next RI rollout should explicitly replace or create the
+target `7502MIW/RIM6` shadow stack from the prepared configs.
