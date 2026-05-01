@@ -191,6 +191,7 @@ pub struct StrategyRuntime {
     sim_orders: Vec<SimOrder>,
     next_sim_order_id: i64,
     strategy_now_ts_utc: i64,
+    pending_strategy_journal_records: Vec<serde_json::Value>,
     health_snapshot: RuntimeSharedState,
     health_server_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -307,6 +308,8 @@ impl StrategyRuntime {
     {
         let previous_strategy_state = self.state.strategy_state.clone();
         let intents = callback(self.strategy.as_mut(), ctx);
+        self.pending_strategy_journal_records
+            .extend(self.strategy.drain_observation_journal_records());
         self.state.strategy_state = self.strategy.state().clone();
         self.audit_event(
             if intents.is_empty() {
@@ -476,6 +479,7 @@ impl StrategyRuntime {
             sim_orders: Vec::new(),
             next_sim_order_id: 1,
             strategy_now_ts_utc: 0,
+            pending_strategy_journal_records: Vec::new(),
             health_snapshot,
             health_server_handle: None,
         })
@@ -723,6 +727,7 @@ impl StrategyRuntime {
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
 
         if self.config.trade_mode != TradeMode::Live {
+            self.flush_strategy_journal_records().await?;
             self.record_non_live_intents(bar.close_time_utc, &intents, self.config.trade_mode)
                 .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
@@ -1023,6 +1028,9 @@ impl StrategyRuntime {
         let mut ctx = self.strategy_ctx();
         ctx.allow_live_orders = false;
         let processed = self.strategy.warmup_from_history(&ctx, &bars);
+        self.pending_strategy_journal_records
+            .extend(self.strategy.drain_observation_journal_records());
+        self.flush_strategy_journal_records().await?;
         if processed > 0 {
             if let Some(last_bar) = bars.last() {
                 self.state
@@ -1055,6 +1063,13 @@ impl StrategyRuntime {
                 self.truncate_file(&self.config.backtest.summary_json)?;
             }
             _ => {}
+        }
+        if let Some(settings) = self.config.strategy.ri_author41_42() {
+            if let Some(path) = settings.decision_journal_path.as_deref() {
+                if !path.trim().is_empty() && !settings.decision_journal_append {
+                    self.truncate_file(path)?;
+                }
+            }
         }
         Ok(())
     }
@@ -2004,6 +2019,7 @@ impl StrategyRuntime {
             });
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         if self.config.trade_mode != TradeMode::Live {
+            self.flush_strategy_journal_records().await?;
             self.record_non_live_intents(event_ts, &intents, self.config.trade_mode)
                 .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
@@ -2068,6 +2084,26 @@ impl StrategyRuntime {
                 self.metrics.publish_failures_total.saturating_add(1);
             error!(?error, "failed to persist runtime state");
             return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn flush_strategy_journal_records(&mut self) -> Result<()> {
+        if self.pending_strategy_journal_records.is_empty() {
+            return Ok(());
+        }
+        let records = std::mem::take(&mut self.pending_strategy_journal_records);
+        let Some(settings) = self.config.strategy.ri_author41_42() else {
+            return Ok(());
+        };
+        let Some(path) = settings.decision_journal_path.as_deref() else {
+            return Ok(());
+        };
+        if path.trim().is_empty() {
+            return Ok(());
+        }
+        for record in records {
+            append_json_line(path, &record).await?;
         }
         Ok(())
     }
@@ -3313,6 +3349,7 @@ impl StrategyRuntime {
                 "synthetic_ack": true,
             }),
         );
+        self.flush_strategy_journal_records().await?;
         self.persist_state(None).await?;
         Ok(true)
     }
@@ -3347,6 +3384,7 @@ impl StrategyRuntime {
         intents: Vec<Intent>,
         previous_strategy_state: StrategyState,
     ) -> Result<()> {
+        self.flush_strategy_journal_records().await?;
         if intents.is_empty() {
             self.persist_state(None).await?;
             return Ok(());
@@ -4025,6 +4063,7 @@ mod tests {
     use super::*;
     use crate::{ReadConfig, ReplayConfig, StrategyConfig, StrategyKind, StreamNames, TrimConfig};
     use alor_types::TradingPeriods;
+    use tempfile::tempdir;
 
     fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {
         let mut strategy = StrategyConfig::defaults_for_kind(StrategyKind::LimitCancel);
@@ -4113,6 +4152,33 @@ mod tests {
             .unwrap()
             .block_on(StrategyRuntime::new(config))
             .unwrap()
+    }
+
+    #[test]
+    fn flush_strategy_journal_records_writes_ri_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let journal_path = dir.path().join("ri_decisions.jsonl");
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::RiAuthor4142);
+        if let Some(settings) = runtime.config.strategy.ri_author41_42_mut() {
+            settings.decision_journal_path = Some(journal_path.display().to_string());
+            settings.decision_journal_append = true;
+        }
+        runtime
+            .pending_strategy_journal_records
+            .push(json!({"adapter_decision":"shadow_recorded","decision_key":"one"}));
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.flush_strategy_journal_records())
+            .expect("flush journal");
+
+        let payload = std::fs::read_to_string(&journal_path).expect("journal file");
+        let lines = payload.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let value: serde_json::Value = serde_json::from_str(lines[0]).expect("json line");
+        assert_eq!(value["adapter_decision"], "shadow_recorded");
+        assert!(runtime.pending_strategy_journal_records.is_empty());
     }
 
     #[derive(Default)]
@@ -5629,7 +5695,7 @@ async fn log_virtual_trades(
     Ok(())
 }
 
-async fn append_json_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+async fn append_json_line<T: Serialize>(path: &str, entry: &T) -> Result<()> {
     ensure_parent_dir(path)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)

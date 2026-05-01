@@ -765,6 +765,15 @@ impl Strategy for RiAuthor4142LiveStrategy {
         &self.state
     }
 
+    fn drain_observation_journal_records(&mut self) -> Vec<serde_json::Value> {
+        self.journal_records
+            .drain(..)
+            .map(|record| {
+                serde_json::to_value(record).expect("ri_author41_42 journal record must serialize")
+            })
+            .collect()
+    }
+
     fn set_state(&mut self, state: StrategyState) {
         if let StrategyState::RiAuthor4142Live { .. } = state {
             self.state = state;
@@ -891,6 +900,7 @@ mod tests {
     use crate::strategies::moex_author41_42::{
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
     };
+    use crate::strategy_host::Strategy;
     use alor_protocol::{IntentClass, Side as OrderSide};
     use chrono::{NaiveDate, NaiveDateTime};
 
@@ -1112,6 +1122,27 @@ mod tests {
         assert_eq!(journal[1].role, None);
         assert_eq!(journal[1].entry_exit_reason, "mr_interval_overlap");
         assert_eq!(journal[1].candidate_order_side, None);
+    }
+
+    #[test]
+    fn drain_observation_journal_records_serializes_and_clears_buffer() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let record = sample_record(OverlapDecision::Accepted, "time_exit_same_bar_close");
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "decision-key".to_string(),
+        )
+        .expect("decision");
+
+        strategy.record_shadow_journal(&decision);
+        strategy.apply_dry_run_decision(&decision);
+        let drained = Strategy::drain_observation_journal_records(&mut strategy);
+
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0]["adapter_decision"], "shadow_recorded");
+        assert_eq!(drained[1]["adapter_decision"], "intent_suppressed");
+        assert_eq!(drained[1]["role"], "entry");
+        assert!(strategy.journal_records_for_test().is_empty());
     }
 
     fn sample_record(overlap_decision: OverlapDecision, reason: &str) -> ShadowJournalRecord {

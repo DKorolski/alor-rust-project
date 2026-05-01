@@ -275,6 +275,8 @@ timeframe = "10m"
 mode = "shadow"
 allow_order_emission = false
 execution_path = "action_scoped_only"
+decision_journal_path = "./reports/ri_author41_42_decisions.jsonl"
+decision_journal_append = true
 "#,
     );
 
@@ -295,6 +297,11 @@ execution_path = "action_scoped_only"
     assert_eq!(settings.mode, "shadow");
     assert!(!settings.allow_order_emission);
     assert_eq!(settings.execution_path, "action_scoped_only");
+    assert_eq!(
+        settings.decision_journal_path.as_deref(),
+        Some("./reports/ri_author41_42_decisions.jsonl")
+    );
+    assert!(settings.decision_journal_append);
 }
 
 #[test]

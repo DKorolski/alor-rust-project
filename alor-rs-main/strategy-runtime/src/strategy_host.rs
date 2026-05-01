@@ -123,6 +123,9 @@ pub trait Strategy: Send + Sync {
     }
     fn acknowledge_risk_gate_session_finalizations(&mut self, _session_dates: &[NaiveDate]) {}
     fn on_risk_gate_state(&mut self, _state: &RiskGateRuntimeState) {}
+    fn drain_observation_journal_records(&mut self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
 }

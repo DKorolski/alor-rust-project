@@ -686,6 +686,45 @@ Result:
 PASS: 12 RI live scaffold tests
 ```
 
+### 2026-05-01 Runtime-Owned JSONL Journal Writer
+
+Added the first runtime-owned writer path for RI decision journal records.
+
+Config:
+
+```toml
+[strategy.ri_author41_42]
+decision_journal_path = "./reports/ri_author41_42_decisions.jsonl"
+decision_journal_append = true
+```
+
+Current behavior:
+
+- strategy owns schema and drains serialized evidence records through a generic
+  runtime hook;
+- runtime owns file persistence and writes JSONL only when
+  `decision_journal_path` is configured;
+- `decision_journal_append=false` truncates the configured file during runtime
+  artifact preparation;
+- journal is not read during startup, restore, reconcile, or lifecycle
+  decisions;
+- no live intents are enabled by this writer.
+
+This keeps the boundary explicit:
+
+```text
+strategy = creates evidence rows
+runtime  = persists evidence rows
+journal  = audit artifact, not source of truth
+```
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+cargo test -p strategy-runtime flush_strategy_journal_records_writes_ri_jsonl
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document

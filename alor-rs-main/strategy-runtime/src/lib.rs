@@ -244,6 +244,8 @@ pub struct RiAuthor4142Settings {
     pub mode: String,
     pub allow_order_emission: bool,
     pub execution_path: String,
+    pub decision_journal_path: Option<String>,
+    pub decision_journal_append: bool,
 }
 
 impl Default for AlorUsdrubfHybridSettings {
@@ -280,6 +282,8 @@ impl Default for RiAuthor4142Settings {
             mode: "shadow".to_string(),
             allow_order_emission: false,
             execution_path: "action_scoped_only".to_string(),
+            decision_journal_path: None,
+            decision_journal_append: true,
         }
     }
 }
