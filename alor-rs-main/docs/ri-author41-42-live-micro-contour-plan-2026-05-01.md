@@ -852,6 +852,24 @@ STREAM_ACKS=cmd.acks.7502MIW.ri_author41_42.shadow
 CONSUMER_GROUP=gateway-commands-ri-author41-42-shadow-7502MIW
 ```
 
+### 2026-05-01 Simple Contract Roll Policy
+
+Added the simple RI futures roll policy to the live contract.
+
+Decision:
+
+- roll to the next RI contract 7 calendar days before current contract expiry;
+- roll only between trading sessions;
+- require broker-flat and no working orders before roll;
+- change `symbol` / feed config to the next contract;
+- restart runtime/live state from zero;
+- warmup/history must be loaded for the new contract;
+- no intraday cross-contract transfer or hedge.
+
+This intentionally avoids a complex liquidity monitor for the first RI contour.
+Because the strategy is no-overnight, a between-session flat roll is enough for
+the current shadow/micro design.
+
 ## Work Packages
 
 ### WP1. Live Contract Document

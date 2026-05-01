@@ -108,6 +108,18 @@ No-overnight rule:
 - BO must not carry across non-tradable gaps in live/micro contour;
 - gap flatten is a live safety overlay, not a frozen parity claim.
 
+Contract roll rule:
+
+- roll to the next RI futures contract 7 calendar days before current contract
+  expiry;
+- perform roll only between trading sessions;
+- confirm broker-flat and no working orders before roll;
+- change `symbol` / feed config to the next contract;
+- restart the RI contour from zero for runtime/live state;
+- warmup/history must be loaded from the new contract, not from the expired
+  contract;
+- do not run an intraday cross-contract transfer or hedge.
+
 Closed-window rule:
 
 - closed-window exits must not become stale live pending state;
