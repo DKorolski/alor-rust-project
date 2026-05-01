@@ -794,6 +794,31 @@ The contract freezes the current pre-GO operating boundary:
 - `action_scoped_only` execution path;
 - `micro_live` and `allow_order_emission=true` blocked until GO/NO-GO.
 
+### 2026-05-01 Adapter Safety Gate
+
+Added the first RI adapter-level safety gate for no-overnight behavior.
+
+Current behavior:
+
+- same-day accepted decisions may build suppressed candidate entry/exit legs;
+- cross-day accepted decisions are rejected before candidate lifecycle;
+- rejected cross-day decisions enter `manual_intervention_required`;
+- no order is emitted by this path.
+
+This keeps Backtrader-style cross-day/carry artifacts out of the future live
+adapter path. The live contour remains stricter than replay fill semantics:
+
+```text
+model/replay artifact carry -> manual intervention before live candidate
+live/micro target          -> no overnight exposure by design
+```
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document

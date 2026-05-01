@@ -441,6 +441,12 @@ impl RiAuthor4142LiveStrategy {
                 self.log_transition("suppressed", "ri_intent_suppressed", decision);
             }
             RiAuthor4142DecisionAction::Enter => {
+                if let Some(reason) = self.decision_safety_reject_reason(decision) {
+                    self.record_manual_intervention_journal(decision, reason);
+                    self.log_manual_intervention_required(decision, reason);
+                    self.enter_manual_intervention_required(reason.to_string());
+                    return;
+                }
                 let candidates = self.candidate_intents_for_decision(decision);
                 if candidates.is_empty() {
                     self.record_manual_intervention_journal(
@@ -461,6 +467,26 @@ impl RiAuthor4142LiveStrategy {
                 self.transition_to_flat_after_scheduled_exit(decision);
             }
         }
+    }
+
+    fn decision_safety_reject_reason(
+        &self,
+        decision: &RiAuthor4142ModelDecision,
+    ) -> Option<&'static str> {
+        let (Some(entry_ts), Some(exit_ts)) = (
+            decision.scheduled_entry_ts_local,
+            decision.scheduled_exit_ts_local,
+        ) else {
+            return None;
+        };
+
+        if exit_ts < entry_ts {
+            return Some("exit_before_entry_not_allowed");
+        }
+        if exit_ts.date() != entry_ts.date() {
+            return Some("cross_day_exit_not_allowed");
+        }
+        None
     }
 
     fn candidate_intents_for_decision(
@@ -1198,6 +1224,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn cross_day_decision_requires_manual_intervention_before_candidate_lifecycle() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let mut record = sample_record(OverlapDecision::Accepted, "forced_last_bar_close");
+        record.scheduled_exit_ts_local = Some(dt(2026, 5, 2, 9, 0, 0));
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "cross-day-decision-key".to_string(),
+        )
+        .expect("decision");
+
+        strategy.apply_dry_run_decision(&decision);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::ManualInterventionRequired.as_str())
+        );
+        let journal = strategy.journal_records_for_test();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(
+            journal[0].adapter_decision,
+            RiAuthor4142JournalDecision::ManualInterventionRequired
+        );
+        assert_eq!(journal[0].entry_exit_reason, "cross_day_exit_not_allowed");
+        assert_eq!(journal[0].role, None);
+        assert_eq!(journal[0].request_id, None);
     }
 
     #[test]
