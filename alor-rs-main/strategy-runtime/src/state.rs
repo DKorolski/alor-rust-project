@@ -101,6 +101,10 @@ fn default_session_gap_live_phase() -> SessionGapLivePhase {
     SessionGapLivePhase::Flat
 }
 
+fn default_ri_author4142_phase() -> String {
+    "flat".to_string()
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum StrategyState {
@@ -448,6 +452,20 @@ pub enum StrategyState {
         model_decisions_seen: u64,
         #[serde(default)]
         last_decision_key: Option<String>,
+        #[serde(default = "default_ri_author4142_phase")]
+        phase: String,
+        #[serde(default)]
+        current_component: Option<String>,
+        #[serde(default)]
+        current_side: Option<String>,
+        #[serde(default)]
+        current_cycle_id: Option<String>,
+        #[serde(default)]
+        current_entry_ts_local: Option<String>,
+        #[serde(default)]
+        current_exit_ts_local: Option<String>,
+        #[serde(default)]
+        last_transition_reason: Option<String>,
         #[serde(default)]
         live_adapter_enabled: bool,
     },
@@ -654,6 +672,49 @@ mod tests {
                 assert!(!was_long_today);
                 assert!(!was_short_today);
                 assert_eq!(overnight_exit_armed_date, None);
+            }
+            other => panic!("unexpected state: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ri_author4142_live_deserializes_with_flat_phase_default() {
+        let legacy_json = r#"{
+            "RiAuthor41_42Live": {
+                "mode": "shadow",
+                "profile_id": "ri_author41_42_primary_combo_cost2",
+                "timeframe": "10m",
+                "allow_order_emission": false,
+                "execution_path": "action_scoped_only",
+                "last_bar_ts": null,
+                "last_model_bar_ts": null,
+                "model_bars_seen": 12,
+                "suppressed_service_bars": 0,
+                "model_decisions_seen": 2,
+                "last_decision_key": null,
+                "live_adapter_enabled": false
+            }
+        }"#;
+        let state: StrategyState = serde_json::from_str(legacy_json).unwrap();
+
+        match state {
+            StrategyState::RiAuthor4142Live {
+                phase,
+                current_component,
+                current_side,
+                current_cycle_id,
+                current_entry_ts_local,
+                current_exit_ts_local,
+                last_transition_reason,
+                ..
+            } => {
+                assert_eq!(phase, "flat");
+                assert_eq!(current_component, None);
+                assert_eq!(current_side, None);
+                assert_eq!(current_cycle_id, None);
+                assert_eq!(current_entry_ts_local, None);
+                assert_eq!(current_exit_ts_local, None);
+                assert_eq!(last_transition_reason, None);
             }
             other => panic!("unexpected state: {other:?}"),
         }

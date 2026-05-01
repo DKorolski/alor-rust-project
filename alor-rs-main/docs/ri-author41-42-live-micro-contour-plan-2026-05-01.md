@@ -584,6 +584,43 @@ Result:
 PASS: 6 RI live scaffold tests
 ```
 
+### 2026-05-01 Dry-Run State Machine Skeleton
+
+Added the first RI lifecycle skeleton.
+
+Current phases:
+
+```text
+flat
+dry_run_in_position
+manual_intervention_required
+```
+
+Current behavior:
+
+- accepted finalized model decision performs a dry-run
+  `flat -> dry_run_in_position -> flat` round trip;
+- dropped BO overlap decision remains `flat` and logs suppression;
+- no `Intent` is emitted;
+- no broker command path is touched;
+- phase, component, side, cycle id, entry timestamp, exit timestamp, and last
+  transition reason are persisted in strategy state.
+
+This is intentionally not the final live lifecycle. It is a safe state skeleton
+for validating decision ownership and future adapter behavior before GO/NO-GO.
+
+Validation:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+```
+
+Result:
+
+```text
+PASS: 8 RI live scaffold tests
+```
+
 ## Work Packages
 
 ### WP1. Live Contract Document

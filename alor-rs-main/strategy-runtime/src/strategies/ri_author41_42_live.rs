@@ -88,6 +88,24 @@ pub enum RiAuthor4142DecisionAction {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RiAuthor4142Phase {
+    Flat,
+    DryRunInPosition,
+    ManualInterventionRequired,
+}
+
+impl RiAuthor4142Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::DryRunInPosition => "dry_run_in_position",
+            Self::ManualInterventionRequired => "manual_intervention_required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RiAuthor4142Component {
     Author41Mr,
     Author42Bo,
@@ -195,6 +213,13 @@ impl RiAuthor4142LiveStrategy {
                 suppressed_service_bars: 0,
                 model_decisions_seen: 0,
                 last_decision_key: None,
+                phase: RiAuthor4142Phase::Flat.as_str().to_string(),
+                current_component: None,
+                current_side: None,
+                current_cycle_id: None,
+                current_entry_ts_local: None,
+                current_exit_ts_local: None,
+                last_transition_reason: None,
                 live_adapter_enabled: false,
             },
             config,
@@ -286,6 +311,7 @@ impl RiAuthor4142LiveStrategy {
             };
             self.record_decision_state(&decision);
             self.log_decision(&decision);
+            self.apply_dry_run_decision(&decision);
             decisions.push(decision);
         }
         decisions
@@ -322,8 +348,108 @@ impl RiAuthor4142LiveStrategy {
         );
     }
 
+    fn apply_dry_run_decision(&mut self, decision: &RiAuthor4142ModelDecision) {
+        match decision.action {
+            RiAuthor4142DecisionAction::Suppress => {
+                self.log_transition("suppressed", "ri_intent_suppressed", decision);
+            }
+            RiAuthor4142DecisionAction::Enter => {
+                self.transition_to_dry_run_in_position(decision);
+                self.transition_to_flat_after_scheduled_exit(decision);
+            }
+        }
+    }
+
+    fn transition_to_dry_run_in_position(&mut self, decision: &RiAuthor4142ModelDecision) {
+        let cycle_id = format!(
+            "{}:{}",
+            decision.component.as_str(),
+            decision.model_signal_ts_local.format("%Y%m%d%H%M%S")
+        );
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            current_component,
+            current_side,
+            current_cycle_id,
+            current_entry_ts_local,
+            current_exit_ts_local,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            *phase = RiAuthor4142Phase::DryRunInPosition.as_str().to_string();
+            *current_component = Some(decision.component.as_str().to_string());
+            *current_side = decision.side.map(|side| side.as_str().to_string());
+            *current_cycle_id = Some(cycle_id);
+            *current_entry_ts_local = decision.scheduled_entry_ts_local.map(|ts| ts.to_string());
+            *current_exit_ts_local = decision.scheduled_exit_ts_local.map(|ts| ts.to_string());
+            *last_transition_reason = Some(decision.reason.clone());
+        }
+        self.log_transition("flat", "ri_dry_run_position_opened", decision);
+    }
+
+    fn transition_to_flat_after_scheduled_exit(&mut self, decision: &RiAuthor4142ModelDecision) {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            current_component,
+            current_side,
+            current_cycle_id,
+            current_entry_ts_local,
+            current_exit_ts_local,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            *phase = RiAuthor4142Phase::Flat.as_str().to_string();
+            *current_component = None;
+            *current_side = None;
+            *current_cycle_id = None;
+            *current_entry_ts_local = None;
+            *current_exit_ts_local = None;
+            *last_transition_reason = Some(format!("dry_run_exit:{}", decision.reason));
+        }
+        self.log_transition(
+            "dry_run_in_position",
+            "ri_dry_run_position_closed",
+            decision,
+        );
+    }
+
+    fn log_transition(
+        &self,
+        from_phase: &'static str,
+        action: &'static str,
+        decision: &RiAuthor4142ModelDecision,
+    ) {
+        let to_phase = match &self.state {
+            StrategyState::RiAuthor4142Live { phase, .. } => phase.as_str(),
+            _ => "unknown",
+        };
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action,
+            from_phase,
+            to_phase,
+            component = decision.component.as_str(),
+            side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
+            decision_key = %decision.decision_key,
+            reason = %decision.reason,
+            scheduled_entry_ts_local = ?decision.scheduled_entry_ts_local,
+            scheduled_exit_ts_local = ?decision.scheduled_exit_ts_local,
+            mode = self.config.mode.as_str(),
+            live_adapter_enabled = false,
+        );
+    }
+
     pub fn can_emit_orders(&self) -> bool {
         self.config.mode.can_emit_orders() && self.config.allow_order_emission
+    }
+
+    pub fn phase_for_test(&self) -> Option<String> {
+        match &self.state {
+            StrategyState::RiAuthor4142Live { phase, .. } => Some(phase.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -453,7 +579,8 @@ fn decision_key(record: &ShadowJournalRecord) -> String {
 mod tests {
     use super::{
         is_finalized_record, RiAuthor4142DecisionAction, RiAuthor4142ExecutionPath,
-        RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy, RiAuthor4142RuntimeMode,
+        RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy, RiAuthor4142Phase,
+        RiAuthor4142RuntimeMode,
     };
     use crate::strategies::moex_author41_42::{
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
@@ -528,6 +655,42 @@ mod tests {
         let current_dt = dt(2026, 5, 2, 9, 0, 0);
 
         assert!(is_finalized_record(&record, current_dt));
+    }
+
+    #[test]
+    fn dry_run_enter_decision_round_trips_to_flat() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let record = sample_record(OverlapDecision::Accepted, "time_exit_same_bar_close");
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "decision-key".to_string(),
+        )
+        .expect("decision");
+
+        strategy.apply_dry_run_decision(&decision);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
+    }
+
+    #[test]
+    fn suppress_decision_keeps_flat_phase() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let record = sample_record(OverlapDecision::DroppedMrOverlap, "mr_interval_overlap");
+        let decision = super::RiAuthor4142ModelDecision::from_shadow_record(
+            record,
+            "decision-key".to_string(),
+        )
+        .expect("decision");
+
+        strategy.apply_dry_run_decision(&decision);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
     }
 
     fn sample_record(overlap_decision: OverlapDecision, reason: &str) -> ShadowJournalRecord {
