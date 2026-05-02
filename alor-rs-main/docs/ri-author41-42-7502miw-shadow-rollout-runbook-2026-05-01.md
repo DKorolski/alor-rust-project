@@ -239,3 +239,54 @@ Stop and investigate if any of the following appears:
 - cross-day decision enters candidate lifecycle instead of
   `manual_intervention_required`;
 - runtime state restore reports pending/known order tails.
+
+## Observation 2026-05-02
+
+Checkpoint:
+
+```text
+2026-05-02 10:47 MSK
+```
+
+Runtime state:
+
+```text
+mode = shadow
+profile_id = ri_author41_42_primary_combo_cost2
+timeframe = 10m
+allow_order_emission = false
+execution_path = action_scoped_only
+live_adapter_enabled = false
+phase = flat
+model_bars_seen = 430
+suppressed_service_bars = 76
+model_decisions_seen = 6
+last_transition_reason = dry_run_exit:take_author_close
+```
+
+Safety checks:
+
+```text
+cmd.orders.7502MIW.ri_author41_42.shadow = 0
+cmd.acks.7502MIW.ri_author41_42.shadow = 0
+broker positions = no futures position
+broker orders = {}
+broker stop_orders = {}
+WARN/ERROR scan = clean
+```
+
+Timing read:
+
+```text
+last_model_bar_ts = 2026-05-01 23:30:00 MSK
+last_bar_ts = 2026-05-02 10:20:00 MSK
+```
+
+Interpretation:
+
+```text
+The shadow contour remains pre-GO safe.
+Newer bars are visible to the runtime, but model progression remains anchored
+to the last regular model bar. This is consistent with weekend/service-bar
+suppression and with the current shadow-only contract.
+```
