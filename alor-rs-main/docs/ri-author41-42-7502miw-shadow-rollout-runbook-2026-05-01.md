@@ -290,3 +290,68 @@ Newer bars are visible to the runtime, but model progression remains anchored
 to the last regular model bar. This is consistent with weekend/service-bar
 suppression and with the current shadow-only contract.
 ```
+
+## Observation 2026-05-03
+
+Checkpoint:
+
+```text
+2026-05-03 09:37-09:40 MSK
+```
+
+Runtime state:
+
+```text
+mode = shadow
+profile_id = ri_author41_42_primary_combo_cost2
+timeframe = 10m
+allow_order_emission = false
+execution_path = action_scoped_only
+live_adapter_enabled = false
+phase = flat
+model_bars_seen = 430
+suppressed_service_bars = 114
+model_decisions_seen = 6
+last_transition_reason = dry_run_exit:take_author_close
+```
+
+Safety checks:
+
+```text
+cmd.orders.7502MIW.ri_author41_42.shadow = 0
+cmd.acks.7502MIW.ri_author41_42.shadow = 0
+broker futures position = none
+broker orders = {}
+broker stop_orders = {}
+WARN/ERROR scan = clean
+```
+
+Timing read:
+
+```text
+last_model_bar_ts = 2026-05-01 23:30:00 MSK
+last_bar_ts = 2026-05-02 10:30:00 MSK
+```
+
+Maintenance note:
+
+```text
+The RI 7502MIW Redis container was added to /opt/trading-maintenance/redis_safe_trim.sh
+so the daily whitelist trim now covers this new shadow contour.
+
+Manual apply trimmed broker.snapshots.7502MIW:
+len_before=15444
+len_after=10000
+
+Runtime state, command streams, and model bars were not trimmed.
+```
+
+Interpretation:
+
+```text
+The shadow contour remains pre-GO safe.
+The weekend/service-bar suppression behavior remains consistent with the
+current model contract.
+The Redis retention gap for the new contour was corrected before becoming a
+resource incident.
+```
