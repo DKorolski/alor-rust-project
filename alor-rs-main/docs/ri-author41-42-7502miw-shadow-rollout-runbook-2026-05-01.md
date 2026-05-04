@@ -417,3 +417,89 @@ The shadow contour progressed into the regular Monday session and remains
 pre-GO safe. The safe-trim timer now covers the new RI contour, and no live
 command emission was observed.
 ```
+
+## Micro Preparation 2026-05-04
+
+Decision:
+
+```text
+Prepare the RI 7502MIW micro contour now, but do not switch it during the
+active session. The actual enablement must happen only in a controlled
+between-session window after a separate live-adapter GO patch/review.
+```
+
+Prepared config candidates:
+
+```text
+configs/runtime.ri_author41_42.micro.7502MIW.pending.toml
+configs/gateway.ri_author41_42.micro.7502MIW.pending.toml
+```
+
+Candidate micro namespace:
+
+```text
+strategy_id    = ri_author41_42.micro.7502MIW
+runtime_state  = runtime.state.ri_author41_42.micro.7502MIW
+commands       = cmd.orders.7502MIW.ri_author41_42.micro
+acks           = cmd.acks.7502MIW.ri_author41_42.micro
+consumer_group = strategy-runtime-ri-author41-42-micro-7502MIW
+```
+
+Execution invariants:
+
+```text
+symbol = RIM6
+qty = 1
+timeframe = 10m
+trade_mode = live
+allow_live_orders = true
+mode = micro_live
+allow_order_emission = true
+execution_path = action_scoped_only
+```
+
+Current lock:
+
+```text
+The pending micro runtime config parses as a candidate, but the current
+strategy implementation still blocks micro_live / allow_order_emission=true.
+This is intentional until the live adapter emits entry at the scheduled entry
+time and exit at the scheduled exit time.
+```
+
+Why not just flip the current shadow config:
+
+```text
+The current shadow bridge records finalized model trades after the model exit
+is known. That is correct for shadow evidence, but not sufficient for live
+execution because live entry must be emitted at entry time, not retrospectively
+after the trade is finalized.
+```
+
+Between-session enablement checklist:
+
+```text
+1. Confirm broker flat for RIM6 on 7502MIW.
+2. Confirm broker working orders = {} and stop_orders = {}.
+3. Confirm sessiongap on 7502MIW is not using RI streams.
+4. Archive current shadow reports, but keep them as evidence.
+5. Stop only the RI Author41/42 stack.
+6. Clear only micro runtime state/command/ack streams:
+   runtime.state.ri_author41_42.micro.7502MIW
+   cmd.orders.7502MIW.ri_author41_42.micro
+   cmd.acks.7502MIW.ri_author41_42.micro
+7. Keep md.bars.7502MIW.RIM6.10m for warmup/history.
+8. Switch compose env to the pending micro configs after the GO patch is
+   deployed.
+9. Start from zero and wait for bootstrap flat reconciliation.
+10. Verify runtime logs show live_adapter_enabled=true only after GO.
+11. Verify first command path is action-scoped and no legacy CWS path appears.
+```
+
+Rollback:
+
+```text
+If bootstrap is not flat, any legacy CWS path appears, command reject handling
+is unclear, or runtime enters manual_intervention_required, stop RI micro and
+return to the shadow config. Do not retry intraday without a fresh review.
+```

@@ -1040,6 +1040,50 @@ Rollout order:
    exist.
 6. Start at size `1`.
 
+### WP10. Live Adapter Before Micro Enablement
+
+Status as of 2026-05-04:
+
+```text
+PENDING_LIVE_ADAPTER_PATCH
+```
+
+The micro config candidates have been prepared, but they are intentionally
+locked behind the current pre-GO runtime guard.
+
+Prepared candidate files:
+
+```text
+configs/runtime.ri_author41_42.micro.7502MIW.pending.toml
+configs/gateway.ri_author41_42.micro.7502MIW.pending.toml
+```
+
+Required before these files can be used on VPS:
+
+- live adapter must emit `entry` at `scheduled_entry_ts_local`;
+- live adapter must emit `exit` at `scheduled_exit_ts_local`;
+- entry/exit must be `Intent::Market` or the approved marketable P0 order
+  style;
+- every emitted intent must be explicitly classified as `Entry` or `Exit`;
+- emitted command comments must include RI profile/component/role metadata;
+- runtime must remain source of truth for final `request_id`;
+- current shadow journal must not be used as live state;
+- no BO/MR overlap can create simultaneous exposure;
+- if a decision is already stale at startup, it must not be emitted
+  retroactively.
+
+This distinction matters because the current shadow bridge records finalized
+model trades after the exit is known. That is correct for observation, but live
+micro execution needs a prospective state machine:
+
+```text
+model entry event -> emit entry now -> wait for broker/trade state
+scheduled/model exit event -> emit exit now -> reconcile flat
+```
+
+Therefore a pure config flip is a NO-GO until the live adapter patch and tests
+exist.
+
 ## Promotion Gates
 
 ### GO To Micro-Live Size 1
