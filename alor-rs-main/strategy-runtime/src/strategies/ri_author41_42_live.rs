@@ -1,14 +1,15 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{bail, Result};
-use chrono::{NaiveDateTime, Timelike};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::state::StrategyState;
 use crate::strategies::moex_author41_42::{
-    build_ri_author41_42_combo_shadow_journal, Component, ModelBar, ModelProfile, OverlapDecision,
-    RegularSessionPolicy, ShadowJournalRecord, ShadowSide,
+    build_ri_author41_42_combo_shadow_journal, Author41Config, Author42Config, Author42SideMode,
+    Component, ModelBar, ModelProfile, OverlapDecision, RegularSessionPolicy, ShadowJournalRecord,
+    ShadowSide,
 };
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
@@ -217,11 +218,118 @@ pub struct RiAuthor4142CandidateIntent {
     pub decision_key: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RiDailyStats {
+    high: f64,
+    low: f64,
+    close: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RiDailyAnchor {
+    prev_close: f64,
+    prev_low: f64,
+    prev_range: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RiAuthor4142LiveMrPosition {
+    side: RiAuthor4142Side,
+    entry_ts_local: NaiveDateTime,
+    entry_price: f64,
+    prev_close: f64,
+    prev_range: f64,
+    bars_held: u32,
+    config: Author41Config,
+    decision_key: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RiAuthor4142LiveMrState {
+    current_date: Option<NaiveDate>,
+    entries_today: u32,
+    position: Option<RiAuthor4142LiveMrPosition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RiAuthor4142LiveBoContext {
+    prev_close: f64,
+    prev2_close: f64,
+    prev_range: f64,
+    prev_hl_ratio: f64,
+    prev_ret: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RiAuthor4142LiveBoPosition {
+    side: RiAuthor4142Side,
+    entry_ts_local: NaiveDateTime,
+    entry_price: f64,
+    bars_held: u32,
+    decision_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RiAuthor4142LiveBoPending {
+    Entry(RiAuthor4142Side),
+    Exit(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RiAuthor4142LiveDecisionInput {
+    component: RiAuthor4142Component,
+    side: RiAuthor4142Side,
+    model_signal_ts_local: NaiveDateTime,
+    scheduled_entry_ts_local: Option<NaiveDateTime>,
+    scheduled_exit_ts_local: Option<NaiveDateTime>,
+    reason: &'static str,
+    decision_key: String,
+    shadow_pnl_points: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RiAuthor4142LiveBoState {
+    current_date: Option<NaiveDate>,
+    context: Option<RiAuthor4142LiveBoContext>,
+    first_bar: Option<ModelBar>,
+    bar_index: usize,
+    long_level: Option<f64>,
+    short_level: Option<f64>,
+    trade_allowed: bool,
+    was_long_today: bool,
+    was_short_today: bool,
+    day_hh: f64,
+    day_ll: f64,
+    position: Option<RiAuthor4142LiveBoPosition>,
+    pending: Option<RiAuthor4142LiveBoPending>,
+}
+
+impl Default for RiAuthor4142LiveBoState {
+    fn default() -> Self {
+        Self {
+            current_date: None,
+            context: None,
+            first_bar: None,
+            bar_index: 0,
+            long_level: None,
+            short_level: None,
+            trade_allowed: true,
+            was_long_today: false,
+            was_short_today: false,
+            day_hh: f64::NEG_INFINITY,
+            day_ll: f64::INFINITY,
+            position: None,
+            pending: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RiAuthor4142JournalDecision {
     ShadowRecorded,
     IntentSuppressed,
+    IntentEmitted,
     ManualInterventionRequired,
 }
 
@@ -249,15 +357,18 @@ pub struct RiAuthor4142JournalRecord {
 }
 
 impl RiAuthor4142LiveConfig {
-    pub fn validate_pre_go(&self) -> Result<()> {
+    pub fn can_emit_orders(&self) -> bool {
+        self.mode.can_emit_orders() && self.allow_order_emission
+    }
+
+    pub fn validate(&self) -> Result<()> {
         if self.execution_path != RiAuthor4142ExecutionPath::ActionScopedOnly {
             bail!("ri_author41_42 requires action_scoped_only execution");
         }
-        if self.allow_order_emission {
-            bail!("ri_author41_42 live order emission is blocked until GO/NO-GO is approved");
-        }
-        if self.mode.can_emit_orders() {
-            bail!("ri_author41_42 micro_live mode is blocked until GO/NO-GO is approved");
+        if self.mode.can_emit_orders() != self.allow_order_emission {
+            bail!(
+                "ri_author41_42 requires mode=micro_live and allow_order_emission=true to be paired"
+            );
         }
         if self.timeframe.trim() != "10m" {
             bail!(
@@ -276,14 +387,17 @@ pub struct RiAuthor4142LiveStrategy {
     model_bars: Vec<ModelBar>,
     emitted_decision_keys: HashSet<String>,
     journal_records: Vec<RiAuthor4142JournalRecord>,
+    live_mr: RiAuthor4142LiveMrState,
+    live_bo: RiAuthor4142LiveBoState,
     state: StrategyState,
 }
 
 impl RiAuthor4142LiveStrategy {
     pub fn new(config: RiAuthor4142LiveConfig) -> Result<Self> {
-        config.validate_pre_go()?;
+        config.validate()?;
         let profile = ModelProfile::ri_shadow_10m();
         let session_policy = profile.session_policy;
+        let live_adapter_enabled = config.can_emit_orders();
         Ok(Self {
             state: StrategyState::RiAuthor4142Live {
                 mode: config.mode.as_str().to_string(),
@@ -304,13 +418,15 @@ impl RiAuthor4142LiveStrategy {
                 current_entry_ts_local: None,
                 current_exit_ts_local: None,
                 last_transition_reason: None,
-                live_adapter_enabled: false,
+                live_adapter_enabled,
             },
             config,
             session_policy,
             model_bars: Vec::new(),
             emitted_decision_keys: HashSet::new(),
             journal_records: Vec::new(),
+            live_mr: RiAuthor4142LiveMrState::default(),
+            live_bo: RiAuthor4142LiveBoState::default(),
         })
     }
 
@@ -366,7 +482,7 @@ impl RiAuthor4142LiveStrategy {
             is_model_bar,
             mode = self.config.mode.as_str(),
             allow_order_emission = self.config.allow_order_emission,
-            live_adapter_enabled = false,
+            live_adapter_enabled = self.can_emit_orders(),
         );
 
         if !is_model_bar {
@@ -397,7 +513,9 @@ impl RiAuthor4142LiveStrategy {
             self.record_decision_state(&decision);
             self.record_shadow_journal(&decision);
             self.log_decision(&decision);
-            self.apply_dry_run_decision(&decision);
+            if !self.can_emit_orders() {
+                self.apply_dry_run_decision(&decision);
+            }
             decisions.push(decision);
         }
         decisions
@@ -430,7 +548,7 @@ impl RiAuthor4142LiveStrategy {
             shadow_pnl_points = ?decision.shadow_pnl_points,
             decision_key = %decision.decision_key,
             mode = self.config.mode.as_str(),
-            live_adapter_enabled = false,
+            live_adapter_enabled = self.can_emit_orders(),
         );
     }
 
@@ -627,7 +745,7 @@ impl RiAuthor4142LiveStrategy {
             decision_key = %candidate.decision_key,
             mode = self.config.mode.as_str(),
             allow_order_emission = self.config.allow_order_emission,
-            live_adapter_enabled = false,
+            live_adapter_enabled = self.can_emit_orders(),
         );
     }
 
@@ -644,7 +762,7 @@ impl RiAuthor4142LiveStrategy {
             side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
             decision_key = %decision.decision_key,
             mode = self.config.mode.as_str(),
-            live_adapter_enabled = false,
+            live_adapter_enabled = self.can_emit_orders(),
         );
     }
 
@@ -675,7 +793,7 @@ impl RiAuthor4142LiveStrategy {
             action = "ri_manual_intervention_required",
             reason = %reason,
             mode = self.config.mode.as_str(),
-            live_adapter_enabled = false,
+            live_adapter_enabled = self.can_emit_orders(),
         );
     }
 
@@ -717,7 +835,7 @@ impl RiAuthor4142LiveStrategy {
                 symbol,
                 snapshot_ts_utc = ?snapshot.snapshot_ts_utc,
                 mode = self.config.mode.as_str(),
-                live_adapter_enabled = false,
+                live_adapter_enabled = self.can_emit_orders(),
             );
         }
     }
@@ -744,7 +862,7 @@ impl RiAuthor4142LiveStrategy {
                 target: "strategy_runtime::ri_author41_42_live",
                 action = "ri_runtime_state_restored_clean",
                 mode = self.config.mode.as_str(),
-                live_adapter_enabled = false,
+                live_adapter_enabled = self.can_emit_orders(),
             );
         }
     }
@@ -826,12 +944,683 @@ impl RiAuthor4142LiveStrategy {
             scheduled_entry_ts_local = ?decision.scheduled_entry_ts_local,
             scheduled_exit_ts_local = ?decision.scheduled_exit_ts_local,
             mode = self.config.mode.as_str(),
-            live_adapter_enabled = false,
+            live_adapter_enabled = self.can_emit_orders(),
         );
     }
 
+    fn live_model_bar_for_emit(&self, ctx: &StrategyCtx, bar: &BarEvent) -> Option<ModelBar> {
+        if !self.can_emit_orders()
+            || ctx.trade_mode != crate::TradeMode::Live
+            || !ctx.allow_live_orders
+        {
+            return None;
+        }
+        if bar.origin != DataOrigin::Live {
+            return None;
+        }
+        let dt_local = self.local_dt(bar.close_time_utc)?;
+        if !self.session_policy.is_model_bar(dt_local) {
+            return None;
+        }
+        Some(ModelBar {
+            ts_local: dt_local,
+            open: non_zero_or_close(bar.o, bar.close),
+            high: non_zero_or_close(bar.h, bar.close),
+            low: non_zero_or_close(bar.l, bar.close),
+            close: bar.close,
+            volume: bar.v,
+        })
+    }
+
+    fn live_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
+        let mut intents = Vec::new();
+        intents.extend(self.live_mr_intents_for_bar(bar));
+        intents.extend(self.live_bo_intents_for_bar(bar));
+        intents
+    }
+
+    fn live_mr_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
+        let mut intents = Vec::new();
+        if self.live_mr.current_date != Some(bar.ts_local.date()) {
+            self.live_mr.current_date = Some(bar.ts_local.date());
+            self.live_mr.entries_today = 0;
+            self.live_mr.position = None;
+        }
+
+        if let Some(mut position) = self.live_mr.position.take() {
+            position.bars_held = position.bars_held.saturating_add(1);
+            if let Some((exit_price, reason)) = Self::mr_exit_signal(&position, bar) {
+                let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
+                    component: RiAuthor4142Component::Author41Mr,
+                    side: position.side,
+                    model_signal_ts_local: position.entry_ts_local,
+                    scheduled_entry_ts_local: Some(position.entry_ts_local),
+                    scheduled_exit_ts_local: Some(bar.ts_local),
+                    reason,
+                    decision_key: position.decision_key.clone(),
+                    shadow_pnl_points: Some(
+                        Self::points_for_side(position.side, position.entry_price, exit_price)
+                            - position.config.roundtrip_cost_points,
+                    ),
+                });
+                let candidate = self.live_candidate_for_decision(
+                    &decision,
+                    RiAuthor4142CandidateRole::Exit,
+                    position.side.exit_order_side(),
+                    bar.ts_local,
+                );
+                intents.push(self.emit_live_candidate(candidate, &decision));
+                self.transition_live_flat(&decision, "live_exit_emitted");
+                return intents;
+            } else {
+                self.live_mr.position = Some(position);
+                return intents;
+            }
+        }
+
+        if self.live_mr.entries_today >= 2 {
+            return intents;
+        }
+        if self.live_bo.position.is_some() {
+            return intents;
+        }
+        let Some((anchor, side, config)) = self.mr_entry_signal(bar) else {
+            return intents;
+        };
+        self.live_mr.entries_today = self.live_mr.entries_today.saturating_add(1);
+        let decision_key = format!(
+            "{}|author41_mr|{}|Some({:?})|live_prospective",
+            self.config.profile_id, bar.ts_local, side
+        );
+        let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
+            component: RiAuthor4142Component::Author41Mr,
+            side,
+            model_signal_ts_local: bar.ts_local,
+            scheduled_entry_ts_local: Some(bar.ts_local),
+            scheduled_exit_ts_local: None,
+            reason: "live_entry",
+            decision_key: decision_key.clone(),
+            shadow_pnl_points: None,
+        });
+        let candidate = self.live_candidate_for_decision(
+            &decision,
+            RiAuthor4142CandidateRole::Entry,
+            side.entry_order_side(),
+            bar.ts_local,
+        );
+        self.live_mr.position = Some(RiAuthor4142LiveMrPosition {
+            side,
+            entry_ts_local: bar.ts_local,
+            entry_price: bar.close,
+            prev_close: anchor.prev_close,
+            prev_range: anchor.prev_range,
+            bars_held: 0,
+            config,
+            decision_key,
+        });
+        intents.push(self.emit_live_candidate(candidate, &decision));
+        self.transition_live_in_position(&decision, "live_entry_emitted");
+        intents
+    }
+
+    fn live_bo_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
+        let mut intents = Vec::new();
+        self.ensure_bo_session(bar);
+        let config = Author42Config::ri_grid_k042_both();
+
+        if let Some(pending) = self.live_bo.pending.take() {
+            match pending {
+                RiAuthor4142LiveBoPending::Entry(side) => {
+                    if self.live_mr.position.is_none() && self.live_bo.position.is_none() {
+                        let decision_key = format!(
+                            "{}|author42_bo|{}|Some({:?})|live_prospective",
+                            self.config.profile_id, bar.ts_local, side
+                        );
+                        let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
+                            component: RiAuthor4142Component::Author42Bo,
+                            side,
+                            model_signal_ts_local: bar.ts_local,
+                            scheduled_entry_ts_local: Some(bar.ts_local),
+                            scheduled_exit_ts_local: None,
+                            reason: "live_entry_next_bar",
+                            decision_key: decision_key.clone(),
+                            shadow_pnl_points: None,
+                        });
+                        let candidate = self.live_candidate_for_decision(
+                            &decision,
+                            RiAuthor4142CandidateRole::Entry,
+                            side.entry_order_side(),
+                            bar.ts_local,
+                        );
+                        self.live_bo.position = Some(RiAuthor4142LiveBoPosition {
+                            side,
+                            entry_ts_local: bar.ts_local,
+                            entry_price: non_zero_or_close(bar.open, bar.close),
+                            bars_held: 0,
+                            decision_key,
+                        });
+                        match side {
+                            RiAuthor4142Side::Long => self.live_bo.was_long_today = true,
+                            RiAuthor4142Side::Short => self.live_bo.was_short_today = true,
+                        }
+                        intents.push(self.emit_live_candidate(candidate, &decision));
+                        self.transition_live_in_position(&decision, "live_bo_entry_emitted");
+                    }
+                }
+                RiAuthor4142LiveBoPending::Exit(reason) => {
+                    if let Some(position) = self.live_bo.position.take() {
+                        let exit_price = non_zero_or_close(bar.open, bar.close);
+                        let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
+                            component: RiAuthor4142Component::Author42Bo,
+                            side: position.side,
+                            model_signal_ts_local: position.entry_ts_local,
+                            scheduled_entry_ts_local: Some(position.entry_ts_local),
+                            scheduled_exit_ts_local: Some(bar.ts_local),
+                            reason,
+                            decision_key: position.decision_key,
+                            shadow_pnl_points: Some(
+                                Self::points_for_side(
+                                    position.side,
+                                    position.entry_price,
+                                    exit_price,
+                                ) - config.roundtrip_cost_points,
+                            ),
+                        });
+                        let candidate = self.live_candidate_for_decision(
+                            &decision,
+                            RiAuthor4142CandidateRole::Exit,
+                            position.side.exit_order_side(),
+                            bar.ts_local,
+                        );
+                        intents.push(self.emit_live_candidate(candidate, &decision));
+                        self.transition_live_flat(&decision, "live_bo_exit_emitted");
+                    }
+                }
+            }
+        }
+
+        self.live_bo.day_hh = self.live_bo.day_hh.max(bar.high);
+        self.live_bo.day_ll = self.live_bo.day_ll.min(bar.low);
+
+        if let Some(mut position) = self.live_bo.position.take() {
+            position.bars_held = position.bars_held.saturating_add(1);
+            if bar.ts_local.time() >= config.exit_time {
+                let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
+                    component: RiAuthor4142Component::Author42Bo,
+                    side: position.side,
+                    model_signal_ts_local: position.entry_ts_local,
+                    scheduled_entry_ts_local: Some(position.entry_ts_local),
+                    scheduled_exit_ts_local: Some(bar.ts_local),
+                    reason: "time_exit_same_bar_close",
+                    decision_key: position.decision_key,
+                    shadow_pnl_points: Some(
+                        Self::points_for_side(position.side, position.entry_price, bar.close)
+                            - config.roundtrip_cost_points,
+                    ),
+                });
+                let candidate = self.live_candidate_for_decision(
+                    &decision,
+                    RiAuthor4142CandidateRole::Exit,
+                    position.side.exit_order_side(),
+                    bar.ts_local,
+                );
+                intents.push(self.emit_live_candidate(candidate, &decision));
+                self.transition_live_flat(&decision, "live_bo_exit_emitted");
+            } else {
+                if let Some(context) = self.live_bo.context {
+                    match position.side {
+                        RiAuthor4142Side::Long => {
+                            if bar.close < context.prev_close + config.stop_k * context.prev_range {
+                                self.live_bo.pending = Some(RiAuthor4142LiveBoPending::Exit(
+                                    "stop_emergency_long_next_open",
+                                ));
+                            } else if Self::is_author42_hour_check(
+                                bar.ts_local,
+                                self.live_bo.first_bar.map(|bar| bar.ts_local),
+                            ) && bar.close
+                                < context.prev_close + config.stop_hour_k * context.prev_range
+                            {
+                                self.live_bo.pending = Some(RiAuthor4142LiveBoPending::Exit(
+                                    "stop_hour_long_next_open",
+                                ));
+                            }
+                        }
+                        RiAuthor4142Side::Short => {
+                            if bar.close > context.prev_close - config.stop_k * context.prev_range {
+                                self.live_bo.pending = Some(RiAuthor4142LiveBoPending::Exit(
+                                    "stop_emergency_short_next_open",
+                                ));
+                            } else if Self::is_author42_hour_check(
+                                bar.ts_local,
+                                self.live_bo.first_bar.map(|bar| bar.ts_local),
+                            ) && bar.close
+                                > context.prev_close - config.stop_hour_k * context.prev_range
+                            {
+                                self.live_bo.pending = Some(RiAuthor4142LiveBoPending::Exit(
+                                    "stop_hour_short_next_open",
+                                ));
+                            }
+                        }
+                    }
+                }
+                self.live_bo.position = Some(position);
+            }
+        }
+
+        self.update_bo_levels_and_pending_entry(bar, config);
+        self.live_bo.bar_index = self.live_bo.bar_index.saturating_add(1);
+        intents
+    }
+
+    fn ensure_bo_session(&mut self, bar: ModelBar) {
+        if self.live_bo.current_date == Some(bar.ts_local.date()) {
+            return;
+        }
+        let date = bar.ts_local.date();
+        let config = Author42Config::ri_grid_k042_both();
+        let context = self.bo_context_for_date(date);
+        let skip_by_date = (config.exclude_friday && date.weekday().number_from_monday() == 5)
+            || (config.exclude_june_window && Self::in_author_june_window(date));
+        let trade_allowed = context
+            .map(|ctx| {
+                !skip_by_date
+                    && all_finite_live(&[
+                        ctx.prev_close,
+                        ctx.prev2_close,
+                        ctx.prev_range,
+                        ctx.prev_hl_ratio,
+                        ctx.prev_ret,
+                    ])
+                    && ctx.prev_range > 0.0
+                    && ctx.prev_close > 0.0
+            })
+            .unwrap_or(false);
+        self.live_bo = RiAuthor4142LiveBoState {
+            current_date: Some(date),
+            context,
+            first_bar: Some(bar),
+            trade_allowed,
+            ..RiAuthor4142LiveBoState::default()
+        };
+    }
+
+    fn update_bo_levels_and_pending_entry(&mut self, bar: ModelBar, config: Author42Config) {
+        let Some(context) = self.live_bo.context else {
+            return;
+        };
+        if self.live_bo.bar_index == 5 {
+            if let Some(first_bar) = self.live_bo.first_bar {
+                self.live_bo.long_level = Some(
+                    (context.prev_close + config.k * context.prev_range)
+                        .max(bar.close)
+                        .max(first_bar.high),
+                );
+                self.live_bo.short_level = Some(
+                    (context.prev_close - config.k * context.prev_range)
+                        .min(bar.close)
+                        .min(first_bar.low),
+                );
+            }
+            if config.use_first_hour_extreme_filter
+                && (bar.close - context.prev_close).abs()
+                    > config.first_hour_extreme_k * context.prev_range
+            {
+                self.live_bo.trade_allowed = false;
+            }
+        }
+        if self.live_bo.pending.is_some()
+            || self.live_bo.position.is_some()
+            || self.live_mr.position.is_some()
+            || !self.live_bo.trade_allowed
+        {
+            return;
+        }
+        let (Some(long_level), Some(short_level)) =
+            (self.live_bo.long_level, self.live_bo.short_level)
+        else {
+            return;
+        };
+        if bar.ts_local.time() >= config.exit_time {
+            return;
+        }
+
+        let range_ok = context.prev_hl_ratio > config.min_prev_hl_ratio;
+        let mut buy_trig = range_ok && context.prev_ret > -config.prev_extreme_move;
+        let mut short_trig = range_ok && context.prev_ret < config.prev_extreme_move;
+        match config.side_mode {
+            Author42SideMode::Long => short_trig = false,
+            Author42SideMode::Short => buy_trig = false,
+            Author42SideMode::Both => {}
+        }
+
+        if config.allow_reentry_on_day_extreme {
+            if self.live_bo.was_long_today
+                && bar.high >= self.live_bo.day_hh
+                && bar.ts_local.time() < config.exit_time
+            {
+                self.live_bo.pending =
+                    Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Long));
+                return;
+            }
+            if self.live_bo.was_short_today
+                && bar.low <= self.live_bo.day_ll
+                && bar.ts_local.time() < config.exit_time
+            {
+                self.live_bo.pending =
+                    Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Short));
+                return;
+            }
+        }
+
+        if Self::is_author42_hour_check(
+            bar.ts_local,
+            self.live_bo.first_bar.map(|bar| bar.ts_local),
+        ) {
+            if buy_trig && bar.close > long_level {
+                self.live_bo.pending =
+                    Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Long));
+            } else if short_trig && bar.close < short_level {
+                self.live_bo.pending =
+                    Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Short));
+            }
+        }
+    }
+
+    fn mr_entry_signal(
+        &self,
+        bar: ModelBar,
+    ) -> Option<(RiDailyAnchor, RiAuthor4142Side, Author41Config)> {
+        let anchor = self.mr_anchor_for_date(bar.ts_local.date())?;
+        if !anchor.prev_close.is_finite()
+            || !anchor.prev_range.is_finite()
+            || !anchor.prev_low.is_finite()
+            || anchor.prev_range <= 0.0
+            || anchor.prev_low <= 0.0
+        {
+            return None;
+        }
+        let short = Author41Config::ri_plateau_short_source();
+        let long = Author41Config::ri_plateau_long_source();
+        for (side, config) in [
+            (RiAuthor4142Side::Short, short),
+            (RiAuthor4142Side::Long, long),
+        ] {
+            if bar.ts_local.time() > config.entry_end {
+                continue;
+            }
+            let rel_range = anchor.prev_range / anchor.prev_low;
+            if !(rel_range.is_finite()
+                && config.min_range < rel_range
+                && rel_range < config.max_range)
+            {
+                continue;
+            }
+            let signal = match side {
+                RiAuthor4142Side::Short => {
+                    bar.close > anchor.prev_close
+                        && bar.close < anchor.prev_close + config.k * anchor.prev_range
+                }
+                RiAuthor4142Side::Long => {
+                    bar.close < anchor.prev_close
+                        && bar.close > anchor.prev_close - config.k * anchor.prev_range
+                }
+            };
+            if signal {
+                return Some((anchor, side, config));
+            }
+        }
+        None
+    }
+
+    fn mr_exit_signal(
+        position: &RiAuthor4142LiveMrPosition,
+        bar: ModelBar,
+    ) -> Option<(f64, &'static str)> {
+        let config = position.config;
+        match position.side {
+            RiAuthor4142Side::Short => {
+                let stop_price = position.prev_close + config.stop_k * position.prev_range;
+                let take_price = position.prev_close - config.k2 * position.prev_range;
+                if bar.high >= stop_price {
+                    Some((stop_price, "stop"))
+                } else if bar.close < take_price {
+                    Some((bar.close, "take_author_close"))
+                } else if bar.ts_local.time() >= config.time_exit {
+                    Some((bar.close, "time_exit"))
+                } else if position.bars_held > config.breakeven_after_bars
+                    && bar.low <= position.entry_price
+                {
+                    Some((position.entry_price, "breakeven_limit"))
+                } else {
+                    None
+                }
+            }
+            RiAuthor4142Side::Long => {
+                let stop_price = position.prev_close - config.stop_k * position.prev_range;
+                let take_price = position.prev_close + config.k2 * position.prev_range;
+                if bar.low <= stop_price {
+                    Some((stop_price, "stop"))
+                } else if bar.close > take_price {
+                    Some((bar.close, "take_author_close"))
+                } else if bar.ts_local.time() >= config.time_exit {
+                    Some((bar.close, "time_exit"))
+                } else if position.bars_held > config.breakeven_after_bars
+                    && bar.high >= position.entry_price
+                {
+                    Some((position.entry_price, "breakeven_limit"))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn live_decision(&self, input: RiAuthor4142LiveDecisionInput) -> RiAuthor4142ModelDecision {
+        RiAuthor4142ModelDecision {
+            action: RiAuthor4142DecisionAction::Enter,
+            component: input.component,
+            side: Some(input.side),
+            model_signal_ts_local: input.model_signal_ts_local,
+            scheduled_entry_ts_local: input.scheduled_entry_ts_local,
+            scheduled_exit_ts_local: input.scheduled_exit_ts_local,
+            reason: input.reason.to_string(),
+            overlap_decision: "Accepted".to_string(),
+            shadow_pnl_points: input.shadow_pnl_points,
+            decision_key: input.decision_key,
+        }
+    }
+
+    fn live_candidate_for_decision(
+        &self,
+        decision: &RiAuthor4142ModelDecision,
+        role: RiAuthor4142CandidateRole,
+        side: OrderSide,
+        scheduled_ts_local: NaiveDateTime,
+    ) -> RiAuthor4142CandidateIntent {
+        self.build_candidate_intent(decision, role, side, scheduled_ts_local)
+    }
+
+    fn emit_live_candidate(
+        &mut self,
+        candidate: RiAuthor4142CandidateIntent,
+        decision: &RiAuthor4142ModelDecision,
+    ) -> Intent {
+        self.record_candidate_emitted_journal(&candidate, decision);
+        self.log_candidate_intent_emitted(&candidate, decision);
+        Intent::Market {
+            qty: candidate.qty,
+            side: candidate.side,
+            fill_price: None,
+            comment: Some(candidate.comment),
+        }
+        .with_class(candidate.intent_class)
+    }
+
+    fn record_candidate_emitted_journal(
+        &mut self,
+        candidate: &RiAuthor4142CandidateIntent,
+        decision: &RiAuthor4142ModelDecision,
+    ) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::IntentEmitted,
+            Some(candidate),
+            None,
+        ));
+    }
+
+    fn log_candidate_intent_emitted(
+        &self,
+        candidate: &RiAuthor4142CandidateIntent,
+        decision: &RiAuthor4142ModelDecision,
+    ) {
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_intent_emitted",
+            role = candidate.role.as_str(),
+            component = candidate.component.as_str(),
+            model_side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
+            order_side = ?candidate.side,
+            qty = candidate.qty,
+            order_style = candidate.order_style,
+            intent_class = ?candidate.intent_class,
+            scheduled_ts_local = %candidate.scheduled_ts_local,
+            comment = %candidate.comment,
+            execution_path = candidate.execution_path.as_str(),
+            decision_key = %candidate.decision_key,
+            mode = self.config.mode.as_str(),
+            allow_order_emission = self.config.allow_order_emission,
+            live_adapter_enabled = self.can_emit_orders(),
+        );
+    }
+
+    fn transition_live_in_position(
+        &mut self,
+        decision: &RiAuthor4142ModelDecision,
+        reason: &'static str,
+    ) {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            current_component,
+            current_side,
+            current_cycle_id,
+            current_entry_ts_local,
+            current_exit_ts_local,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            *phase = "live_in_position".to_string();
+            *current_component = Some(decision.component.as_str().to_string());
+            *current_side = decision.side.map(|side| side.as_str().to_string());
+            *current_cycle_id = Some(format!(
+                "{}:{}",
+                decision.component.as_str(),
+                decision.model_signal_ts_local.format("%Y%m%d%H%M%S")
+            ));
+            *current_entry_ts_local = decision.scheduled_entry_ts_local.map(|ts| ts.to_string());
+            *current_exit_ts_local = decision.scheduled_exit_ts_local.map(|ts| ts.to_string());
+            *last_transition_reason = Some(reason.to_string());
+        }
+    }
+
+    fn transition_live_flat(&mut self, decision: &RiAuthor4142ModelDecision, reason: &'static str) {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            current_component,
+            current_side,
+            current_cycle_id,
+            current_entry_ts_local,
+            current_exit_ts_local,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            *phase = RiAuthor4142Phase::Flat.as_str().to_string();
+            *current_component = None;
+            *current_side = None;
+            *current_cycle_id = None;
+            *current_entry_ts_local = None;
+            *current_exit_ts_local = None;
+            *last_transition_reason = Some(format!("{}:{}", reason, decision.reason));
+        }
+    }
+
+    fn mr_anchor_for_date(&self, date: NaiveDate) -> Option<RiDailyAnchor> {
+        let stats = self.daily_stats_before(date);
+        let (_, prev) = stats.last().copied()?;
+        Some(RiDailyAnchor {
+            prev_close: prev.close,
+            prev_low: prev.low,
+            prev_range: prev.high - prev.low,
+        })
+    }
+
+    fn bo_context_for_date(&self, date: NaiveDate) -> Option<RiAuthor4142LiveBoContext> {
+        let stats = self.daily_stats_before(date);
+        if stats.len() < 2 {
+            return None;
+        }
+        let (_, prev2) = stats[stats.len() - 2];
+        let (_, prev) = stats[stats.len() - 1];
+        let prev_range = prev.high - prev.low;
+        Some(RiAuthor4142LiveBoContext {
+            prev_close: prev.close,
+            prev2_close: prev2.close,
+            prev_range,
+            prev_hl_ratio: prev.high / prev.low,
+            prev_ret: prev.close / prev2.close - 1.0,
+        })
+    }
+
+    fn daily_stats_before(&self, date: NaiveDate) -> Vec<(NaiveDate, RiDailyStats)> {
+        let mut by_day: BTreeMap<NaiveDate, RiDailyStats> = BTreeMap::new();
+        for bar in &self.model_bars {
+            if bar.ts_local.date() >= date {
+                continue;
+            }
+            by_day
+                .entry(bar.ts_local.date())
+                .and_modify(|stats| {
+                    stats.high = stats.high.max(bar.high);
+                    stats.low = stats.low.min(bar.low);
+                    stats.close = bar.close;
+                })
+                .or_insert(RiDailyStats {
+                    high: bar.high,
+                    low: bar.low,
+                    close: bar.close,
+                });
+        }
+        by_day.into_iter().collect()
+    }
+
+    fn points_for_side(side: RiAuthor4142Side, entry_price: f64, exit_price: f64) -> f64 {
+        match side {
+            RiAuthor4142Side::Long => exit_price - entry_price,
+            RiAuthor4142Side::Short => entry_price - exit_price,
+        }
+    }
+
+    fn is_author42_hour_check(ts: NaiveDateTime, start_ts: Option<NaiveDateTime>) -> bool {
+        let Some(start_ts) = start_ts else {
+            return false;
+        };
+        ts.time().minute() == 50 && ts > start_ts + chrono::Duration::minutes(50)
+    }
+
+    fn in_author_june_window(date: NaiveDate) -> bool {
+        let Some(start) = NaiveDate::from_ymd_opt(date.year(), 5, 21) else {
+            return false;
+        };
+        let Some(end) = NaiveDate::from_ymd_opt(date.year(), 7, 1) else {
+            return false;
+        };
+        start <= date && date <= end
+    }
+
     pub fn can_emit_orders(&self) -> bool {
-        self.config.mode.can_emit_orders() && self.config.allow_order_emission
+        self.config.can_emit_orders()
     }
 
     pub fn phase_for_test(&self) -> Option<String> {
@@ -847,9 +1636,12 @@ impl RiAuthor4142LiveStrategy {
 }
 
 impl Strategy for RiAuthor4142LiveStrategy {
-    fn on_bar(&mut self, _ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
+    fn on_bar(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
         let _decisions = self.update_bar_state(bar);
-        Vec::new()
+        let Some(model_bar) = self.live_model_bar_for_emit(ctx, bar) else {
+            return Vec::new();
+        };
+        self.live_intents_for_bar(model_bar)
     }
 
     fn on_ack(&mut self, _ctx: &StrategyCtx, _ack: &alor_protocol::CommandAck) -> Vec<Intent> {
@@ -980,11 +1772,15 @@ impl RiAuthor4142JournalRecord {
 }
 
 fn non_zero_or_close(value: f64, close: f64) -> f64 {
-    if value != 0.0 {
+    if value.is_finite() && value != 0.0 {
         value
     } else {
         close
     }
+}
+
+fn all_finite_live(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
 }
 
 fn is_finalized_record(record: &ShadowJournalRecord, current_dt_local: NaiveDateTime) -> bool {
@@ -1057,25 +1853,113 @@ mod tests {
     }
 
     #[test]
-    fn allow_order_emission_is_blocked_until_go() {
+    fn allow_order_emission_requires_micro_live_mode() {
         let mut config = default_config();
         config.allow_order_emission = true;
 
         let err = RiAuthor4142LiveStrategy::new(config)
-            .expect_err("order emission must remain blocked")
+            .expect_err("order emission must be paired with micro_live")
             .to_string();
-        assert!(err.contains("blocked until GO/NO-GO"));
+        assert!(err.contains("mode=micro_live and allow_order_emission=true"));
     }
 
     #[test]
-    fn micro_live_mode_is_blocked_until_go() {
+    fn micro_live_mode_requires_order_emission_permission() {
         let mut config = default_config();
         config.mode = RiAuthor4142RuntimeMode::MicroLive;
 
         let err = RiAuthor4142LiveStrategy::new(config)
-            .expect_err("micro_live must remain blocked")
+            .expect_err("micro_live must be paired with order emission")
             .to_string();
-        assert!(err.contains("micro_live mode is blocked"));
+        assert!(err.contains("mode=micro_live and allow_order_emission=true"));
+    }
+
+    #[test]
+    fn micro_live_with_order_emission_can_emit_orders() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+
+        let strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+        assert!(strategy.can_emit_orders());
+    }
+
+    #[test]
+    fn micro_live_emits_author41_entry_and_exit_as_action_scoped_market_intents() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        let entry_intents = strategy.on_bar(&live_ctx(), &entry_bar);
+
+        assert_eq!(entry_intents.len(), 1);
+        match entry_intents[0].base_intent() {
+            crate::strategy_host::Intent::Market {
+                side, qty, comment, ..
+            } => {
+                assert_eq!(*side, OrderSide::Sell);
+                assert_eq!(*qty, 1.0);
+                assert!(comment
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("author41_mr:entry"));
+            }
+            other => panic!("unexpected entry intent: {other:?}"),
+        }
+        assert_eq!(entry_intents[0].explicit_class(), Some(IntentClass::Entry));
+
+        let exit_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 10, 0),
+            DataOrigin::Live,
+            100_090.0,
+            100_100.0,
+            99_890.0,
+            99_900.0,
+        );
+        let exit_intents = strategy.on_bar(&live_ctx(), &exit_bar);
+
+        assert_eq!(exit_intents.len(), 1);
+        match exit_intents[0].base_intent() {
+            crate::strategy_host::Intent::Market {
+                side, qty, comment, ..
+            } => {
+                assert_eq!(*side, OrderSide::Buy);
+                assert_eq!(*qty, 1.0);
+                assert!(comment
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("author41_mr:exit"));
+            }
+            other => panic!("unexpected exit intent: {other:?}"),
+        }
+        assert_eq!(exit_intents[0].explicit_class(), Some(IntentClass::Exit));
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
+        assert!(strategy
+            .journal_records_for_test()
+            .iter()
+            .any(|row| row.adapter_decision == RiAuthor4142JournalDecision::IntentEmitted));
     }
 
     #[test]
@@ -1599,13 +2483,24 @@ mod tests {
     }
 
     fn bar(dt_local: NaiveDateTime, origin: DataOrigin) -> BarEvent {
+        bar_with_ohlc(dt_local, origin, 99_990.0, 100_010.0, 99_980.0, 100_000.0)
+    }
+
+    fn bar_with_ohlc(
+        dt_local: NaiveDateTime,
+        origin: DataOrigin,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+    ) -> BarEvent {
         BarEvent {
             symbol: "RIM6".to_string(),
             close_time_utc: (dt_local - Duration::hours(3)).and_utc().timestamp(),
-            close: 100_000.0,
-            o: 99_990.0,
-            h: 100_010.0,
-            l: 99_980.0,
+            close,
+            o: open,
+            h: high,
+            l: low,
             v: 10.0,
             origin,
         }
@@ -1626,6 +2521,13 @@ mod tests {
             event_ts_utc: 1_776_000_000,
             now_ts_utc: 1_776_000_000,
             last_bar_ts: None,
+        }
+    }
+
+    fn live_ctx() -> crate::StrategyCtx {
+        crate::StrategyCtx {
+            allow_live_orders: true,
+            ..test_ctx()
         }
     }
 }

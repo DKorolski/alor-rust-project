@@ -458,13 +458,13 @@ allow_order_emission = true
 execution_path = action_scoped_only
 ```
 
-Current lock:
+Current code status:
 
 ```text
-The pending micro runtime config parses as a candidate, but the current
-strategy implementation still blocks micro_live / allow_order_emission=true.
-This is intentional until the live adapter emits entry at the scheduled entry
-time and exit at the scheduled exit time.
+The pending micro runtime config parses as a candidate and the P0 live adapter
+now supports prospective action-scoped market entry/exit intents in
+micro_live mode. The config still remains inactive on VPS until a new image is
+built, deployed, and switched only in the controlled between-session window.
 ```
 
 Why not just flip the current shadow config:
@@ -474,6 +474,16 @@ The current shadow bridge records finalized model trades after the model exit
 is known. That is correct for shadow evidence, but not sufficient for live
 execution because live entry must be emitted at entry time, not retrospectively
 after the trade is finalized.
+```
+
+P0 live-adapter scope:
+
+```text
+MR/BO live state is maintained prospectively from canonical 10m bars.
+Entry/exit intents use market_p0 / Intent::Market.
+Every emitted intent is explicitly classified as Entry or Exit.
+No same-bar MR re-entry is emitted immediately after an MR exit in P0.
+Shadow journal remains observation evidence, not live state.
 ```
 
 Between-session enablement checklist:

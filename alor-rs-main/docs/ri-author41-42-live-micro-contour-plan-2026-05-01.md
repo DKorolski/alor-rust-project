@@ -1045,11 +1045,12 @@ Rollout order:
 Status as of 2026-05-04:
 
 ```text
-PENDING_LIVE_ADAPTER_PATCH
+P0_LIVE_ADAPTER_PATCHED / PENDING_IMAGE_ROLLOUT
 ```
 
-The micro config candidates have been prepared, but they are intentionally
-locked behind the current pre-GO runtime guard.
+The micro config candidates have been prepared, and the first prospective
+live-adapter slice is implemented. The candidate files still must not be used
+on VPS until a new image is built and the between-session checklist passes.
 
 Prepared candidate files:
 
@@ -1058,19 +1059,23 @@ configs/runtime.ri_author41_42.micro.7502MIW.pending.toml
 configs/gateway.ri_author41_42.micro.7502MIW.pending.toml
 ```
 
-Required before these files can be used on VPS:
+Implemented P0 requirements:
 
-- live adapter must emit `entry` at `scheduled_entry_ts_local`;
-- live adapter must emit `exit` at `scheduled_exit_ts_local`;
-- entry/exit must be `Intent::Market` or the approved marketable P0 order
+- live adapter emits prospective `entry`/`exit` intents from live 10m state;
+- entry/exit uses `Intent::Market` / the approved marketable P0 order
   style;
-- every emitted intent must be explicitly classified as `Entry` or `Exit`;
+- every emitted intent is explicitly classified as `Entry` or `Exit`;
 - emitted command comments must include RI profile/component/role metadata;
-- runtime must remain source of truth for final `request_id`;
 - current shadow journal must not be used as live state;
-- no BO/MR overlap can create simultaneous exposure;
-- if a decision is already stale at startup, it must not be emitted
-  retroactively.
+- no same-bar MR re-entry is emitted immediately after an MR exit in P0;
+- runtime remains source of truth for final `request_id`.
+
+Still required before VPS switch:
+
+- build and deploy a new runtime image containing the P0 adapter;
+- run focused config/runtime tests from the deployed artifact;
+- confirm broker-flat/no-orders/no-stop-orders;
+- switch only from zero in a between-session window.
 
 This distinction matters because the current shadow bridge records finalized
 model trades after the exit is known. That is correct for observation, but live
@@ -1081,8 +1086,9 @@ model entry event -> emit entry now -> wait for broker/trade state
 scheduled/model exit event -> emit exit now -> reconcile flat
 ```
 
-Therefore a pure config flip is a NO-GO until the live adapter patch and tests
-exist.
+Therefore a pure VPS config flip remains a NO-GO until the new image with the
+P0 adapter is deployed, tested from the deployed artifact, and the
+between-session from-zero checklist passes.
 
 ## Promotion Gates
 
