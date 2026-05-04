@@ -355,3 +355,65 @@ current model contract.
 The Redis retention gap for the new contour was corrected before becoming a
 resource incident.
 ```
+
+## Observation 2026-05-04
+
+Checkpoint:
+
+```text
+2026-05-04 09:40 MSK
+```
+
+Runtime state:
+
+```text
+mode = shadow
+profile_id = ri_author41_42_primary_combo_cost2
+timeframe = 10m
+allow_order_emission = false
+execution_path = action_scoped_only
+live_adapter_enabled = false
+phase = flat
+model_bars_seen = 434
+suppressed_service_bars = 148
+model_decisions_seen = 6
+last_transition_reason = dry_run_exit:take_author_close
+```
+
+Safety checks:
+
+```text
+cmd.orders.7502MIW.ri_author41_42.shadow = 0
+cmd.acks.7502MIW.ri_author41_42.shadow = 0
+broker futures position = none
+broker orders = {}
+broker stop_orders = {}
+WARN/ERROR scan = clean
+```
+
+Timing read:
+
+```text
+last_model_bar_ts = 2026-05-04 09:30:00 MSK
+last_bar_ts = 2026-05-04 09:30:00 MSK
+```
+
+Redis retention:
+
+```text
+The 2026-05-04 03:10 MSK safe-trim timer included the RI 7502MIW contour.
+broker.snapshots.7502MIW was trimmed from 16306 to 10000.
+
+At the checkpoint:
+broker.snapshots.7502MIW = 12340
+md.bars.7502MIW.RIM6.10m = 1037
+runtime.state.ri_author41_42.shadow.7502MIW = 127
+```
+
+Interpretation:
+
+```text
+The shadow contour progressed into the regular Monday session and remains
+pre-GO safe. The safe-trim timer now covers the new RI contour, and no live
+command emission was observed.
+```
