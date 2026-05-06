@@ -489,3 +489,159 @@ configs, clear only the micro runtime state/command/ack streams, preserve the
 10m RIM6 bar stream, and verify live_adapter_enabled=true plus
 execution_path=action_scoped_only after restart.
 ```
+
+## RI Author41/42 Micro Rollout (2026-05-06)
+
+GO decision:
+
+```text
+2026-05-06 23:44 MSK
+operator decision: GO - begin controlled RI micro rollout
+```
+
+Final preflight before rollout:
+
+```text
+2026-05-06 23:44 MSK
+sessiongap       nonzero=0 working=0
+alor-usdrubf     nonzero=0 working=0
+hybrid-imoexf    nonzero=0 working=0
+ri-author41/42   nonzero=0 working=0
+```
+
+Build/deploy preparation:
+
+```text
+runtime image built on VPS from local code commit 0245ab7
+image tag: ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-0245ab7-ri-micro-20260506
+image id:  cebf386bcaf8
+
+old runtime image:
+ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-d6d0e7e-ri7502miw-20260501
+
+reason for new image:
+the old image still contained the pre-GO live-order-emission blocker; switching
+only config would not have activated the live adapter.
+```
+
+VPS deployment changes:
+
+```text
+stack: /opt/trading-ri-author41-42-7502miw
+
+runtime config:
+/configs/runtime.ri_author41_42.micro.7502MIW.toml
+
+gateway config:
+/configs/gateway.ri_author41_42.micro.7502MIW.toml
+
+runtime stream:
+runtime.state.ri_author41_42.micro.7502MIW
+
+command stream:
+cmd.orders.7502MIW.ri_author41_42.micro
+
+ack stream:
+cmd.acks.7502MIW.ri_author41_42.micro
+
+gateway consumer group:
+gateway-commands-ri-author41-42-micro-7502MIW
+```
+
+Backups and preserved state:
+
+```text
+.env backup:
+/opt/trading-ri-author41-42-7502miw/.env.bak.pre-ri-micro-20260506-235356
+
+compose backup:
+/opt/trading-ri-author41-42-7502miw/docker-compose.yml.bak.pre-ri-micro-20260506-235356
+
+shadow report archive:
+/opt/trading-ri-author41-42-7502miw/volumes/reports/archive-20260506-235503
+
+preserved:
+md.bars.7502MIW.RIM6.10m
+broker positions/orders/trades/snapshots
+shadow decision journal archive
+
+cleared:
+runtime.state.ri_author41_42.micro.7502MIW
+cmd.orders.7502MIW.ri_author41_42.micro
+cmd.acks.7502MIW.ri_author41_42.micro
+```
+
+Startup verification:
+
+```text
+2026-05-06 23:55 MSK
+strategy_id=ri_author41_42.micro.7502MIW
+trade_mode=Live
+allow_live_orders=true
+mode=micro_live
+allow_order_emission=true
+execution_path=action_scoped_only
+live_adapter_enabled=true
+qty=1
+symbol=RIM6
+```
+
+Bootstrap result:
+
+```text
+ri_bootstrap_reconciled_flat
+ri_runtime_state_restored_clean
+reset_state_on_start=true
+broker snapshot positions_open_strategy=0
+broker snapshot orders_open_strategy=0
+broker snapshot stop_orders_open_strategy=0
+```
+
+Safety checks after restart:
+
+```text
+RI gateway healthy
+RI runtime healthy
+RI micro command stream XLEN=0
+RI micro ack stream XLEN=0
+all checked contours remain flat/no-working-orders after restart
+RI runtime/gateway WARN/ERROR since restart: none
+```
+
+Resource check after restart:
+
+```text
+RI runtime  ~3.0 MiB / 768 MiB
+RI gateway  ~3.8 MiB / 768 MiB
+RI Redis    80.71 MiB / 512 MiB, fragmentation 1.13
+```
+
+Interpretation:
+
+```text
+The RI Author41/42 contour was promoted from shadow to controlled micro-live
+configuration after a clean flat gate. The active runtime is now micro_live with
+live_adapter_enabled=true and execution_path=action_scoped_only. Historical
+warmup replay emitted model decisions but did not publish live commands; the
+micro command and ack streams stayed empty after startup.
+
+Because the rollout happened after the regular trading window, the live guard
+remains BLOCKED/SyncingHistory until the next eligible live bar. This is
+expected and should resolve on the next regular-session startup.
+```
+
+Next checks:
+
+```text
+1. Before the next session, confirm RI remains flat and command/ack streams are
+   still empty.
+2. At the first eligible RIM6 10m live bar, verify transition toward LiveReady.
+3. On the first real RI intent, verify:
+   - order size qty=1
+   - command stream is cmd.orders.7502MIW.ri_author41_42.micro
+   - gateway uses action-scoped CWS
+   - no legacy CWS path appears
+   - broker ack/fill lifecycle is clean
+4. Roll back to the saved shadow env/compose if startup state, path, or broker
+   reconciliation deviates from the expected contract.
+```
