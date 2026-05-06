@@ -52,6 +52,69 @@ RI 7502MIW Redis is still the largest Redis container and should remain on the
 watchlist, but it is not at maxmemory during this review.
 ```
 
+## RI Redis Maintenance
+
+Maintenance time:
+
+```text
+2026-05-06 09:18-09:20 MSK
+```
+
+Reason:
+
+```text
+trading-ri-author41-42-7502miw-redis-1 approached maxmemory:
+used_memory_human = 494.30M
+maxmemory_human   = 512.00M
+```
+
+Key-level finding:
+
+```text
+events.health.ri_author41_42.7502MIW  82484 rows, ~465MB
+broker.snapshots.7502MIW              12217 rows, ~5.3MB
+md.bars.7502MIW.RIM6.10m               1212 rows, ~0.38MB
+runtime.state.ri_author41_42...          302 rows, ~0.35MB
+```
+
+Action:
+
+```text
+XTRIM events.health.ri_author41_42.7502MIW MAXLEN 2000
+XTRIM broker.snapshots.7502MIW MAXLEN 3000
+MEMORY PURGE
+```
+
+Preserved:
+
+```text
+md.bars.7502MIW.RIM6.10m
+runtime.state.ri_author41_42.shadow.7502MIW
+broker.positions.7502MIW
+broker.orders.7502MIW
+broker.trades.7502MIW
+cmd.orders.7502MIW.ri_author41_42.shadow
+cmd.acks.7502MIW.ri_author41_42.shadow
+```
+
+Result:
+
+```text
+used_memory_human before  494.30M
+used_memory_human after    15.51M
+docker stats after         27.31MiB / 768MiB
+events.health rows          2001
+broker.snapshots rows       3000
+```
+
+Post-check:
+
+```text
+RI runtime continued normally after trim.
+Latest post-trim log: ri_model_bar_observed dt_local=2026-05-06 09:10:00
+No post-trim runtime ERROR/WARN observed.
+```
+
 ## Stack Health
 
 Active stacks:
