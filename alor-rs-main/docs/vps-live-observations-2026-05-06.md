@@ -426,3 +426,66 @@ Follow-up:
 4. Keep RI Redis on the resource watchlist; it is the largest active Redis
    container but remains below maxmemory.
 ```
+
+## Post-Session Flat Gate (2026-05-06)
+
+Observed at:
+
+```text
+2026-05-06 23:40 MSK
+```
+
+Broker-state check:
+
+```text
+sessiongap       non-cash positions none, working orders none
+alor-usdrubf     non-cash positions none, working orders none
+hybrid-imoexf    non-cash positions none, working orders none
+ri-author41/42   non-cash positions none, working orders none
+```
+
+Important lifecycle events:
+
+```text
+sessiongap       13:00 short USDRUBF, 13:10 buy exit, broker-flat
+alor-usdrubf     12:20 short USDRUBF, 23:40 BO EOD buy exit, broker-flat
+hybrid-imoexf    11:30 MR short IMOEXF, 12:00 TP buy exit, broker-flat
+ri-author41/42   shadow only, no live command emission
+```
+
+Alor-USDRUBF EOD exit path:
+
+```text
+request_id=4866ec64-8006-5ef1-a9c8-145c106d990f
+action=create:market
+control_cws_mode=action_scoped
+status=Accepted
+broker_order_id=2023556056051328601
+```
+
+Resources:
+
+```text
+RAM      2.0 GiB used / 7.7 GiB total, 5.7 GiB available
+disk /   29 GiB used / 79 GiB total, 46 GiB available, 39%
+RI Redis 90.68 MiB / 768 MiB after 2026-05-06 trim
+```
+
+Interpretation:
+
+```text
+The 2026-05-06 session ended in a clean flat gate across all live/shadow
+contours. No working or stop orders were detected in the checked broker streams.
+The alor-usdrubf EOD exit used the expected action-scoped CWS path; no legacy
+CWS regression was observed in the final exit path.
+```
+
+RI micro readiness note:
+
+```text
+This is a valid operational window for a controlled RI micro rollout only after
+an explicit final GO decision. The rollout must still use the pending micro
+configs, clear only the micro runtime state/command/ack streams, preserve the
+10m RIM6 bar stream, and verify live_adapter_enabled=true plus
+execution_path=action_scoped_only after restart.
+```
