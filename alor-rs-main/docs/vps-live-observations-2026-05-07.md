@@ -118,6 +118,64 @@ intent must still be watched closely for action-scoped CWS path and clean
 broker ack/fill lifecycle.
 ```
 
+## RI Redis Health Retention Trim
+
+The first post-rollout RI Redis read showed that the footprint was dominated by
+the diagnostic health stream, not by bars, commands, acks, or runtime state:
+
+```text
+events.health.ri_author41_42.7502MIW  18,527 rows, ~117.79 MiB
+broker.snapshots.7502MIW              ~5.59 MiB
+broker.positions.7502MIW              ~0.52 MiB
+md.bars.7502MIW.RIM6.10m              ~0.51 MiB
+runtime.state.ri_author41_42.shadow   ~0.42 MiB
+runtime.state.ri_author41_42.micro    ~0 MiB
+cmd.orders/acks micro                 0 rows
+```
+
+Safe online trim was applied only to the RI health stream:
+
+```text
+XTRIM events.health.ri_author41_42.7502MIW MAXLEN 2000
+MEMORY PURGE
+```
+
+Result:
+
+```text
+before_len=18541
+before_mem=123608428
+trimmed=16541
+after_len=2000
+after_mem=13333980
+used_memory_human=19.47M
+maxmemory_human=512.00M
+mem_fragmentation_ratio=1.56
+cmd.orders.7502MIW.ri_author41_42.micro=0
+cmd.acks.7502MIW.ri_author41_42.micro=0
+```
+
+Interpretation:
+
+```text
+This was safe hygiene cleanup. It did not touch model bars, broker snapshots,
+positions, runtime state, command streams, or ack streams. The RI health trim
+target should be reduced from 5000 to 2000 because this stream is diagnostic
+heartbeat history, not trading state.
+```
+
+Config / maintenance follow-up:
+
+```text
+RI runtime health trim target: 5000 -> 2000
+RI shadow health trim target:  5000 -> 2000
+safe-trim script special case: events.health.ri_author41_42.* -> 2000
+VPS active config updated: yes
+VPS safe-trim dry-run after update: RI health would trim at limit=2000
+final verification: health_len=2000, used_memory_human=19.49M
+micro cmd/ack streams remained empty
+```
+
 ## Watch Items
 
 ```text
@@ -131,7 +189,8 @@ broker ack/fill lifecycle.
    - gateway action scope session open/send/result logs
    - no legacy CWS path
    - broker ack/fill is accepted and reconciled
-4. Continue routine Redis memory watch after the recent trim and micro rollout.
+4. Continue routine Redis memory watch after the health retention reduction and
+   micro rollout.
 ```
 
 ## Verdict

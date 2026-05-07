@@ -49,7 +49,7 @@ trades = 5000
 positions = 20000
 commands = 5000
 acks = 5000
-health = 5000
+health = 2000
 runtime_state = 500
 
 [strategy]
