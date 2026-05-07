@@ -468,6 +468,10 @@ pub enum StrategyState {
         last_transition_reason: Option<String>,
         #[serde(default)]
         live_adapter_enabled: bool,
+        #[serde(default)]
+        pending_entry_request_id: Option<uuid::Uuid>,
+        #[serde(default)]
+        pending_exit_request_id: Option<uuid::Uuid>,
     },
     CancelSent {
         cancel_request_id: Uuid,

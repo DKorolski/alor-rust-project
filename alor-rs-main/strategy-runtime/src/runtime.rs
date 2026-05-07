@@ -26,7 +26,7 @@ use crate::risk_gate_store::{
 };
 use crate::state::{RuntimeState, StrategyState, StrategyStateEnvelopeCompat};
 use crate::strategy_host::{
-    BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
+    BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, OrderEvent, PositionEvent,
     RiskGateRuntimeState, RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
 };
 use crate::strategy_registry::{StrategyCapabilities, StrategyRegistry};
@@ -3312,6 +3312,7 @@ impl StrategyRuntime {
 
         let action = self.intent_action_name(&intent);
         let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+        self.notify_command_prepared(ctx, &command, intent_class);
         info!(
             action,
             class = ?intent_class,
@@ -3396,6 +3397,22 @@ impl StrategyRuntime {
         );
         self.strategy.set_state(previous_state.clone());
         self.state.strategy_state = previous_state;
+    }
+
+    fn notify_command_prepared(
+        &mut self,
+        ctx: &StrategyCtx,
+        command: &alor_protocol::OrderCommand,
+        intent_class: alor_protocol::IntentClass,
+    ) {
+        let event = CommandPrepared {
+            request_id: command.request_id,
+            intent_class,
+            created_ts_utc: command.created_ts_utc,
+            symbol: command.symbol.clone(),
+        };
+        self.strategy.on_command_prepared(ctx, &event);
+        self.state.strategy_state = self.strategy.state().clone();
     }
 
     async fn apply_intents(
@@ -3495,6 +3512,7 @@ impl StrategyRuntime {
                         }
                         let command =
                             self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+                        self.notify_command_prepared(ctx, &command, intent_class);
                         info!(
                             action,
                             class = ?intent_class,
@@ -3531,6 +3549,7 @@ impl StrategyRuntime {
                         continue;
                     }
                     let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+                    self.notify_command_prepared(ctx, &command, intent_class);
                     info!(
                         action,
                         request_id = %command.request_id,
@@ -4304,6 +4323,17 @@ mod tests {
             Vec::new()
         }
 
+        fn on_command_prepared(&mut self, _ctx: &StrategyCtx, command: &CommandPrepared) {
+            self.pending_requests.push(command.request_id);
+            self.state = StrategyState::Blocked {
+                reason: format!(
+                    "prepared:{}:{:?}:{}",
+                    command.request_id, command.intent_class, command.symbol
+                ),
+                last_bar_ts: command.created_ts_utc,
+            };
+        }
+
         fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
             self.pending_requests.clone()
         }
@@ -4385,6 +4415,41 @@ mod tests {
         runtime.restore_pending_requests();
 
         assert!(runtime.our_request_ids.contains(&request_id));
+    }
+
+    #[test]
+    fn notify_command_prepared_updates_strategy_state_with_exact_request_id() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.strategy = Box::new(HookSpyStrategy::default());
+        let ctx = runtime.strategy_ctx();
+        let command = runtime.intent_to_command(
+            &ctx,
+            1_700_000_000,
+            Intent::Market {
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                fill_price: None,
+                comment: None,
+            },
+            alor_protocol::IntentClass::Entry,
+        );
+
+        runtime.notify_command_prepared(&ctx, &command, alor_protocol::IntentClass::Entry);
+
+        assert_eq!(
+            runtime.strategy.pending_request_ids(),
+            vec![command.request_id]
+        );
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::Blocked { reason, last_bar_ts }
+                if reason == &format!(
+                    "prepared:{}:{:?}:{}",
+                    command.request_id,
+                    alor_protocol::IntentClass::Entry,
+                    command.symbol
+                ) && *last_bar_ts == command.created_ts_utc
+        ));
     }
 
     #[test]

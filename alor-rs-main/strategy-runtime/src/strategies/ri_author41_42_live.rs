@@ -12,10 +12,11 @@ use crate::strategies::moex_author41_42::{
     ShadowSide,
 };
 use crate::strategy_host::{
-    BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
+    BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, OrderEvent, PositionEvent,
     RuntimeStateRestored, Strategy, StrategyCtx,
 };
 use alor_protocol::{AckStatus, IntentClass, Side as OrderSide};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -420,6 +421,8 @@ impl RiAuthor4142LiveStrategy {
                 current_exit_ts_local: None,
                 last_transition_reason: None,
                 live_adapter_enabled,
+                pending_entry_request_id: None,
+                pending_exit_request_id: None,
             },
             config,
             session_policy,
@@ -1580,6 +1583,8 @@ impl RiAuthor4142LiveStrategy {
             current_entry_ts_local,
             current_exit_ts_local,
             last_transition_reason,
+            pending_entry_request_id,
+            pending_exit_request_id,
             ..
         } = &mut self.state
         {
@@ -1594,6 +1599,8 @@ impl RiAuthor4142LiveStrategy {
             *current_entry_ts_local = decision.scheduled_entry_ts_local.map(|ts| ts.to_string());
             *current_exit_ts_local = decision.scheduled_exit_ts_local.map(|ts| ts.to_string());
             *last_transition_reason = Some(reason.to_string());
+            *pending_entry_request_id = None;
+            *pending_exit_request_id = None;
         }
     }
 
@@ -1610,6 +1617,7 @@ impl RiAuthor4142LiveStrategy {
             current_entry_ts_local,
             current_exit_ts_local,
             last_transition_reason,
+            pending_exit_request_id,
             ..
         } = &mut self.state
         {
@@ -1624,6 +1632,7 @@ impl RiAuthor4142LiveStrategy {
             *current_entry_ts_local = decision.scheduled_entry_ts_local.map(|ts| ts.to_string());
             *current_exit_ts_local = decision.scheduled_exit_ts_local.map(|ts| ts.to_string());
             *last_transition_reason = Some(format!("{}:{}", reason, decision.reason));
+            *pending_exit_request_id = None;
         }
     }
 
@@ -1631,11 +1640,13 @@ impl RiAuthor4142LiveStrategy {
         if let StrategyState::RiAuthor4142Live {
             phase,
             last_transition_reason,
+            pending_exit_request_id,
             ..
         } = &mut self.state
         {
             *phase = "live_deferred_exit".to_string();
             *last_transition_reason = Some(reason);
+            *pending_exit_request_id = None;
         }
     }
 
@@ -1649,6 +1660,8 @@ impl RiAuthor4142LiveStrategy {
             current_entry_ts_local,
             current_exit_ts_local,
             last_transition_reason,
+            pending_entry_request_id,
+            pending_exit_request_id,
             ..
         } = &mut self.state
         {
@@ -1659,6 +1672,8 @@ impl RiAuthor4142LiveStrategy {
             *current_entry_ts_local = None;
             *current_exit_ts_local = None;
             *last_transition_reason = Some(reason);
+            *pending_entry_request_id = None;
+            *pending_exit_request_id = None;
         }
     }
 
@@ -1750,6 +1765,73 @@ impl RiAuthor4142LiveStrategy {
         self.phase_for_test().as_deref() == Some(expected)
     }
 
+    fn pending_entry_request_id(&self) -> Option<Uuid> {
+        match &self.state {
+            StrategyState::RiAuthor4142Live {
+                pending_entry_request_id,
+                ..
+            } => *pending_entry_request_id,
+            _ => None,
+        }
+    }
+
+    fn pending_exit_request_id(&self) -> Option<Uuid> {
+        match &self.state {
+            StrategyState::RiAuthor4142Live {
+                pending_exit_request_id,
+                ..
+            } => *pending_exit_request_id,
+            _ => None,
+        }
+    }
+
+    fn clear_pending_entry_request_id(&mut self) {
+        if let StrategyState::RiAuthor4142Live {
+            pending_entry_request_id,
+            ..
+        } = &mut self.state
+        {
+            *pending_entry_request_id = None;
+        }
+    }
+
+    fn set_pending_request_id(&mut self, intent_class: IntentClass, request_id: Uuid) {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            pending_entry_request_id,
+            pending_exit_request_id,
+            ..
+        } = &mut self.state
+        {
+            match (phase.as_str(), intent_class) {
+                ("live_pending_entry", IntentClass::Entry) => {
+                    *pending_entry_request_id = Some(request_id);
+                }
+                ("live_pending_exit" | "live_deferred_exit", IntentClass::Exit) => {
+                    *pending_exit_request_id = Some(request_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn log_request_id_skew(&self, lifecycle: &'static str, expected: Option<Uuid>, actual: Uuid) {
+        if let Some(expected) = expected {
+            if expected != actual {
+                info!(
+                    target: "strategy_runtime::ri_author41_42_live",
+                    action = "ri_pending_request_id_skew_detected",
+                    lifecycle,
+                    expected_request_id = %expected,
+                    actual_request_id = %actual,
+                    phase = ?self.phase_for_test(),
+                    mode = self.config.mode.as_str(),
+                    live_adapter_enabled = self.can_emit_orders(),
+                );
+            }
+        }
+    }
+
     fn clear_live_positions(&mut self) {
         self.live_mr.position = None;
         self.live_bo.position = None;
@@ -1781,6 +1863,11 @@ impl Strategy for RiAuthor4142LiveStrategy {
         if phase.as_deref() == Some("live_pending_exit")
             || phase.as_deref() == Some("live_deferred_exit")
         {
+            let expected_request_id = self.pending_exit_request_id();
+            if expected_request_id.is_some() && expected_request_id != Some(ack.request_id) {
+                self.log_request_id_skew("exit", expected_request_id, ack.request_id);
+                return Vec::new();
+            }
             let broker_qty = ctx.position_qty.unwrap_or(f64::NAN);
             if ctx
                 .position_qty
@@ -1830,32 +1917,18 @@ impl Strategy for RiAuthor4142LiveStrategy {
         } else if phase.as_deref() == Some("live_pending_entry")
             || phase.as_deref() == Some("live_in_position")
         {
+            let expected_request_id = self.pending_entry_request_id();
+            if expected_request_id.is_some() && expected_request_id != Some(ack.request_id) {
+                self.log_request_id_skew("entry", expected_request_id, ack.request_id);
+                return Vec::new();
+            }
             let broker_qty = ctx.position_qty.unwrap_or(0.0);
             if broker_qty.abs() <= f64::EPSILON {
-                self.clear_live_positions();
-                if let StrategyState::RiAuthor4142Live {
-                    phase,
-                    current_component,
-                    current_side,
-                    current_cycle_id,
-                    current_entry_ts_local,
-                    current_exit_ts_local,
-                    last_transition_reason,
-                    ..
-                } = &mut self.state
-                {
-                    *phase = RiAuthor4142Phase::Flat.as_str().to_string();
-                    *current_component = None;
-                    *current_side = None;
-                    *current_cycle_id = None;
-                    *current_entry_ts_local = None;
-                    *current_exit_ts_local = None;
-                    *last_transition_reason = Some(format!(
-                        "live_entry_ack_rejected:{}:{}",
-                        ack.error_code.as_deref().unwrap_or("unknown"),
-                        ack.error_msg.as_deref().unwrap_or("unknown")
-                    ));
-                }
+                self.transition_live_flat_with_reason(format!(
+                    "live_entry_ack_rejected:{}:{}",
+                    ack.error_code.as_deref().unwrap_or("unknown"),
+                    ack.error_msg.as_deref().unwrap_or("unknown")
+                ));
                 info!(
                     target: "strategy_runtime::ri_author41_42_live",
                     action = "ri_live_entry_rejected_rolled_back",
@@ -1884,6 +1957,7 @@ impl Strategy for RiAuthor4142LiveStrategy {
 
     fn on_position(&mut self, _ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
         let mut mark_flat = false;
+        let mut clear_pending_entry = false;
         if let StrategyState::RiAuthor4142Live {
             phase,
             last_transition_reason,
@@ -1893,6 +1967,7 @@ impl Strategy for RiAuthor4142LiveStrategy {
             if phase == "live_pending_entry" && pos.qty.abs() > f64::EPSILON {
                 *phase = "live_in_position".to_string();
                 *last_transition_reason = Some("live_position_confirmed".to_string());
+                clear_pending_entry = true;
             }
             if matches!(
                 phase.as_str(),
@@ -1904,6 +1979,8 @@ impl Strategy for RiAuthor4142LiveStrategy {
         }
         if mark_flat {
             self.transition_live_flat_with_reason("live_position_flat_confirmed".to_string());
+        } else if clear_pending_entry {
+            self.clear_pending_entry_request_id();
         }
         Vec::new()
     }
@@ -1946,7 +2023,7 @@ impl Strategy for RiAuthor4142LiveStrategy {
             .collect()
     }
 
-    fn set_state(&mut self, state: StrategyState) {
+    fn set_state(&mut self, mut state: StrategyState) {
         if let StrategyState::RiAuthor4142Live { phase, .. } = &state {
             if phase != "live_in_position"
                 && phase != "live_pending_exit"
@@ -1954,8 +2031,47 @@ impl Strategy for RiAuthor4142LiveStrategy {
             {
                 self.clear_live_positions();
             }
-            self.state = state;
         }
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            pending_entry_request_id,
+            pending_exit_request_id,
+            ..
+        } = &mut state
+        {
+            if phase != "live_pending_entry" {
+                *pending_entry_request_id = None;
+            }
+            if phase != "live_pending_exit" && phase != "live_deferred_exit" {
+                *pending_exit_request_id = None;
+            }
+        }
+        self.state = state;
+    }
+
+    fn on_command_prepared(&mut self, _ctx: &StrategyCtx, command: &CommandPrepared) {
+        self.set_pending_request_id(command.intent_class, command.request_id);
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_command_prepared",
+            request_id = %command.request_id,
+            intent_class = ?command.intent_class,
+            created_ts_utc = command.created_ts_utc,
+            symbol = %command.symbol,
+            phase = ?self.phase_for_test(),
+            mode = self.config.mode.as_str(),
+            live_adapter_enabled = self.can_emit_orders(),
+        );
+    }
+
+    fn pending_request_ids(&self) -> Vec<Uuid> {
+        [
+            self.pending_entry_request_id(),
+            self.pending_exit_request_id(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn exit_risk_status(
@@ -2103,8 +2219,8 @@ mod tests {
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
     };
     use crate::strategy_host::{
-        BarEvent, BootstrapSnapshot, DataOrigin, OrderEvent, PositionEvent, RuntimeStateRestored,
-        StopOrderEvent, Strategy,
+        BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, OrderEvent, PositionEvent,
+        RuntimeStateRestored, StopOrderEvent, Strategy,
     };
     use alor_protocol::{AckStatus, CommandAck, IntentClass, Side as OrderSide};
     use chrono::{Duration, NaiveDate, NaiveDateTime};
@@ -2473,11 +2589,25 @@ mod tests {
             strategy.phase_for_test().as_deref(),
             Some("live_pending_exit")
         );
+        let pending_exit_request_id = Uuid::new_v4();
+        strategy.on_command_prepared(
+            &live_ctx_with_position(-1.0),
+            &CommandPrepared {
+                request_id: pending_exit_request_id,
+                intent_class: IntentClass::Exit,
+                created_ts_utc: 1_776_000_600,
+                symbol: "RIM6".to_string(),
+            },
+        );
+        assert_eq!(
+            strategy.pending_request_ids(),
+            vec![pending_exit_request_id]
+        );
 
         strategy.on_ack(
             &live_ctx_with_position(-1.0),
             &CommandAck {
-                request_id: Uuid::new_v4(),
+                request_id: pending_exit_request_id,
                 status: AckStatus::Rejected,
                 broker_order_id: None,
                 broker_order_id_str: None,
@@ -2493,6 +2623,7 @@ mod tests {
             strategy.phase_for_test().as_deref(),
             Some("live_deferred_exit")
         );
+        assert!(strategy.pending_request_ids().is_empty());
 
         let reissue_bar = bar_with_ohlc(
             dt(2026, 5, 4, 9, 20, 0),
@@ -2509,6 +2640,86 @@ mod tests {
             strategy.phase_for_test().as_deref(),
             Some("live_pending_exit")
         );
+    }
+
+    #[test]
+    fn micro_live_entry_ack_with_request_id_skew_does_not_clear_pending_entry() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        assert_eq!(strategy.on_bar(&live_ctx(), &entry_bar).len(), 1);
+        let request_id = Uuid::new_v4();
+        strategy.on_command_prepared(
+            &live_ctx(),
+            &CommandPrepared {
+                request_id,
+                intent_class: IntentClass::Entry,
+                created_ts_utc: 1_776_000_000,
+                symbol: "RIM6".to_string(),
+            },
+        );
+
+        strategy.on_ack(
+            &live_ctx(),
+            &CommandAck {
+                request_id: Uuid::new_v4(),
+                status: AckStatus::Rejected,
+                broker_order_id: None,
+                broker_order_id_str: None,
+                error_code: Some("cws_http_400".to_string()),
+                error_msg: Some("unknown instrument".to_string()),
+                cws_http_code: Some(400),
+                cws_message: Some("unknown instrument".to_string()),
+                cws_request_guid: None,
+                processed_ts_utc: 1_776_000_010,
+            },
+        );
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_pending_entry")
+        );
+        assert_eq!(strategy.pending_request_ids(), vec![request_id]);
+
+        strategy.on_ack(
+            &live_ctx(),
+            &CommandAck {
+                request_id,
+                status: AckStatus::Rejected,
+                broker_order_id: None,
+                broker_order_id_str: None,
+                error_code: Some("cws_http_400".to_string()),
+                error_msg: Some("unknown instrument".to_string()),
+                cws_http_code: Some(400),
+                cws_message: Some("unknown instrument".to_string()),
+                cws_request_guid: None,
+                processed_ts_utc: 1_776_000_020,
+            },
+        );
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
+        assert!(strategy.pending_request_ids().is_empty());
     }
 
     #[test]

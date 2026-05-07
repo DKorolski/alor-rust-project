@@ -88,6 +88,14 @@ impl Intent {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CommandPrepared {
+    pub request_id: Uuid,
+    pub intent_class: IntentClass,
+    pub created_ts_utc: i64,
+    pub symbol: String,
+}
+
 pub trait Strategy: Send + Sync {
     fn on_bar(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent>;
     fn on_ack(&mut self, ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent>;
@@ -124,6 +132,7 @@ pub trait Strategy: Send + Sync {
     ) -> Option<String> {
         None
     }
+    fn on_command_prepared(&mut self, _ctx: &StrategyCtx, _command: &CommandPrepared) {}
     fn pending_request_ids(&self) -> Vec<Uuid> {
         Vec::new()
     }

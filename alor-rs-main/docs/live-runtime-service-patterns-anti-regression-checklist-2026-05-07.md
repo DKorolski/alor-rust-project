@@ -117,12 +117,21 @@ RI mitigation:
   `live_deferred_exit` and reissue the exit on the next eligible model bar.
 - Runtime strategy event matching includes RI `order_symbol`, preserving
   callbacks for routed full-symbol instruments such as `RTS-6.26`.
+- Runtime now calls `on_command_prepared` after constructing the exact
+  `OrderCommand`, and RI persists that exact `request_id` into
+  `pending_entry_request_id` / `pending_exit_request_id` before state
+  persistence.
+- RI ack handling only clears pending entry/exit state when the ack
+  `request_id` matches the current persisted pending id; mismatches log
+  `ri_pending_request_id_skew_detected` and keep the pending state intact.
 
 Existing test:
 
 - `ri_author41_42_live::restored_flat_state_clears_unpersisted_live_positions`
 - `ri_author41_42_live::micro_live_promotes_pending_entry_to_in_position_on_position_update`
 - `ri_author41_42_live::micro_live_trading_window_closed_exit_reject_enters_deferred_exit_and_reissues`
+- `ri_author41_42_live::micro_live_entry_ack_with_request_id_skew_does_not_clear_pending_entry`
+- `runtime::notify_command_prepared_updates_strategy_state_with_exact_request_id`
 - `runtime::live_accepts_position_events_for_ri_order_symbol`
 
 Required future checklist item:
@@ -145,11 +154,17 @@ Patterns:
   timestamp semantics.
 - Hybrid logs `pending_request_id_skew_detected` if an ack arrives for a related
   path but does not match the current pending id.
+- RI receives the final host-built command id through `on_command_prepared`
+  instead of deriving it from model/bar timestamps.
+- RI exposes these ids through `pending_request_ids()` so runtime restore keeps
+  in-flight entry/exit acks attached after restart.
 
 Existing tests:
 
 - `hybrid_intraday_runtime::pending_exit_request_id_uses_effective_created_ts`
 - `hybrid_intraday_runtime::ack_reject_clears_only_matching_pending_entry`
+- `ri_author41_42_live::micro_live_entry_ack_with_request_id_skew_does_not_clear_pending_entry`
+- `runtime::notify_command_prepared_updates_strategy_state_with_exact_request_id`
 - runtime tests for `normalize_event_ts_is_monotonic_and_bootstrap_safe`
 
 Rule for new strategies:
@@ -336,8 +351,8 @@ Before a strategy moves from shadow/dry-run to micro-live, verify:
 - Exit lifecycle preserves open-risk state until broker truth confirms flat.
 - Closed-window exits defer before emit and still converge on residual gateway
   reject.
-- Pending request ids are produced by a single source of truth or checked against
-  emitted command ids.
+- Pending request ids are produced by a single source of truth, preferably the
+  runtime's final prepared command hook, or checked against emitted command ids.
 - Bootstrap with non-flat broker position, working order, or working stop order
   enters safe/adopt/manual-intervention mode rather than blind entry.
 - Runtime restore with pending requests or known order ids is explicitly handled.
@@ -354,13 +369,9 @@ The immediate RI micro patch line is acceptable for controlled observation after
 the 2026-05-07 rollback fix, provided account state remains flat and logs remain
 clean.
 
-For promotion beyond the current conservative micro contour, add a P1 lifecycle
-hardening slice:
+For promotion beyond the current conservative micro contour, continue the
+remaining P1 lifecycle hardening slice:
 
-- introduce explicit `pending_entry` / `pending_exit` state for RI live legs;
-- transition to `live_in_position` only after accepted/filled broker truth, or
-  make the optimistic transition fully rollback-safe through host integration
-  tests;
 - add a runtime-level test where RI emits an entry while guard is blocked and the
   next model bar must not emit a stale exit;
 - keep the existing strategy-level `set_state` hidden-state cleanup test as a
