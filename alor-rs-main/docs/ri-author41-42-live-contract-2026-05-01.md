@@ -2,12 +2,12 @@
 
 Date: 2026-05-01
 
-Status: `PRE_GO_SHADOW_ONLY`
+Status: `MICRO_CONTOUR_PREPARED / SERVICE_HARDENING_PATCH_READY`
 
 This document freezes the first engineering contract for the isolated RI
-Author41/42 live contour. It is intentionally conservative: the strategy may
-run in shadow/dry-run modes, but live order emission remains blocked until a
-separate GO/NO-GO decision.
+Author41/42 live contour. It is intentionally conservative: shadow/dry-run
+remain the research/observation modes, and micro-live size `1` requires explicit
+operator GO, broker-flat confirmation, and from-zero runtime rollout discipline.
 
 ## Scope
 
@@ -21,15 +21,17 @@ symbol = RIM6
 qty = 1
 ```
 
-Current allowed modes:
+Current modes:
 
 - `shadow`
 - `dry_run`
+- `micro_live` only after explicit operator GO and service-hardening rebuild
 
-Blocked until GO/NO-GO:
+Blocked until a separate later GO/NO-GO:
 
-- `micro_live`
-- `allow_order_emission = true`
+- any size above `1`;
+- any legacy CWS primary path;
+- any contract roll without from-zero restart.
 
 ## Model Contract
 
@@ -129,6 +131,16 @@ Closed-window rule:
 
 ## State Boundaries
 
+Live pending request ids:
+
+- runtime is the source of truth for final emitted `request_id`;
+- strategy receives the exact id through `on_command_prepared`;
+- `pending_entry_request_id` and `pending_exit_request_id` are persisted in
+  `StrategyState::RiAuthor4142Live`;
+- ack/reject callbacks clear pending state only for matching ids;
+- mismatched ids must log `ri_pending_request_id_skew_detected` and leave
+  pending state intact.
+
 Shadow/model journal:
 
 - source for observed model decisions and dry-run evidence;
@@ -184,3 +196,12 @@ RI can be considered for micro-live size 1 only after:
 
 Any legacy CWS primary path, stale pending tail, request-id skew, BO/MR live
 overlap, or overnight carry possibility is a NO-GO.
+
+Post-2026-05-07 service-hardening rollout gate:
+
+- build includes commits from
+  [`ri-author41-42-service-hardening-rollout-checklist-2026-05-07.md`](./ri-author41-42-service-hardening-rollout-checklist-2026-05-07.md);
+- RI operational runtime state starts from zero;
+- canonical `RIM6` 10m model bars are retained for warmup;
+- broker account is flat and has no RI/RTS working orders or stop orders;
+- first patched observation window remains size `1`.

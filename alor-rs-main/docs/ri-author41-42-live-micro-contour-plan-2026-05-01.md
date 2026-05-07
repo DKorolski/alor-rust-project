@@ -9,12 +9,25 @@ Related documents:
 - [`vps-live-observations-2026-05-01.md`](./vps-live-observations-2026-05-01.md)
 - [`intent-path-unification-fix-plan-2026-04-17.md`](./intent-path-unification-fix-plan-2026-04-17.md)
 - [`live-incident-note-2026-04-17-trading-hybrid-bo-exit-break2-request-id-skew.md`](./live-incident-note-2026-04-17-trading-hybrid-bo-exit-break2-request-id-skew.md)
+- [`ri-author41-42-service-hardening-rollout-checklist-2026-05-07.md`](./ri-author41-42-service-hardening-rollout-checklist-2026-05-07.md)
 
 Status:
 
 ```text
-DESIGN_LOCK_CANDIDATE / SHADOW_FIRST / NO_LIVE_ORDERS_YET
+DESIGN_LOCKED / MICRO_CONTOUR_PREPARED / SERVICE_HARDENING_PATCH_READY
 ```
+
+2026-05-07 update: the RI service-maturity patch line now covers live pending
+entry/exit lifecycle, deferred closed-window exit recovery, exact runtime-owned
+`request_id` tracking, guard rollback anti-regression, and reduced model-bar
+heartbeat log noise. Rollout should use the service-hardening checklist and a
+from-zero runtime restart.
+
+Note: older sections below are kept as chronological pre-GO engineering notes.
+Where they say `micro_live` / `allow_order_emission=true` are blocked until
+GO/NO-GO, read that as the historical state before the 2026-05-07
+service-hardening line. The active rollout gate is now the checklist linked
+above plus explicit operator GO, flat broker state, and size `1`.
 
 ## Decision
 
