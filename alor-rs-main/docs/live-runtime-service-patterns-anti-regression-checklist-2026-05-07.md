@@ -124,6 +124,9 @@ RI mitigation:
 - RI ack handling only clears pending entry/exit state when the ack
   `request_id` matches the current persisted pending id; mismatches log
   `ri_pending_request_id_skew_detected` and keep the pending state intact.
+- Runtime-level guard rollback is covered for RI: if a live entry intent is
+  dropped by the host before broker emit, strategy state and hidden live
+  positions are restored before the next model bar.
 
 Existing test:
 
@@ -132,6 +135,7 @@ Existing test:
 - `ri_author41_42_live::micro_live_trading_window_closed_exit_reject_enters_deferred_exit_and_reissues`
 - `ri_author41_42_live::micro_live_entry_ack_with_request_id_skew_does_not_clear_pending_entry`
 - `runtime::notify_command_prepared_updates_strategy_state_with_exact_request_id`
+- `runtime::ri_guard_dropped_entry_restores_hidden_live_state_before_next_bar`
 - `runtime::live_accepts_position_events_for_ri_order_symbol`
 
 Required future checklist item:
@@ -370,10 +374,8 @@ the 2026-05-07 rollback fix, provided account state remains flat and logs remain
 clean.
 
 For promotion beyond the current conservative micro contour, continue the
-remaining P1 lifecycle hardening slice:
+remaining P1 lifecycle polish slice:
 
-- add a runtime-level test where RI emits an entry while guard is blocked and the
-  next model bar must not emit a stale exit;
 - keep the existing strategy-level `set_state` hidden-state cleanup test as a
   regression backstop;
 - reduce `ri_model_bar_observed` log verbosity if it becomes operational noise.

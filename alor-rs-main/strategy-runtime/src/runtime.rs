@@ -4203,6 +4203,56 @@ mod tests {
             .unwrap()
     }
 
+    fn install_ri_micro_strategy(runtime: &mut StrategyRuntime) {
+        let registry = StrategyRegistry::builtin().expect("strategy registry");
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::RiAuthor4142);
+        runtime.config.strategy.strategy_id = "ri_author41_42.micro.test".to_string();
+        runtime.config.strategy.symbol = "RIM6".to_string();
+        runtime.config.strategy.qty = 1.0;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.max_silence_bars_sec = 0;
+        if let Some(settings) = runtime.config.strategy.ri_author41_42_mut() {
+            settings.mode = "micro_live".to_string();
+            settings.allow_order_emission = true;
+            settings.execution_path = "action_scoped_only".to_string();
+            settings.timeframe = "10m".to_string();
+        }
+        runtime.strategy_capabilities = registry
+            .descriptor(StrategyKind::RiAuthor4142)
+            .expect("ri descriptor")
+            .capabilities;
+        runtime.strategy = registry
+            .create(&runtime.config.strategy)
+            .expect("ri strategy");
+        runtime.state.strategy_state = runtime.strategy.state().clone();
+    }
+
+    fn ri_runtime_bar(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        origin: DataOrigin,
+        ohlc: (f64, f64, f64, f64),
+    ) -> BarEvent {
+        let dt_local = chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap();
+        let (open, high, low, close) = ohlc;
+        BarEvent {
+            symbol: "RIM6".to_string(),
+            close_time_utc: (dt_local - ChronoDuration::hours(3)).and_utc().timestamp(),
+            close,
+            o: open,
+            h: high,
+            l: low,
+            v: 10.0,
+            origin,
+        }
+    }
+
     #[test]
     fn flush_strategy_journal_records_writes_ri_jsonl() {
         let dir = tempdir().expect("tempdir");
@@ -4449,6 +4499,93 @@ mod tests {
                     alor_protocol::IntentClass::Entry,
                     command.symbol
                 ) && *last_bar_ts == command.created_ts_utc
+        ));
+    }
+
+    #[test]
+    fn ri_guard_dropped_entry_restores_hidden_live_state_before_next_bar() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        install_ri_micro_strategy(&mut runtime);
+        let warmup_bar = ri_runtime_bar(
+            2026,
+            5,
+            1,
+            23,
+            40,
+            DataOrigin::History,
+            (100_000.0, 101_000.0, 99_000.0, 100_000.0),
+        );
+        let warmup_ctx = runtime.strategy_ctx();
+        assert_eq!(
+            runtime
+                .strategy
+                .warmup_from_history(&warmup_ctx, &[warmup_bar]),
+            1
+        );
+        runtime.state.strategy_state = runtime.strategy.state().clone();
+
+        let entry_bar = ri_runtime_bar(
+            2026,
+            5,
+            4,
+            9,
+            0,
+            DataOrigin::Live,
+            (100_050.0, 100_120.0, 100_030.0, 100_100.0),
+        );
+        let entry_ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(None, entry_bar.close_time_utc);
+        let (entry_intents, previous_strategy_state) =
+            runtime.invoke_strategy_callback(&entry_ctx, "on_bar", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &entry_bar)
+            });
+        assert_eq!(entry_intents.len(), 1);
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live { phase, .. } if phase == "live_pending_entry"
+        ));
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.apply_intents(
+                &entry_ctx,
+                entry_bar.close_time_utc,
+                entry_intents,
+                previous_strategy_state,
+            ))
+            .unwrap();
+
+        assert!(runtime.strategy.pending_request_ids().is_empty());
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live { phase, .. } if phase == "flat"
+        ));
+
+        let stop_like_bar = ri_runtime_bar(
+            2026,
+            5,
+            4,
+            9,
+            10,
+            DataOrigin::Live,
+            (101_000.0, 102_000.0, 100_900.0, 101_000.0),
+        );
+        let stop_ctx = runtime.strategy_ctx_with_last_bar_and_event_ts(
+            Some(entry_bar.close_time_utc),
+            stop_like_bar.close_time_utc,
+        );
+        let (next_intents, _previous_strategy_state) =
+            runtime.invoke_strategy_callback(&stop_ctx, "on_bar", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &stop_like_bar)
+            });
+
+        assert!(
+            next_intents.is_empty(),
+            "guard-dropped RI entry must not leave a hidden position that emits stale exit"
+        );
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live { phase, .. } if phase == "flat"
         ));
     }
 
