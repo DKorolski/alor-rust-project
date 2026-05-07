@@ -15,7 +15,7 @@ use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
     RuntimeStateRestored, Strategy, StrategyCtx,
 };
-use alor_protocol::{IntentClass, Side as OrderSide};
+use alor_protocol::{AckStatus, IntentClass, Side as OrderSide};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +77,7 @@ pub struct RiAuthor4142LiveConfig {
     pub mode: RiAuthor4142RuntimeMode,
     pub allow_order_emission: bool,
     pub execution_path: RiAuthor4142ExecutionPath,
+    pub order_symbol: Option<String>,
     pub qty: f64,
     pub timezone_offset_hours: i32,
 }
@@ -1447,13 +1448,19 @@ impl RiAuthor4142LiveStrategy {
     ) -> Intent {
         self.record_candidate_emitted_journal(&candidate, decision);
         self.log_candidate_intent_emitted(&candidate, decision);
-        Intent::Market {
+        let intent = Intent::Market {
             qty: candidate.qty,
             side: candidate.side,
             fill_price: None,
             comment: Some(candidate.comment),
         }
-        .with_class(candidate.intent_class)
+        .with_class(candidate.intent_class);
+        if let Some(order_symbol) = self.config.order_symbol.as_deref() {
+            if order_symbol != self.config.symbol {
+                return intent.with_symbol(order_symbol.to_string());
+            }
+        }
+        intent
     }
 
     fn record_candidate_emitted_journal(
@@ -1487,6 +1494,7 @@ impl RiAuthor4142LiveStrategy {
             scheduled_ts_local = %candidate.scheduled_ts_local,
             comment = %candidate.comment,
             execution_path = candidate.execution_path.as_str(),
+            order_symbol = self.config.order_symbol.as_deref().unwrap_or(self.config.symbol.as_str()),
             decision_key = %candidate.decision_key,
             mode = self.config.mode.as_str(),
             allow_order_emission = self.config.allow_order_emission,
@@ -1630,6 +1638,12 @@ impl RiAuthor4142LiveStrategy {
         }
     }
 
+    fn clear_live_positions(&mut self) {
+        self.live_mr.position = None;
+        self.live_bo.position = None;
+        self.live_bo.pending = None;
+    }
+
     pub fn journal_records_for_test(&self) -> &[RiAuthor4142JournalRecord] {
         &self.journal_records
     }
@@ -1644,7 +1658,60 @@ impl Strategy for RiAuthor4142LiveStrategy {
         self.live_intents_for_bar(model_bar)
     }
 
-    fn on_ack(&mut self, _ctx: &StrategyCtx, _ack: &alor_protocol::CommandAck) -> Vec<Intent> {
+    fn on_ack(&mut self, ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent> {
+        if !matches!(
+            ack.status,
+            AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
+        ) {
+            return Vec::new();
+        }
+        let phase = self.phase_for_test();
+        if phase.as_deref() == Some("live_in_position") {
+            let broker_qty = ctx.position_qty.unwrap_or(0.0);
+            if broker_qty.abs() <= f64::EPSILON {
+                self.clear_live_positions();
+                if let StrategyState::RiAuthor4142Live {
+                    phase,
+                    current_component,
+                    current_side,
+                    current_cycle_id,
+                    current_entry_ts_local,
+                    current_exit_ts_local,
+                    last_transition_reason,
+                    ..
+                } = &mut self.state
+                {
+                    *phase = RiAuthor4142Phase::Flat.as_str().to_string();
+                    *current_component = None;
+                    *current_side = None;
+                    *current_cycle_id = None;
+                    *current_entry_ts_local = None;
+                    *current_exit_ts_local = None;
+                    *last_transition_reason = Some(format!(
+                        "live_entry_ack_rejected:{}:{}",
+                        ack.error_code.as_deref().unwrap_or("unknown"),
+                        ack.error_msg.as_deref().unwrap_or("unknown")
+                    ));
+                }
+                info!(
+                    target: "strategy_runtime::ri_author41_42_live",
+                    action = "ri_live_entry_rejected_rolled_back",
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    error_code = ?ack.error_code,
+                    error_msg = ?ack.error_msg,
+                    broker_qty,
+                    mode = self.config.mode.as_str(),
+                    live_adapter_enabled = self.can_emit_orders(),
+                );
+            } else {
+                self.enter_manual_intervention_required(format!(
+                    "live_ack_rejected_with_broker_position:{}:{}",
+                    ack.error_code.as_deref().unwrap_or("unknown"),
+                    ack.error_msg.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
         Vec::new()
     }
 
@@ -1828,7 +1895,7 @@ mod tests {
         BarEvent, BootstrapSnapshot, DataOrigin, OrderEvent, PositionEvent, RuntimeStateRestored,
         StopOrderEvent, Strategy,
     };
-    use alor_protocol::{IntentClass, Side as OrderSide};
+    use alor_protocol::{AckStatus, CommandAck, IntentClass, Side as OrderSide};
     use chrono::{Duration, NaiveDate, NaiveDateTime};
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -1841,6 +1908,7 @@ mod tests {
             mode: RiAuthor4142RuntimeMode::Shadow,
             allow_order_emission: false,
             execution_path: RiAuthor4142ExecutionPath::ActionScopedOnly,
+            order_symbol: None,
             qty: 1.0,
             timezone_offset_hours: 3,
         }
@@ -1882,6 +1950,97 @@ mod tests {
 
         let strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
         assert!(strategy.can_emit_orders());
+    }
+
+    #[test]
+    fn micro_live_routes_orders_to_full_alor_symbol_when_configured() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        config.order_symbol = Some("RTS-6.26".to_string());
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        let entry_intents = strategy.on_bar(&live_ctx(), &entry_bar);
+
+        assert_eq!(entry_intents.len(), 1);
+        match &entry_intents[0] {
+            crate::strategy_host::Intent::Routed { symbol, intent } => {
+                assert_eq!(symbol, "RTS-6.26");
+                assert!(matches!(
+                    intent.base_intent(),
+                    crate::strategy_host::Intent::Market { .. }
+                ));
+            }
+            other => panic!("expected routed intent, got {other:?}"),
+        }
+        assert_eq!(entry_intents[0].explicit_class(), Some(IntentClass::Entry));
+    }
+
+    #[test]
+    fn micro_live_rejected_entry_rolls_back_to_flat_when_broker_flat() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        let entry_intents = strategy.on_bar(&live_ctx(), &entry_bar);
+        assert_eq!(entry_intents.len(), 1);
+        assert_eq!(strategy.phase_for_test().as_deref(), Some("live_in_position"));
+
+        strategy.on_ack(
+            &live_ctx(),
+            &CommandAck {
+                request_id: Uuid::new_v4(),
+                status: AckStatus::Rejected,
+                broker_order_id: None,
+                broker_order_id_str: None,
+                error_code: Some("cws_http_400".to_string()),
+                error_msg: Some("unknown instrument".to_string()),
+                cws_http_code: Some(400),
+                cws_message: Some("unknown instrument".to_string()),
+                cws_request_guid: None,
+                processed_ts_utc: 1_776_000_000,
+            },
+        );
+
+        assert_eq!(strategy.phase_for_test().as_deref(), Some("flat"));
+        assert!(strategy.live_mr.position.is_none());
+        assert!(strategy.live_bo.position.is_none());
     }
 
     #[test]

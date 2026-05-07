@@ -83,6 +83,9 @@ timeframe = "10m"
 mode = "micro_live"
 allow_order_emission = true
 execution_path = "action_scoped_only"
+# Alor bars arrive with shortname `RIM6`, but CWS order placement expects the
+# full security symbol from reference data.
+order_symbol = "RTS-6.26"
 decision_journal_path = "/reports/ri_author41_42_7502MIW_micro_decisions.jsonl"
 decision_journal_append = true
 

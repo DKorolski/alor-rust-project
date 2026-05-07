@@ -203,3 +203,103 @@ WARN_ERROR = RECONNECT_NOISE_ONLY_PENDING_COUNT_0
 PATCH_REQUIRED = NO
 OPERATOR_ACTION_REQUIRED = NO
 ```
+
+## Post-Open RI Micro Incident
+
+Collection time: 2026-05-07 ~09:10 MSK.
+
+All existing live contours moved cleanly from night sync into live readiness:
+
+```text
+sessiongap       BLOCKED -> ALLOWED, flat, no working orders
+alor-usdrubf     BLOCKED -> ALLOWED, flat, no working orders
+hybrid-imoexf    BLOCKED -> ALLOWED, flat, no working orders
+```
+
+Hybrid IMOEXF also finalized the risk-gate shadow ledger for 2026-05-06:
+
+```text
+risk_gate_shadow_session_finalized session_date=2026-05-06 shadow_pnl_points=11.4 shadow_trade_count=1
+risk gate runtime session finalized inserted_records=1 duplicate_records=0 state_refreshed=true
+```
+
+RI Author41/42 generated the first real micro-live entry on the 09:00 model bar:
+
+```text
+component=author41_mr
+role=entry
+model_side=long
+order_side=Buy
+qty=1
+order_style=market_p0
+execution_path=action_scoped_only
+decision_key=ri_author41_42_primary_combo_cost2|author41_mr|2026-05-07 09:00:00|Some(Long)|live_prospective
+```
+
+The transport path was correct. Gateway received the command and used
+action-scoped CWS:
+
+```text
+command received strategy_id=ri_author41_42.micro.7502MIW symbol=RIM6 action=market
+action_scope_send_start primary_opcode=create:market opcode=authorize
+action_scope_send_start primary_opcode=create:market opcode=create:market
+action_scope_send_result primary_opcode=create:market http_code=400 order_id=None
+```
+
+The broker rejected the command:
+
+```text
+status=Rejected
+error_code=cws_http_400
+error_msg="Неизвестный инструмент в заявке"
+cws_http_code=400
+```
+
+Immediate safety action:
+
+```text
+trading-ri-author41-42-7502miw-strategy-runtime-1 stopped
+gateway and redis left running
+cmd.orders.7502MIW.ri_author41_42.micro = 1
+cmd.acks.7502MIW.ri_author41_42.micro   = 1
+broker position snapshot remains flat for RI
+```
+
+Read-only Alor reference-data check confirmed the symbol split:
+
+```text
+GET /md/v2/Securities/MOEX/RIM6
+symbol=RTS-6.26
+shortname=RIM6
+board=RFUD
+tradingStatusInfo="нормальный период торгов"
+
+GET /md/v2/Securities/MOEX/RTS-6.26
+symbol=RTS-6.26
+shortname=RIM6
+board=RFUD
+```
+
+Interpretation:
+
+```text
+This is not a regression to the legacy CWS path. The command used
+action_scoped_only as expected. The failure is RI-specific symbol semantics:
+market data bars arrive and are stored with shortname RIM6, but CWS order
+placement appears to require the full Alor security symbol RTS-6.26.
+
+A secondary safety issue was also found: after rejected entry, RI runtime state
+had already moved to live_in_position even though broker stayed flat. This must
+be patched before restarting RI micro.
+```
+
+Patch line:
+
+```text
+1. Keep model/warmup symbol = RIM6.
+2. Add RI order_symbol = RTS-6.26 for CWS commands.
+3. Route live order commands with order_symbol while preserving RIM6 bars.
+4. Roll back RI live state to flat on rejected entry when broker position is flat.
+5. Rebuild/redeploy only RI runtime after tests.
+6. Restart RI from clean state; do not replay the stale live_in_position tail.
+```

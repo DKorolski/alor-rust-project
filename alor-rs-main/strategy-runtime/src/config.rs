@@ -658,6 +658,7 @@ struct RiAuthor4142ConfigFile {
     mode: Option<String>,
     allow_order_emission: Option<bool>,
     execution_path: Option<String>,
+    order_symbol: Option<String>,
     decision_journal_path: Option<String>,
     decision_journal_append: Option<bool>,
 }
@@ -1365,6 +1366,9 @@ fn apply_ri_author41_42_config_file(
         }
         if let Some(value) = &ri_file.execution_path {
             settings.execution_path = value.clone();
+        }
+        if let Some(value) = &ri_file.order_symbol {
+            settings.order_symbol = Some(value.clone());
         }
         if let Some(value) = &ri_file.decision_journal_path {
             settings.decision_journal_path = Some(value.clone());

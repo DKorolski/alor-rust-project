@@ -84,6 +84,7 @@ timeframe = "10m"
 mode = "shadow"
 allow_order_emission = false
 execution_path = "action_scoped_only"
+order_symbol = "RTS-6.26"
 decision_journal_path = "/reports/ri_author41_42_7502MIW_decisions.jsonl"
 decision_journal_append = true
 

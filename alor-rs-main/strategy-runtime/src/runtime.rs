@@ -2253,13 +2253,20 @@ impl StrategyRuntime {
         for intent in intents {
             let mut intent = intent;
             let mut intent_class = intent.explicit_class();
-            while let Intent::Classified {
-                intent: inner,
-                intent_class: class,
-            } = intent
-            {
-                intent_class = Some(class);
-                intent = *inner;
+            loop {
+                match intent {
+                    Intent::Classified {
+                        intent: inner,
+                        intent_class: class,
+                    } => {
+                        intent_class = Some(class);
+                        intent = *inner;
+                    }
+                    Intent::Routed { intent: inner, .. } => {
+                        intent = *inner;
+                    }
+                    _ => break,
+                }
             }
             match intent {
                 Intent::Place {
@@ -2497,7 +2504,9 @@ impl StrategyRuntime {
                 Intent::CreateStopLimit { .. } | Intent::DeleteStopLimit { .. } => {
                     // Backtest/paper simulator does not emulate broker-side stop-order lifecycle.
                 }
-                Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
+                Intent::Classified { .. } | Intent::Routed { .. } => {
+                    unreachable!("wrapped intents are flattened above")
+                }
             }
         }
         Ok(())
@@ -3604,6 +3613,16 @@ impl StrategyRuntime {
             Intent::Classified { intent, .. } => {
                 return self.intent_to_command(ctx, created_ts_utc, *intent, intent_class);
             }
+            Intent::Routed { intent, symbol } => {
+                let mut routed_ctx = ctx.clone();
+                routed_ctx.symbol = symbol;
+                return self.intent_to_command(
+                    &routed_ctx,
+                    created_ts_utc,
+                    *intent,
+                    intent_class,
+                );
+            }
             Intent::Place {
                 price,
                 qty,
@@ -3778,7 +3797,9 @@ impl StrategyRuntime {
                     alor_protocol::IntentClass::Entry
                 }
             }
-            Intent::Classified { intent, .. } => Self::resolve_intent_class(ctx, intent),
+            Intent::Classified { intent, .. } | Intent::Routed { intent, .. } => {
+                Self::resolve_intent_class(ctx, intent)
+            }
         }
     }
 
@@ -4019,7 +4040,9 @@ impl StrategyRuntime {
             Intent::Replace { .. } => "replace",
             Intent::CreateStopLimit { .. } => "create_stop_limit",
             Intent::DeleteStopLimit { .. } => "delete_stop_limit",
-            Intent::Classified { .. } => unreachable!("base_intent flattens classified variant"),
+            Intent::Classified { .. } | Intent::Routed { .. } => {
+                unreachable!("base_intent flattens wrapped variant")
+            }
         }
     }
 }
@@ -4383,6 +4406,31 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn intent_to_command_uses_routed_symbol_for_order_command() {
+        let runtime = test_runtime(TradeMode::Live);
+        let ctx = runtime.strategy_ctx();
+        let command = runtime.intent_to_command(
+            &ctx,
+            1_700_000_000,
+            Intent::Market {
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                fill_price: None,
+                comment: None,
+            }
+            .with_symbol("RTS-6.26"),
+            alor_protocol::IntentClass::Entry,
+        );
+
+        assert_eq!(ctx.symbol, "SBER");
+        assert_eq!(command.symbol, "RTS-6.26");
+        assert!(matches!(
+            command.action,
+            alor_protocol::CommandAction::Market(_)
+        ));
     }
 
     #[test]
@@ -5562,9 +5610,10 @@ struct VirtualTradeLog {
 
 impl VirtualTradeLog {
     fn from_intent(created_ts_utc: i64, config: &RuntimeConfig, intent: Intent) -> Self {
-        let intent = match intent {
-            Intent::Classified { intent, .. } => *intent,
-            other => other,
+        let (intent, symbol) = match intent {
+            Intent::Classified { intent, .. } => (*intent, config.strategy.symbol.clone()),
+            Intent::Routed { intent, symbol } => (*intent, symbol),
+            other => (other, config.strategy.symbol.clone()),
         };
         match intent {
             Intent::Place {
@@ -5573,7 +5622,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "place".to_string(),
                 qty: Some(qty),
                 price: Some(price),
@@ -5591,7 +5640,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "market".to_string(),
                 qty: Some(qty),
                 price: fill_price,
@@ -5604,7 +5653,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "cancel".to_string(),
                 qty: None,
                 price: None,
@@ -5621,7 +5670,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "replace".to_string(),
                 qty: None,
                 price: None,
@@ -5634,7 +5683,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "create_stop_limit".to_string(),
                 qty: None,
                 price: None,
@@ -5647,7 +5696,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol,
                 action: "delete_stop_limit".to_string(),
                 qty: None,
                 price: None,
@@ -5656,7 +5705,9 @@ impl VirtualTradeLog {
                 new_price: None,
                 new_qty: None,
             },
-            Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
+            Intent::Classified { .. } | Intent::Routed { .. } => {
+                unreachable!("wrapped intents are flattened above")
+            }
         }
     }
 }

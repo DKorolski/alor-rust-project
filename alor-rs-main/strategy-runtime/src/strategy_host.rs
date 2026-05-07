@@ -14,6 +14,10 @@ pub enum Intent {
         intent: Box<Intent>,
         intent_class: IntentClass,
     },
+    Routed {
+        intent: Box<Intent>,
+        symbol: String,
+    },
     Place {
         price: f64,
         qty: f64,
@@ -60,9 +64,17 @@ impl Intent {
         }
     }
 
+    pub fn with_symbol(self, symbol: impl Into<String>) -> Self {
+        Self::Routed {
+            intent: Box::new(self),
+            symbol: symbol.into(),
+        }
+    }
+
     pub fn explicit_class(&self) -> Option<IntentClass> {
         match self {
             Intent::Classified { intent_class, .. } => Some(*intent_class),
+            Intent::Routed { intent, .. } => intent.explicit_class(),
             _ => None,
         }
     }
@@ -70,6 +82,7 @@ impl Intent {
     pub fn base_intent(&self) -> &Intent {
         match self {
             Intent::Classified { intent, .. } => intent.base_intent(),
+            Intent::Routed { intent, .. } => intent.base_intent(),
             _ => self,
         }
     }

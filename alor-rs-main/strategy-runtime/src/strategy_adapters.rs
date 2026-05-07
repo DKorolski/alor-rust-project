@@ -288,6 +288,12 @@ impl RiAuthor4142Adapter {
             mode: RiAuthor4142RuntimeMode::parse(&settings.mode)?,
             allow_order_emission: settings.allow_order_emission,
             execution_path: RiAuthor4142ExecutionPath::parse(&settings.execution_path)?,
+            order_symbol: settings
+                .order_symbol
+                .as_ref()
+                .map(|symbol| symbol.trim())
+                .filter(|symbol| !symbol.is_empty())
+                .map(ToString::to_string),
             qty: config.qty.max(1.0),
             timezone_offset_hours: config.timezone_offset_hours,
         })

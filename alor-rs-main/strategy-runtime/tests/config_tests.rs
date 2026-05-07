@@ -356,6 +356,7 @@ fn loads_ri_author41_42_7502miw_shadow_config() {
     assert_eq!(settings.mode, "shadow");
     assert!(!settings.allow_order_emission);
     assert_eq!(settings.execution_path, "action_scoped_only");
+    assert_eq!(settings.order_symbol.as_deref(), Some("RTS-6.26"));
 }
 
 #[test]
@@ -402,6 +403,7 @@ fn loads_ri_author41_42_7502miw_pending_micro_config_as_locked_candidate() {
     assert_eq!(settings.mode, "micro_live");
     assert!(settings.allow_order_emission);
     assert_eq!(settings.execution_path, "action_scoped_only");
+    assert_eq!(settings.order_symbol.as_deref(), Some("RTS-6.26"));
     assert_eq!(
         settings.decision_journal_path.as_deref(),
         Some("/reports/ri_author41_42_7502MIW_micro_decisions.jsonl")
