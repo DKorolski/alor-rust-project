@@ -1060,7 +1060,7 @@ impl RiAuthor4142LiveStrategy {
             decision_key,
         });
         intents.push(self.emit_live_candidate(candidate, &decision));
-        self.transition_live_in_position(&decision, "live_entry_emitted");
+        self.transition_live_pending_entry(&decision, "live_entry_emitted");
         intents
     }
 
@@ -1105,7 +1105,7 @@ impl RiAuthor4142LiveStrategy {
                             RiAuthor4142Side::Short => self.live_bo.was_short_today = true,
                         }
                         intents.push(self.emit_live_candidate(candidate, &decision));
-                        self.transition_live_in_position(&decision, "live_bo_entry_emitted");
+                        self.transition_live_pending_entry(&decision, "live_bo_entry_emitted");
                     }
                 }
                 RiAuthor4142LiveBoPending::Exit(reason) => {
@@ -1502,7 +1502,7 @@ impl RiAuthor4142LiveStrategy {
         );
     }
 
-    fn transition_live_in_position(
+    fn transition_live_pending_entry(
         &mut self,
         decision: &RiAuthor4142ModelDecision,
         reason: &'static str,
@@ -1518,7 +1518,7 @@ impl RiAuthor4142LiveStrategy {
             ..
         } = &mut self.state
         {
-            *phase = "live_in_position".to_string();
+            *phase = "live_pending_entry".to_string();
             *current_component = Some(decision.component.as_str().to_string());
             *current_side = decision.side.map(|side| side.as_str().to_string());
             *current_cycle_id = Some(format!(
@@ -1666,7 +1666,9 @@ impl Strategy for RiAuthor4142LiveStrategy {
             return Vec::new();
         }
         let phase = self.phase_for_test();
-        if phase.as_deref() == Some("live_in_position") {
+        if phase.as_deref() == Some("live_pending_entry")
+            || phase.as_deref() == Some("live_in_position")
+        {
             let broker_qty = ctx.position_qty.unwrap_or(0.0);
             if broker_qty.abs() <= f64::EPSILON {
                 self.clear_live_positions();
@@ -1719,7 +1721,18 @@ impl Strategy for RiAuthor4142LiveStrategy {
         Vec::new()
     }
 
-    fn on_position(&mut self, _ctx: &StrategyCtx, _pos: &PositionEvent) -> Vec<Intent> {
+    fn on_position(&mut self, _ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            if phase == "live_pending_entry" && pos.qty.abs() > f64::EPSILON {
+                *phase = "live_in_position".to_string();
+                *last_transition_reason = Some("live_position_confirmed".to_string());
+            }
+        }
         Vec::new()
     }
 
@@ -2025,7 +2038,7 @@ mod tests {
         assert_eq!(entry_intents.len(), 1);
         assert_eq!(
             strategy.phase_for_test().as_deref(),
-            Some("live_in_position")
+            Some("live_pending_entry")
         );
 
         strategy.on_ack(
@@ -2079,7 +2092,7 @@ mod tests {
         assert_eq!(entry_intents.len(), 1);
         assert_eq!(
             strategy.phase_for_test().as_deref(),
-            Some("live_in_position")
+            Some("live_pending_entry")
         );
         assert!(strategy.live_mr.position.is_some());
 
@@ -2185,6 +2198,53 @@ mod tests {
             .journal_records_for_test()
             .iter()
             .any(|row| row.adapter_decision == RiAuthor4142JournalDecision::IntentEmitted));
+    }
+
+    #[test]
+    fn micro_live_promotes_pending_entry_to_in_position_on_position_update() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        let entry_intents = strategy.on_bar(&live_ctx(), &entry_bar);
+        assert_eq!(entry_intents.len(), 1);
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_pending_entry")
+        );
+
+        strategy.on_position(
+            &live_ctx(),
+            &PositionEvent {
+                symbol: "RTS-6.26".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100_100.0,
+                ts_utc: 1_776_000_020,
+            },
+        );
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_in_position")
+        );
     }
 
     #[test]

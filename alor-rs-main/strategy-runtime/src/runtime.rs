@@ -284,6 +284,42 @@ impl Default for RuntimeMetrics {
 }
 
 impl StrategyRuntime {
+    fn strategy_symbols(&self) -> Vec<&str> {
+        let mut symbols = vec![self.config.strategy.symbol.as_str()];
+        if let Some(ri) = self.config.strategy.ri_author41_42() {
+            if let Some(order_symbol) = ri.order_symbol.as_deref() {
+                if order_symbol != self.config.strategy.symbol {
+                    symbols.push(order_symbol);
+                }
+            }
+        }
+        symbols
+    }
+
+    fn matches_strategy_symbol(&self, symbol: &str) -> bool {
+        self.strategy_symbols().into_iter().any(|s| s == symbol)
+    }
+
+    fn strategy_position_qty(&self) -> Option<f64> {
+        let mut fallback = None;
+        for symbol in self.strategy_symbols() {
+            let Some(pos) = self.state.positions.get(symbol) else {
+                continue;
+            };
+            if pos.qty.abs() > f64::EPSILON {
+                return Some(pos.qty);
+            }
+            fallback = fallback.or(Some(pos.qty));
+        }
+        fallback
+    }
+
+    fn strategy_last_bar_ts(&self) -> Option<i64> {
+        self.strategy_symbols()
+            .into_iter()
+            .find_map(|symbol| self.state.last_processed_bar_ts.get(symbol).copied())
+    }
+
     fn lifecycle_hook_enabled(&self, hook: StrategyLifecycleHook) -> bool {
         match hook {
             StrategyLifecycleHook::BootstrapSnapshot => {
@@ -1153,7 +1189,6 @@ impl StrategyRuntime {
             }
         }
 
-        let strategy_symbol = self.config.strategy.symbol.clone();
         let mut positions_strategy = HashMap::new();
         let mut working_orders_strategy = HashMap::new();
         let mut working_stop_orders_strategy = HashMap::new();
@@ -1178,7 +1213,7 @@ impl StrategyRuntime {
                 if self.is_working_order(&order) {
                     orders_open_all += 1;
                 }
-                if order.symbol == strategy_symbol {
+                if self.matches_strategy_symbol(&order.symbol) {
                     if self.is_working_order(&order) {
                         orders_open_strategy += 1;
                         working_orders_strategy.insert(order_id, order.clone());
@@ -1203,7 +1238,7 @@ impl StrategyRuntime {
                 if self.is_working_stop_order(&stop_order) {
                     stop_orders_open_all += 1;
                 }
-                if stop_order.symbol == strategy_symbol {
+                if self.matches_strategy_symbol(&stop_order.symbol) {
                     if self.is_working_stop_order(&stop_order) {
                         stop_orders_open_strategy += 1;
                         working_stop_orders_strategy
@@ -1228,7 +1263,7 @@ impl StrategyRuntime {
                 if self.is_open_position(&position) {
                     positions_open_all += 1;
                 }
-                if symbol == strategy_symbol {
+                if self.matches_strategy_symbol(&symbol) {
                     positions_total_strategy += 1;
                     if self.is_open_position(&position) {
                         positions_open_strategy += 1;
@@ -1737,16 +1772,12 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if order.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&order.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(order.ts_utc);
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, order.ts_utc);
         let intents_count = self
             .invoke_and_apply_strategy_callback(
@@ -1782,7 +1813,7 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if stop_order.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&stop_order.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
@@ -1794,11 +1825,7 @@ impl StrategyRuntime {
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(stop_order.ts_utc);
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, stop_order.ts_utc);
         let intents_count = self
             .invoke_and_apply_strategy_callback(
@@ -1834,7 +1861,7 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if trade.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&trade.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
@@ -1961,16 +1988,12 @@ impl StrategyRuntime {
             }
             return Ok(());
         }
-        if position.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&position.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(position.ts_utc);
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, position.ts_utc);
         let intents_count = self
             .invoke_and_apply_strategy_callback(
@@ -2912,11 +2935,7 @@ impl StrategyRuntime {
             .as_ref()
             .map(|health| health.gateway_phase)
             .unwrap_or_default();
-        let position_qty = self
-            .state
-            .positions
-            .get(&self.config.strategy.symbol)
-            .map(|pos| pos.qty);
+        let position_qty = self.strategy_position_qty();
         StrategyCtx {
             strategy_id: self.config.strategy.strategy_id.clone(),
             portfolio: self.config.portfolio.clone(),
@@ -2939,11 +2958,7 @@ impl StrategyRuntime {
     }
 
     fn strategy_ctx(&self) -> StrategyCtx {
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         self.strategy_ctx_with_last_bar(last_bar_ts)
     }
 
@@ -3616,12 +3631,7 @@ impl StrategyRuntime {
             Intent::Routed { intent, symbol } => {
                 let mut routed_ctx = ctx.clone();
                 routed_ctx.symbol = symbol;
-                return self.intent_to_command(
-                    &routed_ctx,
-                    created_ts_utc,
-                    *intent,
-                    intent_class,
-                );
+                return self.intent_to_command(&routed_ctx, created_ts_utc, *intent, intent_class);
             }
             Intent::Place {
                 price,
@@ -5561,6 +5571,56 @@ mod tests {
                 .unwrap();
         });
         assert!(runtime.state.positions.is_empty());
+    }
+
+    #[test]
+    fn live_accepts_position_events_for_ri_order_symbol() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::RiAuthor4142);
+        runtime.config.strategy.symbol = "RIM6".to_string();
+        if let Some(settings) = runtime.config.strategy.ri_author41_42_mut() {
+            settings.order_symbol = Some("RTS-6.26".to_string());
+        }
+        runtime.state.positions.insert(
+            "RIM6".to_string(),
+            PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: 0.0,
+                existing: true,
+                avg_price: 0.0,
+                ts_utc: 1_699_999_999,
+            },
+        );
+
+        let position = PositionEvent {
+            symbol: "RTS-6.26".to_string(),
+            qty: 2.0,
+            existing: true,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_000,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .handle_position(
+                    runtime.config.streams.positions.clone(),
+                    "1-0".to_string(),
+                    position,
+                )
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(
+            runtime
+                .state
+                .positions
+                .get("RTS-6.26")
+                .map(|pos| pos.qty)
+                .unwrap_or_default(),
+            2.0
+        );
+        assert_eq!(runtime.strategy_position_qty(), Some(2.0));
     }
 
     #[test]
