@@ -551,3 +551,106 @@ NEXT_ACCEPTANCE = wait for next genuine RI entry signal and verify:
   broker Accepted/fill
   runtime and broker positions remain in parity
 ```
+
+## RI Service-Hardening Rollout
+
+Collection time: 2026-05-07 12:28-12:42 MSK.
+
+Deployment:
+
+```text
+source_head=fcc1dab Document RI service hardening rollout
+runtime_image=manual-fcc1dab-ri-service-20260507
+gateway_image=manual-5430299-protplace-20260428
+stack=/opt/trading-ri-author41-42-7502miw
+runtime_config=/configs/runtime.ri_author41_42.micro.7502MIW.toml
+gateway_config=/configs/gateway.ri_author41_42.micro.7502MIW.toml
+```
+
+Pre-rollout safety:
+
+```text
+broker snapshot before restart: positions={}
+latest RTS-6.26 position event before restart: qty=0
+orders stream latest records: historical filled orders only
+cmd.orders.7502MIW.ri_author41_42.micro XLEN=2
+cmd.acks.7502MIW.ri_author41_42.micro XLEN=2
+runtime.state.ri_author41_42.micro.7502MIW XLEN=14
+md.bars.7502MIW.RIM6.10m XLEN=2583
+```
+
+From-zero actions:
+
+```text
+stopped: strategy-runtime, alor-gateway
+archived: volumes/reports/ri_author41_42_7502MIW_micro_decisions.jsonl
+archive_dir: volumes/reports/archive-ri-service-20260507-123804
+destroyed consumer group:
+  md.bars.7502MIW.RIM6.10m / strategy-runtime-ri-author41-42-micro-7502MIW
+deleted streams:
+  runtime.state.ri_author41_42.micro.7502MIW
+  cmd.orders.7502MIW.ri_author41_42.micro
+  cmd.acks.7502MIW.ri_author41_42.micro
+preserved:
+  md.bars.7502MIW.RIM6.10m
+```
+
+Post-clean check:
+
+```text
+md.bars.7502MIW.RIM6.10m XLEN=2583
+runtime.state.ri_author41_42.micro.7502MIW XLEN=0
+cmd.orders.7502MIW.ri_author41_42.micro XLEN=0
+cmd.acks.7502MIW.ri_author41_42.micro XLEN=0
+```
+
+Post-start readiness:
+
+```text
+strategy-runtime=healthy
+alor-gateway=healthy
+redis=healthy
+bootstrap: snapshots filtered positions_open_all=0 orders_open_all=0 stop_orders_open_all=0
+ri_bootstrap_reconciled_flat
+ri_runtime_state_restored_clean
+warmup bars_processed=867 scan=5000
+consumer group lag=0
+live_guard BLOCKED -> ALLOWED at 2026-05-07 12:40:14 MSK
+phase=LiveReady
+broker snapshot after restart: positions={}
+cmd.orders XLEN=0
+cmd.acks XLEN=0
+```
+
+Notes:
+
+```text
+One WARN orphan_trade was observed during startup from an existing historical
+trade event after the manual close. It did not create a command, ack, or live
+position and is treated as historical bootstrap noise.
+
+The previous noisy ri_model_bar_observed INFO stream is absent after rollout:
+grep count for ri_model_bar_observed over the first five minutes = 0.
+```
+
+VPS resources after rollout:
+
+```text
+RAM: 7.7Gi total, 1.7Gi used, 6.0Gi available
+disk /: 79G total, 37G used, 38G available, 50%
+RI Redis: 50.8MiB / 768MiB
+RI gateway: 3.7MiB / 768MiB
+RI runtime: 3.8MiB / 768MiB
+```
+
+Current status:
+
+```text
+RI_MICRO = RUNNING / FLAT / SERVICE_HARDENED / ACTION_SCOPED_READY
+BROKER_RI = FLAT
+NEXT_ACCEPTANCE = wait for the next genuine RI entry/exit and verify:
+  exact emitted request_id tracking
+  action_scoped_only transport
+  no stale guard rollback
+  runtime/broker position parity after fill
+```
