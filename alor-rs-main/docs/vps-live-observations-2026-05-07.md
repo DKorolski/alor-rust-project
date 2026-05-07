@@ -479,3 +479,75 @@ Local patch verification:
 cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
 result: 30 passed
 ```
+
+## RI Micro Rollback Patch Deployment Check
+
+Collection time: 2026-05-07 10:34-10:41 MSK.
+
+Deployment:
+
+```text
+commit=5938d8f Fix RI live state rollback on dropped intents
+runtime_image=manual-5938d8f-ri-rollback-20260507
+gateway_image=manual-5430299-protplace-20260428
+strategy_runtime=recreated/healthy
+alor_gateway=recreated/healthy
+redis=kept running/healthy
+```
+
+Pre-start safety:
+
+```text
+broker snapshot before restart:
+  RTS-6.26 qty=0
+
+runtime.state.ri_author41_42.micro.7502MIW:
+  XLEN before=8
+  DEL=1
+  XLEN after=0
+
+cmd.orders.7502MIW.ri_author41_42.micro = 2  # retained audit records
+cmd.acks.7502MIW.ri_author41_42.micro   = 2  # retained audit records
+```
+
+Bootstrap:
+
+```text
+bootstrap warmup completed bars_processed=855 scan=5000
+latest warmup bar before live guard: 2026-05-07 10:20:00 MSK
+initial runtime state after clean start: phase=flat
+broker snapshot after clean start: positions={}
+```
+
+Post-restart live-readiness check:
+
+```text
+10:30 model bar observed
+live_guard BLOCKED -> ALLOWED at 2026-05-07 10:40:12 MSK
+no ri_intent_emitted after restart
+no gateway command after restart
+cmd.orders length remains 2
+cmd.acks length remains 2
+runtime state remains phase=flat
+broker snapshot remains positions={}
+```
+
+Interpretation:
+
+```text
+Rollback patch behaved as intended on the first post-restart live bar. The
+previous stale internal MR position did not survive from-zero restart/warmup,
+and no stale exit was emitted after the guard became ALLOWED.
+```
+
+Current status:
+
+```text
+RI_MICRO = RUNNING / FLAT / PATCHED / ACTION_SCOPED_READY
+BROKER_RI = FLAT
+NEXT_ACCEPTANCE = wait for next genuine RI entry signal and verify:
+  symbol=RTS-6.26
+  action_scoped_only transport
+  broker Accepted/fill
+  runtime and broker positions remain in parity
+```
