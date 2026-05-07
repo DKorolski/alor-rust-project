@@ -614,12 +614,9 @@ impl StrategyRuntime {
 
         let gateway_health_last_ts_utc = self.live_guard.health.as_ref().map(|h| h.last_event_ts);
         let gateway_health_age_sec = gateway_health_last_ts_utc.map(|ts| now_ts.saturating_sub(ts));
-        let has_open_position = self
-            .state
-            .positions
-            .get(&self.config.strategy.symbol)
-            .map(|pos| pos.qty.abs() > f64::EPSILON)
-            .unwrap_or(false);
+        let has_open_position = self.state.positions.iter().any(|(symbol, pos)| {
+            self.matches_strategy_symbol(symbol) && pos.qty.abs() > f64::EPSILON
+        });
         let strategy_risk = self.strategy.exit_risk_status(has_open_position);
         if let Some(override_phase) = strategy_risk.phase_override.clone() {
             runtime_phase = override_phase;

@@ -35,10 +35,12 @@ They are stable because the signal layer is surrounded by service invariants:
 - operator-readable audit events
 
 RI already has several of these protections. The 2026-05-07 service-maturity
-patch moves RI live entry emission into `live_pending_entry` and promotes it to
-`live_in_position` only after broker position confirmation. It also teaches the
-runtime to treat RI `order_symbol` as part of the strategy symbol set, so routed
-broker events are not filtered out before strategy callbacks.
+patches move RI live entry emission into `live_pending_entry` and promote it to
+`live_in_position` only after broker position confirmation. RI exits now move
+through `live_pending_exit`, confirm flat only from broker position updates, and
+use `live_deferred_exit` for recoverable `trading_window_closed` exit rejects.
+The runtime also treats RI `order_symbol` as part of the strategy symbol set, so
+routed broker events are not filtered out before strategy callbacks.
 
 ## Proven Service Patterns
 
@@ -109,6 +111,10 @@ RI mitigation:
   `live_in_position`.
 - RI live entry emits now persist `live_pending_entry` first; broker position
   updates promote that phase to `live_in_position`.
+- RI live exit emits now persist `live_pending_exit`; broker-flat position
+  updates clear strategy-owned live positions and return the phase to `flat`.
+- RI `trading_window_closed` exit rejects with a broker position enter
+  `live_deferred_exit` and reissue the exit on the next eligible model bar.
 - Runtime strategy event matching includes RI `order_symbol`, preserving
   callbacks for routed full-symbol instruments such as `RTS-6.26`.
 
@@ -116,6 +122,7 @@ Existing test:
 
 - `ri_author41_42_live::restored_flat_state_clears_unpersisted_live_positions`
 - `ri_author41_42_live::micro_live_promotes_pending_entry_to_in_position_on_position_update`
+- `ri_author41_42_live::micro_live_trading_window_closed_exit_reject_enters_deferred_exit_and_reissues`
 - `runtime::live_accepts_position_events_for_ri_order_symbol`
 
 Required future checklist item:
@@ -172,6 +179,7 @@ Existing tests:
 - `session_gap_standalone::deferred_exit_reissues_after_trading_resumes_until_flat`
 - `hybrid_intraday_runtime::trading_window_closed_exit_reject_enters_deferred_state`
 - `hybrid_intraday_runtime::deferred_exit_reissues_after_live_ready_returns_until_flat`
+- `ri_author41_42_live::micro_live_trading_window_closed_exit_reject_enters_deferred_exit_and_reissues`
 
 Rule for new strategies:
 

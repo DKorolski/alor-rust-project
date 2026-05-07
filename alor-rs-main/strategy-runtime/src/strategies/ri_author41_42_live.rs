@@ -982,36 +982,43 @@ impl RiAuthor4142LiveStrategy {
 
     fn live_mr_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
         let mut intents = Vec::new();
+        if self.phase_is("live_pending_entry") {
+            return intents;
+        }
+        if self.phase_is("live_pending_exit") {
+            return intents;
+        }
+        if self.phase_is("live_deferred_exit") {
+            if let Some(position) = self.live_mr.position.clone() {
+                intents.push(self.emit_mr_exit_intent(
+                    &position,
+                    bar,
+                    bar.close,
+                    "deferred_exit_reissue",
+                    "live_deferred_exit_reissued",
+                ));
+            }
+            return intents;
+        }
         if self.live_mr.current_date != Some(bar.ts_local.date()) {
             self.live_mr.current_date = Some(bar.ts_local.date());
             self.live_mr.entries_today = 0;
-            self.live_mr.position = None;
+            if self.phase_is(RiAuthor4142Phase::Flat.as_str()) {
+                self.live_mr.position = None;
+            }
         }
 
         if let Some(mut position) = self.live_mr.position.take() {
             position.bars_held = position.bars_held.saturating_add(1);
             if let Some((exit_price, reason)) = Self::mr_exit_signal(&position, bar) {
-                let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
-                    component: RiAuthor4142Component::Author41Mr,
-                    side: position.side,
-                    model_signal_ts_local: position.entry_ts_local,
-                    scheduled_entry_ts_local: Some(position.entry_ts_local),
-                    scheduled_exit_ts_local: Some(bar.ts_local),
+                intents.push(self.emit_mr_exit_intent(
+                    &position,
+                    bar,
+                    exit_price,
                     reason,
-                    decision_key: position.decision_key.clone(),
-                    shadow_pnl_points: Some(
-                        Self::points_for_side(position.side, position.entry_price, exit_price)
-                            - position.config.roundtrip_cost_points,
-                    ),
-                });
-                let candidate = self.live_candidate_for_decision(
-                    &decision,
-                    RiAuthor4142CandidateRole::Exit,
-                    position.side.exit_order_side(),
-                    bar.ts_local,
-                );
-                intents.push(self.emit_live_candidate(candidate, &decision));
-                self.transition_live_flat(&decision, "live_exit_emitted");
+                    "live_exit_emitted",
+                ));
+                self.live_mr.position = Some(position);
                 return intents;
             } else {
                 self.live_mr.position = Some(position);
@@ -1066,6 +1073,26 @@ impl RiAuthor4142LiveStrategy {
 
     fn live_bo_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
         let mut intents = Vec::new();
+        if self.phase_is("live_pending_entry") {
+            return intents;
+        }
+        if self.phase_is("live_pending_exit") {
+            return intents;
+        }
+        if self.phase_is("live_deferred_exit") {
+            if let Some(position) = self.live_bo.position.clone() {
+                let config = Author42Config::ri_grid_k042_both();
+                intents.push(self.emit_bo_exit_intent(
+                    &position,
+                    bar,
+                    non_zero_or_close(bar.open, bar.close),
+                    "deferred_exit_reissue",
+                    "live_bo_deferred_exit_reissued",
+                    config.roundtrip_cost_points,
+                ));
+            }
+            return intents;
+        }
         self.ensure_bo_session(bar);
         let config = Author42Config::ri_grid_k042_both();
 
@@ -1109,32 +1136,17 @@ impl RiAuthor4142LiveStrategy {
                     }
                 }
                 RiAuthor4142LiveBoPending::Exit(reason) => {
-                    if let Some(position) = self.live_bo.position.take() {
+                    if let Some(position) = self.live_bo.position.clone() {
                         let exit_price = non_zero_or_close(bar.open, bar.close);
-                        let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
-                            component: RiAuthor4142Component::Author42Bo,
-                            side: position.side,
-                            model_signal_ts_local: position.entry_ts_local,
-                            scheduled_entry_ts_local: Some(position.entry_ts_local),
-                            scheduled_exit_ts_local: Some(bar.ts_local),
+                        intents.push(self.emit_bo_exit_intent(
+                            &position,
+                            bar,
+                            exit_price,
                             reason,
-                            decision_key: position.decision_key,
-                            shadow_pnl_points: Some(
-                                Self::points_for_side(
-                                    position.side,
-                                    position.entry_price,
-                                    exit_price,
-                                ) - config.roundtrip_cost_points,
-                            ),
-                        });
-                        let candidate = self.live_candidate_for_decision(
-                            &decision,
-                            RiAuthor4142CandidateRole::Exit,
-                            position.side.exit_order_side(),
-                            bar.ts_local,
-                        );
-                        intents.push(self.emit_live_candidate(candidate, &decision));
-                        self.transition_live_flat(&decision, "live_bo_exit_emitted");
+                            "live_bo_exit_emitted",
+                            config.roundtrip_cost_points,
+                        ));
+                        return intents;
                     }
                 }
             }
@@ -1146,27 +1158,15 @@ impl RiAuthor4142LiveStrategy {
         if let Some(mut position) = self.live_bo.position.take() {
             position.bars_held = position.bars_held.saturating_add(1);
             if bar.ts_local.time() >= config.exit_time {
-                let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
-                    component: RiAuthor4142Component::Author42Bo,
-                    side: position.side,
-                    model_signal_ts_local: position.entry_ts_local,
-                    scheduled_entry_ts_local: Some(position.entry_ts_local),
-                    scheduled_exit_ts_local: Some(bar.ts_local),
-                    reason: "time_exit_same_bar_close",
-                    decision_key: position.decision_key,
-                    shadow_pnl_points: Some(
-                        Self::points_for_side(position.side, position.entry_price, bar.close)
-                            - config.roundtrip_cost_points,
-                    ),
-                });
-                let candidate = self.live_candidate_for_decision(
-                    &decision,
-                    RiAuthor4142CandidateRole::Exit,
-                    position.side.exit_order_side(),
-                    bar.ts_local,
-                );
-                intents.push(self.emit_live_candidate(candidate, &decision));
-                self.transition_live_flat(&decision, "live_bo_exit_emitted");
+                intents.push(self.emit_bo_exit_intent(
+                    &position,
+                    bar,
+                    bar.close,
+                    "time_exit_same_bar_close",
+                    "live_bo_exit_emitted",
+                    config.roundtrip_cost_points,
+                ));
+                self.live_bo.position = Some(position);
             } else {
                 if let Some(context) = self.live_bo.context {
                     match position.side {
@@ -1463,6 +1463,71 @@ impl RiAuthor4142LiveStrategy {
         intent
     }
 
+    fn emit_mr_exit_intent(
+        &mut self,
+        position: &RiAuthor4142LiveMrPosition,
+        bar: ModelBar,
+        exit_price: f64,
+        reason: &'static str,
+        transition_reason: &'static str,
+    ) -> Intent {
+        let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
+            component: RiAuthor4142Component::Author41Mr,
+            side: position.side,
+            model_signal_ts_local: position.entry_ts_local,
+            scheduled_entry_ts_local: Some(position.entry_ts_local),
+            scheduled_exit_ts_local: Some(bar.ts_local),
+            reason,
+            decision_key: position.decision_key.clone(),
+            shadow_pnl_points: Some(
+                Self::points_for_side(position.side, position.entry_price, exit_price)
+                    - position.config.roundtrip_cost_points,
+            ),
+        });
+        let candidate = self.live_candidate_for_decision(
+            &decision,
+            RiAuthor4142CandidateRole::Exit,
+            position.side.exit_order_side(),
+            bar.ts_local,
+        );
+        let intent = self.emit_live_candidate(candidate, &decision);
+        self.transition_live_pending_exit(&decision, transition_reason);
+        intent
+    }
+
+    fn emit_bo_exit_intent(
+        &mut self,
+        position: &RiAuthor4142LiveBoPosition,
+        bar: ModelBar,
+        exit_price: f64,
+        reason: &'static str,
+        transition_reason: &'static str,
+        roundtrip_cost_points: f64,
+    ) -> Intent {
+        let decision = self.live_decision(RiAuthor4142LiveDecisionInput {
+            component: RiAuthor4142Component::Author42Bo,
+            side: position.side,
+            model_signal_ts_local: position.entry_ts_local,
+            scheduled_entry_ts_local: Some(position.entry_ts_local),
+            scheduled_exit_ts_local: Some(bar.ts_local),
+            reason,
+            decision_key: position.decision_key.clone(),
+            shadow_pnl_points: Some(
+                Self::points_for_side(position.side, position.entry_price, exit_price)
+                    - roundtrip_cost_points,
+            ),
+        });
+        let candidate = self.live_candidate_for_decision(
+            &decision,
+            RiAuthor4142CandidateRole::Exit,
+            position.side.exit_order_side(),
+            bar.ts_local,
+        );
+        let intent = self.emit_live_candidate(candidate, &decision);
+        self.transition_live_pending_exit(&decision, transition_reason);
+        intent
+    }
+
     fn record_candidate_emitted_journal(
         &mut self,
         candidate: &RiAuthor4142CandidateIntent,
@@ -1532,7 +1597,50 @@ impl RiAuthor4142LiveStrategy {
         }
     }
 
-    fn transition_live_flat(&mut self, decision: &RiAuthor4142ModelDecision, reason: &'static str) {
+    fn transition_live_pending_exit(
+        &mut self,
+        decision: &RiAuthor4142ModelDecision,
+        reason: &'static str,
+    ) {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            current_component,
+            current_side,
+            current_cycle_id,
+            current_entry_ts_local,
+            current_exit_ts_local,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            *phase = "live_pending_exit".to_string();
+            *current_component = Some(decision.component.as_str().to_string());
+            *current_side = decision.side.map(|side| side.as_str().to_string());
+            *current_cycle_id = Some(format!(
+                "{}:{}",
+                decision.component.as_str(),
+                decision.model_signal_ts_local.format("%Y%m%d%H%M%S")
+            ));
+            *current_entry_ts_local = decision.scheduled_entry_ts_local.map(|ts| ts.to_string());
+            *current_exit_ts_local = decision.scheduled_exit_ts_local.map(|ts| ts.to_string());
+            *last_transition_reason = Some(format!("{}:{}", reason, decision.reason));
+        }
+    }
+
+    fn transition_live_deferred_exit(&mut self, reason: String) {
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            last_transition_reason,
+            ..
+        } = &mut self.state
+        {
+            *phase = "live_deferred_exit".to_string();
+            *last_transition_reason = Some(reason);
+        }
+    }
+
+    fn transition_live_flat_with_reason(&mut self, reason: String) {
+        self.clear_live_positions();
         if let StrategyState::RiAuthor4142Live {
             phase,
             current_component,
@@ -1550,7 +1658,7 @@ impl RiAuthor4142LiveStrategy {
             *current_cycle_id = None;
             *current_entry_ts_local = None;
             *current_exit_ts_local = None;
-            *last_transition_reason = Some(format!("{}:{}", reason, decision.reason));
+            *last_transition_reason = Some(reason);
         }
     }
 
@@ -1638,6 +1746,10 @@ impl RiAuthor4142LiveStrategy {
         }
     }
 
+    fn phase_is(&self, expected: &str) -> bool {
+        self.phase_for_test().as_deref() == Some(expected)
+    }
+
     fn clear_live_positions(&mut self) {
         self.live_mr.position = None;
         self.live_bo.position = None;
@@ -1666,7 +1778,56 @@ impl Strategy for RiAuthor4142LiveStrategy {
             return Vec::new();
         }
         let phase = self.phase_for_test();
-        if phase.as_deref() == Some("live_pending_entry")
+        if phase.as_deref() == Some("live_pending_exit")
+            || phase.as_deref() == Some("live_deferred_exit")
+        {
+            let broker_qty = ctx.position_qty.unwrap_or(f64::NAN);
+            if ctx
+                .position_qty
+                .map(|qty| qty.abs() <= f64::EPSILON)
+                .unwrap_or(false)
+            {
+                self.transition_live_flat_with_reason(format!(
+                    "live_exit_ack_rejected_but_broker_flat:{}:{}",
+                    ack.error_code.as_deref().unwrap_or("unknown"),
+                    ack.error_msg.as_deref().unwrap_or("unknown")
+                ));
+                info!(
+                    target: "strategy_runtime::ri_author41_42_live",
+                    action = "ri_live_exit_rejected_broker_flat",
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    error_code = ?ack.error_code,
+                    error_msg = ?ack.error_msg,
+                    broker_qty,
+                    mode = self.config.mode.as_str(),
+                    live_adapter_enabled = self.can_emit_orders(),
+                );
+            } else if ack.error_code.as_deref() == Some("trading_window_closed") {
+                self.transition_live_deferred_exit(format!(
+                    "live_exit_deferred:{}:{}",
+                    ack.error_code.as_deref().unwrap_or("unknown"),
+                    ack.error_msg.as_deref().unwrap_or("unknown")
+                ));
+                info!(
+                    target: "strategy_runtime::ri_author41_42_live",
+                    action = "ri_live_exit_deferred",
+                    request_id = %ack.request_id,
+                    status = ?ack.status,
+                    error_code = ?ack.error_code,
+                    error_msg = ?ack.error_msg,
+                    broker_qty,
+                    mode = self.config.mode.as_str(),
+                    live_adapter_enabled = self.can_emit_orders(),
+                );
+            } else {
+                self.enter_manual_intervention_required(format!(
+                    "live_exit_ack_rejected_with_broker_position:{}:{}",
+                    ack.error_code.as_deref().unwrap_or("unknown"),
+                    ack.error_msg.as_deref().unwrap_or("unknown")
+                ));
+            }
+        } else if phase.as_deref() == Some("live_pending_entry")
             || phase.as_deref() == Some("live_in_position")
         {
             let broker_qty = ctx.position_qty.unwrap_or(0.0);
@@ -1722,6 +1883,7 @@ impl Strategy for RiAuthor4142LiveStrategy {
     }
 
     fn on_position(&mut self, _ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
+        let mut mark_flat = false;
         if let StrategyState::RiAuthor4142Live {
             phase,
             last_transition_reason,
@@ -1732,6 +1894,16 @@ impl Strategy for RiAuthor4142LiveStrategy {
                 *phase = "live_in_position".to_string();
                 *last_transition_reason = Some("live_position_confirmed".to_string());
             }
+            if matches!(
+                phase.as_str(),
+                "live_pending_exit" | "live_deferred_exit" | "live_in_position"
+            ) && pos.qty.abs() <= f64::EPSILON
+            {
+                mark_flat = true;
+            }
+        }
+        if mark_flat {
+            self.transition_live_flat_with_reason("live_position_flat_confirmed".to_string());
         }
         Vec::new()
     }
@@ -1776,11 +1948,34 @@ impl Strategy for RiAuthor4142LiveStrategy {
 
     fn set_state(&mut self, state: StrategyState) {
         if let StrategyState::RiAuthor4142Live { phase, .. } = &state {
-            if phase != "live_in_position" {
+            if phase != "live_in_position"
+                && phase != "live_pending_exit"
+                && phase != "live_deferred_exit"
+            {
                 self.clear_live_positions();
             }
             self.state = state;
         }
+    }
+
+    fn exit_risk_status(
+        &self,
+        has_open_position: bool,
+    ) -> crate::strategy_host::StrategyExitRiskStatus {
+        let phase = self.phase_for_test();
+        if matches!(
+            phase.as_deref(),
+            Some("live_pending_exit") | Some("live_deferred_exit")
+        ) && has_open_position
+        {
+            return crate::strategy_host::StrategyExitRiskStatus {
+                phase_override: Some("CloseOnlyDegraded".to_string()),
+                exit_recovery_active: phase.as_deref() == Some("live_deferred_exit"),
+                operator_intervention_required: false,
+                open_risk_position_unflattened: true,
+            };
+        }
+        crate::strategy_host::StrategyExitRiskStatus::default()
     }
 }
 
@@ -2164,6 +2359,20 @@ mod tests {
             other => panic!("unexpected entry intent: {other:?}"),
         }
         assert_eq!(entry_intents[0].explicit_class(), Some(IntentClass::Entry));
+        strategy.on_position(
+            &live_ctx_with_position(-1.0),
+            &PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100_100.0,
+                ts_utc: 1_776_000_020,
+            },
+        );
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_in_position")
+        );
 
         let exit_bar = bar_with_ohlc(
             dt(2026, 5, 4, 9, 10, 0),
@@ -2192,12 +2401,114 @@ mod tests {
         assert_eq!(exit_intents[0].explicit_class(), Some(IntentClass::Exit));
         assert_eq!(
             strategy.phase_for_test().as_deref(),
+            Some("live_pending_exit")
+        );
+        strategy.on_position(
+            &live_ctx_with_position(0.0),
+            &PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: 0.0,
+                existing: false,
+                avg_price: 0.0,
+                ts_utc: 1_776_000_620,
+            },
+        );
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
             Some(RiAuthor4142Phase::Flat.as_str())
         );
         assert!(strategy
             .journal_records_for_test()
             .iter()
             .any(|row| row.adapter_decision == RiAuthor4142JournalDecision::IntentEmitted));
+    }
+
+    #[test]
+    fn micro_live_trading_window_closed_exit_reject_enters_deferred_exit_and_reissues() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        assert_eq!(strategy.on_bar(&live_ctx(), &entry_bar).len(), 1);
+        strategy.on_position(
+            &live_ctx_with_position(-1.0),
+            &PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100_100.0,
+                ts_utc: 1_776_000_020,
+            },
+        );
+
+        let exit_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 10, 0),
+            DataOrigin::Live,
+            100_090.0,
+            100_100.0,
+            99_890.0,
+            99_900.0,
+        );
+        let exit_intents = strategy.on_bar(&live_ctx_with_position(-1.0), &exit_bar);
+        assert_eq!(exit_intents.len(), 1);
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_pending_exit")
+        );
+
+        strategy.on_ack(
+            &live_ctx_with_position(-1.0),
+            &CommandAck {
+                request_id: Uuid::new_v4(),
+                status: AckStatus::Rejected,
+                broker_order_id: None,
+                broker_order_id_str: None,
+                error_code: Some("trading_window_closed".to_string()),
+                error_msg: Some("validation failed".to_string()),
+                cws_http_code: None,
+                cws_message: None,
+                cws_request_guid: None,
+                processed_ts_utc: 1_776_000_620,
+            },
+        );
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_deferred_exit")
+        );
+
+        let reissue_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 20, 0),
+            DataOrigin::Live,
+            99_920.0,
+            99_950.0,
+            99_850.0,
+            99_900.0,
+        );
+        let reissued = strategy.on_bar(&live_ctx_with_position(-1.0), &reissue_bar);
+        assert_eq!(reissued.len(), 1);
+        assert_eq!(reissued[0].explicit_class(), Some(IntentClass::Exit));
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_pending_exit")
+        );
     }
 
     #[test]
@@ -2813,6 +3124,13 @@ mod tests {
         crate::StrategyCtx {
             allow_live_orders: true,
             ..test_ctx()
+        }
+    }
+
+    fn live_ctx_with_position(qty: f64) -> crate::StrategyCtx {
+        crate::StrategyCtx {
+            position_qty: Some(qty),
+            ..live_ctx()
         }
     }
 }
