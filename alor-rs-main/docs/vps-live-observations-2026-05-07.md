@@ -303,3 +303,83 @@ Patch line:
 5. Rebuild/redeploy only RI runtime after tests.
 6. Restart RI from clean state; do not replay the stale live_in_position tail.
 ```
+
+## RI Micro Symbol Patch Deployment Check
+
+Collection time: 2026-05-07 09:33-09:53 MSK.
+
+Patch deployed:
+
+```text
+commit=9e5fea2 Fix RI order symbol routing
+runtime_image=manual-9e5fea2-ri-symbol-20260507
+gateway_image=manual-5430299-protplace-20260428
+strategy_runtime=recreated/healthy
+alor_gateway=recreated/healthy
+redis=kept running/healthy
+```
+
+Active RI runtime config after deploy:
+
+```text
+strategy_id=ri_author41_42.micro.7502MIW
+model_symbol=RIM6
+order_symbol=RTS-6.26
+portfolio=7502MIW
+mode=micro_live
+qty=1
+execution_path=action_scoped_only
+```
+
+From-zero safety reset:
+
+```text
+DEL runtime.state.ri_author41_42.micro.7502MIW
+cmd.orders.7502MIW.ri_author41_42.micro = 1  # retained audit record from rejected 09:00 attempt
+cmd.acks.7502MIW.ri_author41_42.micro   = 1  # retained audit record from rejected 09:00 attempt
+broker snapshot after restart: positions={}
+```
+
+Bootstrap/restart result:
+
+```text
+bootstrap snapshots filtered positions_open_strategy=0 orders_open_strategy=0 stop_orders_open_strategy=0
+ri_bootstrap_reconciled_flat symbol=RIM6 mode=micro_live
+warmup completed bars_processed=849 scan=5000
+live_guard BLOCKED -> ALLOWED at 2026-05-07 09:40:08 MSK
+```
+
+Post-restart live bar observations:
+
+```text
+09:30 model bar:
+  ri_intent_emitted role=entry component=author41_mr model_side=short order_side=Sell
+  order_symbol=RTS-6.26
+  live_guard was still BLOCKED / gateway_ready=false / phase=SyncingHistory
+  no command was written to gateway; cmd stream length stayed 1
+
+09:40 model bar:
+  ri_model_bar_observed
+  live_guard already ALLOWED
+  no new intent emitted
+  no gateway command
+  broker snapshot remains flat
+```
+
+Interpretation:
+
+```text
+The RI symbol patch is deployed and the runtime is safe/flat.
+The first post-restart prospective RI intent already carries order_symbol=RTS-6.26,
+but it occurred while the live guard was still blocked and therefore did not reach
+the broker. The next live-ready model bar produced no entry signal. The old 09:00
+reject remains only as an audit record in cmd/ack streams.
+```
+
+Follow-up:
+
+```text
+Continue watching the next RI entry signal. The required acceptance point is a
+new command with symbol=RTS-6.26, action_scoped_only transport, broker accepted
+ack/fill, and runtime/broker position parity.
+```
