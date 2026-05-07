@@ -1762,7 +1762,10 @@ impl Strategy for RiAuthor4142LiveStrategy {
     }
 
     fn set_state(&mut self, state: StrategyState) {
-        if let StrategyState::RiAuthor4142Live { .. } = state {
+        if let StrategyState::RiAuthor4142Live { phase, .. } = &state {
+            if phase != "live_in_position" {
+                self.clear_live_positions();
+            }
             self.state = state;
         }
     }
@@ -2020,7 +2023,10 @@ mod tests {
         );
         let entry_intents = strategy.on_bar(&live_ctx(), &entry_bar);
         assert_eq!(entry_intents.len(), 1);
-        assert_eq!(strategy.phase_for_test().as_deref(), Some("live_in_position"));
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_in_position")
+        );
 
         strategy.on_ack(
             &live_ctx(),
@@ -2041,6 +2047,66 @@ mod tests {
         assert_eq!(strategy.phase_for_test().as_deref(), Some("flat"));
         assert!(strategy.live_mr.position.is_none());
         assert!(strategy.live_bo.position.is_none());
+    }
+
+    #[test]
+    fn restored_flat_state_clears_unpersisted_live_positions() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+        let previous_state = strategy.state().clone();
+
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        let entry_intents = strategy.on_bar(&live_ctx(), &entry_bar);
+        assert_eq!(entry_intents.len(), 1);
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_in_position")
+        );
+        assert!(strategy.live_mr.position.is_some());
+
+        strategy.set_state(previous_state);
+
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
+        assert!(strategy.live_mr.position.is_none());
+        assert!(strategy.live_bo.position.is_none());
+
+        let exit_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 10, 0),
+            DataOrigin::Live,
+            100_090.0,
+            100_100.0,
+            99_890.0,
+            99_900.0,
+        );
+        let intents_after_restore = strategy.on_bar(&live_ctx(), &exit_bar);
+        assert!(
+            intents_after_restore
+                .iter()
+                .all(|intent| intent.explicit_class() != Some(IntentClass::Exit)),
+            "restored flat state must not emit stale exit intents: {intents_after_restore:?}"
+        );
     }
 
     #[test]

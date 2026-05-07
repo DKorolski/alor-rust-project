@@ -383,3 +383,99 @@ Continue watching the next RI entry signal. The required acceptance point is a
 new command with symbol=RTS-6.26, action_scoped_only transport, broker accepted
 ack/fill, and runtime/broker position parity.
 ```
+
+## RI Micro Blocked-Entry State Skew Incident
+
+Collection time: 2026-05-07 10:20-10:23 MSK.
+
+After the symbol patch restart, the 09:30 RI model bar generated a short MR
+entry candidate:
+
+```text
+09:30 MSK
+ri_intent_emitted role=entry component=author41_mr model_side=short order_side=Sell
+order_symbol=RTS-6.26
+live_guard=BLOCKED / gateway_ready=false / phase=SyncingHistory
+cmd.orders length stayed 1
+gateway command events: none
+```
+
+The command was correctly blocked before broker emit, but the RI adapter still
+kept an unpersisted internal `live_mr.position`. At 10:00 MSK it therefore
+generated the matching short-exit order:
+
+```text
+10:00 MSK
+ri_intent_emitted role=exit component=author41_mr model_side=short order_side=Buy
+order_symbol=RTS-6.26
+intent_class=Exit
+request_id=4740189c-e1db-5087-b944-7a86441db66e
+```
+
+This time the runtime was `LiveReady`, so the command reached the gateway and
+the broker accepted it:
+
+```text
+command received symbol=RTS-6.26 action=market
+action_scope_send_start opcode=authorize
+action_scope_send_start opcode=create:market
+action_scope_send_result http_code=200
+command ack published status=Accepted broker_order_id=1925039818497159211
+trade side=buy qty=1 price=110890
+```
+
+Because no broker-side short entry existed, the accepted exit created an
+unintended long:
+
+```text
+broker snapshot: RTS-6.26 qty=+1 avg_price=110890
+runtime state: phase=flat last_transition_reason=live_exit_emitted:take_author_close
+```
+
+Immediate operator action:
+
+```text
+strategy runtime stopped
+manual close executed: sell 1 RTS-6.26
+manual close trade price=110630 commission=11.1
+latest broker snapshot: RTS-6.26 qty=0
+gateway/redis left running
+```
+
+Impact:
+
+```text
+unintended round-trip: buy 110890 / sell 110630
+gross result: -260 RI points
+commission: 2 * 11.1 RUB
+```
+
+Root cause:
+
+```text
+Runtime host correctly restores persisted StrategyState when all intents are
+dropped before emit, but RI keeps live_mr/live_bo operational positions outside
+the persisted StrategyState envelope. RiAuthor4142LiveStrategy::set_state(flat)
+updated only the persisted state fields and did not clear those unpersisted live
+positions. Therefore Redis/runtime snapshot looked flat while the in-process RI
+adapter still held a stale MR position and later emitted an exit.
+```
+
+Patch line:
+
+```text
+1. Keep RI runtime stopped until patched runtime is deployed.
+2. Make RiAuthor4142LiveStrategy::set_state clear unpersisted live positions
+   whenever restored phase is not live_in_position.
+3. Add regression test:
+   entry intent creates internal live_mr.position -> host restores previous flat
+   StrategyState -> next bar must not emit stale exit.
+4. Rebuild RI runtime image and restart from zero after broker-flat confirmed.
+```
+
+Local patch verification:
+
+```text
+cargo test -p strategy-runtime ri_author41_42_live -- --nocapture
+result: 30 passed
+```
