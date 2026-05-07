@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::{bail, Result};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::state::StrategyState;
 use crate::strategies::moex_author41_42::{
@@ -476,7 +476,7 @@ impl RiAuthor4142LiveStrategy {
             }
         }
 
-        info!(
+        debug!(
             target: "strategy_runtime::ri_author41_42_live",
             action = "ri_model_bar_observed",
             ts_utc = bar.close_time_utc,

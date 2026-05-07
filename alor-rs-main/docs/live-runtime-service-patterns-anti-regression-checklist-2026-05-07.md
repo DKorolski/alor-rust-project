@@ -127,6 +127,9 @@ RI mitigation:
 - Runtime-level guard rollback is covered for RI: if a live entry intent is
   dropped by the host before broker emit, strategy state and hidden live
   positions are restored before the next model bar.
+- `ri_model_bar_observed` is a debug-level heartbeat only; operational `INFO`
+  remains focused on decisions, candidate intents, command preparation, rejects,
+  recovery, and manual-intervention events.
 
 Existing test:
 
@@ -378,7 +381,8 @@ remaining P1 lifecycle polish slice:
 
 - keep the existing strategy-level `set_state` hidden-state cleanup test as a
   regression backstop;
-- reduce `ri_model_bar_observed` log verbosity if it becomes operational noise.
+- keep monitoring live logs for any new high-volume `INFO` event that crowds out
+  execution/recovery diagnostics.
 
 This keeps the current micro contour usable while moving RI toward the service
 contract already proven by SessionGap, Hybrid IMOEXF, and Alor-USDRUBF.

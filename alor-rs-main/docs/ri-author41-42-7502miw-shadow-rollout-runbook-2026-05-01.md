@@ -150,11 +150,14 @@ RUNTIME_CONFIG=/configs/runtime.ri_author41_42.shadow.7502MIW.toml
 Runtime should show:
 
 ```text
-ri_model_bar_observed
 mode=shadow
 allow_order_emission=false
 live_adapter_enabled=false
 ```
+
+`ri_model_bar_observed` is intentionally debug-level heartbeat noise. Use it
+only with debug logging enabled when checking bar cadence. Normal operator log
+checks should focus on decision and intent lifecycle events.
 
 When decisions appear, runtime may show:
 
