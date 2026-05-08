@@ -216,3 +216,111 @@ Next checks after open:
 3. Continue watching gateway reconnect WARN frequency; current reconnects are
    benign because there were no commands in flight.
 ```
+
+## Completed 2026-05-07 Trade Result Attribution
+
+Collection time: 2026-05-08 08:09-08:20 MSK.
+
+Source:
+
+```text
+Redis broker.trades / broker.orders streams across live VPS contours.
+Date filter: broker event date = 2026-05-07 MSK.
+```
+
+Important attribution note:
+
+```text
+Some broker streams are shared by portfolio, not by strategy.
+
+7502MIW broker stream is visible in both sessiongap and RI micro Redis. It can
+contain RI and USDRUBF broker activity even when sessiongap itself emitted no
+intent.
+
+7502SN6 broker stream is visible in both hybrid and RI shadow Redis. RI shadow
+is observation-only and did not emit commands; IMOEXF broker trades in that
+stream are hybrid trades.
+
+Existing=true records observed around 02:40-02:50 MSK are broker replay /
+historical snapshot records after reconnect and are excluded from new-trade
+economics below.
+```
+
+Strategy-attributed results:
+
+```text
+sessiongap:
+  strategy intents: 0
+  strategy trades: 0
+  note: broker stream contains shared portfolio records, but no sessiongap
+        intent/emission was observed for the session.
+
+hybrid IMOEXF:
+  component: MR
+  entry: 2026-05-07 09:20:07 MSK, sell 1 IMOEXF @ 2623.5
+  protective orders: TP buy @ 2620.0, SL buy @ 2651.0
+  exit: 2026-05-07 10:11:43 MSK, buy 1 IMOEXF @ 2620.0
+  SL cleanup: canceled after TP fill
+  gross result: +3.5 points before commission
+  broker commissions observed: 1.74 + 1.74 = 3.48
+  final broker position: IMOEXF qty=0
+  interpretation: logical MR short lifecycle; entry, TP fill, SL cleanup, flat.
+
+alor-USDRUBF:
+  component/comment: day_breakout_waitfix -> bo_stop1_long
+  entry: 2026-05-07 11:30:04 MSK, buy 1 USDRUBF @ 74.81
+  exit: 2026-05-07 12:00:04 MSK, sell 1 USDRUBF @ 74.78
+  gross result: -0.03 price points before commission
+  broker commissions observed: 3.48 + 3.48 = 6.96
+  final broker position: USDRUBF qty=0
+  interpretation: regular long breakout stopped by Stop1; flat after exit.
+
+RI author41/42 micro:
+  2026-05-07 10:10:03 MSK, buy 1 RTS-6.26 @ 110890.0
+  2026-05-07 10:22:09 MSK, sell 1 RTS-6.26 @ 110630.0
+  gross result if treated as a pair: -260 points before commission
+  broker commissions observed: 11.10 + 11.10 = 22.20
+  attribution: operational remediation before the 12:38 MSK service-hardening
+               rollout, not a clean post-hardening RI soak trade.
+  final broker position: RTS-6.26 qty=0
+  interpretation: exclude from post-hardening RI acceptance economics; keep in
+                  incident/remediation accounting.
+
+RI shadow:
+  live commands: 0
+  shadow commands: 0
+  note: IMOEXF broker trades visible in RI shadow Redis belong to the shared
+        7502SN6 portfolio and are attributed to hybrid, not RI shadow.
+```
+
+Order/transport observations:
+
+```text
+hybrid IMOEXF:
+  broker order comments:
+    HYB|sid=hybrid_imoexf|...|o=MR|r=ENTRY
+    HYB|sid=hybrid_imoexf|...|o=MR|r=TP
+    HYB|sid=hybrid_imoexf|...|o=MR|r=SL
+  no runtime command_rejected observed in the 14h pre-session check.
+
+alor-USDRUBF:
+  broker order comments:
+    USDRUBF|entry|day_breakout_waitfix
+    USDRUBF|exit|bo_stop1_long
+  no runtime command_rejected observed in the 14h pre-session check.
+
+RI micro:
+  service-hardening rollout happened after these remediation fills.
+  After the rollout, cmd.orders.7502MIW.ri_author41_42.micro remains 0 and
+  cmd.acks.7502MIW.ri_author41_42.micro remains 0 as of the pre-session check.
+```
+
+Completed-session status:
+
+```text
+HYBRID_IMOEXF_2026_05_07 = CLEAN_MR_TP_EXIT / FLAT
+ALOR_USDRUBF_2026_05_07 = CLEAN_BO_STOP_EXIT / FLAT
+SESSIONGAP_2026_05_07 = NO_STRATEGY_TRADE
+RI_MICRO_2026_05_07 = REMEDIATION_PAIR_BEFORE_SERVICE_HARDENING / FLAT
+RI_SHADOW_2026_05_07 = OBSERVATION_ONLY / NO_LIVE_COMMANDS
+```
