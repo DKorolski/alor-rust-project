@@ -254,6 +254,12 @@ pub struct Author41Config {
 }
 
 impl Author41Config {
+    /// Legacy local/unit-test plateau helper.
+    ///
+    /// This summary-parameter profile (`K=0.07`, `StopK=0.58`) is retained for
+    /// older focused tests only. Active RI replay/live handoff paths use the
+    /// source split profiles (`ri_plateau_short_source` / `ri_plateau_long_source`)
+    /// and the combo contract built on top of them.
     pub fn ri_dual_no_overlap_plateau() -> Self {
         Self {
             side_mode: Author41SideMode::Dual,

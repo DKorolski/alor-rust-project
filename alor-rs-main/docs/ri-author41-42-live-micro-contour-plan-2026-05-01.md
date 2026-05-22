@@ -462,6 +462,31 @@ Rationale:
 If later RI needs passive/limit execution, add it as a separate execution
 profile after the marketable P0 contour is validated.
 
+2026-05-08 analyst clarification:
+
+```text
+Do not promote TP bracket/limit to the primary RI micro contract.
+Keep MR TP as closed-bar `take_author_close` plus marketable/action-scoped exit.
+```
+
+Reasoning:
+
+- the active parity/live path is intentionally close-bar based for
+  `take_author_close`;
+- a passive TP limit would change live semantics to touch-based execution;
+- the TP-level variant may improve win-rate appearance while hurting
+  expectancy, so it belongs to a separate challenger profile if revisited.
+
+Operational protection candidate:
+
+```text
+SL bracket / stop-limit protection = separate future safety overlay discussion
+```
+
+This is safer to analyze separately because the research `stop` condition is
+already level-touch based. Any SL bracket line must remain action-scoped only
+and must include bootstrap/cleanup/reconciliation tests before live rollout.
+
 ### Observability Contract
 
 Minimum live logs:

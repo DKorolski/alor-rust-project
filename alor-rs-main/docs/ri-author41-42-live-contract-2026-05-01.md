@@ -94,6 +94,44 @@ The adapter may build candidate intents before GO, but it must suppress them
 and write observation records. It must not return order-emitting `Intent`s
 while `micro_live` and `allow_order_emission=true` are blocked.
 
+## MR Exit Execution Contract
+
+2026-05-08 analyst verdict:
+
+```text
+TP bracket / passive limit is not the primary live micro contract.
+Keep Author41 MR take-profit semantics as closed-bar condition
+(`take_author_close`) followed by marketable/action-scoped exit.
+```
+
+Rationale:
+
+- the frozen RI parity contract models `take_author_close`, not a touch-based
+  TP limit;
+- TP-limit variants looked cosmetically better by win-rate but worse by
+  expectancy in the analyst review;
+- switching TP to a resting broker limit would create a live execution overlay
+  and should not be mixed into the current parity-validation micro soak.
+
+SL handling:
+
+- research `stop` already behaves like a level-touch condition;
+- broker-side SL / stop-limit protection may be evaluated separately as an
+  operational safety overlay;
+- enabling SL bracket protection requires a separate design/review/test line and
+  must remain action-scoped only;
+- SL bracket discussion must not implicitly enable TP bracket semantics.
+
+Current live micro contract:
+
+```text
+MR entry: action-scoped marketable order
+MR take_author_close: closed-bar condition -> action-scoped marketable exit
+MR stop/time/breakeven exits: current model condition -> action-scoped marketable exit
+TP resting limit: disabled in primary contract
+SL broker bracket: future safety candidate, not enabled by default
+```
+
 ## Safety Contract
 
 Startup and restart must be conservative:
