@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_match)]
+
 use alor_protocol::{AckStatus, CommandAck, Side};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
