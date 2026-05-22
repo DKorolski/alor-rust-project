@@ -615,7 +615,7 @@ fn close_bar_high180_exit(
     if position.owner != Owner::MeanReversion {
         return false;
     }
-    let Some(open) = state.high180_open.clone() else {
+    let Some(open) = state.high180_open else {
         return false;
     };
     let Some((reason, exit_price)) =
@@ -717,7 +717,7 @@ fn simulate_high180_shadow_daily_pnl(bars: &[PreparedBar]) -> Vec<(NaiveDate, f6
         }
         mr.on_bar(bar.ts, bar.high, bar.low);
         let mut closed_this_bar = false;
-        if let (Some(pos), Some(open)) = (position.clone(), high180_open.clone()) {
+        if let (Some(pos), Some(open)) = (position.clone(), high180_open) {
             if let Some((_reason, exit_price)) =
                 mr.evaluate_exit(&open, pos.entry_ts, pos.side, bar.ts, bar.close)
             {

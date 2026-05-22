@@ -395,6 +395,7 @@ impl HybridIntradayRuntimeStrategy {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_risk_gate_shadow(
         &mut self,
         dt_local: NaiveDateTime,

@@ -290,6 +290,7 @@ impl Default for RiAuthor4142Settings {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StrategySpecificConfig {
     LimitCancel(LimitCancelSettings),

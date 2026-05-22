@@ -154,8 +154,7 @@ impl HybridIntradayAdapter {
         let risk_gate_mode = Self::parse_risk_gate_mode(&runtime_settings.risk_gate_mode)?;
         if mr_gate_policy == MrGatePolicy::Disabled && risk_gate_mode != RiskGateMode::Disabled {
             bail!(
-                "hybrid_intraday risk_gate_mode {:?} requires non-disabled mr_gate_policy",
-                risk_gate_mode
+                "hybrid_intraday risk_gate_mode {risk_gate_mode:?} requires non-disabled mr_gate_policy"
             );
         }
         let (session_close_hour, session_close_minute, weekends_off) = config
