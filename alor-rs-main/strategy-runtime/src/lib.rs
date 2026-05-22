@@ -2,6 +2,7 @@ pub mod config;
 pub mod health_server;
 pub mod live_guard;
 pub mod redis_transport;
+pub mod risk_gate_store;
 pub mod runtime;
 pub mod state;
 pub mod strategies;
@@ -185,6 +186,7 @@ pub struct SessionGapStandaloneSettings {
     pub entry_fill_timeout_ms: u64,
     pub exit_ack_timeout_ms: u64,
     pub exit_fill_timeout_ms: u64,
+    pub signal_minute: u32,
     pub k_long: f64,
     pub k_short: f64,
     pub wait_hours: i64,
@@ -235,6 +237,18 @@ pub struct AlorUsdrubfHybridSettings {
     pub live_fixed_units: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiAuthor4142Settings {
+    pub profile_id: String,
+    pub timeframe: String,
+    pub mode: String,
+    pub allow_order_emission: bool,
+    pub execution_path: String,
+    pub order_symbol: Option<String>,
+    pub decision_journal_path: Option<String>,
+    pub decision_journal_append: bool,
+}
+
 impl Default for AlorUsdrubfHybridSettings {
     fn default() -> Self {
         Self {
@@ -261,6 +275,21 @@ impl Default for AlorUsdrubfHybridSettings {
     }
 }
 
+impl Default for RiAuthor4142Settings {
+    fn default() -> Self {
+        Self {
+            profile_id: "ri_author41_42_primary_combo_cost2".to_string(),
+            timeframe: "10m".to_string(),
+            mode: "shadow".to_string(),
+            allow_order_emission: false,
+            execution_path: "action_scoped_only".to_string(),
+            order_symbol: None,
+            decision_journal_path: None,
+            decision_journal_append: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StrategySpecificConfig {
     LimitCancel(LimitCancelSettings),
@@ -270,10 +299,27 @@ pub enum StrategySpecificConfig {
     MockLiveProbe(MockLiveProbeSettings),
     HybridIntraday(HybridIntradayStrategySettings),
     AlorUsdrubfHybrid(AlorUsdrubfHybridSettings),
+    RiAuthor4142(RiAuthor4142Settings),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HybridIntradaySettings {
+    #[serde(default)]
+    pub profile: String,
+    #[serde(default)]
+    pub mr_variant: String,
+    #[serde(default)]
+    pub mr_gate_policy: String,
+    #[serde(default)]
+    pub risk_gate_mode: String,
+    #[serde(default)]
+    pub risk_gate_seed_file: Option<String>,
+    #[serde(default)]
+    pub risk_gate_ledger_key: Option<String>,
+    #[serde(default)]
+    pub model_session_start_time: String,
+    #[serde(default)]
+    pub model_session_end_time: String,
     pub mr_min_range_long: f64,
     pub mr_max_range_long: f64,
     pub mr_k_long: f64,
@@ -308,6 +354,14 @@ pub struct HybridIntradaySettings {
 impl Default for HybridIntradaySettings {
     fn default() -> Self {
         Self {
+            profile: "baseline_runtime_hybrid".to_string(),
+            mr_variant: "classic_prev_day_range".to_string(),
+            mr_gate_policy: "disabled".to_string(),
+            risk_gate_mode: "disabled".to_string(),
+            risk_gate_seed_file: None,
+            risk_gate_ledger_key: None,
+            model_session_start_time: String::new(),
+            model_session_end_time: String::new(),
             mr_min_range_long: 0.013,
             mr_max_range_long: 0.035,
             mr_k_long: 0.032,
@@ -403,6 +457,7 @@ impl Default for SessionGapStandaloneSettings {
             entry_fill_timeout_ms: 60_000,
             exit_ack_timeout_ms: 15_000,
             exit_fill_timeout_ms: 60_000,
+            signal_minute: 59,
             k_long: 0.5,
             k_short: 0.46,
             wait_hours: 2,
@@ -452,6 +507,7 @@ impl StrategySpecificConfig {
             StrategyKind::AlorUsdrubfHybrid => {
                 Self::AlorUsdrubfHybrid(AlorUsdrubfHybridSettings::default())
             }
+            StrategyKind::RiAuthor4142 => Self::RiAuthor4142(RiAuthor4142Settings::default()),
         }
     }
 
@@ -464,6 +520,7 @@ impl StrategySpecificConfig {
             StrategySpecificConfig::MockLiveProbe(_) => StrategyKind::MockLiveProbe,
             StrategySpecificConfig::HybridIntraday(_) => StrategyKind::HybridIntraday,
             StrategySpecificConfig::AlorUsdrubfHybrid(_) => StrategyKind::AlorUsdrubfHybrid,
+            StrategySpecificConfig::RiAuthor4142(_) => StrategyKind::RiAuthor4142,
         }
     }
 }
@@ -486,6 +543,8 @@ pub enum StrategyKind {
     MockLiveProbe,
     HybridIntraday,
     AlorUsdrubfHybrid,
+    #[serde(rename = "ri_author41_42")]
+    RiAuthor4142,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -662,6 +721,20 @@ impl StrategyConfig {
     pub fn alor_skeleton_mut(&mut self) -> Option<&mut AlorUsdrubfHybridSettings> {
         self.alor_usdrubf_hybrid_mut()
     }
+
+    pub fn ri_author41_42(&self) -> Option<&RiAuthor4142Settings> {
+        match &self.specific {
+            StrategySpecificConfig::RiAuthor4142(settings) => Some(settings),
+            _ => None,
+        }
+    }
+
+    pub fn ri_author41_42_mut(&mut self) -> Option<&mut RiAuthor4142Settings> {
+        match &mut self.specific {
+            StrategySpecificConfig::RiAuthor4142(settings) => Some(settings),
+            _ => None,
+        }
+    }
 }
 
 impl Deref for StrategyConfig {
@@ -688,6 +761,7 @@ impl StrategyKind {
             StrategyKind::MockLiveProbe => "mock_live_probe",
             StrategyKind::HybridIntraday => "hybrid_intraday",
             StrategyKind::AlorUsdrubfHybrid => "alor_usdrubf_hybrid_v1",
+            StrategyKind::RiAuthor4142 => "ri_author41_42",
         }
     }
 }

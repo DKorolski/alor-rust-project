@@ -20,10 +20,14 @@ use alor_types::{MarketState, Scheduler};
 use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
+use crate::risk_gate_store::{
+    append_risk_gate_runtime_session, run_risk_gate_startup_store,
+    startup_store_config_from_strategy_config,
+};
 use crate::state::{RuntimeState, StrategyState, StrategyStateEnvelopeCompat};
 use crate::strategy_host::{
-    BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
-    RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
+    BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, OrderEvent, PositionEvent,
+    RiskGateRuntimeState, RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
 };
 use crate::strategy_registry::{StrategyCapabilities, StrategyRegistry};
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
@@ -187,6 +191,7 @@ pub struct StrategyRuntime {
     sim_orders: Vec<SimOrder>,
     next_sim_order_id: i64,
     strategy_now_ts_utc: i64,
+    pending_strategy_journal_records: Vec<serde_json::Value>,
     health_snapshot: RuntimeSharedState,
     health_server_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -279,6 +284,42 @@ impl Default for RuntimeMetrics {
 }
 
 impl StrategyRuntime {
+    fn strategy_symbols(&self) -> Vec<&str> {
+        let mut symbols = vec![self.config.strategy.symbol.as_str()];
+        if let Some(ri) = self.config.strategy.ri_author41_42() {
+            if let Some(order_symbol) = ri.order_symbol.as_deref() {
+                if order_symbol != self.config.strategy.symbol {
+                    symbols.push(order_symbol);
+                }
+            }
+        }
+        symbols
+    }
+
+    fn matches_strategy_symbol(&self, symbol: &str) -> bool {
+        self.strategy_symbols().into_iter().any(|s| s == symbol)
+    }
+
+    fn strategy_position_qty(&self) -> Option<f64> {
+        let mut fallback = None;
+        for symbol in self.strategy_symbols() {
+            let Some(pos) = self.state.positions.get(symbol) else {
+                continue;
+            };
+            if pos.qty.abs() > f64::EPSILON {
+                return Some(pos.qty);
+            }
+            fallback = fallback.or(Some(pos.qty));
+        }
+        fallback
+    }
+
+    fn strategy_last_bar_ts(&self) -> Option<i64> {
+        self.strategy_symbols()
+            .into_iter()
+            .find_map(|symbol| self.state.last_processed_bar_ts.get(symbol).copied())
+    }
+
     fn lifecycle_hook_enabled(&self, hook: StrategyLifecycleHook) -> bool {
         match hook {
             StrategyLifecycleHook::BootstrapSnapshot => {
@@ -303,6 +344,8 @@ impl StrategyRuntime {
     {
         let previous_strategy_state = self.state.strategy_state.clone();
         let intents = callback(self.strategy.as_mut(), ctx);
+        self.pending_strategy_journal_records
+            .extend(self.strategy.drain_observation_journal_records());
         self.state.strategy_state = self.strategy.state().clone();
         self.audit_event(
             if intents.is_empty() {
@@ -472,6 +515,7 @@ impl StrategyRuntime {
             sim_orders: Vec::new(),
             next_sim_order_id: 1,
             strategy_now_ts_utc: 0,
+            pending_strategy_journal_records: Vec::new(),
             health_snapshot,
             health_server_handle: None,
         })
@@ -570,12 +614,9 @@ impl StrategyRuntime {
 
         let gateway_health_last_ts_utc = self.live_guard.health.as_ref().map(|h| h.last_event_ts);
         let gateway_health_age_sec = gateway_health_last_ts_utc.map(|ts| now_ts.saturating_sub(ts));
-        let has_open_position = self
-            .state
-            .positions
-            .get(&self.config.strategy.symbol)
-            .map(|pos| pos.qty.abs() > f64::EPSILON)
-            .unwrap_or(false);
+        let has_open_position = self.state.positions.iter().any(|(symbol, pos)| {
+            self.matches_strategy_symbol(symbol) && pos.qty.abs() > f64::EPSILON
+        });
         let strategy_risk = self.strategy.exit_risk_status(has_open_position);
         if let Some(override_phase) = strategy_risk.phase_override.clone() {
             runtime_phase = override_phase;
@@ -719,6 +760,7 @@ impl StrategyRuntime {
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
 
         if self.config.trade_mode != TradeMode::Live {
+            self.flush_strategy_journal_records().await?;
             self.record_non_live_intents(bar.close_time_utc, &intents, self.config.trade_mode)
                 .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
@@ -753,6 +795,8 @@ impl StrategyRuntime {
 
         self.load_snapshots().await?;
         self.load_runtime_state().await?;
+        self.bootstrap_risk_gate_startup_store().await?;
+        self.flush_risk_gate_session_finalizations().await?;
         self.notify_bootstrap_snapshot().await?;
         self.notify_runtime_state_restored().await?;
         self.warmup_strategy_indicators_from_history().await?;
@@ -825,6 +869,147 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    async fn bootstrap_risk_gate_startup_store(&mut self) -> Result<()> {
+        let finalized_at_utc = Utc::now().timestamp();
+        let Some(config) =
+            startup_store_config_from_strategy_config(&self.config.strategy, finalized_at_utc)?
+        else {
+            return Ok(());
+        };
+
+        info!(
+            strategy = %self.config.strategy.strategy_id,
+            profile = %config.identity.profile_id,
+            mode = ?config.mode,
+            "risk gate startup store bootstrap started"
+        );
+        let result = run_risk_gate_startup_store(&self.transport, &config).await?;
+        self.apply_risk_gate_materialized_state(
+            config.identity.profile_id.clone(),
+            &result.artifacts.materialized_state,
+        );
+        self.audit_event(
+            "risk_gate_startup_bootstrap",
+            json!({
+                "profile_id": config.identity.profile_id,
+                "mode": format!("{:?}", config.mode),
+                "decision": format!("{:?}", result.artifacts.decision),
+                "existing_records_loaded": result.existing_records_loaded,
+                "records_attempted": result.write_summary.attempted_records,
+                "records_inserted": result.write_summary.inserted_records,
+                "records_duplicate": result.write_summary.duplicate_records,
+                "state_refreshed": result.write_summary.state_refreshed,
+                "ledger_rows_count": result.artifacts.materialized_state.ledger_rows_count,
+                "seed_loaded": result.artifacts.materialized_state.seed_loaded,
+            }),
+        );
+        info!(
+            strategy = %self.config.strategy.strategy_id,
+            profile = %config.identity.profile_id,
+            mode = ?config.mode,
+            decision = ?result.artifacts.decision,
+            existing_records_loaded = result.existing_records_loaded,
+            records_attempted = result.write_summary.attempted_records,
+            records_inserted = result.write_summary.inserted_records,
+            records_duplicate = result.write_summary.duplicate_records,
+            state_refreshed = result.write_summary.state_refreshed,
+            "risk gate startup store bootstrap finished"
+        );
+        Ok(())
+    }
+
+    fn apply_risk_gate_materialized_state(
+        &mut self,
+        profile_id: String,
+        state: &crate::strategies::hybrid_intraday::RiskGateMaterializedState,
+    ) {
+        let runtime_state = RiskGateRuntimeState {
+            profile_id,
+            last_finalized_session_date: state.last_finalized_session_date,
+            rolling_sum_lb120: state.rolling_sum_lb120,
+            mr_enabled_current_session: state.mr_enabled_current_session,
+            mr_enabled_next_session: state.mr_enabled_next_session,
+            ledger_rows_count: state.ledger_rows_count,
+        };
+        self.strategy.on_risk_gate_state(&runtime_state);
+        self.state.strategy_state = self.strategy.state().clone();
+    }
+
+    async fn flush_risk_gate_session_finalizations(&mut self) -> Result<()> {
+        let finalizations = self.strategy.risk_gate_session_finalizations();
+        if finalizations.is_empty() {
+            return Ok(());
+        }
+
+        if self.config.trade_mode != TradeMode::Live {
+            let session_dates = finalizations
+                .iter()
+                .map(|finalization| finalization.session_date)
+                .collect::<Vec<_>>();
+            self.strategy
+                .acknowledge_risk_gate_session_finalizations(&session_dates);
+            self.state.strategy_state = self.strategy.state().clone();
+            return Ok(());
+        }
+
+        let finalized_at_utc = Utc::now().timestamp();
+        let Some(config) =
+            startup_store_config_from_strategy_config(&self.config.strategy, finalized_at_utc)?
+        else {
+            return Ok(());
+        };
+
+        let mut acknowledged_dates = Vec::new();
+        for finalization in &finalizations {
+            let append_result = append_risk_gate_runtime_session(
+                &self.transport,
+                &config.identity,
+                finalization,
+                finalized_at_utc,
+                config.ledger_scan_count,
+            )
+            .await?;
+            if let Some(materialized_state) = append_result.materialized_state.as_ref() {
+                self.apply_risk_gate_materialized_state(
+                    config.identity.profile_id.clone(),
+                    materialized_state,
+                );
+            }
+            let summary = append_result.write_summary;
+            self.audit_event(
+                "risk_gate_runtime_session_finalized",
+                json!({
+                    "profile_id": config.identity.profile_id,
+                    "session_date": finalization.session_date.format("%Y-%m-%d").to_string(),
+                    "shadow_pnl_points": finalization.shadow_pnl_points,
+                    "shadow_trade_count": finalization.shadow_trade_count,
+                    "records_attempted": summary.attempted_records,
+                    "records_inserted": summary.inserted_records,
+                    "records_duplicate": summary.duplicate_records,
+                    "state_refreshed": summary.state_refreshed,
+                }),
+            );
+            info!(
+                strategy = %self.config.strategy.strategy_id,
+                profile = %config.identity.profile_id,
+                session_date = %finalization.session_date,
+                shadow_pnl_points = finalization.shadow_pnl_points,
+                shadow_trade_count = finalization.shadow_trade_count,
+                inserted_records = summary.inserted_records,
+                duplicate_records = summary.duplicate_records,
+                state_refreshed = summary.state_refreshed,
+                "risk gate runtime session finalized"
+            );
+            acknowledged_dates.push(finalization.session_date);
+        }
+
+        self.strategy
+            .acknowledge_risk_gate_session_finalizations(&acknowledged_dates);
+        self.state.strategy_state = self.strategy.state().clone();
+        self.persist_state(None).await?;
+        Ok(())
+    }
+
     async fn warmup_strategy_indicators_from_history(&mut self) -> Result<()> {
         if !self.lifecycle_hook_enabled(StrategyLifecycleHook::HistoryWarmup) {
             return Ok(());
@@ -876,6 +1061,9 @@ impl StrategyRuntime {
         let mut ctx = self.strategy_ctx();
         ctx.allow_live_orders = false;
         let processed = self.strategy.warmup_from_history(&ctx, &bars);
+        self.pending_strategy_journal_records
+            .extend(self.strategy.drain_observation_journal_records());
+        self.flush_strategy_journal_records().await?;
         if processed > 0 {
             if let Some(last_bar) = bars.last() {
                 self.state
@@ -908,6 +1096,13 @@ impl StrategyRuntime {
                 self.truncate_file(&self.config.backtest.summary_json)?;
             }
             _ => {}
+        }
+        if let Some(settings) = self.config.strategy.ri_author41_42() {
+            if let Some(path) = settings.decision_journal_path.as_deref() {
+                if !path.trim().is_empty() && !settings.decision_journal_append {
+                    self.truncate_file(path)?;
+                }
+            }
         }
         Ok(())
     }
@@ -991,7 +1186,6 @@ impl StrategyRuntime {
             }
         }
 
-        let strategy_symbol = self.config.strategy.symbol.clone();
         let mut positions_strategy = HashMap::new();
         let mut working_orders_strategy = HashMap::new();
         let mut working_stop_orders_strategy = HashMap::new();
@@ -1016,7 +1210,7 @@ impl StrategyRuntime {
                 if self.is_working_order(&order) {
                     orders_open_all += 1;
                 }
-                if order.symbol == strategy_symbol {
+                if self.matches_strategy_symbol(&order.symbol) {
                     if self.is_working_order(&order) {
                         orders_open_strategy += 1;
                         working_orders_strategy.insert(order_id, order.clone());
@@ -1041,7 +1235,7 @@ impl StrategyRuntime {
                 if self.is_working_stop_order(&stop_order) {
                     stop_orders_open_all += 1;
                 }
-                if stop_order.symbol == strategy_symbol {
+                if self.matches_strategy_symbol(&stop_order.symbol) {
                     if self.is_working_stop_order(&stop_order) {
                         stop_orders_open_strategy += 1;
                         working_stop_orders_strategy
@@ -1066,7 +1260,7 @@ impl StrategyRuntime {
                 if self.is_open_position(&position) {
                     positions_open_all += 1;
                 }
-                if symbol == strategy_symbol {
+                if self.matches_strategy_symbol(&symbol) {
                     positions_total_strategy += 1;
                     if self.is_open_position(&position) {
                         positions_open_strategy += 1;
@@ -1575,16 +1769,12 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if order.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&order.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(order.ts_utc);
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, order.ts_utc);
         let intents_count = self
             .invoke_and_apply_strategy_callback(
@@ -1620,7 +1810,7 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if stop_order.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&stop_order.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
@@ -1632,11 +1822,7 @@ impl StrategyRuntime {
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(stop_order.ts_utc);
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, stop_order.ts_utc);
         let intents_count = self
             .invoke_and_apply_strategy_callback(
@@ -1672,7 +1858,7 @@ impl StrategyRuntime {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
-        if trade.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&trade.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
@@ -1799,16 +1985,12 @@ impl StrategyRuntime {
             }
             return Ok(());
         }
-        if position.symbol != self.config.strategy.symbol {
+        if !self.matches_strategy_symbol(&position.symbol) {
             self.transport.xack(&stream, &message_id).await?;
             return Ok(());
         }
         let event_ts = self.normalize_event_ts(position.ts_utc);
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, position.ts_utc);
         let intents_count = self
             .invoke_and_apply_strategy_callback(
@@ -1857,6 +2039,7 @@ impl StrategyRuntime {
             });
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         if self.config.trade_mode != TradeMode::Live {
+            self.flush_strategy_journal_records().await?;
             self.record_non_live_intents(event_ts, &intents, self.config.trade_mode)
                 .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
@@ -1868,6 +2051,7 @@ impl StrategyRuntime {
             self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
                 .await?;
         }
+        self.flush_risk_gate_session_finalizations().await?;
         self.state
             .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
         self.transport.xack(&stream, &message_id).await?;
@@ -1920,6 +2104,26 @@ impl StrategyRuntime {
                 self.metrics.publish_failures_total.saturating_add(1);
             error!(?error, "failed to persist runtime state");
             return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn flush_strategy_journal_records(&mut self) -> Result<()> {
+        if self.pending_strategy_journal_records.is_empty() {
+            return Ok(());
+        }
+        let records = std::mem::take(&mut self.pending_strategy_journal_records);
+        let Some(settings) = self.config.strategy.ri_author41_42() else {
+            return Ok(());
+        };
+        let Some(path) = settings.decision_journal_path.as_deref() else {
+            return Ok(());
+        };
+        if path.trim().is_empty() {
+            return Ok(());
+        }
+        for record in records {
+            append_json_line(path, &record).await?;
         }
         Ok(())
     }
@@ -2069,13 +2273,20 @@ impl StrategyRuntime {
         for intent in intents {
             let mut intent = intent;
             let mut intent_class = intent.explicit_class();
-            while let Intent::Classified {
-                intent: inner,
-                intent_class: class,
-            } = intent
-            {
-                intent_class = Some(class);
-                intent = *inner;
+            loop {
+                match intent {
+                    Intent::Classified {
+                        intent: inner,
+                        intent_class: class,
+                    } => {
+                        intent_class = Some(class);
+                        intent = *inner;
+                    }
+                    Intent::Routed { intent: inner, .. } => {
+                        intent = *inner;
+                    }
+                    _ => break,
+                }
             }
             match intent {
                 Intent::Place {
@@ -2313,7 +2524,9 @@ impl StrategyRuntime {
                 Intent::CreateStopLimit { .. } | Intent::DeleteStopLimit { .. } => {
                     // Backtest/paper simulator does not emulate broker-side stop-order lifecycle.
                 }
-                Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
+                Intent::Classified { .. } | Intent::Routed { .. } => {
+                    unreachable!("wrapped intents are flattened above")
+                }
             }
         }
         Ok(())
@@ -2719,11 +2932,7 @@ impl StrategyRuntime {
             .as_ref()
             .map(|health| health.gateway_phase)
             .unwrap_or_default();
-        let position_qty = self
-            .state
-            .positions
-            .get(&self.config.strategy.symbol)
-            .map(|pos| pos.qty);
+        let position_qty = self.strategy_position_qty();
         StrategyCtx {
             strategy_id: self.config.strategy.strategy_id.clone(),
             portfolio: self.config.portfolio.clone(),
@@ -2746,11 +2955,7 @@ impl StrategyRuntime {
     }
 
     fn strategy_ctx(&self) -> StrategyCtx {
-        let last_bar_ts = self
-            .state
-            .last_processed_bar_ts
-            .get(&self.config.strategy.symbol)
-            .copied();
+        let last_bar_ts = self.strategy_last_bar_ts();
         self.strategy_ctx_with_last_bar(last_bar_ts)
     }
 
@@ -3075,6 +3280,102 @@ impl StrategyRuntime {
         true
     }
 
+    fn current_market_state(&self, created_ts_utc: i64) -> Option<(MarketState, String)> {
+        let periods = self.config.strategy.trading_periods.clone()?;
+        let scheduler = Scheduler::new_with_fallback_offset_hours(
+            periods,
+            self.config.strategy.timezone_offset_hours,
+        );
+        let now_local = scheduler
+            .local_datetime_utc(created_ts_utc)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "unknown".to_string());
+        Some((scheduler.market_state_utc(created_ts_utc), now_local))
+    }
+
+    async fn maybe_defer_exit_before_emit(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intent: Intent,
+        intent_class: alor_protocol::IntentClass,
+    ) -> Result<bool> {
+        if intent_class != alor_protocol::IntentClass::Exit {
+            return Ok(false);
+        }
+        let Some((market_state, now_local)) = self.current_market_state(created_ts_utc) else {
+            return Ok(false);
+        };
+        if market_state == MarketState::Open {
+            return Ok(false);
+        }
+
+        let action = self.intent_action_name(&intent);
+        let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+        self.notify_command_prepared(ctx, &command, intent_class);
+        info!(
+            action,
+            class = ?intent_class,
+            state = ?market_state,
+            created_ts_utc,
+            now_local,
+            request_id = %command.request_id,
+            "intent_deferred_by_trading_window_pre_emit"
+        );
+        self.audit_event(
+            "intent_deferred",
+            json!({
+                "reason": "trading_window_pre_emit",
+                "action": action,
+                "class": format!("{intent_class:?}"),
+                "state": format!("{market_state:?}"),
+                "request_id": command.request_id.to_string(),
+                "created_ts_utc": created_ts_utc,
+                "synthetic_ack": true,
+            }),
+        );
+
+        let mut ack = alor_protocol::CommandAck::rejected(
+            command.request_id,
+            "trading_window_closed",
+            "validation failed",
+        );
+        ack.processed_ts_utc = created_ts_utc;
+
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ack_ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts_utc);
+        let (follow_up_intents, _previous_strategy_state) = self.invoke_strategy_callback(
+            &ack_ctx,
+            "on_ack_pre_emit_window_closed",
+            |strategy, strategy_ctx| strategy.on_ack(strategy_ctx, &ack),
+        );
+        let intents_count = follow_up_intents.len();
+        if !follow_up_intents.is_empty() {
+            warn!(
+                request_id = %ack.request_id,
+                intents_count,
+                "synthetic_pre_emit_ack_generated_unexpected_follow_up_intents"
+            );
+        }
+        self.audit_event(
+            "order_acknowledged_by_strategy",
+            json!({
+                "callback": "on_ack_pre_emit_window_closed",
+                "event_ts_utc": created_ts_utc,
+                "request_id": ack.request_id.to_string(),
+                "intents_count": intents_count,
+                "synthetic_ack": true,
+            }),
+        );
+        self.flush_strategy_journal_records().await?;
+        self.persist_state(None).await?;
+        Ok(true)
+    }
+
     fn restore_strategy_state_after_dropped_intents(
         &mut self,
         previous_state: StrategyState,
@@ -3098,6 +3399,22 @@ impl StrategyRuntime {
         self.state.strategy_state = previous_state;
     }
 
+    fn notify_command_prepared(
+        &mut self,
+        ctx: &StrategyCtx,
+        command: &alor_protocol::OrderCommand,
+        intent_class: alor_protocol::IntentClass,
+    ) {
+        let event = CommandPrepared {
+            request_id: command.request_id,
+            intent_class,
+            created_ts_utc: command.created_ts_utc,
+            symbol: command.symbol.clone(),
+        };
+        self.strategy.on_command_prepared(ctx, &event);
+        self.state.strategy_state = self.strategy.state().clone();
+    }
+
     async fn apply_intents(
         &mut self,
         ctx: &StrategyCtx,
@@ -3105,6 +3422,7 @@ impl StrategyRuntime {
         intents: Vec<Intent>,
         previous_strategy_state: StrategyState,
     ) -> Result<()> {
+        self.flush_strategy_journal_records().await?;
         if intents.is_empty() {
             self.persist_state(None).await?;
             return Ok(());
@@ -3181,8 +3499,20 @@ impl StrategyRuntime {
                     }
                     for (intent, intent_class) in passthrough {
                         let action = self.intent_action_name(&intent);
+                        if self
+                            .maybe_defer_exit_before_emit(
+                                ctx,
+                                created_ts_utc,
+                                intent.clone(),
+                                intent_class,
+                            )
+                            .await?
+                        {
+                            continue;
+                        }
                         let command =
                             self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+                        self.notify_command_prepared(ctx, &command, intent_class);
                         info!(
                             action,
                             class = ?intent_class,
@@ -3207,7 +3537,19 @@ impl StrategyRuntime {
                 }
                 for (intent, intent_class) in accepted {
                     let action = self.intent_action_name(&intent);
+                    if self
+                        .maybe_defer_exit_before_emit(
+                            ctx,
+                            created_ts_utc,
+                            intent.clone(),
+                            intent_class,
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
                     let command = self.intent_to_command(ctx, created_ts_utc, intent, intent_class);
+                    self.notify_command_prepared(ctx, &command, intent_class);
                     info!(
                         action,
                         request_id = %command.request_id,
@@ -3301,6 +3643,11 @@ impl StrategyRuntime {
         let (action, seq, action_name) = match intent {
             Intent::Classified { intent, .. } => {
                 return self.intent_to_command(ctx, created_ts_utc, *intent, intent_class);
+            }
+            Intent::Routed { intent, symbol } => {
+                let mut routed_ctx = ctx.clone();
+                routed_ctx.symbol = symbol;
+                return self.intent_to_command(&routed_ctx, created_ts_utc, *intent, intent_class);
             }
             Intent::Place {
                 price,
@@ -3476,7 +3823,9 @@ impl StrategyRuntime {
                     alor_protocol::IntentClass::Entry
                 }
             }
-            Intent::Classified { intent, .. } => Self::resolve_intent_class(ctx, intent),
+            Intent::Classified { intent, .. } | Intent::Routed { intent, .. } => {
+                Self::resolve_intent_class(ctx, intent)
+            }
         }
     }
 
@@ -3717,7 +4066,9 @@ impl StrategyRuntime {
             Intent::Replace { .. } => "replace",
             Intent::CreateStopLimit { .. } => "create_stop_limit",
             Intent::DeleteStopLimit { .. } => "delete_stop_limit",
-            Intent::Classified { .. } => unreachable!("base_intent flattens classified variant"),
+            Intent::Classified { .. } | Intent::Routed { .. } => {
+                unreachable!("base_intent flattens wrapped variant")
+            }
         }
     }
 }
@@ -3761,6 +4112,7 @@ mod tests {
     use super::*;
     use crate::{ReadConfig, ReplayConfig, StrategyConfig, StrategyKind, StreamNames, TrimConfig};
     use alor_types::TradingPeriods;
+    use tempfile::tempdir;
 
     fn test_runtime(trade_mode: TradeMode) -> StrategyRuntime {
         let mut strategy = StrategyConfig::defaults_for_kind(StrategyKind::LimitCancel);
@@ -3849,6 +4201,83 @@ mod tests {
             .unwrap()
             .block_on(StrategyRuntime::new(config))
             .unwrap()
+    }
+
+    fn install_ri_micro_strategy(runtime: &mut StrategyRuntime) {
+        let registry = StrategyRegistry::builtin().expect("strategy registry");
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::RiAuthor4142);
+        runtime.config.strategy.strategy_id = "ri_author41_42.micro.test".to_string();
+        runtime.config.strategy.symbol = "RIM6".to_string();
+        runtime.config.strategy.qty = 1.0;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.max_silence_bars_sec = 0;
+        if let Some(settings) = runtime.config.strategy.ri_author41_42_mut() {
+            settings.mode = "micro_live".to_string();
+            settings.allow_order_emission = true;
+            settings.execution_path = "action_scoped_only".to_string();
+            settings.timeframe = "10m".to_string();
+        }
+        runtime.strategy_capabilities = registry
+            .descriptor(StrategyKind::RiAuthor4142)
+            .expect("ri descriptor")
+            .capabilities;
+        runtime.strategy = registry
+            .create(&runtime.config.strategy)
+            .expect("ri strategy");
+        runtime.state.strategy_state = runtime.strategy.state().clone();
+    }
+
+    fn ri_runtime_bar(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        origin: DataOrigin,
+        ohlc: (f64, f64, f64, f64),
+    ) -> BarEvent {
+        let dt_local = chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap();
+        let (open, high, low, close) = ohlc;
+        BarEvent {
+            symbol: "RIM6".to_string(),
+            close_time_utc: (dt_local - ChronoDuration::hours(3)).and_utc().timestamp(),
+            close,
+            o: open,
+            h: high,
+            l: low,
+            v: 10.0,
+            origin,
+        }
+    }
+
+    #[test]
+    fn flush_strategy_journal_records_writes_ri_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let journal_path = dir.path().join("ri_decisions.jsonl");
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::RiAuthor4142);
+        if let Some(settings) = runtime.config.strategy.ri_author41_42_mut() {
+            settings.decision_journal_path = Some(journal_path.display().to_string());
+            settings.decision_journal_append = true;
+        }
+        runtime
+            .pending_strategy_journal_records
+            .push(json!({"adapter_decision":"shadow_recorded","decision_key":"one"}));
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.flush_strategy_journal_records())
+            .expect("flush journal");
+
+        let payload = std::fs::read_to_string(&journal_path).expect("journal file");
+        let lines = payload.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let value: serde_json::Value = serde_json::from_str(lines[0]).expect("json line");
+        assert_eq!(value["adapter_decision"], "shadow_recorded");
+        assert!(runtime.pending_strategy_journal_records.is_empty());
     }
 
     #[derive(Default)]
@@ -3944,6 +4373,17 @@ mod tests {
             Vec::new()
         }
 
+        fn on_command_prepared(&mut self, _ctx: &StrategyCtx, command: &CommandPrepared) {
+            self.pending_requests.push(command.request_id);
+            self.state = StrategyState::Blocked {
+                reason: format!(
+                    "prepared:{}:{:?}:{}",
+                    command.request_id, command.intent_class, command.symbol
+                ),
+                last_bar_ts: command.created_ts_utc,
+            };
+        }
+
         fn pending_request_ids(&self) -> Vec<uuid::Uuid> {
             self.pending_requests.clone()
         }
@@ -3973,6 +4413,45 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct WindowClosedExitSpyStrategy {
+        state: StrategyState,
+    }
+
+    impl Strategy for WindowClosedExitSpyStrategy {
+        fn on_bar(&mut self, _ctx: &StrategyCtx, _bar: &BarEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent> {
+            self.state = StrategyState::Blocked {
+                reason: format!(
+                    "ack:{}:{}",
+                    ack.request_id,
+                    ack.error_code.as_deref().unwrap_or("none")
+                ),
+                last_bar_ts: ack.processed_ts_utc,
+            };
+            Vec::new()
+        }
+
+        fn on_order(&mut self, _ctx: &StrategyCtx, _ord: &OrderEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn on_position(&mut self, _ctx: &StrategyCtx, _pos: &PositionEvent) -> Vec<Intent> {
+            Vec::new()
+        }
+
+        fn state(&self) -> &StrategyState {
+            &self.state
+        }
+
+        fn set_state(&mut self, state: StrategyState) {
+            self.state = state;
+        }
+    }
+
     #[test]
     fn restore_pending_requests_uses_strategy_hook() {
         let mut runtime = test_runtime(TradeMode::Live);
@@ -3986,6 +4465,128 @@ mod tests {
         runtime.restore_pending_requests();
 
         assert!(runtime.our_request_ids.contains(&request_id));
+    }
+
+    #[test]
+    fn notify_command_prepared_updates_strategy_state_with_exact_request_id() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.strategy = Box::new(HookSpyStrategy::default());
+        let ctx = runtime.strategy_ctx();
+        let command = runtime.intent_to_command(
+            &ctx,
+            1_700_000_000,
+            Intent::Market {
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                fill_price: None,
+                comment: None,
+            },
+            alor_protocol::IntentClass::Entry,
+        );
+
+        runtime.notify_command_prepared(&ctx, &command, alor_protocol::IntentClass::Entry);
+
+        assert_eq!(
+            runtime.strategy.pending_request_ids(),
+            vec![command.request_id]
+        );
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::Blocked { reason, last_bar_ts }
+                if reason == &format!(
+                    "prepared:{}:{:?}:{}",
+                    command.request_id,
+                    alor_protocol::IntentClass::Entry,
+                    command.symbol
+                ) && *last_bar_ts == command.created_ts_utc
+        ));
+    }
+
+    #[test]
+    fn ri_guard_dropped_entry_restores_hidden_live_state_before_next_bar() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        install_ri_micro_strategy(&mut runtime);
+        let warmup_bar = ri_runtime_bar(
+            2026,
+            5,
+            1,
+            23,
+            40,
+            DataOrigin::History,
+            (100_000.0, 101_000.0, 99_000.0, 100_000.0),
+        );
+        let warmup_ctx = runtime.strategy_ctx();
+        assert_eq!(
+            runtime
+                .strategy
+                .warmup_from_history(&warmup_ctx, &[warmup_bar]),
+            1
+        );
+        runtime.state.strategy_state = runtime.strategy.state().clone();
+
+        let entry_bar = ri_runtime_bar(
+            2026,
+            5,
+            4,
+            9,
+            0,
+            DataOrigin::Live,
+            (100_050.0, 100_120.0, 100_030.0, 100_100.0),
+        );
+        let entry_ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(None, entry_bar.close_time_utc);
+        let (entry_intents, previous_strategy_state) =
+            runtime.invoke_strategy_callback(&entry_ctx, "on_bar", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &entry_bar)
+            });
+        assert_eq!(entry_intents.len(), 1);
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live { phase, .. } if phase == "live_pending_entry"
+        ));
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.apply_intents(
+                &entry_ctx,
+                entry_bar.close_time_utc,
+                entry_intents,
+                previous_strategy_state,
+            ))
+            .unwrap();
+
+        assert!(runtime.strategy.pending_request_ids().is_empty());
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live { phase, .. } if phase == "flat"
+        ));
+
+        let stop_like_bar = ri_runtime_bar(
+            2026,
+            5,
+            4,
+            9,
+            10,
+            DataOrigin::Live,
+            (101_000.0, 102_000.0, 100_900.0, 101_000.0),
+        );
+        let stop_ctx = runtime.strategy_ctx_with_last_bar_and_event_ts(
+            Some(entry_bar.close_time_utc),
+            stop_like_bar.close_time_utc,
+        );
+        let (next_intents, _previous_strategy_state) =
+            runtime.invoke_strategy_callback(&stop_ctx, "on_bar", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &stop_like_bar)
+            });
+
+        assert!(
+            next_intents.is_empty(),
+            "guard-dropped RI entry must not leave a hidden position that emits stale exit"
+        );
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live { phase, .. } if phase == "flat"
+        ));
     }
 
     #[test]
@@ -4014,6 +4615,31 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn intent_to_command_uses_routed_symbol_for_order_command() {
+        let runtime = test_runtime(TradeMode::Live);
+        let ctx = runtime.strategy_ctx();
+        let command = runtime.intent_to_command(
+            &ctx,
+            1_700_000_000,
+            Intent::Market {
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                fill_price: None,
+                comment: None,
+            }
+            .with_symbol("RTS-6.26"),
+            alor_protocol::IntentClass::Entry,
+        );
+
+        assert_eq!(ctx.symbol, "SBER");
+        assert_eq!(command.symbol, "RTS-6.26");
+        assert!(matches!(
+            command.action,
+            alor_protocol::CommandAction::Market(_)
+        ));
     }
 
     #[test]
@@ -4364,6 +4990,94 @@ mod tests {
             &ctx,
             created_ts_utc,
             alor_protocol::IntentClass::Exit
+        ));
+    }
+
+    #[test]
+    fn closed_window_exit_is_deferred_before_emit() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.strategy = Box::new(WindowClosedExitSpyStrategy::default());
+        runtime.config.strategy.max_silence_bars_sec = 0;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+        let last_bar_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        runtime
+            .state
+            .last_processed_bar_ts
+            .insert(runtime.config.strategy.symbol.clone(), last_bar_ts);
+        runtime.state.positions.insert(
+            runtime.config.strategy.symbol.clone(),
+            PositionEvent {
+                symbol: runtime.config.strategy.symbol.clone(),
+                qty: 1.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: last_bar_ts,
+            },
+        );
+        runtime.live_guard.health = Some(HealthEvent {
+            gateway_phase: crate::live_guard::GatewayPhase::LiveReady,
+            readiness: true,
+            ws_connected: true,
+            cws_authorized: true,
+            scheduler_state: Some("Break2".to_string()),
+            last_event_ts: Utc::now().timestamp(),
+        });
+
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(15, 55, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(Some(last_bar_ts), created_ts_utc);
+        let intent = Intent::Place {
+            price: 100.5,
+            qty: 1.0,
+            side: alor_protocol::Side::Sell,
+            comment: None,
+        }
+        .with_class(alor_protocol::IntentClass::Exit);
+        let expected_request_id = runtime
+            .intent_to_command(
+                &ctx,
+                created_ts_utc,
+                intent.clone(),
+                alor_protocol::IntentClass::Exit,
+            )
+            .request_id;
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(runtime.apply_intents(
+                &ctx,
+                created_ts_utc,
+                vec![intent],
+                runtime.state.strategy_state.clone(),
+            ))
+            .unwrap();
+
+        assert!(!runtime.our_request_ids.contains(&expected_request_id));
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::Blocked { reason, last_bar_ts: state_last_bar_ts }
+                if reason == &format!("ack:{expected_request_id}:trading_window_closed")
+                    && *state_last_bar_ts == created_ts_utc
         ));
     }
 
@@ -5059,6 +5773,56 @@ mod tests {
     }
 
     #[test]
+    fn live_accepts_position_events_for_ri_order_symbol() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::RiAuthor4142);
+        runtime.config.strategy.symbol = "RIM6".to_string();
+        if let Some(settings) = runtime.config.strategy.ri_author41_42_mut() {
+            settings.order_symbol = Some("RTS-6.26".to_string());
+        }
+        runtime.state.positions.insert(
+            "RIM6".to_string(),
+            PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: 0.0,
+                existing: true,
+                avg_price: 0.0,
+                ts_utc: 1_699_999_999,
+            },
+        );
+
+        let position = PositionEvent {
+            symbol: "RTS-6.26".to_string(),
+            qty: 2.0,
+            existing: true,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_000,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .handle_position(
+                    runtime.config.streams.positions.clone(),
+                    "1-0".to_string(),
+                    position,
+                )
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(
+            runtime
+                .state
+                .positions
+                .get("RTS-6.26")
+                .map(|pos| pos.qty)
+                .unwrap_or_default(),
+            2.0
+        );
+        assert_eq!(runtime.strategy_position_qty(), Some(2.0));
+    }
+
+    #[test]
     fn stop_order_working_status_table() {
         let runtime = test_runtime(TradeMode::Live);
         let mk = |status: &str| StopOrderEvent {
@@ -5105,9 +5869,10 @@ struct VirtualTradeLog {
 
 impl VirtualTradeLog {
     fn from_intent(created_ts_utc: i64, config: &RuntimeConfig, intent: Intent) -> Self {
-        let intent = match intent {
-            Intent::Classified { intent, .. } => *intent,
-            other => other,
+        let (intent, symbol) = match intent {
+            Intent::Classified { intent, .. } => (*intent, config.strategy.symbol.clone()),
+            Intent::Routed { intent, symbol } => (*intent, symbol),
+            other => (other, config.strategy.symbol.clone()),
         };
         match intent {
             Intent::Place {
@@ -5116,7 +5881,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "place".to_string(),
                 qty: Some(qty),
                 price: Some(price),
@@ -5134,7 +5899,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "market".to_string(),
                 qty: Some(qty),
                 price: fill_price,
@@ -5147,7 +5912,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "cancel".to_string(),
                 qty: None,
                 price: None,
@@ -5164,7 +5929,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "replace".to_string(),
                 qty: None,
                 price: None,
@@ -5177,7 +5942,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol: symbol.clone(),
                 action: "create_stop_limit".to_string(),
                 qty: None,
                 price: None,
@@ -5190,7 +5955,7 @@ impl VirtualTradeLog {
                 ts_utc: created_ts_utc,
                 strategy_id: config.strategy.strategy_id.clone(),
                 portfolio: config.portfolio.clone(),
-                symbol: config.strategy.symbol.clone(),
+                symbol,
                 action: "delete_stop_limit".to_string(),
                 qty: None,
                 price: None,
@@ -5199,7 +5964,9 @@ impl VirtualTradeLog {
                 new_price: None,
                 new_qty: None,
             },
-            Intent::Classified { .. } => unreachable!("classified intents are flattened above"),
+            Intent::Classified { .. } | Intent::Routed { .. } => {
+                unreachable!("wrapped intents are flattened above")
+            }
         }
     }
 }
@@ -5238,7 +6005,7 @@ async fn log_virtual_trades(
     Ok(())
 }
 
-async fn append_json_line(path: &str, entry: &VirtualTradeLog) -> Result<()> {
+async fn append_json_line<T: Serialize>(path: &str, entry: &T) -> Result<()> {
     ensure_parent_dir(path)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)

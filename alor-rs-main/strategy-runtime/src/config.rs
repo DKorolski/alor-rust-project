@@ -166,6 +166,7 @@ pub struct StrategySources {
     pub max_silence_bars_sec: ConfigSource,
     pub session_gap_k_long: ConfigSource,
     pub session_gap_k_short: ConfigSource,
+    pub session_gap_signal_minute: ConfigSource,
     pub session_gap_wait_hours: ConfigSource,
     pub session_gap_k_tp_long: ConfigSource,
     pub session_gap_k_sl_long: ConfigSource,
@@ -324,6 +325,7 @@ impl Default for StrategySources {
             max_silence_bars_sec: ConfigSource::Default,
             session_gap_k_long: ConfigSource::Default,
             session_gap_k_short: ConfigSource::Default,
+            session_gap_signal_minute: ConfigSource::Default,
             session_gap_wait_hours: ConfigSource::Default,
             session_gap_k_tp_long: ConfigSource::Default,
             session_gap_k_sl_long: ConfigSource::Default,
@@ -498,6 +500,7 @@ struct StrategyConfigFile {
     hybrid_intraday: Option<HybridIntradayConfigFile>,
     alor_usdrubf_hybrid: Option<AlorUsdrubfHybridConfigFile>,
     alor_skeleton: Option<AlorUsdrubfHybridConfigFile>,
+    ri_author41_42: Option<RiAuthor4142ConfigFile>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -559,6 +562,14 @@ struct MockLiveProbeConfigFile {
 struct HybridIntradayConfigFile {
     live_order_style: Option<String>,
     marketable_limit_offset_ticks: Option<i64>,
+    profile: Option<String>,
+    mr_variant: Option<String>,
+    mr_gate_policy: Option<String>,
+    risk_gate_mode: Option<String>,
+    risk_gate_seed_file: Option<String>,
+    risk_gate_ledger_key: Option<String>,
+    model_session_start_time: Option<String>,
+    model_session_end_time: Option<String>,
     mr_min_range_long: Option<f64>,
     mr_max_range_long: Option<f64>,
     mr_k_long: Option<f64>,
@@ -597,6 +608,7 @@ struct SessionGapConfigFile {
     entry_fill_timeout_ms: Option<u64>,
     exit_ack_timeout_ms: Option<u64>,
     exit_fill_timeout_ms: Option<u64>,
+    signal_minute: Option<u32>,
     k_long: Option<f64>,
     k_short: Option<f64>,
     wait_hours: Option<i64>,
@@ -637,6 +649,18 @@ struct AlorUsdrubfHybridConfigFile {
     enable_live_execution: Option<bool>,
     use_fixed_live_size: Option<bool>,
     live_fixed_units: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RiAuthor4142ConfigFile {
+    profile_id: Option<String>,
+    timeframe: Option<String>,
+    mode: Option<String>,
+    allow_order_emission: Option<bool>,
+    execution_path: Option<String>,
+    order_symbol: Option<String>,
+    decision_journal_path: Option<String>,
+    decision_journal_append: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1058,6 +1082,10 @@ fn apply_session_gap_config_file(
             settings.k_short = value;
             sources.session_gap_k_short = source;
         }
+        if let Some(value) = session_gap_file.signal_minute {
+            settings.signal_minute = value;
+            sources.session_gap_signal_minute = source;
+        }
         if let Some(value) = session_gap_file.wait_hours {
             settings.wait_hours = value;
             sources.session_gap_wait_hours = source;
@@ -1137,6 +1165,30 @@ fn apply_hybrid_intraday_config_file(
     if let Some(settings) = strategy.hybrid_intraday_mut() {
         sources.hybrid_intraday = source;
         let strategy = &mut settings.strategy;
+        if let Some(value) = &hybrid_file.profile {
+            strategy.profile = value.clone();
+        }
+        if let Some(value) = &hybrid_file.mr_variant {
+            strategy.mr_variant = value.clone();
+        }
+        if let Some(value) = &hybrid_file.mr_gate_policy {
+            strategy.mr_gate_policy = value.clone();
+        }
+        if let Some(value) = &hybrid_file.risk_gate_mode {
+            strategy.risk_gate_mode = value.clone();
+        }
+        if let Some(value) = &hybrid_file.risk_gate_seed_file {
+            strategy.risk_gate_seed_file = Some(value.clone());
+        }
+        if let Some(value) = &hybrid_file.risk_gate_ledger_key {
+            strategy.risk_gate_ledger_key = Some(value.clone());
+        }
+        if let Some(value) = &hybrid_file.model_session_start_time {
+            strategy.model_session_start_time = value.clone();
+        }
+        if let Some(value) = &hybrid_file.model_session_end_time {
+            strategy.model_session_end_time = value.clone();
+        }
         if let Some(value) = hybrid_file.mr_min_range_long {
             strategy.mr_min_range_long = value;
         }
@@ -1295,6 +1347,38 @@ fn apply_alor_usdrubf_hybrid_config_file(
     }
 }
 
+fn apply_ri_author41_42_config_file(
+    strategy: &mut StrategyConfig,
+    ri_file: &RiAuthor4142ConfigFile,
+) {
+    if let Some(settings) = strategy.ri_author41_42_mut() {
+        if let Some(value) = &ri_file.profile_id {
+            settings.profile_id = value.clone();
+        }
+        if let Some(value) = &ri_file.timeframe {
+            settings.timeframe = value.clone();
+        }
+        if let Some(value) = &ri_file.mode {
+            settings.mode = value.clone();
+        }
+        if let Some(value) = ri_file.allow_order_emission {
+            settings.allow_order_emission = value;
+        }
+        if let Some(value) = &ri_file.execution_path {
+            settings.execution_path = value.clone();
+        }
+        if let Some(value) = &ri_file.order_symbol {
+            settings.order_symbol = Some(value.clone());
+        }
+        if let Some(value) = &ri_file.decision_journal_path {
+            settings.decision_journal_path = Some(value.clone());
+        }
+        if let Some(value) = ri_file.decision_journal_append {
+            settings.decision_journal_append = value;
+        }
+    }
+}
+
 fn validate_matching_strategy_specific_sections(
     strategy_file: &StrategyConfigFile,
     kind: StrategyKind,
@@ -1321,6 +1405,9 @@ fn validate_matching_strategy_specific_sections(
     }
     if strategy_file.alor_skeleton.is_some() && kind != StrategyKind::AlorUsdrubfHybrid {
         mismatches.push("strategy.alor_skeleton");
+    }
+    if strategy_file.ri_author41_42.is_some() && kind != StrategyKind::RiAuthor4142 {
+        mismatches.push("strategy.ri_author41_42");
     }
 
     if mismatches.is_empty() {
@@ -1568,6 +1655,9 @@ pub fn load_runtime_config(
                     alor_file,
                     ConfigSource::File,
                 );
+            }
+            if let Some(ri_file) = &strategy_file.ri_author41_42 {
+                apply_ri_author41_42_config_file(&mut strategy, ri_file);
             }
         }
         if let Some(runtime_file) = &file_config.runtime {
@@ -2209,6 +2299,7 @@ fn parse_strategy_kind(value: &str) -> Result<StrategyKind> {
         "hybrid_intraday" | "hybridintraday" | "hybrid" => Ok(StrategyKind::HybridIntraday),
         "alor_usdrubf_hybrid" | "alorusdrubfhybrid" => Ok(StrategyKind::AlorUsdrubfHybrid),
         "alor_skeleton" | "alorskeleton" | "alor" => Ok(StrategyKind::AlorUsdrubfHybrid),
+        "ri_author41_42" | "riauthor4142" | "ri_author4142" => Ok(StrategyKind::RiAuthor4142),
         _ => Err(anyhow!("unknown strategy_kind: {value}")),
     }
 }

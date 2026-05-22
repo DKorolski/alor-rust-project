@@ -22,7 +22,7 @@ listen_addr = "127.0.0.1:8091"
 expose_metrics = false
 
 [streams]
-bars = "md.bars.7502MIW.1m"
+bars = "md.bars.7502MIW.10m"
 orders = "broker.orders.7502MIW"
 trades = "broker.trades.7502MIW"
 positions = "broker.positions.7502MIW"
@@ -40,14 +40,14 @@ claim_batch = 50
 poll_interval_ms = 100
 
 [trim]
-bars = 200000
-orders = 100000
-trades = 100000
-positions = 50000
-commands = 50000
-acks = 100000
-health = 10000
-runtime_state = 2000
+bars = 10000
+orders = 5000
+trades = 5000
+positions = 20000
+commands = 5000
+acks = 5000
+health = 5000
+runtime_state = 500
 
 [strategy]
 strategy_id = "session_gap_standalone"
@@ -79,6 +79,7 @@ weekends_off = true
 timezone_offset_hours = 3
 
 [strategy.session_gap]
+signal_minute = 50
 k_long = 0.5
 k_short = 0.46
 wait_hours = 3
@@ -93,11 +94,11 @@ k_sl_long = 0.68
 # Keep available_cash tiny to force exactly 1 contract for live micro-account testing.
 start_cash = 1
 cash_factor = 1.0
-max_entry_hour = 19
+max_entry_hour = 16
 close_hour = 23
 close_minute = 49
 session_gap_min = 60.0
-exit_offset_min = 20
+exit_offset_min = 29
 work_weekends = false
 
 [paper]

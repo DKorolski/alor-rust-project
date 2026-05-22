@@ -22,7 +22,7 @@ listen_addr = "127.0.0.1:8091"
 expose_metrics = false
 
 [streams]
-bars = "md.bars.7502T0U.1m"
+bars = "md.bars.7502T0U.10m"
 orders = "broker.orders.7502T0U"
 trades = "broker.trades.7502T0U"
 positions = "broker.positions.7502T0U"
@@ -40,14 +40,14 @@ claim_batch = 50
 poll_interval_ms = 100
 
 [trim]
-bars = 200000
-orders = 100000
-trades = 100000
-positions = 50000
-commands = 50000
-acks = 100000
-health = 10000
-runtime_state = 2000
+bars = 10000
+orders = 5000
+trades = 5000
+positions = 20000
+commands = 5000
+acks = 5000
+health = 5000
+runtime_state = 500
 
 [strategy]
 strategy_id = "alor_usdrubf_hybrid_v1"

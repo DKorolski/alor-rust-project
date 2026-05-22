@@ -247,6 +247,170 @@ trade_log = "./backtest.log"
 }
 
 #[test]
+fn loads_ri_author41_42_shadow_config() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "STRATEGY_ID",
+        "STRATEGY_KIND",
+        "SYMBOL",
+        "QTY",
+        "TRADE_MODE",
+        "ALLOW_LIVE_ORDERS",
+        "PAPER_ENABLED",
+        "SNAPSHOTS_STREAM",
+    ]);
+    let path = write_temp_config(
+        r#"
+[strategy]
+strategy_id = "ri_author41_42.shadow.test"
+strategy_kind = "ri_author41_42"
+symbol = "RIM6"
+qty = 1
+tick_size = 10
+timezone_offset_hours = 3
+
+[strategy.ri_author41_42]
+profile_id = "ri_author41_42_primary_combo_cost2"
+timeframe = "10m"
+mode = "shadow"
+allow_order_emission = false
+execution_path = "action_scoped_only"
+decision_journal_path = "./reports/ri_author41_42_decisions.jsonl"
+decision_journal_append = true
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::RiAuthor4142
+    );
+    assert_eq!(resolved.config.strategy.symbol, "RIM6");
+    let settings = resolved
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("ri settings");
+    assert_eq!(settings.profile_id, "ri_author41_42_primary_combo_cost2");
+    assert_eq!(settings.timeframe, "10m");
+    assert_eq!(settings.mode, "shadow");
+    assert!(!settings.allow_order_emission);
+    assert_eq!(settings.execution_path, "action_scoped_only");
+    assert_eq!(
+        settings.decision_journal_path.as_deref(),
+        Some("./reports/ri_author41_42_decisions.jsonl")
+    );
+    assert!(settings.decision_journal_append);
+}
+
+#[test]
+fn loads_ri_author41_42_7502miw_shadow_config() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let path = repo_root.join("configs/runtime.ri_author41_42.shadow.7502MIW.toml");
+
+    let resolved = load_runtime_config(path, false).expect("load ri 7502MIW config");
+
+    assert_eq!(resolved.config.portfolio, "7502MIW");
+    assert_eq!(
+        resolved.config.consumer_group,
+        "strategy-runtime-ri-author41-42-shadow-7502MIW"
+    );
+    assert_eq!(resolved.config.streams.bars, "md.bars.7502MIW.RIM6.10m");
+    assert_eq!(
+        resolved.config.streams.commands,
+        "cmd.orders.7502MIW.ri_author41_42.shadow"
+    );
+    assert_eq!(
+        resolved.config.streams.acks,
+        "cmd.acks.7502MIW.ri_author41_42.shadow"
+    );
+    assert_eq!(
+        resolved.config.streams.health.as_deref(),
+        Some("events.health.ri_author41_42.7502MIW")
+    );
+    assert_eq!(
+        resolved.config.streams.runtime_state,
+        "runtime.state.ri_author41_42.shadow.7502MIW"
+    );
+    assert_eq!(
+        resolved.config.trade_mode,
+        strategy_runtime::TradeMode::Paper
+    );
+    assert!(!resolved.config.allow_live_orders);
+    assert_eq!(
+        resolved.config.strategy.strategy_kind,
+        strategy_runtime::StrategyKind::RiAuthor4142
+    );
+    assert_eq!(resolved.config.strategy.symbol, "RIM6");
+    let settings = resolved
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("ri settings");
+    assert_eq!(settings.mode, "shadow");
+    assert!(!settings.allow_order_emission);
+    assert_eq!(settings.execution_path, "action_scoped_only");
+    assert_eq!(settings.order_symbol.as_deref(), Some("RTS-6.26"));
+}
+
+#[test]
+fn loads_ri_author41_42_7502miw_pending_micro_config_as_locked_candidate() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let path = repo_root.join("configs/runtime.ri_author41_42.micro.7502MIW.pending.toml");
+
+    let resolved = load_runtime_config(path, false).expect("load pending ri micro config");
+
+    assert_eq!(resolved.config.portfolio, "7502MIW");
+    assert_eq!(
+        resolved.config.consumer_group,
+        "strategy-runtime-ri-author41-42-micro-7502MIW"
+    );
+    assert_eq!(resolved.config.streams.bars, "md.bars.7502MIW.RIM6.10m");
+    assert_eq!(
+        resolved.config.streams.commands,
+        "cmd.orders.7502MIW.ri_author41_42.micro"
+    );
+    assert_eq!(
+        resolved.config.streams.acks,
+        "cmd.acks.7502MIW.ri_author41_42.micro"
+    );
+    assert_eq!(
+        resolved.config.streams.runtime_state,
+        "runtime.state.ri_author41_42.micro.7502MIW"
+    );
+    assert_eq!(
+        resolved.config.trade_mode,
+        strategy_runtime::TradeMode::Live
+    );
+    assert!(resolved.config.allow_live_orders);
+
+    let settings = resolved
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("ri settings");
+    assert_eq!(settings.mode, "micro_live");
+    assert!(settings.allow_order_emission);
+    assert_eq!(settings.execution_path, "action_scoped_only");
+    assert_eq!(settings.order_symbol.as_deref(), Some("RTS-6.26"));
+    assert_eq!(
+        settings.decision_journal_path.as_deref(),
+        Some("/reports/ri_author41_42_7502MIW_micro_decisions.jsonl")
+    );
+}
+
+#[test]
 fn loads_paper_report_paths() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&[
@@ -468,6 +632,136 @@ close_hour = 21
 }
 
 #[test]
+fn loads_split_hybrid_riskgate_profile_fields() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let path = write_temp_config(
+        r#"
+[strategy.common]
+strategy_kind = "hybrid_intraday"
+symbol = "IMOEXF"
+qty = 1.0
+side = "buy"
+
+[strategy.hybrid_intraday]
+profile = "imoexf_primary_riskgate_high180_lb120"
+mr_variant = "high180"
+mr_gate_policy = "shadow_pnl_lb120_positive"
+risk_gate_mode = "bootstrap_from_seed"
+risk_gate_seed_file = "docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv"
+risk_gate_ledger_key = "runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120"
+model_session_start_time = "09:00:00"
+model_session_end_time = "23:49:59"
+bo_k = 0.53
+"#,
+    );
+
+    let resolved = load_runtime_config(path, false).expect("load config");
+    let settings = resolved
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("hybrid settings");
+    let strategy = &settings.strategy;
+
+    assert_eq!(strategy.profile, "imoexf_primary_riskgate_high180_lb120");
+    assert_eq!(strategy.mr_variant, "high180");
+    assert_eq!(strategy.mr_gate_policy, "shadow_pnl_lb120_positive");
+    assert_eq!(strategy.risk_gate_mode, "bootstrap_from_seed");
+    assert_eq!(
+        strategy.risk_gate_seed_file.as_deref(),
+        Some("docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv")
+    );
+    assert_eq!(
+        strategy.risk_gate_ledger_key.as_deref(),
+        Some("runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120")
+    );
+    assert_eq!(strategy.model_session_start_time, "09:00:00");
+    assert_eq!(strategy.model_session_end_time, "23:49:59");
+    assert_eq!(strategy.bo_k, 0.53);
+    assert_eq!(
+        resolved.sources.strategy.hybrid_intraday,
+        strategy_runtime::config::ConfigSource::File
+    );
+}
+
+#[test]
+fn loads_live_imoexf_riskgate_shadow_configs() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let bootstrap_path =
+        repo_root.join("configs/runtime.hybrid.live.7502SN6.riskgate-bootstrap.toml");
+    let shadow_path = repo_root.join("configs/runtime.hybrid.live.7502SN6.riskgate-shadow.toml");
+
+    let bootstrap = load_runtime_config(bootstrap_path, false).expect("load bootstrap config");
+    let shadow = load_runtime_config(shadow_path, false).expect("load shadow config");
+
+    for resolved in [&bootstrap, &shadow] {
+        let common = &resolved.config.strategy.common;
+        let hybrid = resolved
+            .config
+            .strategy
+            .hybrid_intraday()
+            .expect("hybrid strategy settings")
+            .strategy
+            .clone();
+
+        assert_eq!(common.strategy_id, "hybrid_imoexf");
+        assert_eq!(
+            common.strategy_kind,
+            strategy_runtime::StrategyKind::HybridIntraday
+        );
+        assert_eq!(common.symbol, "IMOEXF");
+        assert_eq!(resolved.config.streams.bars, "md.bars.7502SN6.10m");
+        assert_eq!(
+            resolved.config.streams.runtime_state,
+            "runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502SN6"
+        );
+        assert_eq!(hybrid.profile, "imoexf_primary_riskgate_high180_lb120");
+        assert_eq!(hybrid.mr_variant, "high180");
+        assert_eq!(hybrid.mr_gate_policy, "shadow_pnl_lb120_positive");
+        assert_eq!(
+            hybrid.risk_gate_seed_file.as_deref(),
+            Some("/configs/riskgate_high180_lb120_seed_2026-04-26.csv")
+        );
+        assert_eq!(
+            hybrid.risk_gate_ledger_key.as_deref(),
+            Some("runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120")
+        );
+        assert_eq!(hybrid.model_session_start_time, "09:00:00");
+        assert_eq!(hybrid.model_session_end_time, "23:49:59");
+        assert_eq!(hybrid.bo_k, 0.53);
+    }
+
+    assert_eq!(
+        bootstrap
+            .config
+            .strategy
+            .hybrid_intraday()
+            .expect("bootstrap hybrid settings")
+            .strategy
+            .risk_gate_mode,
+        "bootstrap_from_seed"
+    );
+    assert_eq!(
+        shadow
+            .config
+            .strategy
+            .hybrid_intraday()
+            .expect("shadow hybrid settings")
+            .strategy
+            .risk_gate_mode,
+        "normal_append"
+    );
+}
+
+#[test]
 fn loads_split_alor_skeleton_sections() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
@@ -607,6 +901,7 @@ fn loads_session_gap_settings_from_nested_strategy_section() {
 strategy_kind = "session_gap_standalone"
 
 [strategy.session_gap]
+signal_minute = 50
 k_long = 0.77
 k_short = 0.55
 wait_hours = 4
@@ -634,6 +929,7 @@ work_weekends = true
         .session_gap_standalone()
         .expect("session gap settings");
 
+    assert_eq!(settings.signal_minute, 50);
     assert_eq!(settings.k_long, 0.77);
     assert_eq!(settings.k_short, 0.55);
     assert_eq!(settings.wait_hours, 4);
@@ -660,6 +956,7 @@ fn session_gap_defaults_apply_when_section_missing() {
         "STRATEGY_KIND",
         "SESSION_GAP_K_LONG",
         "SESSION_GAP_K_SHORT",
+        "SESSION_GAP_SIGNAL_MINUTE",
         "SESSION_GAP_WAIT_HOURS",
         "SESSION_GAP_K_TP_LONG",
         "SESSION_GAP_K_SL_LONG",
@@ -691,6 +988,7 @@ strategy_kind = "session_gap_standalone"
         .session_gap_standalone()
         .expect("session gap settings");
 
+    assert_eq!(settings.signal_minute, 59);
     assert_eq!(settings.k_long, 0.5);
     assert_eq!(settings.wait_hours, 2);
     assert_eq!(settings.k_tp_long, 0.28);
@@ -706,6 +1004,7 @@ fn session_gap_partial_section_uses_defaults_for_missing_fields() {
         "STRATEGY_KIND",
         "SESSION_GAP_K_LONG",
         "SESSION_GAP_K_SHORT",
+        "SESSION_GAP_SIGNAL_MINUTE",
         "SESSION_GAP_WAIT_HOURS",
         "SESSION_GAP_K_TP_LONG",
         "SESSION_GAP_K_SL_LONG",
@@ -729,6 +1028,7 @@ fn session_gap_partial_section_uses_defaults_for_missing_fields() {
 strategy_kind = "session_gap_standalone"
 
 [strategy.session_gap]
+signal_minute = 50
 k_long = 0.77
 close_hour = 22
 work_weekends = true
@@ -742,6 +1042,7 @@ work_weekends = true
         .session_gap_standalone()
         .expect("session gap settings");
 
+    assert_eq!(settings.signal_minute, 50);
     assert_eq!(settings.k_long, 0.77);
     assert_eq!(settings.close_hour, 22);
     assert!(settings.work_weekends);

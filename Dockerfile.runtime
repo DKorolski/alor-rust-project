@@ -8,7 +8,9 @@ COPY . .
 
 WORKDIR /app/alor-rs-main
 
-RUN cargo build --release -p strategy-runtime --bin strategy_runtime_runner
+RUN cargo build --release -p strategy-runtime \
+    --bin strategy_runtime_runner \
+    --bin moex_author41_42_shadow_runner
 
 FROM debian:12-slim
 
@@ -20,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /app/alor-rs-main/target/release/strategy_runtime_runner /usr/local/bin/strategy_runtime_runner
+COPY --from=builder /app/alor-rs-main/target/release/moex_author41_42_shadow_runner /usr/local/bin/moex_author41_42_shadow_runner
 
 ENV RUST_LOG=info,strategy_runtime=info
 

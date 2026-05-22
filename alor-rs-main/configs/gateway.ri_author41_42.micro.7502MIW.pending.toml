@@ -1,0 +1,97 @@
+# RI Author41/42 pending micro gateway config for portfolio 7502MIW.
+#
+# This is a prepared candidate for the controlled between-session switch. It
+# must not become active before the RI live adapter GO patch is merged and the
+# account is confirmed flat.
+#
+# Required transport runner stream overrides for the micro contour:
+#
+#   STREAM_BARS=md.bars.7502MIW.RIM6.10m
+#   STREAM_HEALTH=events.health.ri_author41_42.7502MIW
+#   STREAM_COMMANDS=cmd.orders.7502MIW.ri_author41_42.micro
+#   STREAM_ACKS=cmd.acks.7502MIW.ri_author41_42.micro
+#   CONSUMER_GROUP=gateway-commands-ri-author41-42-micro-7502MIW
+#
+# The paired runtime config must use action-scoped execution only.
+BAR_DUMP_PATH="./bars.ri_author41_42.7502MIW.RIM6.csv"
+portfolio = "7502MIW"
+exchange = "MOEX"
+instrument_group = "RFUD"
+symbols = ["RIM6"]
+
+tf_sec = 600
+from_ts = 0
+
+ws_url = "wss://api.alor.ru/ws"
+cws_url = "wss://api.alor.ru/cws"
+oauth_url = "https://oauth.alor.ru/refresh"
+
+log_positions_filter = ["RIM6"]
+log_cash_positions = false
+cash_symbols = ["RUB", "SUR"]
+log_existing_snapshot_orders = false
+
+skip_history_bars = false
+skip_history_positions = false
+skip_history_orders = false
+split_adjust = true
+format = "Simple"
+frequency_ms = 250
+
+backoff_initial_ms = 1000
+backoff_max_ms = 30000
+backoff_multiplier = 2
+
+max_silence_bars_sec = 1200
+
+history_sessions = 6
+history_days_back = 6
+session_rollover_hour_utc = 6
+health_listen_addr = "127.0.0.1:8084"
+control_path_stale_after_sec = 900
+control_path_pre_entry_recycle_enabled = true
+control_path_pre_exit_recycle_enabled = true
+control_path_recycle_timeout_ms = 5000
+control_path_recycle_timeout_ms_exit = 10000
+control_path_post_recycle_exit_send_window_ms = 5000
+control_path_hardening_log_only = false
+
+control_cws_mode = "action_scoped"
+action_scope_enable_create_limit = true
+action_scope_enable_market = true
+action_scope_enable_delete_limit = true
+action_scope_enable_replace_limit = false
+action_scope_enable_exit = true
+action_scope_open_timeout_ms = 5000
+action_scope_authorize_timeout_ms = 5000
+action_scope_force_token_refresh_before_authorize = true
+action_scope_followup_window_ms = 5000
+action_scope_max_session_lifetime_ms = 15000
+action_scope_close_timeout_ms = 2000
+
+[trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:59"
+break_start_1 = "14:00:00"
+break_end_1 = "14:04:59"
+break_start_2 = "18:50:00"
+break_end_2 = "19:04:59"
+weekends_off = true
+timezone_offset_hours = 3
+
+[ws]
+ws_idle_timeout_sec = 70
+ws_ping_interval_sec = 30
+ws_ping_timeout_sec = 15
+subscribe_ack_timeout_ms = 5000
+subscribe_ack_retries = 3
+
+[reconnect]
+warm_reconnect_max_gap_sec = 21600
+gap_backfill_padding_bars = 2
+cold_start_history_days_back = 6
+bar_silence_resync_min_sec = 1200
+
+[general]
+price_step = 10
+volume_step = 1

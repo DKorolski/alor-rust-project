@@ -112,6 +112,29 @@ impl HybridOrchestrator {
     }
 
     pub fn on_bar(&mut self, bar: BarInput) -> Vec<Action> {
+        let mr_exit_reason = if bar.has_open_position
+            && self.current_owner == Some(Owner::MeanReversion)
+            && self.mean_reversion.should_force_exit(bar.dt)
+        {
+            Some(ReasonCode::MeanRevTimeCutoff)
+        } else {
+            None
+        };
+        let mr_entry_signal = self.mean_reversion.evaluate_entry(
+            bar.dt,
+            bar.close,
+            bar.close_prev,
+            bar.day_range_prev,
+        );
+        self.on_bar_with_mr_override(bar, mr_entry_signal, mr_exit_reason)
+    }
+
+    pub fn on_bar_with_mr_override(
+        &mut self,
+        bar: BarInput,
+        mr_entry_signal: Option<EntrySignal>,
+        mr_exit_reason: Option<ReasonCode>,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
         self.intraday_breakout
             .on_bar(bar.dt, bar.open, bar.high, bar.low, bar.close);
@@ -129,13 +152,13 @@ impl HybridOrchestrator {
             return actions;
         }
 
-        if bar.has_open_position
-            && self.current_owner == Some(Owner::MeanReversion)
-            && self.mean_reversion.should_force_exit(bar.dt)
-        {
+        if bar.has_open_position && self.current_owner == Some(Owner::MeanReversion) {
+            let Some(reason) = mr_exit_reason else {
+                return actions;
+            };
             actions.push(Action::SubmitExit {
                 owner: Owner::MeanReversion,
-                reason: ReasonCode::MeanRevTimeCutoff,
+                reason,
             });
             return actions;
         }
@@ -171,12 +194,7 @@ impl HybridOrchestrator {
             return actions;
         }
 
-        if let Some(signal) = self.mean_reversion.evaluate_entry(
-            bar.dt,
-            bar.close,
-            bar.close_prev,
-            bar.day_range_prev,
-        ) {
+        if let Some(signal) = mr_entry_signal {
             return self.emit_entry_action(signal);
         }
 

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use alor_protocol::{IntentClass, Side};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -12,6 +13,10 @@ pub enum Intent {
     Classified {
         intent: Box<Intent>,
         intent_class: IntentClass,
+    },
+    Routed {
+        intent: Box<Intent>,
+        symbol: String,
     },
     Place {
         price: f64,
@@ -59,9 +64,17 @@ impl Intent {
         }
     }
 
+    pub fn with_symbol(self, symbol: impl Into<String>) -> Self {
+        Self::Routed {
+            intent: Box::new(self),
+            symbol: symbol.into(),
+        }
+    }
+
     pub fn explicit_class(&self) -> Option<IntentClass> {
         match self {
             Intent::Classified { intent_class, .. } => Some(*intent_class),
+            Intent::Routed { intent, .. } => intent.explicit_class(),
             _ => None,
         }
     }
@@ -69,9 +82,18 @@ impl Intent {
     pub fn base_intent(&self) -> &Intent {
         match self {
             Intent::Classified { intent, .. } => intent.base_intent(),
+            Intent::Routed { intent, .. } => intent.base_intent(),
             _ => self,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandPrepared {
+    pub request_id: Uuid,
+    pub intent_class: IntentClass,
+    pub created_ts_utc: i64,
+    pub symbol: String,
 }
 
 pub trait Strategy: Send + Sync {
@@ -110,6 +132,7 @@ pub trait Strategy: Send + Sync {
     ) -> Option<String> {
         None
     }
+    fn on_command_prepared(&mut self, _ctx: &StrategyCtx, _command: &CommandPrepared) {}
     fn pending_request_ids(&self) -> Vec<Uuid> {
         Vec::new()
     }
@@ -117,8 +140,33 @@ pub trait Strategy: Send + Sync {
         let _ = has_open_position;
         StrategyExitRiskStatus::default()
     }
+    fn risk_gate_session_finalizations(&self) -> Vec<RiskGateSessionFinalization> {
+        Vec::new()
+    }
+    fn acknowledge_risk_gate_session_finalizations(&mut self, _session_dates: &[NaiveDate]) {}
+    fn on_risk_gate_state(&mut self, _state: &RiskGateRuntimeState) {}
+    fn drain_observation_journal_records(&mut self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
     fn state(&self) -> &crate::state::StrategyState;
     fn set_state(&mut self, state: crate::state::StrategyState);
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskGateSessionFinalization {
+    pub session_date: NaiveDate,
+    pub shadow_pnl_points: f64,
+    pub shadow_trade_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskGateRuntimeState {
+    pub profile_id: String,
+    pub last_finalized_session_date: Option<NaiveDate>,
+    pub rolling_sum_lb120: Option<f64>,
+    pub mr_enabled_current_session: Option<bool>,
+    pub mr_enabled_next_session: Option<bool>,
+    pub ledger_rows_count: usize,
 }
 
 #[derive(Debug, Clone)]

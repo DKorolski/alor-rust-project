@@ -1,0 +1,110 @@
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502XXX"
+exchange = "MOEX"
+source = "strategy-runtime"
+consumer_group = "strategy-runtime-ri-author41-42-shadow-7502XXX"
+consumer_name = "auto"
+reset_state_on_start = false
+
+[runtime]
+# Shadow contour consumes live Redis bars but remains outside live-order mode.
+trade_mode = "paper"
+allow_live_orders = false
+allow_paper_orders = false
+guard_log_interval_ms = 5000
+bootstrap_dump = false
+still_blocked_log_period_sec = 60
+gateway_health_stale_sec = 20
+require_gateway_ready = true
+
+[runtime.health]
+enabled = true
+listen_addr = "127.0.0.1:8094"
+expose_metrics = false
+
+[streams]
+bars = "md.bars.7502XXX.10m"
+orders = "broker.orders.7502XXX"
+trades = "broker.trades.7502XXX"
+positions = "broker.positions.7502XXX"
+commands = "cmd.orders.7502XXX"
+acks = "cmd.acks.7502XXX"
+snapshots = "broker.snapshots.7502XXX"
+health = "events.health"
+dlq_prefix = "dlq"
+runtime_state = "runtime.state.ri_author41_42.shadow.7502XXX"
+
+[read]
+block_ms = 500
+claim_idle_ms = 5000
+claim_batch = 50
+poll_interval_ms = 100
+
+[trim]
+bars = 10000
+orders = 5000
+trades = 5000
+positions = 20000
+commands = 5000
+acks = 5000
+health = 2000
+runtime_state = 500
+
+[strategy]
+strategy_id = "ri_author41_42.shadow.7502XXX"
+strategy_kind = "ri_author41_42"
+symbol = "RIM6"
+qty = 1.0
+side = "buy"
+tick_size = 10.0
+session_open_hour = 9
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 49
+entry_after_open_min = 0
+exit_before_close_min = 0
+timezone_offset_hours = 3
+max_silence_bars_sec = 1200
+
+[trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:59"
+break_start_1 = "14:00:00"
+break_end_1 = "14:04:59"
+break_start_2 = "18:50:00"
+break_end_2 = "19:04:59"
+weekends_off = true
+timezone_offset_hours = 3
+
+[strategy.ri_author41_42]
+profile_id = "ri_author41_42_primary_combo_cost2"
+timeframe = "10m"
+mode = "shadow"
+allow_order_emission = false
+execution_path = "action_scoped_only"
+order_symbol = "RTS-6.26"
+decision_journal_path = "./reports/ri_author41_42_decisions.jsonl"
+decision_journal_append = true
+
+[paper]
+enabled = false
+output = "stdout"
+file_path = "./reports/paper_ri_author41_42_shadow.jsonl"
+trades_csv = "./reports/trades_ri_author41_42_shadow.csv"
+summary_json = "./reports/summary_ri_author41_42_shadow.json"
+append = false
+
+[backtest]
+enabled = false
+trade_log = "./strategy-runtime/backtest_trades.log"
+trades_csv = "./strategy-runtime/backtest_trades.csv"
+summary_json = "./strategy-runtime/backtest_summary.json"
+append = false
+
+[replay]
+enabled = false
+bars_csv_path = "./strategy-runtime/ri_author41_42_bars.csv"
+reference_trades_csv_path = "./strategy-runtime/ri_author41_42_reference_trades.csv"
+output_dir = "./strategy-runtime/replay_out"
+price_tolerance = 1e-8
+strict_dedup = true

@@ -5,7 +5,7 @@ exchange = "MOEX"
 instrument_group = "RFUD"
 symbols = ["USDRUBF"]
 
-tf_sec = 60
+tf_sec = 600
 from_ts = 0
 
 ws_url = "wss://api.alor.ru/ws"

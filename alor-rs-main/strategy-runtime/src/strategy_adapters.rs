@@ -7,7 +7,12 @@ use crate::strategies::hybrid_intraday::{
     MinRangeMode,
 };
 use crate::strategies::hybrid_intraday_runtime::{
-    HybridIntradayRuntimeConfig, HybridIntradayRuntimeStrategy,
+    HybridIntradayProfile, HybridIntradayRuntimeConfig, HybridIntradayRuntimeStrategy,
+    MeanReversionVariant, MrGatePolicy, RiskGateMode,
+};
+use crate::strategies::ri_author41_42_live::{
+    RiAuthor4142ExecutionPath, RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy,
+    RiAuthor4142RuntimeMode,
 };
 use crate::strategies::session_gap_standalone::{
     SessionGapStandaloneConfig, SessionGapStandaloneStrategy,
@@ -44,6 +49,7 @@ impl SessionGapStandaloneAdapter {
             entry_fill_timeout_ms: settings.entry_fill_timeout_ms,
             exit_ack_timeout_ms: settings.exit_ack_timeout_ms,
             exit_fill_timeout_ms: settings.exit_fill_timeout_ms,
+            signal_minute: settings.signal_minute,
             k_long: settings.k_long,
             k_short: settings.k_short,
             wait_hours: settings.wait_hours,
@@ -71,6 +77,63 @@ impl SessionGapStandaloneAdapter {
 pub(crate) struct HybridIntradayAdapter;
 
 impl HybridIntradayAdapter {
+    fn parse_profile(raw: &str) -> Result<HybridIntradayProfile> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "baseline" | "baseline_runtime_hybrid" => {
+                Ok(HybridIntradayProfile::BaselineRuntimeHybrid)
+            }
+            "imoexf_primary_riskgate"
+            | "imoexf_primary_riskgate_high180_lb120"
+            | "imoexf_primary_riskgate_k053"
+            | "hybrid_mr_riskgate_high180_lb120__bo_new_k053" => {
+                Ok(HybridIntradayProfile::ImoexfPrimaryRiskgateHigh180Lb120)
+            }
+            other => bail!("unsupported hybrid_intraday profile: {other}"),
+        }
+    }
+
+    fn parse_mr_variant(raw: &str) -> Result<MeanReversionVariant> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "classic" | "classic_prev_day_range" | "primary" => {
+                Ok(MeanReversionVariant::ClassicPrevDayRange)
+            }
+            "high180" => Ok(MeanReversionVariant::High180),
+            other => bail!("unsupported hybrid_intraday mr_variant: {other}"),
+        }
+    }
+
+    fn parse_mr_gate_policy(raw: &str) -> Result<MrGatePolicy> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "disabled" | "none" => Ok(MrGatePolicy::Disabled),
+            "shadow_pnl_lb120_positive" | "riskgate_high180_lb120" => {
+                Ok(MrGatePolicy::ShadowPnlLb120Positive)
+            }
+            other => bail!("unsupported hybrid_intraday mr_gate_policy: {other}"),
+        }
+    }
+
+    fn parse_risk_gate_mode(raw: &str) -> Result<RiskGateMode> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "disabled" | "none" => Ok(RiskGateMode::Disabled),
+            "bootstrap_from_seed" => Ok(RiskGateMode::BootstrapFromSeed),
+            "normal_append" => Ok(RiskGateMode::NormalAppend),
+            "rebuild_from_history" => Ok(RiskGateMode::RebuildFromHistory),
+            "shadow_only" => Ok(RiskGateMode::ShadowOnly),
+            "enforced" => Ok(RiskGateMode::Enforced),
+            other => bail!("unsupported hybrid_intraday risk_gate_mode: {other}"),
+        }
+    }
+
+    fn parse_optional_time(raw: &str, field: &str) -> Result<Option<NaiveTime>> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        NaiveTime::parse_from_str(raw, "%H:%M:%S")
+            .map(Some)
+            .map_err(|err| anyhow::anyhow!("invalid {field}: {raw}: {err}"))
+    }
+
     pub(crate) fn from_strategy_config(
         config: &StrategyConfig,
     ) -> Result<HybridIntradayRuntimeConfig> {
@@ -85,6 +148,16 @@ impl HybridIntradayAdapter {
             }
         };
         let runtime_settings = &settings.strategy;
+        let profile = Self::parse_profile(&runtime_settings.profile)?;
+        let mr_variant = Self::parse_mr_variant(&runtime_settings.mr_variant)?;
+        let mr_gate_policy = Self::parse_mr_gate_policy(&runtime_settings.mr_gate_policy)?;
+        let risk_gate_mode = Self::parse_risk_gate_mode(&runtime_settings.risk_gate_mode)?;
+        if mr_gate_policy == MrGatePolicy::Disabled && risk_gate_mode != RiskGateMode::Disabled {
+            bail!(
+                "hybrid_intraday risk_gate_mode {:?} requires non-disabled mr_gate_policy",
+                risk_gate_mode
+            );
+        }
         let (session_close_hour, session_close_minute, weekends_off) = config
             .trading_periods
             .as_ref()
@@ -122,6 +195,20 @@ impl HybridIntradayAdapter {
 
         Ok(HybridIntradayRuntimeConfig {
             symbol: config.symbol.clone(),
+            profile,
+            mr_variant,
+            mr_gate_policy,
+            risk_gate_mode,
+            risk_gate_seed_file: runtime_settings.risk_gate_seed_file.clone(),
+            risk_gate_ledger_key: runtime_settings.risk_gate_ledger_key.clone(),
+            model_session_start_time: Self::parse_optional_time(
+                &runtime_settings.model_session_start_time,
+                "model_session_start_time",
+            )?,
+            model_session_end_time: Self::parse_optional_time(
+                &runtime_settings.model_session_end_time,
+                "model_session_end_time",
+            )?,
             qty: config.qty.max(1.0),
             live_order_style: settings.live_order_style,
             tick_size: config.tick_size,
@@ -176,6 +263,45 @@ impl HybridIntradayAdapter {
         Ok(Box::new(HybridIntradayRuntimeStrategy::new(
             strategy_config,
         )))
+    }
+}
+
+pub(crate) struct RiAuthor4142Adapter;
+
+impl RiAuthor4142Adapter {
+    pub(crate) fn from_strategy_config(config: &StrategyConfig) -> Result<RiAuthor4142LiveConfig> {
+        let settings = match config.specific() {
+            StrategySpecificConfig::RiAuthor4142(settings) => settings,
+            other => {
+                bail!(
+                    "strategy kind {:?} requires RiAuthor4142 payload, found {:?}",
+                    config.strategy_kind,
+                    other.kind()
+                )
+            }
+        };
+
+        Ok(RiAuthor4142LiveConfig {
+            symbol: config.symbol.clone(),
+            profile_id: settings.profile_id.clone(),
+            timeframe: settings.timeframe.clone(),
+            mode: RiAuthor4142RuntimeMode::parse(&settings.mode)?,
+            allow_order_emission: settings.allow_order_emission,
+            execution_path: RiAuthor4142ExecutionPath::parse(&settings.execution_path)?,
+            order_symbol: settings
+                .order_symbol
+                .as_ref()
+                .map(|symbol| symbol.trim())
+                .filter(|symbol| !symbol.is_empty())
+                .map(ToString::to_string),
+            qty: config.qty.max(1.0),
+            timezone_offset_hours: config.timezone_offset_hours,
+        })
+    }
+
+    pub(crate) fn create(config: &StrategyConfig) -> Result<BoxedStrategy> {
+        let strategy_config = Self::from_strategy_config(config)?;
+        Ok(Box::new(RiAuthor4142LiveStrategy::new(strategy_config)?))
     }
 }
 
@@ -236,7 +362,12 @@ impl AlorUsdrubfHybridAdapter {
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveTime;
+
     use super::{AlorUsdrubfHybridAdapter, HybridIntradayAdapter, SessionGapStandaloneAdapter};
+    use crate::strategies::hybrid_intraday_runtime::{
+        HybridIntradayProfile, MeanReversionVariant, MrGatePolicy, RiskGateMode,
+    };
     use crate::{StrategyConfig, StrategyKind};
 
     #[test]
@@ -255,6 +386,98 @@ mod tests {
         let err = HybridIntradayAdapter::from_strategy_config(&config)
             .expect_err("expected mismatch error");
         assert!(err.to_string().contains("requires HybridIntraday payload"));
+    }
+
+    #[test]
+    fn hybrid_adapter_parses_profile_and_model_session_guard() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.profile = "imoexf_primary_riskgate_k053".to_string();
+        settings.strategy.model_session_start_time = "09:00:00".to_string();
+        settings.strategy.model_session_end_time = "23:49:59".to_string();
+
+        let runtime_config =
+            HybridIntradayAdapter::from_strategy_config(&config).expect("hybrid runtime config");
+
+        assert_eq!(
+            runtime_config.profile,
+            HybridIntradayProfile::ImoexfPrimaryRiskgateHigh180Lb120
+        );
+        assert_eq!(
+            runtime_config.mr_variant,
+            MeanReversionVariant::ClassicPrevDayRange
+        );
+        assert_eq!(runtime_config.mr_gate_policy, MrGatePolicy::Disabled);
+        assert_eq!(runtime_config.risk_gate_mode, RiskGateMode::Disabled);
+        assert_eq!(
+            runtime_config.model_session_start_time,
+            Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN))
+        );
+        assert_eq!(
+            runtime_config.model_session_end_time,
+            Some(NaiveTime::from_hms_opt(23, 49, 59).unwrap_or(NaiveTime::MIN))
+        );
+    }
+
+    #[test]
+    fn hybrid_adapter_accepts_high180_without_active_risk_gate() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.mr_variant = "high180".to_string();
+
+        let runtime_config =
+            HybridIntradayAdapter::from_strategy_config(&config).expect("hybrid runtime config");
+
+        assert_eq!(runtime_config.mr_variant, MeanReversionVariant::High180);
+    }
+
+    #[test]
+    fn hybrid_adapter_allows_shadow_risk_gate_bootstrap_modes() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
+        settings.strategy.risk_gate_mode = "bootstrap_from_seed".to_string();
+        settings.strategy.mr_variant = "high180".to_string();
+        settings.strategy.profile = "imoexf_primary_riskgate".to_string();
+        settings.strategy.risk_gate_seed_file = Some("docs/risk_gate_seed.csv".to_string());
+
+        let runtime_config =
+            HybridIntradayAdapter::from_strategy_config(&config).expect("runtime config");
+        assert_eq!(
+            runtime_config.mr_gate_policy,
+            MrGatePolicy::ShadowPnlLb120Positive
+        );
+        assert_eq!(
+            runtime_config.risk_gate_mode,
+            RiskGateMode::BootstrapFromSeed
+        );
+    }
+
+    #[test]
+    fn hybrid_adapter_allows_enforced_risk_gate_mode() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.profile = "imoexf_primary_riskgate".to_string();
+        settings.strategy.mr_variant = "high180".to_string();
+        settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
+        settings.strategy.risk_gate_mode = "enforced".to_string();
+
+        let runtime_config =
+            HybridIntradayAdapter::from_strategy_config(&config).expect("runtime config");
+        assert_eq!(runtime_config.risk_gate_mode, RiskGateMode::Enforced);
+    }
+
+    #[test]
+    fn hybrid_adapter_rejects_risk_gate_mode_without_policy() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.mr_gate_policy = "disabled".to_string();
+        settings.strategy.risk_gate_mode = "normal_append".to_string();
+
+        let err = HybridIntradayAdapter::from_strategy_config(&config).expect_err("invalid combo");
+        assert!(err
+            .to_string()
+            .contains("requires non-disabled mr_gate_policy"));
     }
 
     #[test]

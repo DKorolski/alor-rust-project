@@ -19,6 +19,7 @@ const START_CASH: f64 = 30_000.0;
 
 #[derive(Debug, Clone, Copy)]
 struct StrategyConfig {
+    signal_minute: u32,
     k_long: f64,
     k_short: f64,
     wait_hours: i64,
@@ -42,6 +43,7 @@ struct StrategyConfig {
 impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
+            signal_minute: 59,
             k_long: 0.5,
             k_short: 0.46,
             wait_hours: 3,
@@ -485,7 +487,7 @@ impl ReplayState {
             _ => return,
         };
 
-        if bar.time.minute() == 59
+        if bar.time.minute() == self.cfg.signal_minute
             && (bar.time - session_start_dt).num_seconds() >= self.cfg.wait_hours * 3600
         {
             let price = bar.close;
@@ -609,7 +611,27 @@ fn main() -> Result<()> {
     let bars = load_bars(&bars_path, strict_dedup)?;
     write_normalized_bars(&bars, &bars_out)?;
 
-    let mut state = ReplayState::new(StrategyConfig::default());
+    let mut cfg = StrategyConfig::default();
+    if let Some(value) = env_parse::<u32>("REPLAY_SIGNAL_MINUTE")? {
+        cfg.signal_minute = value;
+    }
+    if let Some(value) = env_parse::<i64>("REPLAY_WAIT_HOURS")? {
+        cfg.wait_hours = value;
+    }
+    if let Some(value) = env_parse::<u32>("REPLAY_MAX_ENTRY_HOUR")? {
+        cfg.max_entry_hour = value;
+    }
+    if let Some(value) = env_parse::<i64>("REPLAY_EXIT_OFFSET_MIN")? {
+        cfg.exit_offset_min = value;
+    }
+    if let Some(value) = env_parse::<u32>("REPLAY_CLOSE_HOUR")? {
+        cfg.close_hour = value;
+    }
+    if let Some(value) = env_parse::<u32>("REPLAY_CLOSE_MINUTE")? {
+        cfg.close_minute = value;
+    }
+
+    let mut state = ReplayState::new(cfg);
     let mut intents = Vec::new();
     let mut trades_runtime = Vec::new();
     for bar in &bars {
@@ -818,6 +840,23 @@ fn env_bool(key: &str, default: bool) -> bool {
             )
         })
         .unwrap_or(default)
+}
+
+fn env_parse<T>(key: &str) -> Result<Option<T>>
+where
+    T: std::str::FromStr,
+    <T as std::str::FromStr>::Err: std::fmt::Display,
+{
+    match env::var(key) {
+        Ok(value) => {
+            let parsed = value
+                .parse::<T>()
+                .map_err(|err| anyhow::anyhow!("{key} parse error: {err}"))?;
+            Ok(Some(parsed))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(anyhow::anyhow!("{key} read error: {err}")),
+    }
 }
 
 fn moscow_offset() -> FixedOffset {

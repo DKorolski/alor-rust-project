@@ -2,6 +2,8 @@
 # Action-scoped control CWS rollout:
 # - entry `Place + IntentClass::Entry` = action-scoped
 # - exit/flatten `Place + IntentClass::Exit` = action-scoped
+# - protective TP `Place + IntentClass::ProtectiveRepair` = action-scoped
+# - protective SL `CreateStopLimit + IntentClass::ProtectiveRepair` = action-scoped
 # - cancel cleanup = action-scoped
 # - replace remains disabled here
 BAR_DUMP_PATH="./bars.7502SN6.csv"
@@ -11,7 +13,7 @@ instrument_group = "RFUD"
 # used for market order routing in CWS (create:market)
 symbols = ["IMOEXF"]
 
-tf_sec = 60
+tf_sec = 600
 from_ts = 0
 
 ws_url = "wss://api.alor.ru/ws"

@@ -1,0 +1,122 @@
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502MIW"
+exchange = "MOEX"
+source = "strategy-runtime"
+consumer_group = "strategy-runtime-sessiongap-local"
+consumer_name = "auto"
+reset_state_on_start = false
+
+[runtime]
+trade_mode = "live"
+allow_live_orders = true
+allow_paper_orders = false
+guard_log_interval_ms = 5000
+bootstrap_dump = false
+still_blocked_log_period_sec = 60
+gateway_health_stale_sec = 20
+require_gateway_ready = true
+
+[runtime.health]
+enabled = true
+listen_addr = "127.0.0.1:8091"
+expose_metrics = false
+
+[streams]
+bars = "md.bars.7502MIW.10m"
+orders = "broker.orders.7502MIW"
+trades = "broker.trades.7502MIW"
+positions = "broker.positions.7502MIW"
+commands = "cmd.orders.7502MIW"
+acks = "cmd.acks.7502MIW"
+snapshots = "broker.snapshots.7502MIW"
+health = "events.health"
+dlq_prefix = "dlq"
+runtime_state = "runtime.state.session_gap_standalone.live.7502MIW"
+
+[read]
+block_ms = 500
+claim_idle_ms = 5000
+claim_batch = 50
+poll_interval_ms = 100
+
+[trim]
+bars = 10000
+orders = 5000
+trades = 5000
+positions = 20000
+commands = 5000
+acks = 5000
+health = 5000
+runtime_state = 500
+
+[strategy]
+strategy_id = "session_gap_standalone"
+strategy_kind = "session_gap_standalone"
+symbol = "USDRUBF"
+qty = 1.0
+side = "buy"
+place_offset_ticks = 0
+tick_size = 0.01
+max_wait_bars_for_ack = 1
+close_trigger = "next_bar"
+session_open_hour = 0
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 49
+entry_after_open_min = 0
+exit_before_close_min = 0
+timezone_offset_hours = 3
+max_silence_bars_sec = 1200
+
+[trading_periods]
+session_start = "09:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:04:59"
+break_start_2 = "18:50:00"
+break_end_2 = "19:04:59"
+weekends_off = true
+timezone_offset_hours = 3
+
+[strategy.session_gap]
+signal_minute = 50
+k_long = 0.5
+k_short = 0.46
+wait_hours = 3
+k_tp_short = 0.60
+k_sl_short = 0.65
+long_ex_pct = 2.2
+short_ex_pct = 2.2
+k_tp_long = 0.28
+k_sl_long = 0.68
+start_cash = 1
+cash_factor = 1.0
+max_entry_hour = 16
+close_hour = 23
+close_minute = 49
+session_gap_min = 60.0
+exit_offset_min = 29
+work_weekends = false
+
+[paper]
+enabled = false
+output = "stdout"
+file_path = "./strategy-runtime/paper_trades.jsonl"
+trades_csv = "./strategy-runtime/trades.csv"
+summary_json = "./strategy-runtime/summary.json"
+append = false
+
+[backtest]
+enabled = false
+trade_log = "./strategy-runtime/backtest_trades.log"
+trades_csv = "./strategy-runtime/backtest_trades.csv"
+summary_json = "./strategy-runtime/backtest_summary.json"
+append = false
+
+[replay]
+enabled = false
+bars_csv_path = "./paper_bars_2.csv"
+reference_trades_csv_path = "./paper_trades_2.csv"
+output_dir = "./strategy-runtime/replay_out"
+price_tolerance = 1e-8
+strict_dedup = true

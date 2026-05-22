@@ -1,0 +1,10 @@
+[Unit]
+Description=Trading Redis safe whitelist stream trim
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/trading-maintenance/redis_safe_trim.sh --apply
+StandardOutput=append:/var/log/trading-redis-safe-trim.log
+StandardError=append:/var/log/trading-redis-safe-trim.log
