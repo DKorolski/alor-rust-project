@@ -28,7 +28,7 @@ Out of scope:
   - `configs/runtime.sessiongap.live.7502MIW.toml`
   - `configs/gateway.sessiongap.live.7502MIW.toml`
   - `configs/runtime.hybrid.paper.7502SN6.toml`
-- read-only VPS verification on `root@155.212.170.21`:
+- read-only server verification on the target host:
   - `docker ps`
   - `.env`
   - `docker-compose.yml`
@@ -41,7 +41,8 @@ Out of scope:
 
 Artifacts bundle:
 
-- `docs/pre-live-config-audit-2026-03-27-artifacts/`
+- Historical pre-live audit artifacts are intentionally omitted from the
+  sanitized corporate handoff branch.
 
 ## 4. Exact Stack Answer
 

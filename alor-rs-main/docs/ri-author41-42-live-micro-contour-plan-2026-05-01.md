@@ -5,11 +5,11 @@ Date: `2026-05-01`
 Related documents:
 
 - [`moex-author41-42-shadow-implementation-plan-2026-04-28.md`](./moex-author41-42-shadow-implementation-plan-2026-04-28.md)
-- [`ri-shadow-vps-rollout-2026-04-28.md`](./ri-shadow-vps-rollout-2026-04-28.md)
-- [`vps-live-observations-2026-05-01.md`](./vps-live-observations-2026-05-01.md)
 - [`intent-path-unification-fix-plan-2026-04-17.md`](./intent-path-unification-fix-plan-2026-04-17.md)
-- [`live-incident-note-2026-04-17-trading-hybrid-bo-exit-break2-request-id-skew.md`](./live-incident-note-2026-04-17-trading-hybrid-bo-exit-break2-request-id-skew.md)
-- [`ri-author41-42-service-hardening-rollout-checklist-2026-05-07.md`](./ri-author41-42-service-hardening-rollout-checklist-2026-05-07.md)
+- Historical VPS observations and incident notes are intentionally omitted from
+  the sanitized corporate handoff branch. The relevant service patterns are
+  consolidated in
+  [`live-runtime-service-patterns-anti-regression-checklist-2026-05-07.md`](./live-runtime-service-patterns-anti-regression-checklist-2026-05-07.md).
 
 Status:
 

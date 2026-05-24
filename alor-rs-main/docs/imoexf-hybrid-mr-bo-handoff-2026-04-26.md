@@ -108,9 +108,9 @@ analiz_alpha_si/imoexf_hybrid_mr_bo_handoff_2026_04
 
 Docs-local mirror:
 
-```text
-docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts
-```
+The original research artifact bundle is intentionally not included in the
+sanitized corporate handoff branch. Runtime bootstrap seed files required for
+deployment live under `configs/`.
 
 Key files:
 

@@ -125,7 +125,8 @@ Required before runtime promotion:
   high180 midpoint semantics are now source-aligned. The saved source reference
   still carries old service-bar and calendar-zero riskgate semantics, so
   official parity needs a refreshed filtered replay bundle/reference before
-  judging the final BO execution-contract drift.
+  judging the final BO execution-contract drift. Raw replay artifacts are not
+  included in the sanitized corporate handoff branch.
 - treat `riskgate_high180_lb120_seed_2026-04-26.csv` as a one-time bootstrap
   artifact only. After import, a runtime-owned regular-session ledger should be
   the source of truth for the 120-session MR gate. Runtime must expose explicit
@@ -142,8 +143,8 @@ Required before runtime promotion:
   `configs/runtime.hybrid.live.7502SN6.riskgate-shadow.toml` for steady
   `normal_append` shadow validation. The production action-scoped baseline
   config remains unchanged. The seed CSV is expected at
-  `/configs/riskgate_high180_lb120_seed_2026-04-26.csv` on VPS because the
-  runtime image does not carry `docs/` artifacts;
+  `/configs/riskgate_high180_lb120_seed_2026-04-26.csv` inside the runtime
+  container. The seed is checked into `configs/` in the sanitized branch;
 - decide explicitly whether Rust close-bar/no-overnight `bo_gap_flatten` is the
   accepted runtime contract. If accepted and final report is clean, IMOEXF can
   move to extended micro soak at size `1` with explicit MR/BO attribution
@@ -162,7 +163,7 @@ Primary candidate:
 Reference artifacts:
 
 - `docs/imoexf-hybrid-mr-bo-handoff-2026-04-26.md`
-- `docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/`
+- `configs/riskgate_high180_lb120_seed_2026-04-26.csv`
 
 ## Rollout Guardrails
 

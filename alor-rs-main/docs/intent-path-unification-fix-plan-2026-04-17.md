@@ -6,13 +6,10 @@ Date: 2026-04-17
 
 This document defines the implementation plan and technical specification for the post-soak fix line.
 
-It is driven by the conclusion memo:
-
-- [extended-live-micro-soak-final-memo-2026-04-17.md](./extended-live-micro-soak-final-memo-2026-04-17.md)
-
-and the engineering synthesis:
-
-- [extended-live-micro-soak-engineering-analysis-2026-04-17.md](./extended-live-micro-soak-engineering-analysis-2026-04-17.md)
+It is driven by the extended micro-soak engineering conclusion. The raw
+observation memo and daily soak journals are intentionally not included in the
+sanitized corporate handoff branch; this document keeps the actionable fix
+plan only.
 
 The central objective is:
 

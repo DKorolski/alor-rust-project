@@ -298,7 +298,10 @@ Evidence:
 
 - `docs/ri-author41-42-live-contract-2026-05-01.md`
 - `docs/imoexf-primary-runtime-integration-review-handoff-2026-04-26.md`
-- `docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/FROZEN_MODEL_SPEC.md`
+- IMOEXF frozen model/risk-gate details are summarized in
+  `docs/imoexf-hybrid-mr-bo-handoff-2026-04-26.md`; raw research artifact
+  bundles are intentionally omitted from the sanitized corporate handoff
+  branch.
 
 Patterns:
 

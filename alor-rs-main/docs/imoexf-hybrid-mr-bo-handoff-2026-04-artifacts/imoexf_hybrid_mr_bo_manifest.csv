@@ -1,9 +1,0 @@
-instrument,package_status,model_id,role,family,component,parameter_set,default_for_soak,notes
-IMOEXF,SOFT_GO_AFTER_REPLAY_PARITY,hybrid_mr_riskgate_high180_lb120__bo_new_k053,primary,HYBRID,MR+BO,riskgate_high180_lb120 + bo_new_k053,true,Recommended extended micro soak candidate after 10m replay parity.
-IMOEXF,SHADOW_CANARY,hybrid_mr_adaptive_lb120_mean__bo_new_k053,secondary,HYBRID,MR+BO,adaptive_lb120_mean_gate + bo_new_k053,false,Higher test_30 result but more selector complexity; shadow/canary only.
-IMOEXF,COMPARISON_BASELINE,baseline_runtime_hybrid,baseline,HYBRID,MR+BO,current_runtime_config,false,Keep for delta comparison; not as updated default.
-IMOEXF,COMPONENT_DEFAULT,bo_new_k053,component,BO,BO,bo_k053_stop035_stop070_wait4,true,Preferred BO component.
-IMOEXF,RECENT_FORWARD_ALT,bo_new_k059,component,BO,BO,bo_k059_stop035_stop070_wait4,false,Recent-forward alternate; not broad default.
-IMOEXF,COMPONENT_DEFAULT,riskgate_high180_lb120,component,MR,MR,regular_weekday_anchor_broad005050_high180_kl085_ks090_sl7_lb120,true,Preferred MR smoothing rule.
-IMOEXF,SESSION_POLICY,weekend_regular_weekday_anchor,contract,DATA,SESSION,regular_weekday_anchor_trade_weekdays_only,true,See WEEKEND_SESSION_POLICY.md; keep weekend bars for audit but do not trade or anchor from Saturday/Sunday sessions.
-IMOEXF,REPLAY_AUDIT,session_contract_audit,contract,HYBRID,MR+BO,mr_window_no_overlap_bo_gap_flatten_pending,true,See IMOEXF_MR_BO_SESSION_AUDIT.md; MR/no-overlap pass and BO anchor use is acceptable; BO gap flatten requires an explicit Rust replay/runtime parity assert before final acceptance.

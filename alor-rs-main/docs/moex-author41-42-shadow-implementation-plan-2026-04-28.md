@@ -689,15 +689,17 @@ merge:         sort by entry_ts, drop trades whose entry_ts <= last accepted exi
 
 Rust now represents this as `replay_ri_author41_dual_no_overlap_source`.
 
-Replay command:
+Replay command used during model handoff. The prepared bars and source trade
+CSV files are research inputs and are intentionally not included in the
+sanitized corporate handoff branch:
 
 ```text
 cargo run -p strategy-runtime --bin moex_author41_replay -- \
-  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
-  --source-trades-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_trades.csv \
-  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --bars-csv <prepared_10m_bars.csv> \
+  --source-trades-csv <fixed_candidate_trades.csv> \
+  --source-daily-csv <fixed_candidate_daily.csv> \
   --model-id ri_author41_mr_primary \
-  --out-json docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_author41_replay_comparison.json
+  --out-json <ri_author41_replay_comparison.json>
 ```
 
 Result:
@@ -756,15 +758,16 @@ Implemented source contract:
 - same-bar close timed exit at `23:00`;
 - last-bar forced close fallback.
 
-Replay command:
+Replay command used during model handoff. Research input/output artifacts are
+not included in the sanitized corporate handoff branch:
 
 ```text
 cargo run -p strategy-runtime --bin moex_author42_replay -- \
-  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
-  --source-trades-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_trades.csv \
-  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --bars-csv <prepared_10m_bars.csv> \
+  --source-trades-csv <fixed_candidate_trades.csv> \
+  --source-daily-csv <fixed_candidate_daily.csv> \
   --model-id ri_author42_bo_primary \
-  --out-json docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_author42_replay_comparison.json
+  --out-json <ri_author42_replay_comparison.json>
 ```
 
 Result:
@@ -832,14 +835,15 @@ actual_author41_trades: 1995
 actual_author42_trades: 971
 ```
 
-Replay command:
+Replay command used during model handoff. Research input/output artifacts are
+not included in the sanitized corporate handoff branch:
 
 ```text
 cargo run -p strategy-runtime --bin moex_author41_42_combo_replay -- \
-  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
-  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --bars-csv <prepared_10m_bars.csv> \
+  --source-daily-csv <fixed_candidate_daily.csv> \
   --model-id ri_author41_42_primary_combo_cost2 \
-  --out-json docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_author41_42_combo_replay_comparison.json
+  --out-json <ri_author41_42_combo_replay_comparison.json>
 ```
 
 Result:
@@ -892,8 +896,8 @@ Journal command:
 
 ```text
 cargo run -p strategy-runtime --bin moex_author41_42_combo_replay -- \
-  --bars-csv docs/moex-author41-42-shadow-2026-04-28-artifacts/ri_2019-01-01_2026-03-27_prepared_10m.csv \
-  --source-daily-csv /Users/denisq/Documents/from_mac/projects/strategies_list/analiz_alpha_si/moex_imoexf_ri_author41_42_fixed_2026_04/fixed_candidate_daily.csv \
+  --bars-csv <prepared_10m_bars.csv> \
+  --source-daily-csv <fixed_candidate_daily.csv> \
   --model-id ri_author41_42_primary_combo_cost2 \
   --out-json /tmp/ri_author41_42_combo_replay_check.json \
   --out-journal-jsonl /tmp/ri_author41_42_combo_shadow_journal_check.jsonl

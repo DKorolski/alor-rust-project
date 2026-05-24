@@ -4,8 +4,9 @@ Date: 2026-03-26
 
 Related documents:
 
-- `docs/create-limit-hardening-2.0-results-2026-03-26.md`
-- `docs/create-limit-tz1.6-results-2026-03-26.md`
+- Historical experiment result artifacts are intentionally omitted from the
+  sanitized corporate handoff branch. This runbook keeps only the operational
+  rollout procedure.
 
 ## 1. Purpose
 
@@ -55,7 +56,7 @@ docker buildx build \
 ## 3. Rollout On VPS
 
 ```bash
-ssh root@155.212.170.21
+ssh <deploy-user>@<target-host>
 ```
 
 Backup current env files:

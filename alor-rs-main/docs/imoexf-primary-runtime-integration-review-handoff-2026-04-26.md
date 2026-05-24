@@ -93,11 +93,10 @@ comparing Backtrader next-bar fills with Rust close-bar/event-loop behavior.
 
 ## Seed Artifact Review
 
-Added seed artifacts:
+Added deployment seed artifacts:
 
-- `docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26.csv`
-- `docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/riskgate_high180_lb120_seed_2026-04-26_metadata.json`
-- `docs/imoexf-hybrid-mr-bo-handoff-2026-04-artifacts/RISK_GATE_SEED_STATE.md`
+- `configs/riskgate_high180_lb120_seed_2026-04-26.csv`
+- `configs/riskgate_high180_lb120_seed_2026-04-26_metadata.json`
 
 Mechanical validation:
 
@@ -135,19 +134,15 @@ Snapshot = current operational process state only
 
 Repository packaging note:
 
-```text
-docs/*-artifacts/ is ignored by alor-rs-main/.gitignore by default.
-```
+Historical research artifact bundles are intentionally omitted from the
+sanitized corporate handoff branch. Runtime-required seed files are stored in
+`configs/`.
 
-The ignore rule is narrowed for the review-critical files:
+- `configs/riskgate_high180_lb120_seed_2026-04-26.csv`
+- `configs/riskgate_high180_lb120_seed_2026-04-26_metadata.json`
 
-- `SERVICE_BAR_EXCLUSION_BACKTEST.md`
-- `RISK_GATE_SEED_STATE.md`
-- `riskgate_high180_lb120_seed_2026-04-26.csv`
-- `riskgate_high180_lb120_seed_2026-04-26_metadata.json`
-
-This keeps the full artifact directory protected from accidental bulk commits
-while allowing the seed/state package to be reviewed normally.
+This keeps the corporate handoff focused on deployable runtime inputs instead
+of historical replay outputs.
 
 ## What Is Not Production-Integrated Yet
 
@@ -553,9 +548,9 @@ Use this checklist only after review accepts the current conditional soak scope.
 6. Start with `risk_gate_mode = bootstrap_from_seed` and the checked-in
    `riskgate_high180_lb120_seed_2026-04-26.csv`.
    Use `configs/runtime.hybrid.live.7502SN6.riskgate-bootstrap.toml`.
-   On VPS the seed CSV must be copied into the mounted config directory as
-   `/configs/riskgate_high180_lb120_seed_2026-04-26.csv`; it is intentionally
-   not read from `docs/` inside the runtime image.
+   The seed CSV is checked into `configs/` and must be mounted into the
+   container config directory as
+   `/configs/riskgate_high180_lb120_seed_2026-04-26.csv`.
 7. Verify startup logs contain `risk_gate_startup_bootstrap` with seed import
    or existing-ledger decision, `state_refreshed = true`, and no identity
    mismatch.

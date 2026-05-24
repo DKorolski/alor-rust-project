@@ -2,9 +2,9 @@
 
 Date: 2026-04-18
 
-Related incident:
-
-- [live-incident-note-2026-04-17-trading-hybrid-bo-exit-break2-request-id-skew.md](./live-incident-note-2026-04-17-trading-hybrid-bo-exit-break2-request-id-skew.md)
+Related live incident notes are intentionally omitted from the sanitized
+corporate handoff branch. This document keeps the actionable shared-class fix
+plan.
 
 Related broader plan:
 
