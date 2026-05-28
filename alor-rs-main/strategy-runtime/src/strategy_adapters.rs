@@ -98,6 +98,9 @@ impl HybridIntradayAdapter {
                 Ok(MeanReversionVariant::ClassicPrevDayRange)
             }
             "high180" => Ok(MeanReversionVariant::High180),
+            "author41_boundary_short" | "author41_short" => {
+                Ok(MeanReversionVariant::Author41BoundaryShort)
+            }
             other => bail!("unsupported hybrid_intraday mr_variant: {other}"),
         }
     }
@@ -429,6 +432,21 @@ mod tests {
             HybridIntradayAdapter::from_strategy_config(&config).expect("hybrid runtime config");
 
         assert_eq!(runtime_config.mr_variant, MeanReversionVariant::High180);
+    }
+
+    #[test]
+    fn hybrid_adapter_accepts_author41_boundary_short_variant() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.mr_variant = "author41_boundary_short".to_string();
+
+        let runtime_config =
+            HybridIntradayAdapter::from_strategy_config(&config).expect("hybrid runtime config");
+
+        assert_eq!(
+            runtime_config.mr_variant,
+            MeanReversionVariant::Author41BoundaryShort
+        );
     }
 
     #[test]

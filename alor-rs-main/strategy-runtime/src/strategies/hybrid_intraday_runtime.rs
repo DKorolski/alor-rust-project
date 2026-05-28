@@ -63,6 +63,7 @@ pub enum HybridIntradayProfile {
 pub enum MeanReversionVariant {
     ClassicPrevDayRange,
     High180,
+    Author41BoundaryShort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +202,16 @@ pub struct HybridIntradayRuntimeStrategy {
 }
 
 impl HybridIntradayRuntimeStrategy {
+    const AUTHOR41_SHORT_K: f64 = 0.16;
+    const AUTHOR41_SHORT_TAKE_K: f64 = 0.02;
+    const AUTHOR41_SHORT_STOP_K: f64 = 0.58;
+    const AUTHOR41_MIN_REL_RANGE: f64 = 0.005;
+    const AUTHOR41_MAX_REL_RANGE: f64 = 0.075;
+    const AUTHOR41_ENTRY_END_HOUR: u32 = 12;
+    const AUTHOR41_ENTRY_END_MINUTE: u32 = 0;
+    const AUTHOR41_TIME_EXIT_HOUR: u32 = 20;
+    const AUTHOR41_TIME_EXIT_MINUTE: u32 = 0;
+
     fn action_debug_label(action: &Action) -> String {
         match action {
             Action::SubmitEntry(entry) => format!(
@@ -351,6 +362,14 @@ impl HybridIntradayRuntimeStrategy {
 
     fn uses_high180_mr(&self) -> bool {
         self.config.mr_variant == MeanReversionVariant::High180
+    }
+
+    fn uses_author41_boundary_short_mr(&self) -> bool {
+        self.config.mr_variant == MeanReversionVariant::Author41BoundaryShort
+    }
+
+    fn uses_mr_override(&self) -> bool {
+        self.uses_high180_mr() || self.uses_author41_boundary_short_mr()
     }
 
     fn mr_gate_allows_current_session(&self) -> bool {
@@ -522,6 +541,63 @@ impl HybridIntradayRuntimeStrategy {
             return Some(ReasonCode::MeanRevTimeCutoff);
         }
         None
+    }
+
+    fn author41_boundary_short_entry_signal(
+        &self,
+        dt_local: NaiveDateTime,
+        close: f64,
+        close_prev: f64,
+        day_range_prev: f64,
+    ) -> Option<EntrySignal> {
+        let entry_end = NaiveTime::from_hms_opt(
+            Self::AUTHOR41_ENTRY_END_HOUR,
+            Self::AUTHOR41_ENTRY_END_MINUTE,
+            0,
+        )
+        .unwrap_or(NaiveTime::MIN);
+        if dt_local.time() > entry_end {
+            return None;
+        }
+        if close_prev <= 0.0 || day_range_prev <= 0.0 || !close.is_finite() {
+            return None;
+        }
+
+        // We keep a close-based normalization to stay deterministic in live runtime
+        // where only previous close/range are guaranteed at this stage.
+        let rel_range = day_range_prev / close_prev;
+        if !(Self::AUTHOR41_MIN_REL_RANGE < rel_range && rel_range < Self::AUTHOR41_MAX_REL_RANGE)
+        {
+            return None;
+        }
+
+        let upper = close_prev + Self::AUTHOR41_SHORT_K * day_range_prev;
+        let short_signal = close > close_prev && close < upper;
+        if !short_signal {
+            return None;
+        }
+
+        Some(EntrySignal {
+            owner: Owner::MeanReversion,
+            side: Side::Short,
+            entry_style: EntryStyle::Bracket,
+            reason: ReasonCode::MorningMeanReversionShort,
+            stop_price: Some(close_prev + Self::AUTHOR41_SHORT_STOP_K * day_range_prev),
+            take_price: Some(close_prev - Self::AUTHOR41_SHORT_TAKE_K * day_range_prev),
+        })
+    }
+
+    fn author41_boundary_short_exit_reason(&self, dt_local: NaiveDateTime) -> Option<ReasonCode> {
+        if self.current_owner != Some(Owner::MeanReversion) {
+            return None;
+        }
+        let time_exit = NaiveTime::from_hms_opt(
+            Self::AUTHOR41_TIME_EXIT_HOUR,
+            Self::AUTHOR41_TIME_EXIT_MINUTE,
+            0,
+        )
+        .unwrap_or(NaiveTime::MIN);
+        (dt_local.time() >= time_exit).then_some(ReasonCode::MeanRevTimeCutoff)
     }
 
     fn breakout_eod_time(&self) -> NaiveTime {
@@ -2083,6 +2159,45 @@ mod tests {
             v: 1.0,
             origin,
         }
+    }
+
+    #[test]
+    fn author41_boundary_short_variant_emits_short_bracket_entry() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
+        let strategy = HybridIntradayRuntimeStrategy::new(cfg);
+
+        let dt_local = chrono::NaiveDate::from_ymd_opt(2026, 5, 28)
+            .expect("date")
+            .and_hms_opt(10, 0, 0)
+            .expect("time");
+        let signal = strategy
+            .author41_boundary_short_entry_signal(dt_local, 100.2, 100.0, 2.0)
+            .expect("author41 short entry");
+
+        assert_eq!(signal.owner, Owner::MeanReversion);
+        assert_eq!(signal.side, Side::Short);
+        assert_eq!(signal.entry_style, EntryStyle::Bracket);
+        assert_eq!(signal.reason, ReasonCode::MorningMeanReversionShort);
+        assert_eq!(signal.take_price, Some(99.96));
+        assert_eq!(signal.stop_price, Some(101.16));
+    }
+
+    #[test]
+    fn author41_boundary_short_variant_time_cutoff_exit_after_20_00() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.current_owner = Some(Owner::MeanReversion);
+
+        let dt_local = chrono::NaiveDate::from_ymd_opt(2026, 5, 28)
+            .expect("date")
+            .and_hms_opt(20, 0, 0)
+            .expect("time");
+        assert_eq!(
+            strategy.author41_boundary_short_exit_reason(dt_local),
+            Some(ReasonCode::MeanRevTimeCutoff)
+        );
     }
 
     #[test]
@@ -4370,16 +4485,30 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 return intents;
             }
         }
-        let mut actions = if self.uses_high180_mr() {
-            let mr_entry_signal = if self.mr_gate_allows_current_session() {
-                self.high180_entry_signal(dt_local, bar.close, close_prev, day_range_prev)
+        let mut actions = if self.uses_mr_override() {
+            let mr_entry_signal = if self.uses_high180_mr() {
+                if self.mr_gate_allows_current_session() {
+                    self.high180_entry_signal(dt_local, bar.close, close_prev, day_range_prev)
+                } else {
+                    None
+                }
             } else {
-                None
+                self.author41_boundary_short_entry_signal(
+                    dt_local,
+                    bar.close,
+                    close_prev,
+                    day_range_prev,
+                )
+            };
+            let mr_exit_reason = if self.uses_high180_mr() {
+                self.high180_exit_reason(dt_local)
+            } else {
+                self.author41_boundary_short_exit_reason(dt_local)
             };
             self.orchestrator.on_bar_with_mr_override(
                 bar_input,
                 mr_entry_signal,
-                self.high180_exit_reason(dt_local),
+                mr_exit_reason,
             )
         } else {
             self.orchestrator.on_bar(bar_input)
