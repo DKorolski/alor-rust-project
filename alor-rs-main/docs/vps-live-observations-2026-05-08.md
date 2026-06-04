@@ -324,3 +324,229 @@ SESSIONGAP_2026_05_07 = NO_STRATEGY_TRADE
 RI_MICRO_2026_05_07 = REMEDIATION_PAIR_BEFORE_SERVICE_HARDENING / FLAT
 RI_SHADOW_2026_05_07 = OBSERVATION_ONLY / NO_LIVE_COMMANDS
 ```
+
+## RI Author41/42 Micro Full-Path Observation
+
+Collection time: 2026-05-08 11:51-12:05 MSK.
+
+Scope:
+
+```text
+stack: trading-ri-author41-42-7502miw
+runtime image: ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-fcc1dab-ri-service-20260507
+gateway image: ghcr.io/dkorolski/alor-rust-project/alor-gateway:manual-5430299-protplace-20260428
+instrument: RTS-6.26
+mode: micro_live
+execution_path: action_scoped_only
+```
+
+Runtime/gateway health:
+
+```text
+strategy-runtime: Up 23h, healthy
+alor-gateway:     Up 23h, healthy
+Redis memory:     63.47M / 512M, fragmentation 1.16
+cmd.orders.7502MIW.ri_author41_42.micro XLEN=4
+cmd.acks.7502MIW.ri_author41_42.micro   XLEN=4
+```
+
+Live guard:
+
+```text
+2026-05-08 09:00:07 MSK: LiveReady / ALLOWED
+```
+
+Observed RI MR cycles:
+
+```text
+Cycle 1:
+  component: author41_mr
+  model signal: 2026-05-08 09:00:00 MSK, short
+  entry intent: sell 1 RTS-6.26, action=market, request_id=ae2ce75b-...
+  entry ack: accepted, broker_order_id=1925039822792044716
+  entry fill: sell 1 @ 110290.0, commission=10.91
+  model exit: take_author_close, scheduled_exit=09:20 MSK, shadow_pnl_points=+88
+  exit intent: buy 1 RTS-6.26, action=market, request_id=dbe9499d-...
+  exit ack: accepted, broker_order_id=1925039822792062398
+  exit fill: buy 1 @ 110170.0, commission=10.91
+  gross result: +120 points before commission
+  final broker position after cycle: flat
+
+Cycle 2:
+  component: author41_mr
+  model signal: 2026-05-08 09:30:00 MSK, short
+  entry intent: sell 1 RTS-6.26, action=market, request_id=cde911b0-...
+  entry ack: accepted, broker_order_id=1925039822792069695
+  entry fill: sell 1 @ 110360.0, commission=10.91
+  model exit: take_author_close, scheduled_exit=10:00 MSK, shadow_pnl_points=+158
+  exit intent: buy 1 RTS-6.26, action=market, request_id=9a3e0297-...
+  exit ack: accepted, broker_order_id=1925039822792099620
+  exit fill: buy 1 @ 110200.0, commission=10.91
+  gross result: +160 points before commission
+  final broker position after cycle: flat
+```
+
+Transport/readiness observations:
+
+```text
+All four RI micro commands used action-scoped CWS sessions.
+Each action-scoped session performed fresh authorize before create:market.
+All four CWS responses were httpCode=200 and ack status=accepted.
+No command_rejected observed.
+No live pending request remained after the cycles.
+```
+
+Broker/runtime flat checks:
+
+```text
+broker.positions.7502MIW latest RTS-6.26 row:
+  qty=0.0, avg_price=0.0, ts_utc=1778224201
+
+runtime.state.ri_author41_42.micro.7502MIW latest:
+  phase="flat"
+  current_component=null
+  current_side=null
+  pending_entry_request_id=null
+  pending_exit_request_id=null
+  last_transition_reason="live_position_flat_confirmed"
+  last_trade_id="1925039822792034455"
+```
+
+Warnings/anomalies:
+
+```text
+Runtime WARN:
+  orphan_trade on cycle 1 exit fill
+  trade_id=1925039822792033470
+  order_id=1925039822792062398
+  side=buy, qty=1, price=110170.0
+
+Interpretation:
+  This appears to be an event-ordering / observability race: the trade event
+  reached runtime before the ack mapping was visible there. Gateway request_map
+  did resolve the same order_id/request_id, the command ack was accepted, and
+  broker/runtime state later converged to flat.
+
+Gateway WARN:
+  overnight ws/cws reconnects at 03:24-03:31 UTC, pending_count=0.
+
+Interpretation:
+  Benign reconnects; no command was in flight.
+```
+
+Broker order-record caveat:
+
+```text
+The gateway broker.orders stream reports order_type=limit and reference prices
+for these create:market actions. Runtime execution_confirmed correctly marks
+exec_price as the fill and warns that reference_price_from_order_record is not
+the execution price. Use broker.trades / execution_confirmed for economics.
+```
+
+Status:
+
+```text
+RI_MICRO_2026_05_08 = FIRST_CLEAN_POST_HARDENING_FULL_PATH_READ
+RI_MICRO_PATH = ACTION_SCOPED_CREATE_MARKET_OK
+RI_MICRO_POSITION = FLAT_CONFIRMED_BY_BROKER_AND_RUNTIME
+RI_MICRO_ECONOMICS = TWO_MR_SHORT_CYCLES / +280_GROSS_POINTS_BEFORE_COMMISSION
+RI_MICRO_WARNINGS = ONE_ORPHAN_TRADE_OBSERVABILITY_RACE / NON_BLOCKING
+```
+
+Follow-up:
+
+```text
+1. Keep RI at size=1 during the current micro soak.
+2. Monitor whether orphan_trade repeats; if repeated, add a service-hardening
+   task for earlier request_map/ack correlation or delayed orphan classification.
+3. Record the analyst TP/SL verdict below: TP limit remains out of the primary
+   RI micro contract; SL bracket remains a separate future safety discussion.
+```
+
+Analyst follow-up on TP/SL execution contract:
+
+```text
+TP bracket/limit should not be enabled as the primary live micro contract.
+Keep RI MR TP as closed-bar `take_author_close` followed by marketable
+action-scoped exit for parity.
+
+If operational protection is strengthened later, discuss SL bracket/stop-limit
+separately. The research stop condition is already level-touch based, while the
+TP limit variant changes the contract and may improve win-rate appearance but
+hurt expectancy.
+```
+
+Code note:
+
+```text
+The older `ri_dual_no_overlap_plateau()` helper still exists with summary
+parameters K=0.07 / StopK=0.58, but it is not the active replay/live handoff
+path. It is now marked as a legacy local/unit-test helper.
+```
+
+## Sessiongap 2026-05-08 Completed Trade Correction
+
+Collection time: 2026-05-09 14:50 MSK.
+
+Reason for correction:
+
+```text
+The pre-session 2026-05-08 note correctly said there were no new sessiongap
+intents in the overnight check window, but the trading session later produced a
+completed sessiongap USDRUBF cycle. Add the completed-session attribution here
+so the daily journal does not undercount sessiongap activity.
+```
+
+Observed sessiongap cycle:
+
+```text
+strategy_id: session_gap_standalone
+symbol: USDRUBF
+qty: 1
+direction: short
+
+entry signal ts: 2026-05-08 12:50:00 MSK
+entry intent emitted: 2026-05-08 13:00:01 MSK
+entry order: sell 1 USDRUBF @ 74.43
+entry ack: accepted, cws_http_code=200
+entry fill: sell 1 @ 74.43, commission=3.45
+
+exit signal ts: 2026-05-08 13:10:00 MSK
+exit intent emitted: 2026-05-08 13:20:16 MSK
+exit order: buy 1 USDRUBF @ 74.32
+exit ack: accepted, cws_http_code=200
+exit fill: buy 1 @ 74.31, commission=3.45
+
+gross result: +0.12 price points before commission
+observed commissions: 3.45 + 3.45 = 6.90
+final broker position: USDRUBF qty=0
+```
+
+Runtime path:
+
+```text
+Flat -> PendingEntry -> InPosition -> PendingExit -> Flat
+```
+
+Warnings/anomalies:
+
+```text
+Runtime WARN:
+  orphan_trade on the exit fill
+  trade_id=2023556064640770579
+  order_id=2023556064640894922
+  side=buy, qty=1, price=74.31
+
+Interpretation:
+  The exit command ack was accepted by the gateway and the strategy transitioned
+  PendingExit -> Flat. This looks like the same event-ordering / observability
+  race seen in other live contours, not a failed exit or uncontrolled position.
+```
+
+Corrected status:
+
+```text
+SESSIONGAP_2026_05_08 = CLEAN_SHORT_ENTRY_EXIT / FLAT
+SESSIONGAP_ECONOMICS_2026_05_08 = +0.12_PRICE_POINTS_BEFORE_COMMISSION
+SESSIONGAP_WARNINGS_2026_05_08 = ONE_ORPHAN_TRADE_OBSERVABILITY_RACE / NON_BLOCKING
+```

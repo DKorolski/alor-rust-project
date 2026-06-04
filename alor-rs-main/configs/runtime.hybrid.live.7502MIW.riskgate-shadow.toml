@@ -1,8 +1,14 @@
 redis_url = "redis://127.0.0.1/"
-portfolio = "7502T0U"
+portfolio = "7502MIW"
 exchange = "MOEX"
 source = "strategy-runtime"
-consumer_group = "strategy-runtime-hybrid-author41-short-7502T0U"
+# Steady shadow-validation contour. It reads/appends the runtime-owned
+# risk-gate ledger but does not suppress live MR entries yet.
+#
+# Note: the risk-gate ledger is portfolio-independent model memory and should
+# be preserved across portfolio moves. Runtime state and broker streams are
+# portfolio-specific and use 7502MIW keys below.
+consumer_group = "strategy-runtime-hybrid-riskgate-shadow-7502MIW"
 consumer_name = "auto"
 reset_state_on_start = false
 
@@ -18,20 +24,20 @@ require_gateway_ready = true
 
 [runtime.health]
 enabled = true
-listen_addr = "127.0.0.1:8094"
+listen_addr = "127.0.0.1:8091"
 expose_metrics = false
 
 [streams]
-bars = "md.bars.7502T0U.10m"
-orders = "broker.orders.7502T0U"
-trades = "broker.trades.7502T0U"
-positions = "broker.positions.7502T0U"
-commands = "cmd.orders.7502T0U.hybrid_author41_short"
-acks = "cmd.acks.7502T0U.hybrid_author41_short"
-snapshots = "broker.snapshots.7502T0U"
-health = "events.health.hybrid_author41_short.7502T0U"
+bars = "md.bars.7502MIW.10m"
+orders = "broker.orders.7502MIW"
+trades = "broker.trades.7502MIW"
+positions = "broker.positions.7502MIW"
+commands = "cmd.orders.7502MIW"
+acks = "cmd.acks.7502MIW"
+snapshots = "broker.snapshots.7502MIW"
+health = "events.health"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.hybrid_intraday.live.author41_short.imoexf.7502T0U"
+runtime_state = "runtime.state.hybrid_intraday.live.riskgate_shadow.imoexf.7502MIW"
 
 [read]
 block_ms = 500
@@ -46,14 +52,14 @@ trades = 5000
 positions = 20000
 commands = 5000
 acks = 5000
-health = 1500
+health = 5000
 runtime_state = 500
 
 [strategy]
 strategy_id = "hybrid_imoexf"
 strategy_kind = "hybrid_intraday"
 symbol = "IMOEXF"
-qty = 1.0
+qty = 4.0
 side = "buy"
 live_order_style = "marketable_limit"
 marketable_limit_offset_ticks = 0
@@ -81,12 +87,12 @@ weekends_off = true
 timezone_offset_hours = 3
 
 [strategy.hybrid_intraday]
-profile = "baseline_runtime_hybrid"
-mr_variant = "author41_boundary_short"
-mr_gate_policy = "disabled"
-risk_gate_mode = "disabled"
-risk_gate_seed_file = ""
-risk_gate_ledger_key = ""
+profile = "imoexf_primary_riskgate_high180_lb120"
+mr_variant = "high180"
+mr_gate_policy = "shadow_pnl_lb120_positive"
+risk_gate_mode = "normal_append"
+risk_gate_seed_file = "/configs/riskgate_high180_lb120_seed_2026-04-26.csv"
+risk_gate_ledger_key = "runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120"
 model_session_start_time = "09:00:00"
 model_session_end_time = "23:49:59"
 mr_min_range_long = 0.013
@@ -100,6 +106,7 @@ mr_k_short = 0.055
 mr_take_k_short = 0.16
 mr_stop_k_short = 0.43
 mr_session_end_time = "11:59:00"
+# 10m feed: force MR exit on the 11:50 model bar, before BO becomes eligible at 12:00.
 mr_exit_offset_min = 10
 bo_k = 0.53
 bo_stop1_range = 0.51
@@ -122,9 +129,9 @@ stop_end_buffer_sec = 60
 [paper]
 enabled = false
 output = "stdout"
-file_path = "./reports/paper_hybrid_7502T0U_author41_short.jsonl"
-trades_csv = "./reports/trades_hybrid_7502T0U_author41_short.csv"
-summary_json = "./reports/summary_hybrid_7502T0U_author41_short.json"
+file_path = "./reports/paper_hybrid_7502MIW_riskgate_shadow.jsonl"
+trades_csv = "./reports/trades_hybrid_7502MIW_riskgate_shadow.csv"
+summary_json = "./reports/summary_hybrid_7502MIW_riskgate_shadow.json"
 append = false
 
 [backtest]
