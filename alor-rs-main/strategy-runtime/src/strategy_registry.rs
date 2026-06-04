@@ -93,7 +93,7 @@ impl StrategyRegistry {
                     uses_bootstrap_snapshot: true,
                     uses_runtime_state_restore: true,
                     uses_history_warmup: true,
-                    uses_stop_orders: false,
+                    uses_stop_orders: true,
                 },
             },
             StrategyDescriptor {
@@ -410,7 +410,7 @@ mod tests {
                 uses_bootstrap_snapshot: true,
                 uses_runtime_state_restore: true,
                 uses_history_warmup: true,
-                uses_stop_orders: false,
+                uses_stop_orders: true,
             }
         );
 
@@ -438,6 +438,6 @@ mod tests {
         assert!(alor.capabilities.uses_bootstrap_snapshot);
         assert!(alor.capabilities.uses_runtime_state_restore);
         assert!(alor.capabilities.uses_history_warmup);
-        assert!(!alor.capabilities.uses_stop_orders);
+        assert!(alor.capabilities.uses_stop_orders);
     }
 }
