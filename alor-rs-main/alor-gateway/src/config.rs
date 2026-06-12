@@ -1847,4 +1847,46 @@ refresh_token = "   "
             std::env::remove_var("ALOR_REFRESH_TOKEN");
         }
     }
+
+    #[test]
+    fn loads_ri_author41_42_riu6_roll_gateway_candidates() {
+        let _guard = env_lock().lock().expect("lock env");
+        unsafe {
+            std::env::set_var("ALOR_REFRESH_TOKEN", "test-token");
+        }
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .to_path_buf();
+
+        for portfolio in ["7502MIW", "7502T0U"] {
+            let path = repo_root
+                .join(format!(
+                    "configs/gateway.ri_author41_42.micro.{portfolio}.RIU6.roll-2026-06-12.toml"
+                ))
+                .to_string_lossy()
+                .to_string();
+            let resolved =
+                AlorGatewayConfig::from_file_with_sources(path).expect("load RIU6 roll config");
+
+            assert_eq!(resolved.config.portfolio, portfolio);
+            assert_eq!(resolved.config.symbols, vec!["RIU6".to_string()]);
+            assert_eq!(resolved.config.tf_sec, 600);
+            assert_eq!(
+                resolved.config.control_cws_mode,
+                ControlCwsMode::ActionScoped
+            );
+            assert!(resolved.config.action_scope_enable_market);
+            assert!(resolved.config.action_scope_enable_exit);
+            assert!(
+                resolved
+                    .config
+                    .action_scope_force_token_refresh_before_authorize
+            );
+        }
+
+        unsafe {
+            std::env::remove_var("ALOR_REFRESH_TOKEN");
+        }
+    }
 }
