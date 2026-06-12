@@ -14,9 +14,12 @@ fi
 # Safe stream retention for live soak. This script never touches runtime.state
 # or runtime.riskgate.* keys. It only trims explicit stream prefixes.
 declare -A LIMITS=(
+  [events.health.hybrid_author41_short.7502T0U]=3000
   [events.health.ri_author41_42.*]=2000
   [events.health]=10000
+  [broker.snapshots.7502T0U]=2000
   [broker.snapshots.*]=10000
+  [broker.positions.7502T0U]=2000
   [broker.positions.*]=5000
   [broker.orders.*]=5000
   [broker.trades.*]=5000
@@ -28,6 +31,7 @@ declare -A LIMITS=(
 CONTAINERS=(
   trading-sessiongap-redis-1
   trading-hybrid-redis-1
+  trading-hybrid-author41-7502t0u-redis-1
   trading-alor-usdrubf-redis-1
   trading-ri-author41-42-7502miw-redis-1
   trading-ri-shadow-redis-1

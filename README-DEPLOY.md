@@ -63,6 +63,27 @@ cp env.example .env
   - Live mode (session_gap): `RUNTIME_CONFIG=/configs/runtime.sessiongap.live.7502MIW.toml`
   - Live mode (hybrid): `RUNTIME_CONFIG=/configs/runtime.hybrid.live.7502SN6.toml`
 - Fill `ALOR_REFRESH_TOKEN` and any other secrets.
+- Set per-stream `TRIM_MAXLEN_*` values. Keep health heartbeat enabled: the
+  runtime uses fresh gateway health as a live guard. Reduce retention instead
+  of changing health publication to change-only.
+
+Recommended live-micro retention baseline:
+
+```dotenv
+TRIM_MAXLEN_BARS=3000
+TRIM_MAXLEN_ORDERS=5000
+TRIM_MAXLEN_TRADES=5000
+TRIM_MAXLEN_POSITIONS=2000
+TRIM_MAXLEN_SNAPSHOTS=2000
+TRIM_MAXLEN_COMMANDS=5000
+TRIM_MAXLEN_ACKS=5000
+TRIM_MAXLEN_HEALTH=1500
+```
+
+The legacy `TRIM_MAXLEN` remains a fallback for any per-stream value that is
+not set. Older gateway images only understand the legacy global value, so
+deploy a gateway image containing per-stream retention support before adding
+these variables.
 
 Tag policy:
 
@@ -195,6 +216,36 @@ docker compose up -d
 - Health endpoints return expected status.
 
 Details for pre-live checks and incident handling are in `RUNBOOK.md`.
+
+---
+
+### Redis stream retention verification
+
+After deploying a gateway image with per-stream retention support, verify that
+the resolved limits appear in the gateway startup log:
+
+```bash
+docker compose logs --tail 100 alor-gateway | grep 'gateway mode: transport-only'
+```
+
+Then check the largest streams:
+
+```bash
+docker compose exec -T redis redis-cli --scan --pattern 'events.health*'
+docker compose exec -T redis redis-cli XLEN <health-stream-name>
+docker compose exec -T redis redis-cli XLEN <snapshot-stream-name>
+```
+
+Expected behavior:
+
+- health remains periodic and fresh for the runtime live guard;
+- health length converges to at most `TRIM_MAXLEN_HEALTH`;
+- snapshot and position lengths converge to their own limits;
+- command/order/trade history keeps its independently configured limit.
+
+Rollback only the gateway image and remove the per-stream variables if a
+problem appears. The runtime and Redis do not require a from-zero restart for
+this retention-only change.
 
 ---
 

@@ -33,8 +33,36 @@ pub struct TransportConfig {
     pub consumer_group: String,
     pub consumer_name: String,
     pub trim_maxlen: usize,
+    pub trim: StreamTrimLimits,
     pub block_ms: usize,
     pub claim_idle_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamTrimLimits {
+    pub bars: usize,
+    pub orders: usize,
+    pub trades: usize,
+    pub positions: usize,
+    pub snapshots: usize,
+    pub commands: usize,
+    pub acks: usize,
+    pub health: usize,
+}
+
+impl StreamTrimLimits {
+    pub fn uniform(maxlen: usize) -> Self {
+        Self {
+            bars: maxlen,
+            orders: maxlen,
+            trades: maxlen,
+            positions: maxlen,
+            snapshots: maxlen,
+            commands: maxlen,
+            acks: maxlen,
+            health: maxlen,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

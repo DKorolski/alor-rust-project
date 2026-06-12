@@ -1,8 +1,9 @@
 use std::time::Duration;
 
+use alor_gateway::health::HealthState;
 use alor_gateway::models::{BarEvent, DataOrigin};
 use alor_gateway::transport::{
-    CommandSink, CommandSource, EventSink, StreamNames, TransportConfig,
+    CommandSink, CommandSource, EventSink, StreamNames, StreamTrimLimits, TransportConfig,
 };
 use alor_gateway::transport_redis::{RedisCommandSink, RedisCommandSource, RedisEventSink};
 use alor_protocol::{
@@ -55,6 +56,7 @@ fn base_config(redis_url: String, prefix: &str, consumer_name: &str) -> Transpor
         consumer_group: format!("{prefix}-group"),
         consumer_name: consumer_name.to_string(),
         trim_maxlen: 5,
+        trim: StreamTrimLimits::uniform(5),
         block_ms: 10,
         claim_idle_ms: 5,
     }
@@ -277,5 +279,45 @@ async fn stream_trim_keeps_length_bounded() {
     let client = redis::Client::open(redis_url).unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     let len: i64 = conn.xlen(&config.streams.bars).await.unwrap();
-    assert!(len <= config.trim_maxlen as i64 + 2);
+    assert!(len <= config.trim.bars as i64 + 2);
+}
+
+#[tokio::test]
+async fn event_streams_use_independent_trim_limits() {
+    if skip_without_docker() {
+        return;
+    }
+
+    let docker = Cli::default();
+    let node = docker.run(redis_image());
+    let port = node.get_host_port_ipv4(6379);
+    let redis_url = format!("redis://127.0.0.1:{port}");
+    let prefix = "per-stream-trim";
+    let mut config = base_config(redis_url.clone(), prefix, "consumer-trim");
+    config.trim.health = 3;
+    config.trim.bars = 7;
+    let sink = RedisEventSink::new(config.clone()).unwrap();
+
+    for i in 0..20 {
+        sink.publish_health(HealthState::default()).await.unwrap();
+        sink.publish_bar(BarEvent {
+            symbol: "SYM".to_string(),
+            close_time_utc: i,
+            o: 1.0,
+            h: 1.0,
+            l: 1.0,
+            c: 1.0,
+            v: 1.0,
+            origin: DataOrigin::Live,
+        })
+        .await
+        .unwrap();
+    }
+
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let health_len: i64 = conn.xlen(&config.streams.health).await.unwrap();
+    let bars_len: i64 = conn.xlen(&config.streams.bars).await.unwrap();
+    assert_eq!(health_len, config.trim.health as i64);
+    assert_eq!(bars_len, config.trim.bars as i64);
 }
