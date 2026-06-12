@@ -63,6 +63,7 @@ pub enum HybridIntradayProfile {
 pub enum MeanReversionVariant {
     ClassicPrevDayRange,
     High180,
+    Author41BoundaryShort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +202,17 @@ pub struct HybridIntradayRuntimeStrategy {
 }
 
 impl HybridIntradayRuntimeStrategy {
+    const MIN_MR_TAKE_DISTANCE_TICKS: f64 = 2.0;
+    const AUTHOR41_SHORT_K: f64 = 0.16;
+    const AUTHOR41_SHORT_TAKE_K: f64 = 0.02;
+    const AUTHOR41_SHORT_STOP_K: f64 = 0.58;
+    const AUTHOR41_MIN_REL_RANGE: f64 = 0.005;
+    const AUTHOR41_MAX_REL_RANGE: f64 = 0.075;
+    const AUTHOR41_ENTRY_END_HOUR: u32 = 12;
+    const AUTHOR41_ENTRY_END_MINUTE: u32 = 0;
+    const AUTHOR41_TIME_EXIT_HOUR: u32 = 20;
+    const AUTHOR41_TIME_EXIT_MINUTE: u32 = 0;
+
     fn action_debug_label(action: &Action) -> String {
         match action {
             Action::SubmitEntry(entry) => format!(
@@ -351,6 +363,77 @@ impl HybridIntradayRuntimeStrategy {
 
     fn uses_high180_mr(&self) -> bool {
         self.config.mr_variant == MeanReversionVariant::High180
+    }
+
+    fn uses_author41_boundary_short_mr(&self) -> bool {
+        self.config.mr_variant == MeanReversionVariant::Author41BoundaryShort
+    }
+
+    fn uses_mr_override(&self) -> bool {
+        self.uses_high180_mr() || self.uses_author41_boundary_short_mr()
+    }
+
+    fn round_to_tick(price: f64, tick_size: f64) -> f64 {
+        if tick_size <= 0.0 || !price.is_finite() {
+            return price;
+        }
+        (price / tick_size).round() * tick_size
+    }
+
+    fn mr_take_distance_ticks_after_rounding(
+        &self,
+        reference_price: f64,
+        signal: &EntrySignal,
+    ) -> Option<f64> {
+        if signal.owner != Owner::MeanReversion || signal.entry_style != EntryStyle::Bracket {
+            return None;
+        }
+        let take_price = signal.take_price?;
+        let tick_size = self.config.tick_size;
+        if tick_size <= 0.0 || !reference_price.is_finite() || !take_price.is_finite() {
+            return None;
+        }
+        let entry = Self::round_to_tick(reference_price, tick_size);
+        let take = Self::round_to_tick(take_price, tick_size);
+        let distance_points = match signal.side {
+            Side::Long => take - entry,
+            Side::Short => entry - take,
+        };
+        Some(distance_points / tick_size)
+    }
+
+    fn filter_near_zero_mr_bracket_entry(
+        &self,
+        dt_local: NaiveDateTime,
+        reference_price: f64,
+        signal: Option<EntrySignal>,
+    ) -> Option<EntrySignal> {
+        let signal = signal?;
+        let Some(distance_ticks) =
+            self.mr_take_distance_ticks_after_rounding(reference_price, &signal)
+        else {
+            return Some(signal);
+        };
+        if distance_ticks >= Self::MIN_MR_TAKE_DISTANCE_TICKS {
+            return Some(signal);
+        }
+        info!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "mr_entry_suppressed",
+            reason = "take_too_close_after_rounding",
+            owner = ?signal.owner,
+            side = ?signal.side,
+            dt_local = %dt_local,
+            reference_price,
+            take_price = signal.take_price,
+            rounded_reference_price = Self::round_to_tick(reference_price, self.config.tick_size),
+            rounded_take_price = signal
+                .take_price
+                .map(|price| Self::round_to_tick(price, self.config.tick_size)),
+            distance_ticks,
+            min_distance_ticks = Self::MIN_MR_TAKE_DISTANCE_TICKS,
+        );
+        None
     }
 
     fn mr_gate_allows_current_session(&self) -> bool {
@@ -523,6 +606,62 @@ impl HybridIntradayRuntimeStrategy {
             return Some(ReasonCode::MeanRevTimeCutoff);
         }
         None
+    }
+
+    fn author41_boundary_short_entry_signal(
+        &self,
+        dt_local: NaiveDateTime,
+        close: f64,
+        close_prev: f64,
+        day_range_prev: f64,
+    ) -> Option<EntrySignal> {
+        let entry_end = NaiveTime::from_hms_opt(
+            Self::AUTHOR41_ENTRY_END_HOUR,
+            Self::AUTHOR41_ENTRY_END_MINUTE,
+            0,
+        )
+        .unwrap_or(NaiveTime::MIN);
+        if dt_local.time() > entry_end {
+            return None;
+        }
+        if close_prev <= 0.0 || day_range_prev <= 0.0 || !close.is_finite() {
+            return None;
+        }
+
+        // We keep a close-based normalization to stay deterministic in live runtime
+        // where only previous close/range are guaranteed at this stage.
+        let rel_range = day_range_prev / close_prev;
+        if !(Self::AUTHOR41_MIN_REL_RANGE < rel_range && rel_range < Self::AUTHOR41_MAX_REL_RANGE) {
+            return None;
+        }
+
+        let upper = close_prev + Self::AUTHOR41_SHORT_K * day_range_prev;
+        let short_signal = close > close_prev && close < upper;
+        if !short_signal {
+            return None;
+        }
+
+        Some(EntrySignal {
+            owner: Owner::MeanReversion,
+            side: Side::Short,
+            entry_style: EntryStyle::Bracket,
+            reason: ReasonCode::MorningMeanReversionShort,
+            stop_price: Some(close_prev + Self::AUTHOR41_SHORT_STOP_K * day_range_prev),
+            take_price: Some(close_prev - Self::AUTHOR41_SHORT_TAKE_K * day_range_prev),
+        })
+    }
+
+    fn author41_boundary_short_exit_reason(&self, dt_local: NaiveDateTime) -> Option<ReasonCode> {
+        if self.current_owner != Some(Owner::MeanReversion) {
+            return None;
+        }
+        let time_exit = NaiveTime::from_hms_opt(
+            Self::AUTHOR41_TIME_EXIT_HOUR,
+            Self::AUTHOR41_TIME_EXIT_MINUTE,
+            0,
+        )
+        .unwrap_or(NaiveTime::MIN);
+        (dt_local.time() >= time_exit).then_some(ReasonCode::MeanRevTimeCutoff)
     }
 
     fn breakout_eod_time(&self) -> NaiveTime {
@@ -1181,6 +1320,58 @@ impl HybridIntradayRuntimeStrategy {
                 .with_class(IntentClass::CancelCleanup),
             );
         }
+        intents
+    }
+
+    fn emit_broker_residual_emergency_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        pos: &PositionEvent,
+        reason: &'static str,
+    ) -> Vec<Intent> {
+        if self.pending_exit_request_id.is_some() || pos.qty.abs() <= f64::EPSILON {
+            return Vec::new();
+        }
+        let owner = self.current_owner.unwrap_or(Owner::MeanReversion);
+        let side = if pos.qty > 0.0 {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let created_ts_utc = self.effective_created_ts_utc(ctx, pos.ts_utc);
+        let cycle_id = self
+            .active_cycle_id
+            .unwrap_or_else(|| self.next_cycle_id(created_ts_utc));
+        let comment = self.build_comment(ctx, &cycle_id, owner, TagRole::Exit);
+        let mut intents = self.emit_cancel_all_protection(self.current_side);
+        intents.push(
+            self.build_live_entry_exit_intent(
+                ctx,
+                side,
+                pos.qty.abs(),
+                self.live_reference_price(),
+                Some(comment),
+            )
+            .with_class(IntentClass::Exit),
+        );
+        self.active_cycle_id = Some(cycle_id);
+        self.pending_exit = Some(PendingExit {
+            owner,
+            reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+        });
+        self.pending_exit_request_id = Some(self.live_request_id(ctx, created_ts_utc, side));
+        self.pending_exit_created_ts_utc = Some(created_ts_utc);
+        self.enter_safe_mode(reason);
+        warn!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "broker_residual_emergency_exit",
+            reason,
+            previous_qty = self.last_position_qty,
+            broker_qty = pos.qty,
+            exit_side = ?side,
+            exit_qty = pos.qty.abs(),
+            "broker position changed while bracket was active; cancel protection and flatten residual"
+        );
         intents
     }
 
@@ -2087,6 +2278,99 @@ mod tests {
     }
 
     #[test]
+    fn author41_boundary_short_variant_emits_short_bracket_entry() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
+        let strategy = HybridIntradayRuntimeStrategy::new(cfg);
+
+        let dt_local = chrono::NaiveDate::from_ymd_opt(2026, 5, 28)
+            .expect("date")
+            .and_hms_opt(10, 0, 0)
+            .expect("time");
+        let signal = strategy
+            .author41_boundary_short_entry_signal(dt_local, 100.2, 100.0, 2.0)
+            .expect("author41 short entry");
+
+        assert_eq!(signal.owner, Owner::MeanReversion);
+        assert_eq!(signal.side, Side::Short);
+        assert_eq!(signal.entry_style, EntryStyle::Bracket);
+        assert_eq!(signal.reason, ReasonCode::MorningMeanReversionShort);
+        assert_eq!(signal.take_price, Some(99.96));
+        assert_eq!(signal.stop_price, Some(101.16));
+    }
+
+    #[test]
+    fn author41_near_zero_take_after_rounding_suppresses_live_entry() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(2.0);
+        strategy.entry_ready = true;
+        strategy.last_day_local =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 28).unwrap_or(chrono::NaiveDate::MIN));
+
+        let intents = strategy.on_bar(
+            &test_ctx(Some(0.0)),
+            &test_bar_ohlc(
+                ts_local(2026, 5, 28, 10, 0, 0),
+                100.2,
+                100.3,
+                99.9,
+                100.2,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
+    }
+
+    #[test]
+    fn author41_entry_with_sufficient_rounded_take_distance_is_allowed() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(2600.0);
+        strategy.prev_day_range = Some(60.0);
+        strategy.entry_ready = true;
+        strategy.last_day_local =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 28).unwrap_or(chrono::NaiveDate::MIN));
+
+        let intents = strategy.on_bar(
+            &test_ctx(Some(0.0)),
+            &test_bar_ohlc(
+                ts_local(2026, 5, 28, 10, 0, 0),
+                2601.0,
+                2602.0,
+                2599.0,
+                2601.0,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert_eq!(intents.len(), 1);
+        assert!(strategy.pending_entry.is_some());
+    }
+
+    #[test]
+    fn author41_boundary_short_variant_time_cutoff_exit_after_20_00() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.current_owner = Some(Owner::MeanReversion);
+
+        let dt_local = chrono::NaiveDate::from_ymd_opt(2026, 5, 28)
+            .expect("date")
+            .and_hms_opt(20, 0, 0)
+            .expect("time");
+        assert_eq!(
+            strategy.author41_boundary_short_exit_reason(dt_local),
+            Some(ReasonCode::MeanRevTimeCutoff)
+        );
+    }
+
+    #[test]
     fn high180_live_variant_emits_midpoint_bracket_entry() {
         let mut cfg = test_config();
         cfg.mr_variant = MeanReversionVariant::High180;
@@ -2102,10 +2386,10 @@ mod tests {
             &ctx,
             &test_bar_ohlc(
                 ts_local(2026, 1, 6, 9, 10, 0),
-                99.8,
-                101.0,
-                99.0,
-                99.8,
+                99.7,
+                102.0,
+                99.7,
+                99.7,
                 DataOrigin::Live,
             ),
         );
@@ -2121,8 +2405,35 @@ mod tests {
         let pending = strategy.pending_entry.expect("pending high180 entry");
         assert_eq!(pending.owner, Owner::MeanReversion);
         assert_eq!(pending.entry_style, EntryStyle::Bracket);
-        assert_eq!(pending.take_price, Some(100.0));
-        assert!((pending.stop_price.unwrap_or_default() - 98.4).abs() <= 1e-9);
+        assert_eq!(pending.take_price, Some(100.85));
+        assert!((pending.stop_price.unwrap_or_default() - 91.65).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn high180_near_zero_take_after_rounding_suppresses_live_entry() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::High180;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(4.0);
+        strategy.entry_ready = true;
+        strategy.last_day_local =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 6).unwrap_or(chrono::NaiveDate::MIN));
+
+        let intents = strategy.on_bar(
+            &test_ctx(Some(0.0)),
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 10, 0),
+                99.8,
+                101.0,
+                99.0,
+                99.8,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
     }
 
     #[test]
@@ -2266,10 +2577,10 @@ mod tests {
             &ctx,
             &test_bar_ohlc(
                 ts_local(2026, 1, 6, 9, 0, 0),
-                100.2,
-                101.0,
-                99.0,
-                99.9,
+                99.7,
+                102.0,
+                99.7,
+                99.7,
                 DataOrigin::Live,
             ),
         );
@@ -2293,10 +2604,10 @@ mod tests {
             &ctx,
             &test_bar_ohlc(
                 ts_local(2026, 1, 6, 9, 0, 0),
-                100.2,
-                101.0,
-                99.0,
-                99.9,
+                99.7,
+                102.0,
+                99.7,
+                99.7,
                 DataOrigin::Live,
             ),
         );
@@ -3870,6 +4181,68 @@ mod tests {
     }
 
     #[test]
+    fn tp_fill_waits_for_broker_flat_before_canceling_stop() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Short);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        let ctx = test_ctx(Some(-2.0));
+        let order = OrderEvent {
+            order_id: 111,
+            symbol: "IMOEXF".to_string(),
+            status: "filled".to_string(),
+            qty: 1.0,
+            filled: 1.0,
+            comment: Some(tag("MR", "abc1230001", "TP")),
+            ..OrderEvent::default()
+        };
+
+        let intents = strategy.on_order(&ctx, &order);
+
+        assert!(intents.is_empty());
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+    }
+
+    #[test]
+    fn partial_protective_fill_emits_cancel_and_emergency_flatten() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.last_position_qty = -2.0;
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Short);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        let ctx = test_ctx(Some(-1.0));
+        let pos = PositionEvent {
+            symbol: "IMOEXF".to_string(),
+            qty: -1.0,
+            existing: false,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_120,
+        };
+
+        let intents = strategy.on_position(&ctx, &pos);
+
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::DeleteStopLimit { order_id, .. } if order_id == "sl-1"
+            )
+        }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::Market { qty, side: OrderSide::Buy, .. } if (*qty - 1.0).abs() <= f64::EPSILON
+            )
+        }));
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("broker_position_size_changed")
+        );
+    }
+
+    #[test]
     fn recovered_position_without_owner_enters_safe_mode_and_blocks_entry() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.entry_ready = true;
@@ -4371,17 +4744,30 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 return intents;
             }
         }
-        let mut actions = if self.uses_high180_mr() {
-            let mr_entry_signal = if self.mr_gate_allows_current_session() {
-                self.high180_entry_signal(dt_local, bar.close, close_prev, day_range_prev)
+        let mut actions = if self.uses_mr_override() {
+            let mr_entry_signal = if self.uses_high180_mr() {
+                if self.mr_gate_allows_current_session() {
+                    self.high180_entry_signal(dt_local, bar.close, close_prev, day_range_prev)
+                } else {
+                    None
+                }
             } else {
-                None
+                self.author41_boundary_short_entry_signal(
+                    dt_local,
+                    bar.close,
+                    close_prev,
+                    day_range_prev,
+                )
             };
-            self.orchestrator.on_bar_with_mr_override(
-                bar_input,
-                mr_entry_signal,
-                self.high180_exit_reason(dt_local),
-            )
+            let mr_entry_signal =
+                self.filter_near_zero_mr_bracket_entry(dt_local, bar.close, mr_entry_signal);
+            let mr_exit_reason = if self.uses_high180_mr() {
+                self.high180_exit_reason(dt_local)
+            } else {
+                self.author41_boundary_short_exit_reason(dt_local)
+            };
+            self.orchestrator
+                .on_bar_with_mr_override(bar_input, mr_entry_signal, mr_exit_reason)
         } else {
             self.orchestrator.on_bar(bar_input)
         };
@@ -4599,7 +4985,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         if !is_ours {
             return Vec::new();
         }
-        let mut intents = Vec::new();
+        let intents = Vec::new();
         let status = ord.status.to_ascii_lowercase();
         if !Self::is_terminal_order_status(&status) {
             self.ensure_active_cycle_from_comment(ord.comment.as_deref());
@@ -4610,19 +4996,6 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.pending_tp_created_ts_utc = None;
             if ord.order_id > 0 {
                 self.tp_order_id = Some(ord.order_id);
-            }
-            if status == "filled" {
-                if let Some(stop_order_id) = self.sl_stop_order_id.take() {
-                    intents.push(
-                        Intent::DeleteStopLimit {
-                            order_id: stop_order_id,
-                            side: self.current_side.map(Self::stop_side_for_entry_side),
-                            check_duplicates: Some(true),
-                        }
-                        .with_class(IntentClass::CancelCleanup),
-                    );
-                }
-                self.sl_exchange_order_id = None;
             }
             if matches!(
                 status.as_str(),
@@ -4725,6 +5098,20 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let mut intents = Vec::new();
         let prev = self.last_position_qty;
         let cur = pos.qty;
+        if prev.abs() > f64::EPSILON
+            && cur.abs() > f64::EPSILON
+            && (prev - cur).abs() > f64::EPSILON
+        {
+            let reason = if prev.signum() != cur.signum() {
+                "broker_position_sign_flip"
+            } else {
+                "broker_position_size_changed"
+            };
+            intents.extend(self.emit_broker_residual_emergency_exit(ctx, pos, reason));
+            self.last_position_qty = cur;
+            self.sync_state();
+            return intents;
+        }
         if prev.abs() <= f64::EPSILON && cur.abs() > f64::EPSILON {
             let filled = self.pending_entry.take();
             self.clear_deferred_entry();
@@ -4753,6 +5140,13 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     self.active_cycle_id = Some(self.next_cycle_id(pos.ts_utc));
                 }
                 self.enter_safe_mode("recovered_position_owner_unknown");
+                if !pos.existing {
+                    intents.extend(self.emit_broker_residual_emergency_exit(
+                        ctx,
+                        pos,
+                        "unexpected_broker_residual",
+                    ));
+                }
             }
         } else if prev.abs() > f64::EPSILON && cur.abs() <= f64::EPSILON {
             let closing_side = self.current_side;
