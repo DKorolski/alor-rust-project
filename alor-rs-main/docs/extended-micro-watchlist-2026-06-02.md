@@ -165,6 +165,8 @@ Observation:
 - Seen across RI, Alor-USDRUBF, and IMOEXF hybrid.
 - In checked cases, later ack/order-map reconciliation converged and broker/runtime state ended flat.
 - Current classification: service observability issue, not position-risk incident.
+- On `2026-06-04`, `trading-hybrid-author41-7502t0u` logged one `orphan_trade` on an `IMOEXF` MR short entry.
+- The broker lifecycle still converged cleanly: TP filled, paired SL canceled, and position returned flat.
 
 What to watch:
 
@@ -178,13 +180,20 @@ Patch candidate:
 
 ### 7. Redis Maintenance And Stream Growth
 
-Status: active maintenance item.
+Status: active maintenance item / systemd timer installed on VPS `2026-06-05`.
 
 Observation:
 
 - `trading-hybrid-author41-7502t0u-redis-1` grew quickly again and was around `372M / 512M` on `2026-06-02`.
+- It was around `399M / 512M` during the `2026-06-05` pre-open check.
 - Prior safe trim showed large memory savings, especially from high-volume health/snapshot/runtime-state streams.
 - Main trading Redis instances are currently manageable but still require weekly checks.
+- On `2026-06-05`, safe trim reduced `trading-hybrid-author41-7502t0u-redis-1` from about `393M` Redis-reported memory to about `39M`.
+- A systemd timer now runs `/opt/maintenance/redis_safe_trim.sh --apply` on the VPS at `08:10 MSK`, Monday-Friday.
+- The local source script is `alor-rs-main/scripts/redis_safe_trim.sh`.
+- By `2026-06-06 09:13 MSK`, the author41 Redis had already regrown to about `286M / 512M`, mainly from `events.health`, `broker.snapshots`, and `broker.positions`.
+- A flat-state safe trim on `2026-06-06` reduced it to about `64M / 512M` without stopping services or trimming protected runtime/risk-gate state.
+- The current Monday-Friday timer leaves a weekend maintenance gap; daily scheduling or lower source-side retention remains an operations candidate.
 
 What to watch:
 
@@ -204,7 +213,11 @@ Maintenance rule:
 Patch/ops candidate:
 
 - Reduce `TRIM_MAXLEN` / health retention for noisy trial contours.
-- Add regular weekend or pre-open trim job for known high-volume streams.
+- Add regular weekend or pre-open trim job for known high-volume streams. Current VPS implementation uses systemd timer `redis-safe-trim-live-soak.timer`, but its Monday-Friday schedule is not sufficient for the observed author41 weekend growth rate.
+- Source-side per-stream gateway retention was deployed as an author41 canary
+  on `2026-06-06`. Health heartbeat remains periodic, while health,
+  snapshots, and positions are now bounded independently at
+  `1500/2000/2000`. Observe the canary before rolling it to other contours.
 
 ### 8. RI And Alor-USDRUBF MR Exit Contract Research
 
@@ -224,13 +237,138 @@ Constraints:
 - Alor-USDRUBF validation must confirm action-scoped protective TP/SL install, paired cleanup, and no stale stop tail after flat.
 - RI production live behavior remains unchanged until separate replay/economics review validates any bracket-style MR exit.
 
+### 9. IMOEXF Hybrid Stale BO Marketable-Limit Entries
+
+Status: stale passive-entry risk mitigated and first live validation completed
+on `2026-06-09`; BO retry-policy and action-scope open-timeout follow-up remain
+open.
+
+Observation:
+
+- On `2026-06-08`, both IMOEXF hybrid contours emitted the same BO short entry
+  from the `15:00 MSK` model bar:
+  - `7502MIW`: sell `4` at `2547.5`, broker order
+    `2033126304043449002`.
+  - `7502T0U`: sell `2` at `2547.5`, broker order
+    `2033126304043448923`.
+- The signal reference close was `2548.0`. The runtime applied one aggressive
+  tick and submitted sell limits at `2547.5`.
+- By the time the broker accepted the commands, the market had moved below the
+  limit. Both intended marketable limits became passive working orders and
+  remained live for several hours.
+- Both orders had `ttl_ms = null` and broker time-in-force `OneDay`.
+- The runtime did not cancel them on the next model bar because a working order
+  prevents stale pending-entry garbage collection.
+- The operator manually canceled both orders on `2026-06-08`; broker events
+  confirmed `status=canceled`, `filled=0`.
+- On the next `10m` model bar at `17:30 MSK`, both runtimes cleared the old
+  pending entry through `hybrid_pending_gc_entry` and generated
+  `BreakoutShort` again because the signal condition was still true.
+- `7502MIW` was live-ready and the repeated sell `4` entry filled immediately
+  at `2526.5`, opening `IMOEXF qty=-4`.
+- `7502T0U` was temporarily blocked by gateway reconnect during that model bar,
+  so its repeated signal was not emitted and the portfolio remained flat.
+- Before the `2026-06-09` session, both IMOEXF hybrid contours were switched
+  from `live_order_style = "marketable_limit"` to
+  `live_order_style = "market"`.
+- Both corresponding gateways now explicitly enable
+  `action_scope_enable_market = true` while retaining
+  `control_cws_mode = "action_scoped"`.
+- The rollout was config-only and preserved Redis runtime/risk-gate state.
+  Startup verification confirmed both runtimes resolved `Market`, both
+  gateways resolved action-scoped Market from file, both containers were
+  healthy, and both IMOEXF portfolios were flat with no working entry orders.
+- During the `2026-06-09` regular session, both contours completed their first
+  action-scoped Market BO entry/exit cycles after the rollout:
+  - author41-short `7502T0U` entered and exited cleanly;
+  - primary `7502MIW` entered cleanly, then its first exit attempt encountered
+    an action-scope `open timeout`;
+  - the primary contour subsequently handled a closed-window retry through
+    deferred exit and reissued successfully after reopen;
+  - both contours ended broker-flat without a passive working-order tail.
+- The primary entry produced one fill-before-ack `orphan_trade` warning, which
+  later converged through acknowledgement and broker truth.
+
+Risk:
+
+- A stale BO entry can execute much later, after the original breakout signal is
+  no longer actionable.
+- The same behavior occurred simultaneously on both hybrid profiles, so this is
+  a shared runtime execution-contract issue rather than a profile-specific
+  signal issue.
+- Canceling a stale broker order alone does not invalidate or mark the original
+  BO opportunity as attempted. The runtime can therefore re-enter on a later
+  bar at a materially different price.
+
+Implemented mitigation:
+
+- Use action-scoped Market for hybrid entry and marketable-exit intents, matching
+  the already validated RI and Alor-USDRUBF one-shot execution path.
+- Keep MR protective TP limit and SL stop-limit commands on their existing
+  action-scoped protective paths.
+
+Remaining patch/watch candidate:
+
+- Define BO entry retry semantics explicitly. Preferred safe default: one
+  bounded execution attempt per BO signal/cycle; do not automatically re-emit
+  the same signal after transport failure or broker rejection unless a
+  separately validated retry policy permits it.
+- Add explicit events that distinguish Market command transport failure,
+  broker rejection, unknown outcome, and retry eligibility.
+
+Validation focus:
+
+- Continue confirming hybrid entry/exit uses `primary_opcode=create:market`
+  through the action-scoped path.
+- Confirm no new passive working BO entry can remain after a one-shot intent.
+- Confirm Market command timeout/unknown-outcome handling converges through
+  broker truth without duplicate entry.
+- Confirm a failed/rejected Market command does not silently create a later,
+  worse-price re-entry for the same BO signal.
+- Track action-scope session-open timeout frequency. The first live validation
+  recovered safely, but this transport class is not considered closed.
+
 ## Scale-Up Implications
+
+### 10. Confirmed Bracket Residual Shared-Class Bug, 2026-06-11
+
+Status: patched locally / affected VPS runtimes stopped / controlled rollout
+required.
+
+Observed:
+
+- `7502MIW / USDRUBF`: two TP buy limits filled against one short and created an
+  unexpected long `+1`.
+- `7502T0U / IMOEXF`: TP closed only part of the short, paired SL cleanup
+  followed, and short `-1` remained without broker protection.
+- Both residuals were manually flattened after stopping the affected runtimes.
+
+Patch posture:
+
+- do not treat TP order fill as broker-flat;
+- do not retry an unknown protective create outcome on the next model bar;
+- on non-zero broker quantity change or sign flip, enter close-only, cancel
+  known protection, and flatten the exact residual;
+- stabilize fractional stop-limit tick normalization.
+
+Rollout:
+
+- deploy only while both portfolios are broker-flat;
+- affected contours restart `from zero`; validate IMOEXF partial-fill handling
+  at quantity `2`, while RI and Alor-USDRUBF remain at quantity `1`;
+- require `3-5` clean validation sessions before restoring previous size.
+
+Detailed incident note:
+
+- `live-incident-note-2026-06-11-bracket-residuals.md`
 
 Current scale-up posture:
 
 - `RI`: continue extended micro; no bracket TP change for MR unless research explicitly validates it.
 - `Alor-USDRUBF`: continue observation; do not alter MR exit contract yet.
-- `IMOEXF hybrid`: keep qty `2` for now; do not move toward `IMOEXF 10` until partial-fill, cleanup, near-zero churn, and protective TP open-timeout watch items remain clean or are patched.
+- `IMOEXF hybrid`: do not increase current quantities until partial-fill,
+  cleanup, near-zero churn, protective TP open-timeout, and stale BO-entry
+  watch items remain clean or are patched.
 
 Small-readiness conditions:
 
@@ -251,3 +389,8 @@ Small-readiness conditions:
 - `vps-live-observations-2026-05-29.md`
 - `vps-live-observations-2026-05-30.md`
 - `vps-live-observations-2026-06-02.md`
+- `vps-live-observations-2026-06-04.md`
+- `vps-live-observations-2026-06-05.md`
+- `vps-live-observations-2026-06-06.md`
+- `vps-live-observations-2026-06-07.md`
+- `vps-live-observations-2026-06-09.md`

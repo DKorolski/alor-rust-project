@@ -630,8 +630,7 @@ impl HybridIntradayRuntimeStrategy {
         // We keep a close-based normalization to stay deterministic in live runtime
         // where only previous close/range are guaranteed at this stage.
         let rel_range = day_range_prev / close_prev;
-        if !(Self::AUTHOR41_MIN_REL_RANGE < rel_range && rel_range < Self::AUTHOR41_MAX_REL_RANGE)
-        {
+        if !(Self::AUTHOR41_MIN_REL_RANGE < rel_range && rel_range < Self::AUTHOR41_MAX_REL_RANGE) {
             return None;
         }
 
@@ -1320,6 +1319,58 @@ impl HybridIntradayRuntimeStrategy {
                 .with_class(IntentClass::CancelCleanup),
             );
         }
+        intents
+    }
+
+    fn emit_broker_residual_emergency_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        pos: &PositionEvent,
+        reason: &'static str,
+    ) -> Vec<Intent> {
+        if self.pending_exit_request_id.is_some() || pos.qty.abs() <= f64::EPSILON {
+            return Vec::new();
+        }
+        let owner = self.current_owner.unwrap_or(Owner::MeanReversion);
+        let side = if pos.qty > 0.0 {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let created_ts_utc = self.effective_created_ts_utc(ctx, pos.ts_utc);
+        let cycle_id = self
+            .active_cycle_id
+            .unwrap_or_else(|| self.next_cycle_id(created_ts_utc));
+        let comment = self.build_comment(ctx, &cycle_id, owner, TagRole::Exit);
+        let mut intents = self.emit_cancel_all_protection(self.current_side);
+        intents.push(
+            self.build_live_entry_exit_intent(
+                ctx,
+                side,
+                pos.qty.abs(),
+                self.live_reference_price(),
+                Some(comment),
+            )
+            .with_class(IntentClass::Exit),
+        );
+        self.active_cycle_id = Some(cycle_id);
+        self.pending_exit = Some(PendingExit {
+            owner,
+            reason: crate::strategies::hybrid_intraday::ReasonCode::MeanRevTimeCutoff,
+        });
+        self.pending_exit_request_id = Some(self.live_request_id(ctx, created_ts_utc, side));
+        self.pending_exit_created_ts_utc = Some(created_ts_utc);
+        self.enter_safe_mode(reason);
+        warn!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "broker_residual_emergency_exit",
+            reason,
+            previous_qty = self.last_position_qty,
+            broker_qty = pos.qty,
+            exit_side = ?side,
+            exit_qty = pos.qty.abs(),
+            "broker position changed while bracket was active; cancel protection and flatten residual"
+        );
         intents
     }
 
@@ -4129,6 +4180,68 @@ mod tests {
     }
 
     #[test]
+    fn tp_fill_waits_for_broker_flat_before_canceling_stop() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Short);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        let ctx = test_ctx(Some(-2.0));
+        let order = OrderEvent {
+            order_id: 111,
+            symbol: "IMOEXF".to_string(),
+            status: "filled".to_string(),
+            qty: 1.0,
+            filled: 1.0,
+            comment: Some(tag("MR", "abc1230001", "TP")),
+            ..OrderEvent::default()
+        };
+
+        let intents = strategy.on_order(&ctx, &order);
+
+        assert!(intents.is_empty());
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+    }
+
+    #[test]
+    fn partial_protective_fill_emits_cancel_and_emergency_flatten() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.last_position_qty = -2.0;
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Short);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        let ctx = test_ctx(Some(-1.0));
+        let pos = PositionEvent {
+            symbol: "IMOEXF".to_string(),
+            qty: -1.0,
+            existing: false,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_120,
+        };
+
+        let intents = strategy.on_position(&ctx, &pos);
+
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::DeleteStopLimit { order_id, .. } if order_id == "sl-1"
+            )
+        }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::Market { qty, side: OrderSide::Buy, .. } if (*qty - 1.0).abs() <= f64::EPSILON
+            )
+        }));
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("broker_position_size_changed")
+        );
+    }
+
+    #[test]
     fn recovered_position_without_owner_enters_safe_mode_and_blocks_entry() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.entry_ready = true;
@@ -4652,11 +4765,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             } else {
                 self.author41_boundary_short_exit_reason(dt_local)
             };
-            self.orchestrator.on_bar_with_mr_override(
-                bar_input,
-                mr_entry_signal,
-                mr_exit_reason,
-            )
+            self.orchestrator
+                .on_bar_with_mr_override(bar_input, mr_entry_signal, mr_exit_reason)
         } else {
             self.orchestrator.on_bar(bar_input)
         };
@@ -4874,7 +4984,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         if !is_ours {
             return Vec::new();
         }
-        let mut intents = Vec::new();
+        let intents = Vec::new();
         let status = ord.status.to_ascii_lowercase();
         if !Self::is_terminal_order_status(&status) {
             self.ensure_active_cycle_from_comment(ord.comment.as_deref());
@@ -4885,19 +4995,6 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.pending_tp_created_ts_utc = None;
             if ord.order_id > 0 {
                 self.tp_order_id = Some(ord.order_id);
-            }
-            if status == "filled" {
-                if let Some(stop_order_id) = self.sl_stop_order_id.take() {
-                    intents.push(
-                        Intent::DeleteStopLimit {
-                            order_id: stop_order_id,
-                            side: self.current_side.map(Self::stop_side_for_entry_side),
-                            check_duplicates: Some(true),
-                        }
-                        .with_class(IntentClass::CancelCleanup),
-                    );
-                }
-                self.sl_exchange_order_id = None;
             }
             if matches!(
                 status.as_str(),
@@ -5000,6 +5097,20 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let mut intents = Vec::new();
         let prev = self.last_position_qty;
         let cur = pos.qty;
+        if prev.abs() > f64::EPSILON
+            && cur.abs() > f64::EPSILON
+            && (prev - cur).abs() > f64::EPSILON
+        {
+            let reason = if prev.signum() != cur.signum() {
+                "broker_position_sign_flip"
+            } else {
+                "broker_position_size_changed"
+            };
+            intents.extend(self.emit_broker_residual_emergency_exit(ctx, pos, reason));
+            self.last_position_qty = cur;
+            self.sync_state();
+            return intents;
+        }
         if prev.abs() <= f64::EPSILON && cur.abs() > f64::EPSILON {
             let filled = self.pending_entry.take();
             self.clear_deferred_entry();
@@ -5028,6 +5139,13 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     self.active_cycle_id = Some(self.next_cycle_id(pos.ts_utc));
                 }
                 self.enter_safe_mode("recovered_position_owner_unknown");
+                if !pos.existing {
+                    intents.extend(self.emit_broker_residual_emergency_exit(
+                        ctx,
+                        pos,
+                        "unexpected_broker_residual",
+                    ));
+                }
             }
         } else if prev.abs() > f64::EPSILON && cur.abs() <= f64::EPSILON {
             let closing_side = self.current_side;

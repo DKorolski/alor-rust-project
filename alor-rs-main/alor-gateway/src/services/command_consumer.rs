@@ -1423,8 +1423,22 @@ fn normalize_step_round(value: f64, step: f64) -> f64 {
     if step <= 0.0 {
         value
     } else {
-        (value / step).round() * step
+        let normalized = (value / step).round() * step;
+        let decimals = decimal_places_for_step(step);
+        let scale = 10_f64.powi(decimals as i32);
+        (normalized * scale).round() / scale
     }
+}
+
+fn decimal_places_for_step(step: f64) -> u32 {
+    let mut scaled = step.abs();
+    for decimals in 0..=8 {
+        if (scaled - scaled.round()).abs() <= 1e-9 {
+            return decimals;
+        }
+        scaled *= 10.0;
+    }
+    8
 }
 
 fn normalize_qty(value: f64, step: f64) -> f64 {
@@ -1791,6 +1805,14 @@ mod tests {
         let command = sample_command(created_ts_utc, Some(ttl_ms));
         assert!(!is_command_expired(&command));
     }
+
+    #[test]
+    fn normalize_step_round_stabilizes_fractional_tick_prices() {
+        let normalized = normalize_step_round(71.93 + 0.01, 0.01);
+        assert_eq!(normalized, 71.94);
+        assert!(((normalized / 0.01) - (normalized / 0.01).round()).abs() <= 1e-9);
+    }
+
     #[test]
     fn validate_command_rejects_trading_actions_when_market_not_open() {
         let command = sample_command(chrono::Utc::now().timestamp(), None);

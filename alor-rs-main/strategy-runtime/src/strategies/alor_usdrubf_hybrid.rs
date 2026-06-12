@@ -554,11 +554,7 @@ impl AlorUsdrubfHybridStrategy {
     }
 
     fn mr_protection_comment(&self, ctx: &StrategyCtx, role: ProtectionRole) -> String {
-        let comment = format!(
-            "AUS|sid={}|o=MR|r={}",
-            ctx.strategy_id,
-            role.as_str()
-        );
+        let comment = format!("AUS|sid={}|o=MR|r={}", ctx.strategy_id, role.as_str());
         comment.chars().filter(|c| c.is_ascii()).take(100).collect()
     }
 
@@ -606,7 +602,10 @@ impl AlorUsdrubfHybridStrategy {
         self.pending_sl_bar_ts_utc = None;
         if let Some(tp_order_id) = self.tp_order_id.take() {
             intents.push(
-                Intent::Cancel { order_id: tp_order_id }.with_class(IntentClass::CancelCleanup),
+                Intent::Cancel {
+                    order_id: tp_order_id,
+                }
+                .with_class(IntentClass::CancelCleanup),
             );
         }
         if let Some(stop_order_id) = self.sl_stop_order_id.take() {
@@ -644,8 +643,9 @@ impl AlorUsdrubfHybridStrategy {
         }
         let exit_side = pos.side.exit_side();
         if let Some(take_price) = pos.take_price {
-            let tp_ready =
-                self.tp_order_id.is_none() && self.pending_tp_bar_ts_utc.is_none_or(|ts| ts < bar_ts_utc);
+            // An unknown create-limit outcome must remain pending until broker truth resolves it.
+            // Retrying on the next bar can create a second TP and over-close the position.
+            let tp_ready = self.tp_order_id.is_none() && self.pending_tp_bar_ts_utc.is_none();
             if tp_ready {
                 intents.push(
                     Intent::Place {
@@ -660,8 +660,7 @@ impl AlorUsdrubfHybridStrategy {
             }
         }
         if let Some(stop_price) = pos.stop_price {
-            let sl_ready = self.sl_stop_order_id.is_none()
-                && self.pending_sl_bar_ts_utc.is_none_or(|ts| ts < bar_ts_utc);
+            let sl_ready = self.sl_stop_order_id.is_none() && self.pending_sl_bar_ts_utc.is_none();
             if sl_ready {
                 intents.push(
                     Intent::CreateStopLimit {
@@ -680,6 +679,41 @@ impl AlorUsdrubfHybridStrategy {
                 self.pending_sl_bar_ts_utc = Some(bar_ts_utc);
             }
         }
+    }
+
+    fn emit_broker_residual_emergency_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        pos: &PositionEvent,
+        reason: &str,
+    ) -> Vec<Intent> {
+        if self.exit_intent_inflight || pos.qty.abs() < 1e-9 {
+            return Vec::new();
+        }
+        let side = if pos.qty > 0.0 { Side::Sell } else { Side::Buy };
+        let mut intents = self.emit_cancel_all_protection(Some(side));
+        intents.push(
+            Intent::Market {
+                qty: pos.qty.abs(),
+                side,
+                fill_price: None,
+                comment: Some(format!("{}|exit|{}", self.config.symbol, reason)),
+            }
+            .with_class(IntentClass::Exit),
+        );
+        self.exit_intent_inflight = true;
+        self.lifecycle_stage = reason.to_string();
+        warn!(
+            strategy_id = ctx.strategy_id.as_str(),
+            strategy = "alor_usdrubf_hybrid",
+            action = "broker_residual_emergency_exit",
+            reason,
+            broker_qty = pos.qty,
+            exit_side = ?side,
+            exit_qty = pos.qty.abs(),
+            "broker position changed while bracket was active; cancel protection and flatten residual"
+        );
+        intents
     }
 
     fn maybe_emit_live_entry_intent(
@@ -794,14 +828,7 @@ impl AlorUsdrubfHybridStrategy {
         });
         self.exit_intent_inflight = true;
         self.lifecycle_stage = "live_exit_intent_emitted".to_string();
-        self.log_live_intent_emitted_exit(
-            ctx,
-            bar_ts_utc,
-            qty,
-            side,
-            exit_price,
-            reason.as_str(),
-        );
+        self.log_live_intent_emitted_exit(ctx, bar_ts_utc, qty, side, exit_price, reason.as_str());
     }
 
     fn build_research_snapshot(&self, bar: &BarEvent, local_dt: NaiveDateTime) -> ResearchSnapshot {
@@ -1390,34 +1417,22 @@ impl Strategy for AlorUsdrubfHybridStrategy {
     }
 
     fn on_order(&mut self, _ctx: &StrategyCtx, ord: &OrderEvent) -> Vec<Intent> {
-        let mut intents = Vec::new();
+        let intents = Vec::new();
         if ord.symbol == self.config.symbol && ord.order_id > 0 {
             self.tracked_order_ids.insert(ord.order_id);
             if let Some(request_id) = ord.request_id {
                 self.pending_request_ids.remove(&request_id);
             }
             let status = ord.status.to_ascii_lowercase();
-            if self.open_position.as_ref().is_some_and(|pos| pos.owner == Owner::MeanRev) {
+            if self
+                .open_position
+                .as_ref()
+                .is_some_and(|pos| pos.owner == Owner::MeanRev)
+            {
                 match Self::parse_mr_protection_role(ord.comment.as_deref()) {
                     Some(ProtectionRole::Tp) => {
                         self.pending_tp_bar_ts_utc = None;
                         self.tp_order_id = Some(ord.order_id);
-                        if status == "filled" {
-                            if let Some(stop_order_id) = self.sl_stop_order_id.take() {
-                                intents.push(
-                                    Intent::DeleteStopLimit {
-                                        order_id: stop_order_id,
-                                        side: self
-                                            .open_position
-                                            .as_ref()
-                                            .map(|pos| pos.side.exit_side()),
-                                        check_duplicates: Some(true),
-                                    }
-                                    .with_class(IntentClass::CancelCleanup),
-                                );
-                            }
-                            self.sl_exchange_order_id = None;
-                        }
                         if matches!(
                             status.as_str(),
                             "filled" | "cancelled" | "canceled" | "rejected" | "expired"
@@ -1459,7 +1474,10 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             "stop order stream update"
         );
         if ord.symbol == self.config.symbol
-            && self.open_position.as_ref().is_some_and(|pos| pos.owner == Owner::MeanRev)
+            && self
+                .open_position
+                .as_ref()
+                .is_some_and(|pos| pos.owner == Owner::MeanRev)
             && matches!(
                 Self::parse_mr_protection_role(ord.comment.as_deref()),
                 Some(ProtectionRole::Sl)
@@ -1517,7 +1535,10 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         }
         self.log_broker_position_transition_if_needed(ctx, pos);
         if pos.qty.abs() < 1e-9 {
-            let closing_side = self.open_position.as_ref().map(|open| open.side.exit_side());
+            let closing_side = self
+                .open_position
+                .as_ref()
+                .map(|open| open.side.exit_side());
             let intents = self.emit_cancel_all_protection(closing_side);
             self.open_position = None;
             self.owner_confirmed_by_live_event = true;
@@ -1539,6 +1560,54 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             PositionSide::Short
         };
         let size = pos.qty.abs().floor().max(1.0) as i64;
+        if self.open_position.is_none() && self.pending_entry.is_none() && !pos.existing {
+            let synthetic_pending = PendingEntry {
+                owner: Owner::Breakout,
+                side,
+                reason: "unexpected_broker_residual".to_string(),
+                scale_at_signal: 0.0,
+                signal_price: pos.avg_price,
+                stop1: None,
+                stop2: None,
+            };
+            self.open_position = Some(self.build_open_position_from_pending(
+                &synthetic_pending,
+                pos.ts_utc,
+                pos.avg_price,
+                size,
+            ));
+            let intents =
+                self.emit_broker_residual_emergency_exit(ctx, pos, "unexpected_broker_residual");
+            self.owner_confirmed_by_live_event = true;
+            self.hybrid_state = HybridState::Open;
+            self.sync_state();
+            return intents;
+        }
+        if let Some(open) = self.open_position.as_ref() {
+            let previous_qty = match open.side {
+                PositionSide::Long => open.size as f64,
+                PositionSide::Short => -(open.size as f64),
+            };
+            if (previous_qty - pos.qty).abs() >= 0.5 {
+                let reason = if previous_qty.signum() != pos.qty.signum() {
+                    "broker_position_sign_flip"
+                } else {
+                    "broker_position_size_changed"
+                };
+                let intents = self.emit_broker_residual_emergency_exit(ctx, pos, reason);
+                if let Some(open) = self.open_position.as_mut() {
+                    open.side = side;
+                    open.size = size;
+                    if pos.avg_price > 0.0 {
+                        open.entry_price = pos.avg_price;
+                    }
+                }
+                self.owner_confirmed_by_live_event = true;
+                self.hybrid_state = HybridState::Open;
+                self.sync_state();
+                return intents;
+            }
+        }
         let entry_price = if pos.avg_price > 0.0 {
             pos.avg_price
         } else if let Some(open) = self.open_position.as_ref() {
@@ -2008,8 +2077,8 @@ mod tests {
     use crate::live_guard::GatewayPhase;
     use crate::state::StrategyState;
     use crate::strategy_host::{
-        BarEvent, BootstrapSnapshot, DataOrigin, OrderEvent, PositionEvent, RuntimeStateRestored,
-        Intent, StopOrderEvent, Strategy, StrategyCtx,
+        BarEvent, BootstrapSnapshot, DataOrigin, Intent, OrderEvent, PositionEvent,
+        RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx,
     };
     use crate::{PaperExecutionMode, TradeMode};
     use alor_protocol::{CommandAck, IntentClass};
@@ -2637,7 +2706,7 @@ mod tests {
     }
 
     #[test]
-    fn mr_tp_fill_cancels_stop_cleanup() {
+    fn mr_tp_fill_waits_for_broker_flat_before_canceling_stop() {
         let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
         strategy.open_position = Some(OpenPosition {
             owner: Owner::MeanRev,
@@ -2656,12 +2725,49 @@ mod tests {
 
         let intents = strategy.on_order(&test_ctx(TradeMode::Live, 1_775_490_120), &tp_fill);
 
+        assert!(intents.is_empty());
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+    }
+
+    #[test]
+    fn unknown_tp_outcome_is_not_retried_on_next_bar() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.open_position = Some(OpenPosition {
+            owner: Owner::MeanRev,
+            side: PositionSide::Short,
+            entry_ts: utc_to_local(1_775_490_000, 3),
+            entry_price: 80.0,
+            size: 1,
+            stop_price: None,
+            take_price: Some(79.9),
+            stop1: None,
+            stop2: None,
+        });
+        strategy.pending_tp_bar_ts_utc = Some(1_775_490_060);
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let mut intents = Vec::new();
+
+        strategy.maybe_emit_live_mr_brackets(&ctx, 1_775_490_120, &mut intents);
+
+        assert!(intents.is_empty());
+    }
+
+    #[test]
+    fn unexpected_live_residual_emits_emergency_market_exit() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let mut residual = position_event(1_775_490_120, 1.0, 80.0);
+        residual.existing = false;
+
+        let intents = strategy.on_position(&ctx, &residual);
+
         assert!(intents.iter().any(|intent| {
             matches!(
                 intent.base_intent(),
-                Intent::DeleteStopLimit { order_id, .. } if order_id == "sl-1"
+                Intent::Market { qty, side: alor_protocol::Side::Sell, .. } if (*qty - 1.0).abs() <= f64::EPSILON
             )
         }));
+        assert!(strategy.exit_intent_inflight);
     }
 
     #[test]
