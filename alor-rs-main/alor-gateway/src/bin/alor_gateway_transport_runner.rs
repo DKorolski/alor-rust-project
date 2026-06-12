@@ -9,7 +9,7 @@ use alor_gateway::config::{AlorGatewayConfig, detect_config_path, log_resolved_c
 use alor_gateway::health_server;
 use alor_gateway::services::command_consumer::{CommandConsumerConfig, InMemoryIdempotency};
 use alor_gateway::supervisor::{CommandTransport, Supervisor};
-use alor_gateway::transport::{StreamNames, TransportConfig};
+use alor_gateway::transport::{StreamNames, StreamTrimLimits, TransportConfig};
 use alor_gateway::transport_redis::{RedisCommandSink, RedisCommandSource, RedisEventSink};
 
 #[tokio::main]
@@ -58,6 +58,14 @@ async fn main() -> anyhow::Result<()> {
         acks = transport.streams.acks,
         health = transport.streams.health,
         dlq_prefix = transport.streams.dlq_prefix,
+        trim_bars = transport.trim.bars,
+        trim_orders = transport.trim.orders,
+        trim_trades = transport.trim.trades,
+        trim_positions = transport.trim.positions,
+        trim_snapshots = transport.trim.snapshots,
+        trim_commands = transport.trim.commands,
+        trim_acks = transport.trim.acks,
+        trim_health = transport.trim.health,
         "gateway mode: transport-only"
     );
 
@@ -156,6 +164,22 @@ fn build_transport_config(args: &[String], cfg: &AlorGatewayConfig) -> Transport
         .or_else(|| env::var("TRIM_MAXLEN").ok())
         .and_then(|value| value.parse().ok())
         .unwrap_or(100_000);
+    let stream_trim = |arg: &str, env_key: &str| {
+        arg_value(args, arg)
+            .or_else(|| env::var(env_key).ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(trim_maxlen)
+    };
+    let trim = StreamTrimLimits {
+        bars: stream_trim("--trim-maxlen-bars", "TRIM_MAXLEN_BARS"),
+        orders: stream_trim("--trim-maxlen-orders", "TRIM_MAXLEN_ORDERS"),
+        trades: stream_trim("--trim-maxlen-trades", "TRIM_MAXLEN_TRADES"),
+        positions: stream_trim("--trim-maxlen-positions", "TRIM_MAXLEN_POSITIONS"),
+        snapshots: stream_trim("--trim-maxlen-snapshots", "TRIM_MAXLEN_SNAPSHOTS"),
+        commands: stream_trim("--trim-maxlen-commands", "TRIM_MAXLEN_COMMANDS"),
+        acks: stream_trim("--trim-maxlen-acks", "TRIM_MAXLEN_ACKS"),
+        health: stream_trim("--trim-maxlen-health", "TRIM_MAXLEN_HEALTH"),
+    };
     let block_ms = arg_value(args, "--block-ms")
         .or_else(|| env::var("BLOCK_MS").ok())
         .and_then(|value| value.parse().ok())
@@ -219,6 +243,7 @@ fn build_transport_config(args: &[String], cfg: &AlorGatewayConfig) -> Transport
         consumer_group,
         consumer_name,
         trim_maxlen,
+        trim,
         block_ms,
         claim_idle_ms,
     }

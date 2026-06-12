@@ -31,6 +31,7 @@ impl RedisEventSink {
         stream: &str,
         msg_type: MessageType,
         payload: &T,
+        maxlen: usize,
     ) -> Result<()> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let envelope = Envelope::new(
@@ -43,7 +44,7 @@ impl RedisEventSink {
         let _: redis::Value = redis::cmd("XADD")
             .arg(stream)
             .arg("MAXLEN")
-            .arg(self.config.trim_maxlen)
+            .arg(maxlen)
             .arg("*")
             .arg("payload")
             .arg(json)
@@ -56,23 +57,43 @@ impl RedisEventSink {
 #[async_trait]
 impl EventSink for RedisEventSink {
     async fn publish_bar(&self, event: BarEvent) -> Result<()> {
-        self.publish_event(&self.config.streams.bars, MessageType::Bar, &event)
-            .await
+        self.publish_event(
+            &self.config.streams.bars,
+            MessageType::Bar,
+            &event,
+            self.config.trim.bars,
+        )
+        .await
     }
 
     async fn publish_order(&self, event: OrderEvent) -> Result<()> {
-        self.publish_event(&self.config.streams.orders, MessageType::Order, &event)
-            .await
+        self.publish_event(
+            &self.config.streams.orders,
+            MessageType::Order,
+            &event,
+            self.config.trim.orders,
+        )
+        .await
     }
 
     async fn publish_stop_order(&self, event: StopOrderEvent) -> Result<()> {
-        self.publish_event(&self.config.streams.orders, MessageType::StopOrder, &event)
-            .await
+        self.publish_event(
+            &self.config.streams.orders,
+            MessageType::StopOrder,
+            &event,
+            self.config.trim.orders,
+        )
+        .await
     }
 
     async fn publish_trade(&self, event: TradeEvent) -> Result<()> {
-        self.publish_event(&self.config.streams.trades, MessageType::Trade, &event)
-            .await
+        self.publish_event(
+            &self.config.streams.trades,
+            MessageType::Trade,
+            &event,
+            self.config.trim.trades,
+        )
+        .await
     }
 
     async fn publish_position(&self, event: PositionEvent) -> Result<()> {
@@ -80,13 +101,19 @@ impl EventSink for RedisEventSink {
             &self.config.streams.positions,
             MessageType::Position,
             &event,
+            self.config.trim.positions,
         )
         .await
     }
 
     async fn publish_health(&self, health: HealthState) -> Result<()> {
-        self.publish_event(&self.config.streams.health, MessageType::Health, &health)
-            .await
+        self.publish_event(
+            &self.config.streams.health,
+            MessageType::Health,
+            &health,
+            self.config.trim.health,
+        )
+        .await
     }
 
     async fn publish_snapshot_orders(&self, snapshot: OrdersSnapshot) -> Result<()> {
@@ -94,6 +121,7 @@ impl EventSink for RedisEventSink {
             &self.config.streams.snapshots,
             MessageType::SnapshotOrders,
             &snapshot,
+            self.config.trim.snapshots,
         )
         .await
     }
@@ -103,6 +131,7 @@ impl EventSink for RedisEventSink {
             &self.config.streams.snapshots,
             MessageType::SnapshotStopOrders,
             &snapshot,
+            self.config.trim.snapshots,
         )
         .await
     }
@@ -112,6 +141,7 @@ impl EventSink for RedisEventSink {
             &self.config.streams.snapshots,
             MessageType::SnapshotPositions,
             &snapshot,
+            self.config.trim.snapshots,
         )
         .await
     }
@@ -457,6 +487,7 @@ impl RedisCommandSink {
         stream: &str,
         msg_type: MessageType,
         payload: &T,
+        maxlen: usize,
     ) -> Result<()> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let envelope = Envelope::new(
@@ -470,7 +501,7 @@ impl RedisCommandSink {
             .arg(stream)
             .arg("MAXLEN")
             .arg("~")
-            .arg(self.config.trim_maxlen)
+            .arg(maxlen)
             .arg("*")
             .arg("payload")
             .arg(json)
@@ -487,12 +518,18 @@ impl CommandSink for RedisCommandSink {
             &self.config.streams.commands,
             MessageType::Command,
             &command,
+            self.config.trim.commands,
         )
         .await
     }
 
     async fn publish_ack(&self, ack: CommandAck) -> Result<()> {
-        self.publish(&self.config.streams.acks, MessageType::CommandAck, &ack)
-            .await
+        self.publish(
+            &self.config.streams.acks,
+            MessageType::CommandAck,
+            &ack,
+            self.config.trim.acks,
+        )
+        .await
     }
 }
