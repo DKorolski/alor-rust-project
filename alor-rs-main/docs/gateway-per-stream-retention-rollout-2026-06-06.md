@@ -93,3 +93,24 @@ Post-deploy checks:
 
 Canary status: deployed and healthy. Continue observation before applying the
 new gateway image to the remaining live contours.
+
+## Remaining Live Contour Rollout
+
+On `2026-06-13`, after a Redis cgroup OOM was confirmed for
+`trading-alor-usdrubf-redis-1`, the same verified image and per-stream limits
+were rolled out gateway-only to:
+
+- `trading-alor-usdrubf`;
+- `trading-hybrid`;
+- `trading-ri-author41-42-7502miw`.
+
+Before rollout, noisy health, snapshot, and position streams were safely
+trimmed and each affected Redis completed an online `BGREWRITEAOF`. Runtime
+state, command/ack streams, model bars, and the IMOEXF risk-gate ledger were
+preserved.
+
+All three gateways returned healthy, reported the expected resolved limits,
+and retained their action-scoped execution configuration. No runtime or Redis
+restart and no from-zero reset were required.
+
+Current rollout status: enabled on all active VPS live contours.
