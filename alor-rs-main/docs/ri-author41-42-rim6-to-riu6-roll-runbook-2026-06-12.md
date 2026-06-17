@@ -1,5 +1,19 @@
 # RI Author41/42 RIM6 To RIU6 Roll Runbook - 2026-06-12
 
+## Post-Roll Audit Note
+
+The June rollover audit found that the earlier simple `expiry - 7` policy and
+weekday-only model-session guard are insufficient. Future rolls are governed
+by:
+
+```text
+docs/ri-author41-42-rollover-session-policy-2026-06-15.md
+```
+
+The preferred manual production target is now actual-expiry minus one trading
+session, with minus two as the operational fallback. Special/DSWD sessions
+must be excluded from model state and previous-session anchors.
+
 ## Decision
 
 Prepare both VPS RI micro-live contours for a controlled futures roll:
