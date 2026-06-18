@@ -2720,6 +2720,8 @@ mod tests {
                 intent_class: IntentClass::Exit,
                 created_ts_utc: 1_776_000_600,
                 symbol: "RIM6".to_string(),
+                action: "market".to_string(),
+                target_order_id: None,
             },
         );
         assert_eq!(
@@ -2798,6 +2800,8 @@ mod tests {
                 intent_class: IntentClass::Entry,
                 created_ts_utc: 1_776_000_000,
                 symbol: "RIM6".to_string(),
+                action: "market".to_string(),
+                target_order_id: None,
             },
         );
 

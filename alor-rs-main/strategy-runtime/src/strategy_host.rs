@@ -94,6 +94,8 @@ pub struct CommandPrepared {
     pub intent_class: IntentClass,
     pub created_ts_utc: i64,
     pub symbol: String,
+    pub action: String,
+    pub target_order_id: Option<String>,
 }
 
 pub trait Strategy: Send + Sync {

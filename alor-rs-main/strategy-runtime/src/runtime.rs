@@ -3410,6 +3410,8 @@ impl StrategyRuntime {
             intent_class,
             created_ts_utc: command.created_ts_utc,
             symbol: command.symbol.clone(),
+            action: command_action_name(&command.action).to_string(),
+            target_order_id: command_target_order_id(&command.action),
         };
         self.strategy.on_command_prepared(ctx, &event);
         self.state.strategy_state = self.strategy.state().clone();
@@ -4070,6 +4072,28 @@ impl StrategyRuntime {
                 unreachable!("base_intent flattens wrapped variant")
             }
         }
+    }
+}
+
+fn command_action_name(action: &alor_protocol::CommandAction) -> &'static str {
+    match action {
+        alor_protocol::CommandAction::Place(_) => "place",
+        alor_protocol::CommandAction::Market(_) => "market",
+        alor_protocol::CommandAction::Cancel(_) => "cancel",
+        alor_protocol::CommandAction::Replace(_) => "replace",
+        alor_protocol::CommandAction::CreateStopLimit(_) => "create_stop_limit",
+        alor_protocol::CommandAction::DeleteStopLimit(_) => "delete_stop_limit",
+    }
+}
+
+fn command_target_order_id(action: &alor_protocol::CommandAction) -> Option<String> {
+    match action {
+        alor_protocol::CommandAction::Cancel(payload) => Some(payload.order_id.to_string()),
+        alor_protocol::CommandAction::Replace(payload) => Some(payload.order_id.to_string()),
+        alor_protocol::CommandAction::DeleteStopLimit(payload) => Some(payload.order_id.clone()),
+        alor_protocol::CommandAction::Place(_)
+        | alor_protocol::CommandAction::Market(_)
+        | alor_protocol::CommandAction::CreateStopLimit(_) => None,
     }
 }
 
