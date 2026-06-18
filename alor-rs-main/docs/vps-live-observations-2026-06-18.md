@@ -106,3 +106,47 @@ After rollout:
 - keep current IMOEXF validation quantities;
 - monitor the first MR bracket terminal fill for cleanup retry/confirmation;
 - continue the daily broker-round vs runtime-intent vs model-replay audit.
+
+## Rollout Result
+
+Rollout completed at `08:34:55 MSK`, before the regular session.
+
+Images:
+
+- runtime:
+  `ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-20260618-lifecycle-68d1cd1`;
+- gateway:
+  `ghcr.io/dkorolski/alor-rust-project/alor-gateway:manual-20260618-oauth-68d1cd1`.
+
+Updated contours:
+
+- `trading-hybrid`;
+- `trading-hybrid-author41-7502t0u`;
+- `trading-alor-usdrubf`;
+- `trading-ri-author41-42-7502miw`;
+- `trading-ri-author41-42-7502t0u`.
+
+The rollout was performed sequentially with per-contour `.env` backups and
+health checks. Redis containers and persisted runtime state were not restarted
+or cleared.
+
+Post-rollout checks:
+
+- all updated gateway and runtime containers were healthy;
+- all gateways completed CWS authorization successfully;
+- runtime bootstrap found zero open positions, orders, and stop orders;
+- no new `WARN` or `ERROR` event was observed during startup;
+- RAM available: about `6.6 GiB`;
+- root disk usage remained `27%`.
+
+The primary IMOEXF risk-gate resumed from the existing Redis ledger:
+
+- startup decision: `UseExistingLedger`;
+- loaded rows: `212`;
+- last finalized session: `2026-06-16`;
+- `rolling_sum_lb120=131.9`;
+- current and next-session MR gate: enabled.
+
+Before the first regular live bar, runtimes remained conservatively blocked by
+the expected bootstrap reasons (`missing_live_bar`, `SyncingHistory`). The next
+validation point is the transition to `LiveReady` after the session feed starts.
