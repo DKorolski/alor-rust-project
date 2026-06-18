@@ -187,6 +187,7 @@ pub struct HybridIntradayRuntimeStrategy {
     last_warmup_log: Option<bool>,
     working_orders: HashSet<i64>,
     working_stop_orders: HashSet<String>,
+    cleanup_stop_retry_attempts: u32,
     startup_live_replay_boundary_ts_utc: Option<i64>,
     startup_replay_suppressed_bars: u32,
     risk_gate_shadow_session_date: Option<NaiveDate>,
@@ -203,6 +204,7 @@ pub struct HybridIntradayRuntimeStrategy {
 
 impl HybridIntradayRuntimeStrategy {
     const MIN_MR_TAKE_DISTANCE_TICKS: f64 = 2.0;
+    const MAX_CLEANUP_STOP_RETRIES: u32 = 3;
     const AUTHOR41_SHORT_K: f64 = 0.16;
     const AUTHOR41_SHORT_TAKE_K: f64 = 0.02;
     const AUTHOR41_SHORT_STOP_K: f64 = 0.58;
@@ -290,6 +292,7 @@ impl HybridIntradayRuntimeStrategy {
             last_warmup_log: None,
             working_orders: HashSet::new(),
             working_stop_orders: HashSet::new(),
+            cleanup_stop_retry_attempts: 0,
             startup_live_replay_boundary_ts_utc: None,
             startup_replay_suppressed_bars: 0,
             risk_gate_shadow_session_date: None,
@@ -4204,6 +4207,63 @@ mod tests {
     }
 
     #[test]
+    fn failed_flat_stop_cleanup_retries_are_bounded_and_reset_after_cancel() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+        strategy.last_position_qty = 0.0;
+        strategy.working_stop_orders.insert("sl-1".to_string());
+
+        for expected_attempt in 1..=HybridIntradayRuntimeStrategy::MAX_CLEANUP_STOP_RETRIES {
+            let intents = strategy.on_ack(
+                &ctx,
+                &CommandAck::error(uuid::Uuid::new_v4(), "cws_error", "transport_error"),
+            );
+            assert_eq!(strategy.cleanup_stop_retry_attempts, expected_attempt);
+            assert_eq!(intents.len(), 1);
+            assert!(matches!(
+                intents[0].base_intent(),
+                Intent::DeleteStopLimit {
+                    order_id,
+                    side: None,
+                    check_duplicates: Some(true),
+                } if order_id == "sl-1"
+            ));
+        }
+
+        let exhausted = strategy.on_ack(
+            &ctx,
+            &CommandAck::error(uuid::Uuid::new_v4(), "cws_error", "transport_error"),
+        );
+        assert!(exhausted.is_empty());
+        assert_eq!(
+            strategy.cleanup_stop_retry_attempts,
+            HybridIntradayRuntimeStrategy::MAX_CLEANUP_STOP_RETRIES
+        );
+
+        let canceled = strategy.on_stop_order(
+            &ctx,
+            &StopOrderEvent {
+                stop_order_id: "sl-1".to_string(),
+                exchange_order_id: None,
+                symbol: "IMOEXF".to_string(),
+                status: "canceled".to_string(),
+                side: "sell".to_string(),
+                qty: 2.0,
+                filled: 0.0,
+                stop_price: 99.0,
+                price: 98.5,
+                existing: false,
+                comment: Some(tag("MR", "abc1230001", "SL")),
+                end_time: None,
+                ts_utc: 1_700_000_130,
+            },
+        );
+        assert!(canceled.is_empty());
+        assert!(strategy.working_stop_orders.is_empty());
+        assert_eq!(strategy.cleanup_stop_retry_attempts, 0);
+    }
+
+    #[test]
     fn partial_protective_fill_emits_cancel_and_emergency_flatten() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.last_position_qty = -2.0;
@@ -4971,6 +5031,40 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 sl_stop_order_id = ?self.sl_stop_order_id,
                 "cleanup command failed while strategy is flat and stop orders are still active"
             );
+            if self.cleanup_stop_retry_attempts < Self::MAX_CLEANUP_STOP_RETRIES {
+                self.cleanup_stop_retry_attempts =
+                    self.cleanup_stop_retry_attempts.saturating_add(1);
+                let mut stop_order_ids =
+                    self.working_stop_orders.iter().cloned().collect::<Vec<_>>();
+                stop_order_ids.sort();
+                info!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    action = "sibling_cleanup_retry",
+                    retry_attempt = self.cleanup_stop_retry_attempts,
+                    max_retries = Self::MAX_CLEANUP_STOP_RETRIES,
+                    stop_order_ids = ?stop_order_ids,
+                    "retrying active sibling stop cleanup while broker position is flat"
+                );
+                self.sync_state();
+                return stop_order_ids
+                    .into_iter()
+                    .map(|order_id| {
+                        Intent::DeleteStopLimit {
+                            order_id,
+                            side: None,
+                            check_duplicates: Some(true),
+                        }
+                        .with_class(IntentClass::CancelCleanup)
+                    })
+                    .collect();
+            }
+            warn!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "sibling_cleanup_retry_exhausted",
+                retry_attempts = self.cleanup_stop_retry_attempts,
+                working_stop_orders_count = self.working_stop_orders.len(),
+                "active sibling stop cleanup retries exhausted while broker position is flat"
+            );
         }
         // Stale/foreign ack: ignore.
         Vec::new()
@@ -5072,6 +5166,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         }
         if Self::is_terminal_stop_order_status(&status) {
             self.working_stop_orders.remove(&ord.stop_order_id);
+            if self.working_stop_orders.is_empty() && self.cleanup_stop_retry_attempts > 0 {
+                info!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    action = "sibling_cleanup_confirmed",
+                    stop_order_id = %ord.stop_order_id,
+                    status = %status,
+                    retry_attempts = self.cleanup_stop_retry_attempts,
+                    "all strategy-owned sibling stop orders are terminal"
+                );
+                self.cleanup_stop_retry_attempts = 0;
+            }
         } else if !ord.stop_order_id.trim().is_empty() {
             self.working_stop_orders.insert(ord.stop_order_id.clone());
         }
@@ -5112,6 +5217,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             return intents;
         }
         if prev.abs() <= f64::EPSILON && cur.abs() > f64::EPSILON {
+            self.cleanup_stop_retry_attempts = 0;
             let filled = self.pending_entry.take();
             self.clear_deferred_entry();
             if let Some(entry) = filled {
@@ -5148,6 +5254,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 }
             }
         } else if prev.abs() > f64::EPSILON && cur.abs() <= f64::EPSILON {
+            self.cleanup_stop_retry_attempts = 0;
             let closing_side = self.current_side;
             let owner = self.current_owner.unwrap_or(Owner::MeanReversion);
             self.orchestrator.on_order_filled("exit", owner, None);

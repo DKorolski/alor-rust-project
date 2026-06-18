@@ -635,6 +635,11 @@ impl AlorUsdrubfHybridStrategy {
         bar_ts_utc: i64,
         intents: &mut Vec<Intent>,
     ) {
+        // A filled TP/SL is terminal for the active bracket, but broker position
+        // truth can arrive slightly later. Do not repair protection in that gap.
+        if self.exit_intent_inflight {
+            return;
+        }
         let Some(pos) = self.open_position.as_ref() else {
             return;
         };
@@ -1433,9 +1438,13 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                     Some(ProtectionRole::Tp) => {
                         self.pending_tp_bar_ts_utc = None;
                         self.tp_order_id = Some(ord.order_id);
-                        if matches!(
+                        if status == "filled" {
+                            self.exit_intent_inflight = true;
+                            self.lifecycle_stage = "mr_tp_filled_awaiting_broker_flat".to_string();
+                            self.tp_order_id = None;
+                        } else if matches!(
                             status.as_str(),
-                            "filled" | "cancelled" | "canceled" | "rejected" | "expired"
+                            "cancelled" | "canceled" | "rejected" | "expired"
                         ) {
                             self.tp_order_id = None;
                         }
@@ -1495,6 +1504,8 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 status.as_str(),
                 "filled" | "executed" | "triggered" | "done" | "completed"
             ) {
+                self.exit_intent_inflight = true;
+                self.lifecycle_stage = "mr_sl_filled_awaiting_broker_flat".to_string();
                 if let Some(tp_order_id) = self.tp_order_id.take() {
                     intents.push(
                         Intent::Cancel {
@@ -1606,6 +1617,11 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.hybrid_state = HybridState::Open;
                 self.sync_state();
                 return intents;
+            }
+            if self.exit_intent_inflight {
+                self.lifecycle_stage = "exit_filled_awaiting_broker_flat".to_string();
+                self.sync_state();
+                return Vec::new();
             }
         }
         let entry_price = if pos.avg_price > 0.0 {
@@ -2727,6 +2743,53 @@ mod tests {
 
         assert!(intents.is_empty());
         assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+        assert!(strategy.exit_intent_inflight);
+        assert_eq!(
+            strategy.lifecycle_stage,
+            "mr_tp_filled_awaiting_broker_flat"
+        );
+    }
+
+    #[test]
+    fn filled_mr_tp_cannot_be_repaired_before_broker_flat_reconciliation() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.open_position = Some(OpenPosition {
+            owner: Owner::MeanRev,
+            side: PositionSide::Short,
+            entry_ts: utc_to_local(1_775_490_000, 3),
+            entry_price: 80.0,
+            size: 1,
+            stop_price: Some(80.2),
+            take_price: Some(79.9),
+            stop1: None,
+            stop2: None,
+        });
+        strategy.tp_order_id = Some(111);
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        let mut tp_fill = order_event(111, "filled", None);
+        tp_fill.comment = Some("AUS|sid=alor_usdrubf_hybrid_v1|o=MR|r=TP".to_string());
+
+        assert!(strategy.on_order(&ctx, &tp_fill).is_empty());
+
+        let mut repair_intents = Vec::new();
+        strategy.maybe_emit_live_mr_brackets(&ctx, 1_775_490_121, &mut repair_intents);
+        assert!(repair_intents.is_empty());
+
+        let repeated_open = strategy.on_position(&ctx, &position_event(1_775_490_122, -1.0, 80.0));
+        assert!(repeated_open.is_empty());
+        assert!(strategy.exit_intent_inflight);
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+
+        let flat_cleanup = strategy.on_position(&ctx, &position_event(1_775_490_123, 0.0, 0.0));
+        assert!(flat_cleanup.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::DeleteStopLimit { order_id, .. } if order_id == "sl-1"
+            )
+        }));
+        assert!(!strategy.exit_intent_inflight);
+        assert!(strategy.open_position.is_none());
     }
 
     #[test]
@@ -2799,6 +2862,11 @@ mod tests {
         assert!(intents.iter().any(|intent| {
             matches!(intent.base_intent(), Intent::Cancel { order_id } if *order_id == 111)
         }));
+        assert!(strategy.exit_intent_inflight);
+        assert_eq!(
+            strategy.lifecycle_stage,
+            "mr_sl_filled_awaiting_broker_flat"
+        );
     }
 
     #[test]
