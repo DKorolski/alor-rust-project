@@ -725,6 +725,7 @@ impl AlorUsdrubfHybridStrategy {
         &mut self,
         ctx: &StrategyCtx,
         bar: &BarEvent,
+        reference_price: f64,
         intents: &mut Vec<Intent>,
     ) {
         let Some(pending) = self.pending_entry.clone() else {
@@ -739,12 +740,12 @@ impl AlorUsdrubfHybridStrategy {
         if self.entry_intent_inflight || self.open_position.is_some() {
             return;
         }
-        let size = self.compute_entry_size(bar.o);
+        let size = self.compute_entry_size(reference_price);
         let side = pending.side.entry_side();
         intents.push(Intent::Market {
             qty: size as f64,
             side,
-            fill_price: Some(bar.o),
+            fill_price: Some(reference_price),
             comment: Some(format!(
                 "{}|entry|{}",
                 self.config.symbol,
@@ -754,13 +755,14 @@ impl AlorUsdrubfHybridStrategy {
         self.entry_intent_inflight = true;
         self.hybrid_state = HybridState::Pending;
         self.lifecycle_stage = "live_entry_intent_emitted".to_string();
-        self.log_live_intent_emitted_entry(ctx, bar, size as f64, side);
+        self.log_live_intent_emitted_entry(ctx, bar, reference_price, size as f64, side);
     }
 
     fn log_live_intent_emitted_entry(
         &self,
         ctx: &StrategyCtx,
         bar: &BarEvent,
+        reference_price: f64,
         qty: f64,
         side: Side,
     ) {
@@ -773,8 +775,8 @@ impl AlorUsdrubfHybridStrategy {
             bar_ts_utc = bar.close_time_utc,
             qty,
             side = ?side,
-            reference_price_from_bar_open = bar.o,
-            "live entry intent emitted (reference price is bar open, not fill)"
+            reference_price,
+            "live entry intent emitted (reference price is model execution reference, not fill)"
         );
     }
 
@@ -1312,7 +1314,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.sync_state();
                 return intents;
             }
-            self.maybe_emit_live_entry_intent(ctx, bar, &mut intents);
+            self.maybe_emit_live_entry_intent(ctx, bar, bar.o, &mut intents);
         } else {
             self.maybe_fill_pending_entry(bar, &mut intents);
             if let Some((reason, exit_price)) = self.evaluate_exit_research(&research) {
@@ -1351,6 +1353,13 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 );
                 self.pending_entry = Some(signal);
                 self.hybrid_state = HybridState::Pending;
+                if matches!(ctx.trade_mode, crate::TradeMode::Live) {
+                    // A completed signal bar arrives at the boundary where the
+                    // research replay enters on the next bar open. Emit now,
+                    // using the signal close as the observable next-open proxy,
+                    // instead of waiting for one more completed bar event.
+                    self.maybe_emit_live_entry_intent(ctx, bar, bar.close, &mut intents);
+                }
             }
         }
         self.log_entry_exit_inflight_transitions(ctx);
@@ -2097,7 +2106,7 @@ mod tests {
         RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx,
     };
     use crate::{PaperExecutionMode, TradeMode};
-    use alor_protocol::{CommandAck, IntentClass};
+    use alor_protocol::{CommandAck, IntentClass, Side};
     use chrono::NaiveTime;
     use uuid::Uuid;
 
@@ -2460,6 +2469,60 @@ mod tests {
                 ..
             } if *last_processed_bar_ts == Some(1775490060)
         ));
+    }
+
+    #[test]
+    fn live_signal_emits_entry_without_waiting_for_an_extra_completed_bar() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.current_date_local = chrono::NaiveDate::from_ymd_opt(2026, 6, 17);
+        strategy.day_open = Some(72.90);
+        strategy.day_high = Some(73.20);
+        strategy.day_low = Some(72.67);
+        strategy.day_volume_sum = 10_000.0;
+        strategy.day_vwap_num = 729_390.0;
+        strategy.session_start_local =
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 17).and_then(|date| date.and_hms_opt(9, 0, 0));
+        strategy.bootstrap_seen = true;
+        strategy.runtime_state_restored = true;
+        strategy.live_ready = true;
+
+        let ctx = test_ctx(TradeMode::Live, 1_781_683_801);
+        let signal_bar = BarEvent {
+            symbol: "USDRUBF".to_string(),
+            close_time_utc: 1_781_683_800,
+            close: 72.95,
+            o: 72.80,
+            h: 72.99,
+            l: 72.89,
+            v: 100.0,
+            origin: DataOrigin::Live,
+        };
+
+        let intents = strategy.on_bar(&ctx, &signal_bar);
+
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(
+            &intents[0],
+            Intent::Market {
+                side: Side::Sell,
+                fill_price: Some(price),
+                ..
+            } if (*price - signal_bar.close).abs() < 1e-9
+        ));
+        assert!(matches!(
+            strategy.state(),
+            StrategyState::AlorUsdrubfHybrid {
+                hybrid_state,
+                pending_entry_owner,
+                entry_intent_inflight,
+                ..
+            } if hybrid_state == "pending"
+                && pending_entry_owner.as_deref() == Some("mean_rev")
+                && *entry_intent_inflight
+        ));
+
+        let next_bar = bar(1_781_684_400, 72.90);
+        assert!(strategy.on_bar(&ctx, &next_bar).is_empty());
     }
 
     #[test]
