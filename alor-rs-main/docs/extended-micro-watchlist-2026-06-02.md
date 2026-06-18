@@ -362,10 +362,68 @@ Detailed incident note:
 
 - `live-incident-note-2026-06-11-bracket-residuals.md`
 
+### 11. Bracket Terminal Fill vs Sibling Cleanup, 2026-06-17
+
+Status: open / patch required before scale-up.
+
+Observed:
+
+- `7502MIW / IMOEXF hybrid` entered an MR long, qty `2`.
+- TP limit filled and broker position became flat.
+- The paired SL stop-limit remained `working` after TP fill.
+- Runtime emitted `delete_stop_limit` for the sibling SL, but the cleanup command
+  failed with `cws_error` because Alor OAuth refresh returned `502 Bad Gateway`.
+- Runtime logged:
+  `cleanup_ack_error_with_active_stop_while_flat`, `working_stop_orders_count=1`.
+- Operator manually canceled the stale SL. Broker stream later confirmed
+  `stop_order_id=121741481 status=canceled`.
+
+Risk:
+
+- A stale sibling SL after broker-flat can reopen the opposite position if it
+  triggers later.
+- The failure was transport/auth-path related, but the risk sits in runtime
+  lifecycle semantics: terminal TP fill must not leave a working sibling stop
+  without a robust retry/reconcile path.
+
+Patch posture:
+
+- Deploy and validate the bracket residual/race patch before any lot-size
+  increase.
+- Treat terminal TP/SL fill and broker-flat reconciliation as separate states.
+- Keep cleanup retry/reconcile active until sibling protection is confirmed
+  canceled or broker truth proves no strategy-owned stop remains.
+- Emit operator-visible events for `flat_with_active_stop`,
+  `sibling_cleanup_failed`, `sibling_cleanup_retry`, and
+  `sibling_cleanup_confirmed`.
+
+Scale-up gate:
+
+- Do not increase `USDRUBF` lot size now.
+- Do not increase `IMOEXF hybrid` size above the current validation size while
+  this class remains open.
+- After patch rollout, collect at least `30-50` complete broker rounds or
+  `15-20` active trading days before revisiting `USDRUBF` lot-size increase.
+
+Daily audit requirement:
+
+- Compare broker rounds vs runtime intents vs model replay, not PnL alone.
+- Required fields for the daily audit:
+  - `signal_ts` / model component;
+  - entry intent and broker fill;
+  - protective TP/SL install acks;
+  - exit reason and broker fill;
+  - sibling cleanup result;
+  - final position reconcile.
+- Classify any mismatch as model drift, Rust state-machine drift, broker
+  execution drift, or bracket lifecycle drift.
+
 Current scale-up posture:
 
 - `RI`: continue extended micro; no bracket TP change for MR unless research explicitly validates it.
-- `Alor-USDRUBF`: continue observation; do not alter MR exit contract yet.
+- `Alor-USDRUBF`: continue micro observation at qty `1`; do not increase lot
+  size until bracket residual/race hardening is deployed and the post-patch
+  audit window is clean.
 - `IMOEXF hybrid`: do not increase current quantities until partial-fill,
   cleanup, near-zero churn, protective TP open-timeout, and stale BO-entry
   watch items remain clean or are patched.
@@ -394,3 +452,5 @@ Small-readiness conditions:
 - `vps-live-observations-2026-06-06.md`
 - `vps-live-observations-2026-06-07.md`
 - `vps-live-observations-2026-06-09.md`
+- `vps-live-observations-2026-06-15.md`
+- `alor-usdrubf-soak-trade-ledger-2026-06-17.md`

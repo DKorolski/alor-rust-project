@@ -10,6 +10,67 @@ current VPS docker logs. It is not a broker accounting export. Rows marked
 confirmed from the currently retained `trading-alor-usdrubf-strategy-runtime-1`
 docker log window.
 
+## Broker Terminal Reconciliation Addendum
+
+On 2026-06-17 the broker terminal paired-cycle export was added as a stronger
+source than the reconstructed rows below. Treat this section as the canonical
+economics read for the paired `USDRUBF` cycles listed by the broker terminal;
+keep the reconstructed rows below for operational/version context only.
+
+Summary from the broker paired-cycle table:
+
+- Cycles: `34`.
+- Gross result: `+0.64` `USDRUBF` price units before commissions.
+- Approximate gross money result for qty 1: `+640 RUB`, using `0.01` price
+  point ~= `10 RUB`.
+- Win/loss/flat: `18` positive, `15` negative, `1` flat.
+- May subtotal: `+1.01` price units.
+- June subtotal through 2026-06-16: `-0.37` price units.
+- Pre-2026-06-04 subtotal: `+0.02` price units.
+- 2026-06-04 and later subtotal: `+0.62` price units.
+- 2026-06-12 and later current deployed contour subtotal: `+0.25` price units.
+
+Daily broker paired-cycle totals:
+
+| Date | Cycles | Gross price units | Notes |
+| --- | ---:| ---:| --- |
+| 2026-05-04 | 1 | +0.02 | Long EOD-style close. |
+| 2026-05-06 | 1 | +0.03 | Short quick close. |
+| 2026-05-08 | 1 | +0.12 | Short quick close. |
+| 2026-05-11 | 1 | -0.07 | Short loss. |
+| 2026-05-13 | 1 | +0.01 | Near-flat short. |
+| 2026-05-14 | 1 | 0.00 | Flat short. |
+| 2026-05-18 | 1 | +0.16 | Short held to 15:00. |
+| 2026-05-19 | 1 | +0.32 | Short held to 18:20. |
+| 2026-05-20 | 1 | -0.09 | Long EOD-style loss. |
+| 2026-05-26 | 1 | +0.72 | Best single cycle in the export. |
+| 2026-05-27 | 2 | -0.23 | One win, one larger loss. |
+| 2026-05-28 | 1 | -0.08 | Short loss. |
+| 2026-05-29 | 2 | +0.10 | One win, one near-flat loss. |
+| 2026-06-01 | 1 | -0.12 | Long loss. |
+| 2026-06-02 | 3 | +0.14 | Two short losses, one long EOD-style win. |
+| 2026-06-03 | 4 | -1.01 | Main negative cluster before the MR bracket fix line. |
+| 2026-06-04 | 1 | -0.52 | BO-style long loss; not an MR bracket validation. |
+| 2026-06-05 | 1 | -0.30 | BO-style long loss; not an MR bracket validation. |
+| 2026-06-08 | 1 | +0.63 | Short EOD-style win. |
+| 2026-06-09 | 1 | +0.28 | Short EOD-style win. |
+| 2026-06-11 | 2 | +0.28 | Broker ledger shows same-time short close and long open at 10:53. |
+| 2026-06-15 | 4 | -0.08 | Includes MR TP fill plus residual/race cleanup row. |
+| 2026-06-16 | 1 | +0.33 | Long EOD-style win. |
+
+Operational read from the broker export:
+
+- The old reconstructed ledger undercounted and misattributed several rows,
+  especially around portfolio/version transitions. Broker paired cycles should
+  supersede those economics.
+- The 2026-06-03 cluster is the main negative outlier and predates the later MR
+  bracket lifecycle hardening line.
+- The 2026-06-15 paired rows confirm that the MR bracket TP did its economic job
+  (`+0.08`), but also confirm the residual/race issue (`-0.01`) already captured
+  in the watchlist and local patch.
+- The 2026-06-11 same-time close/open reversal should remain on the watchlist
+  until it is reconciled against runtime intent ownership and model component.
+
 ## Version Timeline
 
 | Period | Portfolio | Version / contour | MR exit contract | Notes |
