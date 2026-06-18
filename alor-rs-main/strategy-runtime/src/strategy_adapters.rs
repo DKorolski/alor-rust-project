@@ -297,6 +297,13 @@ impl RiAuthor4142Adapter {
                 .map(|symbol| symbol.trim())
                 .filter(|symbol| !symbol.is_empty())
                 .map(ToString::to_string),
+            excluded_model_dates: settings.excluded_model_dates.clone(),
+            min_anchor_bars: settings.min_anchor_bars,
+            anchor_first_bar_at_or_before: settings.anchor_first_bar_at_or_before.clone(),
+            anchor_last_bar_at_or_after: settings.anchor_last_bar_at_or_after.clone(),
+            actual_expiry_date: settings.actual_expiry_date.clone(),
+            roll_target_sessions_before: settings.roll_target_sessions_before,
+            roll_fallback_sessions_before: settings.roll_fallback_sessions_before,
             qty: config.qty.max(1.0),
             timezone_offset_hours: config.timezone_offset_hours,
         })

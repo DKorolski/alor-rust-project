@@ -659,6 +659,13 @@ struct RiAuthor4142ConfigFile {
     allow_order_emission: Option<bool>,
     execution_path: Option<String>,
     order_symbol: Option<String>,
+    excluded_model_dates: Option<Vec<String>>,
+    min_anchor_bars: Option<usize>,
+    anchor_first_bar_at_or_before: Option<String>,
+    anchor_last_bar_at_or_after: Option<String>,
+    actual_expiry_date: Option<String>,
+    roll_target_sessions_before: Option<u32>,
+    roll_fallback_sessions_before: Option<u32>,
     decision_journal_path: Option<String>,
     decision_journal_append: Option<bool>,
 }
@@ -1369,6 +1376,27 @@ fn apply_ri_author41_42_config_file(
         }
         if let Some(value) = &ri_file.order_symbol {
             settings.order_symbol = Some(value.clone());
+        }
+        if let Some(value) = &ri_file.excluded_model_dates {
+            settings.excluded_model_dates = value.clone();
+        }
+        if let Some(value) = ri_file.min_anchor_bars {
+            settings.min_anchor_bars = value;
+        }
+        if let Some(value) = &ri_file.anchor_first_bar_at_or_before {
+            settings.anchor_first_bar_at_or_before = value.clone();
+        }
+        if let Some(value) = &ri_file.anchor_last_bar_at_or_after {
+            settings.anchor_last_bar_at_or_after = value.clone();
+        }
+        if let Some(value) = &ri_file.actual_expiry_date {
+            settings.actual_expiry_date = Some(value.clone());
+        }
+        if let Some(value) = ri_file.roll_target_sessions_before {
+            settings.roll_target_sessions_before = value;
+        }
+        if let Some(value) = ri_file.roll_fallback_sessions_before {
+            settings.roll_fallback_sessions_before = value;
         }
         if let Some(value) = &ri_file.decision_journal_path {
             settings.decision_journal_path = Some(value.clone());

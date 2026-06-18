@@ -443,6 +443,16 @@ fn loads_ri_author41_42_riu6_roll_candidates() {
         assert!(settings.allow_order_emission);
         assert_eq!(settings.execution_path, "action_scoped_only");
         assert_eq!(settings.order_symbol.as_deref(), Some("RTS-9.26"));
+        assert_eq!(
+            settings.excluded_model_dates,
+            ["2026-06-12".to_string(), "2026-11-04".to_string()]
+        );
+        assert_eq!(settings.min_anchor_bars, 80);
+        assert_eq!(settings.anchor_first_bar_at_or_before, "09:10:00");
+        assert_eq!(settings.anchor_last_bar_at_or_after, "23:30:00");
+        assert_eq!(settings.actual_expiry_date.as_deref(), Some("2026-09-17"));
+        assert_eq!(settings.roll_target_sessions_before, 1);
+        assert_eq!(settings.roll_fallback_sessions_before, 2);
     }
 }
 

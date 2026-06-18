@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{bail, Result};
-use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -79,6 +79,13 @@ pub struct RiAuthor4142LiveConfig {
     pub allow_order_emission: bool,
     pub execution_path: RiAuthor4142ExecutionPath,
     pub order_symbol: Option<String>,
+    pub excluded_model_dates: Vec<String>,
+    pub min_anchor_bars: usize,
+    pub anchor_first_bar_at_or_before: String,
+    pub anchor_last_bar_at_or_after: String,
+    pub actual_expiry_date: Option<String>,
+    pub roll_target_sessions_before: u32,
+    pub roll_fallback_sessions_before: u32,
     pub qty: f64,
     pub timezone_offset_hours: i32,
 }
@@ -225,6 +232,9 @@ struct RiDailyStats {
     high: f64,
     low: f64,
     close: f64,
+    bars: usize,
+    first_bar: NaiveTime,
+    last_bar: NaiveTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -378,6 +388,38 @@ impl RiAuthor4142LiveConfig {
                 self.timeframe
             );
         }
+        for raw in &self.excluded_model_dates {
+            NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|err| {
+                anyhow::anyhow!("invalid excluded_model_dates value {raw}: {err}")
+            })?;
+        }
+        NaiveTime::parse_from_str(&self.anchor_first_bar_at_or_before, "%H:%M:%S").map_err(
+            |err| {
+                anyhow::anyhow!(
+                    "invalid anchor_first_bar_at_or_before {}: {err}",
+                    self.anchor_first_bar_at_or_before
+                )
+            },
+        )?;
+        NaiveTime::parse_from_str(&self.anchor_last_bar_at_or_after, "%H:%M:%S").map_err(
+            |err| {
+                anyhow::anyhow!(
+                    "invalid anchor_last_bar_at_or_after {}: {err}",
+                    self.anchor_last_bar_at_or_after
+                )
+            },
+        )?;
+        if let Some(raw) = &self.actual_expiry_date {
+            NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+                .map_err(|err| anyhow::anyhow!("invalid actual_expiry_date {raw}: {err}"))?;
+        }
+        if self.roll_target_sessions_before == 0
+            || self.roll_fallback_sessions_before < self.roll_target_sessions_before
+        {
+            bail!(
+                "ri_author41_42 rollover requires target_sessions_before > 0 and fallback >= target"
+            );
+        }
         Ok(())
     }
 }
@@ -386,6 +428,10 @@ impl RiAuthor4142LiveConfig {
 pub struct RiAuthor4142LiveStrategy {
     config: RiAuthor4142LiveConfig,
     session_policy: RegularSessionPolicy,
+    excluded_model_dates: HashSet<NaiveDate>,
+    anchor_first_bar_at_or_before: NaiveTime,
+    anchor_last_bar_at_or_after: NaiveTime,
+    logged_excluded_dates: HashSet<NaiveDate>,
     model_bars: Vec<ModelBar>,
     emitted_decision_keys: HashSet<String>,
     journal_records: Vec<RiAuthor4142JournalRecord>,
@@ -400,6 +446,28 @@ impl RiAuthor4142LiveStrategy {
         let profile = ModelProfile::ri_shadow_10m();
         let session_policy = profile.session_policy;
         let live_adapter_enabled = config.can_emit_orders();
+        let excluded_model_dates = config
+            .excluded_model_dates
+            .iter()
+            .map(|raw| NaiveDate::parse_from_str(raw, "%Y-%m-%d"))
+            .collect::<std::result::Result<HashSet<_>, _>>()?;
+        let anchor_first_bar_at_or_before =
+            NaiveTime::parse_from_str(&config.anchor_first_bar_at_or_before, "%H:%M:%S")?;
+        let anchor_last_bar_at_or_after =
+            NaiveTime::parse_from_str(&config.anchor_last_bar_at_or_after, "%H:%M:%S")?;
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_rollover_policy_loaded",
+            active_contract = %config.symbol,
+            order_symbol = ?config.order_symbol,
+            actual_expiry_date = ?config.actual_expiry_date,
+            roll_target_sessions_before = config.roll_target_sessions_before,
+            roll_fallback_sessions_before = config.roll_fallback_sessions_before,
+            excluded_model_dates = ?config.excluded_model_dates,
+            min_anchor_bars = config.min_anchor_bars,
+            anchor_first_bar_at_or_before = %config.anchor_first_bar_at_or_before,
+            anchor_last_bar_at_or_after = %config.anchor_last_bar_at_or_after,
+        );
         Ok(Self {
             state: StrategyState::RiAuthor4142Live {
                 mode: config.mode.as_str().to_string(),
@@ -426,6 +494,10 @@ impl RiAuthor4142LiveStrategy {
             },
             config,
             session_policy,
+            excluded_model_dates,
+            anchor_first_bar_at_or_before,
+            anchor_last_bar_at_or_after,
+            logged_excluded_dates: HashSet::new(),
             model_bars: Vec::new(),
             emitted_decision_keys: HashSet::new(),
             journal_records: Vec::new(),
@@ -444,8 +516,19 @@ impl RiAuthor4142LiveStrategy {
         let Some(dt_local) = self.local_dt(bar.close_time_utc) else {
             return Vec::new();
         };
-        let is_model_bar =
-            self.session_policy.is_model_bar(dt_local) && bar.origin != DataOrigin::HistoryGap;
+        let excluded_date = self.excluded_model_dates.contains(&dt_local.date());
+        let is_model_bar = self.session_policy.is_model_bar(dt_local)
+            && !excluded_date
+            && bar.origin != DataOrigin::HistoryGap;
+        if excluded_date && self.logged_excluded_dates.insert(dt_local.date()) {
+            info!(
+                target: "strategy_runtime::ri_author41_42_live",
+                action = "ri_model_session_excluded",
+                calendar_date = %dt_local.date(),
+                reason = "configured_non_regular_session",
+                active_contract = %self.config.symbol,
+            );
+        }
 
         if let StrategyState::RiAuthor4142Live {
             last_bar_ts,
@@ -500,8 +583,22 @@ impl RiAuthor4142LiveStrategy {
         &mut self,
         current_dt_local: NaiveDateTime,
     ) -> Vec<RiAuthor4142ModelDecision> {
+        let eligible_dates = self
+            .daily_stats_before(current_dt_local.date())
+            .into_iter()
+            .map(|(date, _)| date)
+            .collect::<HashSet<_>>();
+        let eligible_model_bars = self
+            .model_bars
+            .iter()
+            .copied()
+            .filter(|bar| {
+                bar.ts_local.date() == current_dt_local.date()
+                    || eligible_dates.contains(&bar.ts_local.date())
+            })
+            .collect::<Vec<_>>();
         let records =
-            build_ri_author41_42_combo_shadow_journal(&self.model_bars, self.session_policy);
+            build_ri_author41_42_combo_shadow_journal(&eligible_model_bars, self.session_policy);
         let mut decisions = Vec::new();
         for record in records {
             if !is_finalized_record(&record, current_dt_local) {
@@ -963,7 +1060,9 @@ impl RiAuthor4142LiveStrategy {
             return None;
         }
         let dt_local = self.local_dt(bar.close_time_utc)?;
-        if !self.session_policy.is_model_bar(dt_local) {
+        if !self.session_policy.is_model_bar(dt_local)
+            || self.excluded_model_dates.contains(&dt_local.date())
+        {
             return None;
         }
         Some(ModelBar {
@@ -1707,7 +1806,9 @@ impl RiAuthor4142LiveStrategy {
     fn daily_stats_before(&self, date: NaiveDate) -> Vec<(NaiveDate, RiDailyStats)> {
         let mut by_day: BTreeMap<NaiveDate, RiDailyStats> = BTreeMap::new();
         for bar in &self.model_bars {
-            if bar.ts_local.date() >= date {
+            if bar.ts_local.date() >= date
+                || self.excluded_model_dates.contains(&bar.ts_local.date())
+            {
                 continue;
             }
             by_day
@@ -1716,14 +1817,29 @@ impl RiAuthor4142LiveStrategy {
                     stats.high = stats.high.max(bar.high);
                     stats.low = stats.low.min(bar.low);
                     stats.close = bar.close;
+                    stats.bars += 1;
+                    stats.first_bar = stats.first_bar.min(bar.ts_local.time());
+                    stats.last_bar = stats.last_bar.max(bar.ts_local.time());
                 })
                 .or_insert(RiDailyStats {
                     high: bar.high,
                     low: bar.low,
                     close: bar.close,
+                    bars: 1,
+                    first_bar: bar.ts_local.time(),
+                    last_bar: bar.ts_local.time(),
                 });
         }
-        by_day.into_iter().collect()
+        by_day
+            .into_iter()
+            .filter(|(_, stats)| self.is_eligible_anchor_session(*stats))
+            .collect()
+    }
+
+    fn is_eligible_anchor_session(&self, stats: RiDailyStats) -> bool {
+        stats.bars >= self.config.min_anchor_bars
+            && stats.first_bar <= self.anchor_first_bar_at_or_before
+            && stats.last_bar >= self.anchor_last_bar_at_or_after
     }
 
     fn points_for_side(side: RiAuthor4142Side, entry_price: f64, exit_price: f64) -> f64 {
@@ -2236,6 +2352,13 @@ mod tests {
             allow_order_emission: false,
             execution_path: RiAuthor4142ExecutionPath::ActionScopedOnly,
             order_symbol: None,
+            excluded_model_dates: Vec::new(),
+            min_anchor_bars: 0,
+            anchor_first_bar_at_or_before: "23:59:59".to_string(),
+            anchor_last_bar_at_or_after: "00:00:00".to_string(),
+            actual_expiry_date: None,
+            roll_target_sessions_before: 1,
+            roll_fallback_sessions_before: 2,
             qty: 1.0,
             timezone_offset_hours: 3,
         }
@@ -2816,6 +2939,100 @@ mod tests {
         } else {
             panic!("unexpected strategy state");
         }
+    }
+
+    #[test]
+    fn configured_special_session_is_excluded_from_model_and_live_emission() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        config.excluded_model_dates = vec!["2026-06-12".to_string()];
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+
+        let special_bar = bar_with_ohlc(
+            dt(2026, 6, 12, 10, 0, 0),
+            DataOrigin::Live,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_100.0,
+        );
+
+        assert!(strategy.on_bar(&live_ctx(), &special_bar).is_empty());
+        assert!(strategy.model_bars.is_empty());
+    }
+
+    #[test]
+    fn anchor_guard_skips_latest_incomplete_session() {
+        let mut config = default_config();
+        config.min_anchor_bars = 3;
+        config.anchor_first_bar_at_or_before = "09:10:00".to_string();
+        config.anchor_last_bar_at_or_after = "23:30:00".to_string();
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+
+        for bar in [
+            bar_with_ohlc(
+                dt(2026, 6, 11, 9, 0, 0),
+                DataOrigin::History,
+                100_000.0,
+                100_100.0,
+                99_900.0,
+                100_000.0,
+            ),
+            bar_with_ohlc(
+                dt(2026, 6, 11, 12, 0, 0),
+                DataOrigin::History,
+                100_000.0,
+                101_000.0,
+                99_000.0,
+                100_500.0,
+            ),
+            bar_with_ohlc(
+                dt(2026, 6, 11, 23, 40, 0),
+                DataOrigin::History,
+                100_500.0,
+                100_700.0,
+                100_300.0,
+                100_600.0,
+            ),
+            bar_with_ohlc(
+                dt(2026, 6, 12, 10, 0, 0),
+                DataOrigin::History,
+                90_000.0,
+                90_100.0,
+                89_900.0,
+                90_000.0,
+            ),
+            bar_with_ohlc(
+                dt(2026, 6, 12, 23, 30, 0),
+                DataOrigin::History,
+                90_000.0,
+                91_000.0,
+                89_000.0,
+                90_500.0,
+            ),
+        ] {
+            strategy.update_bar_state(&bar);
+        }
+
+        let anchor = strategy
+            .mr_anchor_for_date(NaiveDate::from_ymd_opt(2026, 6, 15).unwrap())
+            .expect("eligible 2026-06-11 anchor");
+        assert_eq!(anchor.prev_close, 100_600.0);
+        assert_eq!(anchor.prev_low, 99_000.0);
+        assert_eq!(anchor.prev_range, 2_000.0);
+    }
+
+    #[test]
+    fn rollover_policy_requires_ordered_positive_offsets() {
+        let mut config = default_config();
+        config.roll_target_sessions_before = 2;
+        config.roll_fallback_sessions_before = 1;
+
+        let err = RiAuthor4142LiveStrategy::new(config)
+            .expect_err("fallback cannot be later than target")
+            .to_string();
+        assert!(err.contains("rollover requires"));
     }
 
     #[test]
