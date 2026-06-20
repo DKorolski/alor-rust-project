@@ -115,6 +115,7 @@ point is approximately `10 RUB`, so `1.00` price unit is approximately
 | 2026-06-15 | logs | current VPS `manual-20260612-bracket-residual` | BO | 11:20 | 12:00 | long | 1 | 72.82 | 72.66 | -0.16 | `bo_stop1_long`, market/action-scoped, broker flat. |
 | 2026-06-15 | logs | current VPS `manual-20260612-bracket-residual` | BO | 16:00 | 17:00 | short | 1 | 72.13 | 72.12 | +0.01 | `bo_stop1_short`, market/action-scoped, broker flat. |
 | 2026-06-16 | logs | current VPS `manual-20260612-bracket-residual` | BO | 16:50 | 23:40 | long | 1 | 72.46 | 72.79 | +0.33 | `bo_eod_exit`, market/action-scoped, broker flat. |
+| 2026-06-19 | logs | `manual-20260619-usdrubf-timing-a96a80a` | BO | 13:40 | 15:00 | short | 1 | 73.34 | 73.35 | -0.01 | First post-timing-patch trade. Intent-to-fill about `609 ms`; entered on model next-bar open without an extra `10m` wait. `bo_stop1_short` exit; broker flat. |
 
 ## Observed Totals From This Best-Effort Ledger
 
@@ -124,8 +125,8 @@ The rows above sum to approximately:
   repeated transport/retry incidents in April.
 - Post-2026-06-04 but before the first MR bracket validation: `-0.02` gross,
   both rows were BO and therefore did not exercise MR TP/SL.
-- Current 2026-06-12+ log-confirmed rows: `+0.25` gross if the residual safety
-  row is included, or `+0.26` gross excluding the residual bug row.
+- Current 2026-06-12+ log-confirmed rows: `+0.24` gross if the residual safety
+  row is included, or `+0.25` gross excluding the residual bug row.
 
 These totals are only directional because the ledger is reconstructed from
 observation notes rather than a complete broker statement.
@@ -158,13 +159,16 @@ MR path as production-clean.
 
 ## Current Recommendation
 
-Keep `Alor-USDRUBF` at qty `1` until the bracket lifecycle patch is deployed and
-one or more fresh MR bracket cycles complete without:
+The lifecycle patch and the next-bar timing patch are now deployed. Keep
+`Alor-USDRUBF` at qty `1` until one or more fresh MR bracket cycles complete
+without:
 
 - duplicate TP/SL repair after terminal sibling fill;
 - residual emergency exit;
 - stale working order or stale stop order after broker flat;
 - repeated orphan/fill-before-ack state confusion.
 
-BO cycles on 2026-06-15 and 2026-06-16 looked operationally clean on the current
-VPS logs, but they do not validate the MR bracket path.
+The 2026-06-19 BO cycle validated the timing patch: the entry was emitted and
+filled at the model next-bar open instead of one bar late. BO cycles do not
+validate the MR bracket cleanup path, so the first fresh MR terminal fill
+remains the next important checkpoint.
