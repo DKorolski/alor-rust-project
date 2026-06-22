@@ -55,4 +55,27 @@ in `SyncingHistory` / `waiting_for_next_bar_after_restart`, which is expected.
 The next validation checkpoint is the first completed IMOEXF cycle at quantity
 `3`, with particular attention to MR bracket sibling cleanup and final
 broker-flat reconciliation.
+# MR Partial-Entry Hardening Rollout — 2026-06-22
+
+- Source commit: `8c50aaf Harden MR bracket partial entry lifecycle`.
+- Runtime image: `manual-20260622-mr-partial-8c50aaf`.
+- Rollout window: `12:32-12:40 MSK`.
+- Preflight broker snapshots confirmed:
+  - `7502MIW / IMOEXF = 0`;
+  - `7502T0U / IMOEXF = 0`;
+  - `7502MIW / USDRUBF = 0`;
+  - no working strategy TP or stop orders.
+- Restarted only the three affected strategy runtimes:
+  - IMOEXF riskgate-shadow on `7502MIW`;
+  - IMOEXF Author41 short on `7502T0U`;
+  - Alor-USDRUBF on `7502MIW`.
+- Gateways and Redis were not restarted.
+- Both IMOEXF configurations remain at `qty = 3`; loaded
+  `partial_entry_fill_timeout_ms = 3000`.
+- All three runtimes became healthy, consumed the `12:40 MSK` live bar, and
+  transitioned from restart guard to `ALLOWED / LiveReady`.
+- Post-rollout snapshots remained flat with no working TP/SL.
+- VPS resources remained normal: about `6.6 GiB` memory available, root disk
+  `27%` used, load average below `0.5`.
+- VPS backup timestamp: `20260622-123219`.
 
