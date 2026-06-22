@@ -362,6 +362,7 @@ pub struct HybridIntradaySettings {
     pub repair_backoff_base_sec: u64,
     pub repair_backoff_max_sec: u64,
     pub pending_timeout_sec: u64,
+    pub partial_entry_fill_timeout_ms: u64,
     pub stop_end_buffer_sec: u64,
 }
 
@@ -404,6 +405,7 @@ impl Default for HybridIntradaySettings {
             repair_backoff_base_sec: 5,
             repair_backoff_max_sec: 60,
             pending_timeout_sec: 60,
+            partial_entry_fill_timeout_ms: 3_000,
             stop_end_buffer_sec: 60,
         }
     }

@@ -1481,6 +1481,21 @@ impl StrategyRuntime {
         .await?;
         self.drain_stream(&streams.bars, MessageType::Bar, trim_bars, 100)
             .await?;
+        let now_ts_utc_ms = chrono::Utc::now().timestamp_millis();
+        let event_ts = now_ts_utc_ms.div_euclid(1_000);
+        let last_bar_ts = self
+            .state
+            .last_processed_bar_ts
+            .get(&self.config.strategy.symbol)
+            .copied();
+        let ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, event_ts);
+        self.invoke_and_apply_strategy_callback(
+            &ctx,
+            event_ts,
+            "on_timer",
+            |strategy, strategy_ctx| strategy.on_timer(strategy_ctx, now_ts_utc_ms),
+        )
+        .await?;
         self.refresh_health_if_due().await?;
         self.log_live_guard_status_if_due().await?;
         self.log_metrics_if_due().await?;

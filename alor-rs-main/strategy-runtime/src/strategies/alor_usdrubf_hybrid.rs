@@ -124,6 +124,8 @@ struct PendingEntry {
     signal_price: f64,
     stop1: Option<f64>,
     stop2: Option<f64>,
+    target_qty: f64,
+    partial_started_at_ms: Option<i64>,
 }
 
 #[allow(dead_code)]
@@ -878,6 +880,12 @@ impl AlorUsdrubfHybridStrategy {
             signal_price: rs.close,
             stop1: None,
             stop2: None,
+            target_qty: if self.config.use_fixed_live_size {
+                self.config.live_fixed_units.max(1.0)
+            } else {
+                1.0
+            },
+            partial_started_at_ms: None,
         })
     }
 
@@ -905,6 +913,8 @@ impl AlorUsdrubfHybridStrategy {
                 signal_price: rs.close,
                 stop1: Some(session_open + self.config.bo_stop1_range * scale),
                 stop2: Some(session_open - self.config.bo_stop2_range * scale),
+                target_qty: 1.0,
+                partial_started_at_ms: None,
             });
         }
         if can_short && !rs.bo_was_short_today && rs.close < short_level {
@@ -916,6 +926,8 @@ impl AlorUsdrubfHybridStrategy {
                 signal_price: rs.close,
                 stop1: Some(session_open - self.config.bo_stop1_range * scale),
                 stop2: Some(session_open + self.config.bo_stop2_range * scale),
+                target_qty: 1.0,
+                partial_started_at_ms: None,
             });
         }
         None
@@ -1580,6 +1592,39 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             PositionSide::Short
         };
         let size = pos.qty.abs().floor().max(1.0) as i64;
+        if let Some(mut pending) = self.pending_entry.clone() {
+            if pending.owner == Owner::MeanRev && pending.target_qty > 1.0 {
+                let expected_sign = match pending.side {
+                    PositionSide::Long => 1.0,
+                    PositionSide::Short => -1.0,
+                };
+                if pos.qty.signum() != expected_sign
+                    || pos.qty.abs() > pending.target_qty + f64::EPSILON
+                {
+                    self.pending_entry = None;
+                    let intents =
+                        self.emit_broker_residual_emergency_exit(ctx, pos, "partial_entry_invalid");
+                    self.sync_state();
+                    return intents;
+                }
+                if pos.qty.abs() + f64::EPSILON < pending.target_qty {
+                    if pending.partial_started_at_ms.is_none() {
+                        pending.partial_started_at_ms = Some(Utc::now().timestamp_millis());
+                    }
+                    self.pending_entry = Some(pending.clone());
+                    self.lifecycle_stage = "partial_entry_waiting_target".to_string();
+                    info!(
+                        target: "strategy_runtime::alor_usdrubf_hybrid",
+                        action = "partial_entry_progress",
+                        broker_qty = pos.qty,
+                        target_qty = pending.target_qty,
+                        "MR entry partially filled; waiting for target before creating bracket"
+                    );
+                    self.sync_state();
+                    return Vec::new();
+                }
+            }
+        }
         if self.open_position.is_none() && self.pending_entry.is_none() && !pos.existing {
             let synthetic_pending = PendingEntry {
                 owner: Owner::Breakout,
@@ -1589,6 +1634,8 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 signal_price: pos.avg_price,
                 stop1: None,
                 stop2: None,
+                target_qty: 1.0,
+                partial_started_at_ms: None,
             };
             self.open_position = Some(self.build_open_position_from_pending(
                 &synthetic_pending,
@@ -1664,6 +1711,8 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 signal_price: entry_price,
                 stop1: None,
                 stop2: None,
+                target_qty: 1.0,
+                partial_started_at_ms: None,
             };
             self.open_position = Some(self.build_open_position_from_pending(
                 &synthetic_pending,
@@ -1686,6 +1735,44 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.lifecycle_stage = "broker_position_open".to_string();
         let mut intents = Vec::new();
         self.maybe_emit_live_mr_brackets(ctx, pos.ts_utc, &mut intents);
+        self.sync_state();
+        intents
+    }
+
+    fn on_timer(&mut self, ctx: &StrategyCtx, now_ts_utc_ms: i64) -> Vec<Intent> {
+        let Some(pending) = self.pending_entry.clone() else {
+            return Vec::new();
+        };
+        let Some(started_at_ms) = pending.partial_started_at_ms else {
+            return Vec::new();
+        };
+        let position_qty = ctx.position_qty.unwrap_or(0.0);
+        if pending.owner != Owner::MeanRev
+            || position_qty.abs() <= f64::EPSILON
+            || now_ts_utc_ms.saturating_sub(started_at_ms) < 3_000
+        {
+            return Vec::new();
+        }
+        let mut intents = self
+            .tracked_order_ids
+            .iter()
+            .copied()
+            .map(|order_id| Intent::Cancel { order_id }.with_class(IntentClass::CancelCleanup))
+            .collect::<Vec<_>>();
+        let pos = PositionEvent {
+            symbol: self.config.symbol.clone(),
+            qty: position_qty,
+            existing: false,
+            avg_price: pending.signal_price,
+            ts_utc: now_ts_utc_ms.div_euclid(1_000),
+        };
+        self.pending_entry = None;
+        intents.extend(self.emit_broker_residual_emergency_exit(
+            ctx,
+            &pos,
+            "partial_entry_fill_timeout",
+        ));
+        self.lifecycle_stage = "partial_entry_timeout_flatten".to_string();
         self.sync_state();
         intents
     }
@@ -2013,6 +2100,12 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                     signal_price: pending_entry_signal_price.unwrap_or(0.0),
                     stop1: *pending_entry_stop1,
                     stop2: *pending_entry_stop2,
+                    target_qty: if self.config.use_fixed_live_size {
+                        self.config.live_fixed_units.max(1.0)
+                    } else {
+                        1.0
+                    },
+                    partial_started_at_ms: None,
                 }),
                 _ => None,
             };
@@ -2726,6 +2819,8 @@ mod tests {
             signal_price: 80.1,
             stop1: None,
             stop2: None,
+            target_qty: 1.0,
+            partial_started_at_ms: None,
         });
 
         let intents = strategy.on_position(&ctx, &position_event(1_775_490_120, -1.0, 80.0));
@@ -2754,6 +2849,46 @@ mod tests {
                                 if comment.as_deref() == Some("AUS|sid=alor_usdrubf_hybrid_v1|o=MR|r=SL")
                         )
             )
+        }));
+    }
+
+    #[test]
+    fn live_mr_partial_entry_waits_for_target_before_brackets() {
+        let mut cfg = test_config();
+        cfg.live_fixed_units = 3.0;
+        let mut strategy = AlorUsdrubfHybridStrategy::new(cfg);
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        strategy.pending_entry = Some(PendingEntry {
+            owner: Owner::MeanRev,
+            side: PositionSide::Short,
+            reason: "mr_short_signal".to_string(),
+            scale_at_signal: 0.5,
+            signal_price: 80.1,
+            stop1: None,
+            stop2: None,
+            target_qty: 3.0,
+            partial_started_at_ms: None,
+        });
+
+        let partial = strategy.on_position(&ctx, &position_event(1_775_490_120, -1.0, 80.0));
+        assert!(partial.is_empty());
+        assert!(strategy.pending_entry.is_some());
+        assert!(strategy.open_position.is_none());
+
+        let complete = strategy.on_position(&ctx, &position_event(1_775_490_121, -3.0, 80.0));
+        assert_eq!(complete.len(), 2);
+        assert!(strategy.pending_entry.is_none());
+        assert_eq!(
+            strategy
+                .open_position
+                .as_ref()
+                .map(|position| position.size),
+            Some(3)
+        );
+        assert!(complete.iter().all(|intent| match intent.base_intent() {
+            Intent::Place { qty, .. } | Intent::CreateStopLimit { qty, .. } =>
+                (*qty - 3.0).abs() <= f64::EPSILON,
+            _ => false,
         }));
     }
 

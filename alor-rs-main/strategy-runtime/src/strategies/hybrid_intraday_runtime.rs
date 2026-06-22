@@ -48,6 +48,7 @@ pub struct HybridIntradayRuntimeConfig {
     pub repair_backoff_base_sec: u64,
     pub repair_backoff_max_sec: u64,
     pub pending_timeout_sec: u64,
+    pub partial_entry_fill_timeout_ms: u64,
     pub mr_config: MeanReversionConfig,
     pub breakout_config: IntradayBreakoutConfig,
     pub orchestrator_config: HybridOrchestratorConfig,
@@ -91,6 +92,8 @@ struct PendingEntry {
     entry_style: EntryStyle,
     stop_price: Option<f64>,
     take_price: Option<f64>,
+    target_qty: f64,
+    partial_started_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1377,6 +1380,90 @@ impl HybridIntradayRuntimeStrategy {
         intents
     }
 
+    fn expected_entry_qty(entry: PendingEntry) -> f64 {
+        match entry.side {
+            Side::Long => entry.target_qty,
+            Side::Short => -entry.target_qty,
+        }
+    }
+
+    fn partial_entry_progress_is_valid(entry: PendingEntry, prev: f64, cur: f64) -> bool {
+        let target = Self::expected_entry_qty(entry);
+        cur.abs() > f64::EPSILON
+            && cur.signum() == target.signum()
+            && cur.abs() <= target.abs() + f64::EPSILON
+            && cur.abs() + f64::EPSILON >= prev.abs()
+    }
+
+    fn emit_partial_entry_timeout_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        now_ts_utc_ms: i64,
+    ) -> Vec<Intent> {
+        let Some(entry) = self.pending_entry else {
+            return Vec::new();
+        };
+        let Some(started_at_ms) = entry.partial_started_at_ms else {
+            return Vec::new();
+        };
+        if self.last_position_qty.abs() <= f64::EPSILON
+            || now_ts_utc_ms.saturating_sub(started_at_ms)
+                < self.config.partial_entry_fill_timeout_ms as i64
+        {
+            return Vec::new();
+        }
+
+        let created_ts_utc = now_ts_utc_ms.div_euclid(1_000);
+        let mut intents = self
+            .working_orders
+            .iter()
+            .copied()
+            .map(|order_id| Intent::Cancel { order_id }.with_class(IntentClass::CancelCleanup))
+            .collect::<Vec<_>>();
+        let side = if self.last_position_qty > 0.0 {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let comment = self.build_comment(ctx, &entry.cycle_id, entry.owner, TagRole::Exit);
+        intents.push(
+            self.build_live_entry_exit_intent(
+                ctx,
+                side,
+                self.last_position_qty.abs(),
+                self.live_reference_price(),
+                Some(comment),
+            )
+            .with_class(IntentClass::Exit),
+        );
+        self.current_owner = Some(entry.owner);
+        self.current_side = Some(entry.side);
+        self.pending_entry = None;
+        self.pending_entry_request_id = None;
+        self.pending_entry_created_ts_utc = None;
+        self.pending_exit = Some(PendingExit {
+            owner: entry.owner,
+            reason: ReasonCode::MeanRevTimeCutoff,
+        });
+        self.pending_exit_request_id = Some(self.live_request_id(ctx, created_ts_utc, side));
+        self.pending_exit_created_ts_utc = Some(created_ts_utc);
+        self.enter_safe_mode("partial_entry_fill_timeout");
+        warn!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "partial_entry_timeout_emergency_exit",
+            owner = ?entry.owner,
+            side = ?entry.side,
+            broker_qty = self.last_position_qty,
+            target_qty = entry.target_qty,
+            elapsed_ms = now_ts_utc_ms.saturating_sub(started_at_ms),
+            timeout_ms = self.config.partial_entry_fill_timeout_ms,
+            working_entry_orders = self.working_orders.len(),
+            "partial MR entry did not reach target; cancel remainder and flatten partial position"
+        );
+        self.sync_state();
+        intents
+    }
+
     fn sync_state(&mut self) {
         let breakout = self.breakout_snapshot();
         let orchestrator = self.orchestrator.snapshot();
@@ -1781,6 +1868,8 @@ impl HybridIntradayRuntimeStrategy {
                         entry_style: entry.entry_style,
                         stop_price: entry.stop_price,
                         take_price: entry.take_price,
+                        target_qty: self.config.qty.max(1.0),
+                        partial_started_at_ms: None,
                     });
                     self.pending_entry_request_id = Some(self.live_request_id(
                         ctx,
@@ -2188,6 +2277,7 @@ mod tests {
             repair_backoff_base_sec: 5,
             repair_backoff_max_sec: 60,
             pending_timeout_sec: 30,
+            partial_entry_fill_timeout_ms: 3_000,
             mr_config: MeanReversionConfig::default(),
             breakout_config: IntradayBreakoutConfig::default(),
             orchestrator_config: HybridOrchestratorConfig::default(),
@@ -4302,6 +4392,107 @@ mod tests {
     }
 
     #[test]
+    fn partial_mr_entry_waits_for_full_target_before_creating_bracket() {
+        let mut cfg = test_config();
+        cfg.qty = 3.0;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.pending_entry = Some(PendingEntry {
+            owner: Owner::MeanReversion,
+            side: Side::Short,
+            cycle_id: *b"abc1230001",
+            reason: ReasonCode::MorningMeanReversionShort,
+            entry_style: EntryStyle::Bracket,
+            stop_price: Some(105.0),
+            take_price: Some(95.0),
+            target_qty: 3.0,
+            partial_started_at_ms: None,
+        });
+        strategy.pending_entry_request_id = Some(uuid::Uuid::new_v4());
+
+        let partial = strategy.on_position(
+            &test_ctx(Some(-1.0)),
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_100,
+            },
+        );
+        assert!(partial.is_empty());
+        assert!(strategy.pending_entry.is_some());
+        assert!(strategy.tp_order_id.is_none());
+        assert!(strategy.sl_stop_order_id.is_none());
+
+        let complete = strategy.on_position(
+            &test_ctx(Some(-3.0)),
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: -3.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_101,
+            },
+        );
+        assert_eq!(complete.len(), 2);
+        assert!(strategy.pending_entry.is_none());
+        assert!(complete.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::Place { qty, side: OrderSide::Buy, .. }
+                    if (*qty - 3.0).abs() <= f64::EPSILON
+            )
+        }));
+        assert!(complete.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::CreateStopLimit { qty, side: OrderSide::Buy, .. }
+                    if (*qty - 3.0).abs() <= f64::EPSILON
+            )
+        }));
+    }
+
+    #[test]
+    fn partial_mr_entry_timeout_cancels_remainder_and_flattens_partial() {
+        let mut cfg = test_config();
+        cfg.qty = 3.0;
+        cfg.partial_entry_fill_timeout_ms = 3_000;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.last_position_qty = -1.0;
+        strategy.working_orders.insert(111);
+        strategy.pending_entry = Some(PendingEntry {
+            owner: Owner::MeanReversion,
+            side: Side::Short,
+            cycle_id: *b"abc1230001",
+            reason: ReasonCode::MorningMeanReversionShort,
+            entry_style: EntryStyle::Bracket,
+            stop_price: Some(105.0),
+            take_price: Some(95.0),
+            target_qty: 3.0,
+            partial_started_at_ms: Some(10_000),
+        });
+
+        let intents = strategy.on_timer(&test_ctx(Some(-1.0)), 13_001);
+
+        assert!(intents
+            .iter()
+            .any(|intent| { matches!(intent.base_intent(), Intent::Cancel { order_id: 111 }) }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::Market { qty, side: OrderSide::Buy, .. }
+                    if (*qty - 1.0).abs() <= f64::EPSILON
+            )
+        }));
+        assert!(strategy.pending_entry.is_none());
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("partial_entry_fill_timeout")
+        );
+    }
+
+    #[test]
     fn recovered_position_without_owner_enters_safe_mode_and_blocks_entry() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.entry_ready = true;
@@ -5202,7 +5393,46 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let mut intents = Vec::new();
         let prev = self.last_position_qty;
         let cur = pos.qty;
-        if prev.abs() > f64::EPSILON
+        let mut completes_pending_entry = false;
+        if let Some(mut entry) = self.pending_entry {
+            if cur.abs() > f64::EPSILON {
+                if !Self::partial_entry_progress_is_valid(entry, prev, cur) {
+                    let reason = if cur.signum() != Self::expected_entry_qty(entry).signum() {
+                        "partial_entry_sign_mismatch"
+                    } else if cur.abs() > entry.target_qty + f64::EPSILON {
+                        "partial_entry_overfill"
+                    } else {
+                        "partial_entry_position_reduced"
+                    };
+                    intents.extend(self.emit_broker_residual_emergency_exit(ctx, pos, reason));
+                    self.pending_entry = None;
+                    self.last_position_qty = cur;
+                    self.sync_state();
+                    return intents;
+                }
+                if cur.abs() + f64::EPSILON < entry.target_qty {
+                    if entry.partial_started_at_ms.is_none() {
+                        entry.partial_started_at_ms = Some(Utc::now().timestamp_millis());
+                    }
+                    self.pending_entry = Some(entry);
+                    self.last_position_qty = cur;
+                    info!(
+                        target: "strategy_runtime::hybrid_intraday_runtime",
+                        action = "partial_entry_progress",
+                        owner = ?entry.owner,
+                        side = ?entry.side,
+                        broker_qty = cur,
+                        target_qty = entry.target_qty,
+                        "MR entry partially filled; waiting for target before creating bracket"
+                    );
+                    self.sync_state();
+                    return intents;
+                }
+                completes_pending_entry = true;
+            }
+        }
+        if !completes_pending_entry
+            && prev.abs() > f64::EPSILON
             && cur.abs() > f64::EPSILON
             && (prev - cur).abs() > f64::EPSILON
         {
@@ -5216,7 +5446,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.sync_state();
             return intents;
         }
-        if prev.abs() <= f64::EPSILON && cur.abs() > f64::EPSILON {
+        if (prev.abs() <= f64::EPSILON || completes_pending_entry) && cur.abs() > f64::EPSILON {
             self.cleanup_stop_retry_attempts = 0;
             let filled = self.pending_entry.take();
             self.clear_deferred_entry();
@@ -5278,6 +5508,10 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.last_position_qty = cur;
         self.sync_state();
         intents
+    }
+
+    fn on_timer(&mut self, ctx: &StrategyCtx, now_ts_utc_ms: i64) -> Vec<Intent> {
+        self.emit_partial_entry_timeout_exit(ctx, now_ts_utc_ms)
     }
 
     fn on_bootstrap_snapshot(
@@ -5593,6 +5827,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     entry_style: EntryStyle::Market,
                     stop_price: None,
                     take_price: None,
+                    target_qty: self.config.qty.max(1.0),
+                    partial_started_at_ms: None,
                 }),
                 _ => None,
             };

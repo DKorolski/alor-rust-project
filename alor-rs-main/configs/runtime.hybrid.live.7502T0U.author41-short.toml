@@ -116,6 +116,7 @@ max_repair_retries = 3
 repair_backoff_base_sec = 5
 repair_backoff_max_sec = 60
 pending_timeout_sec = 60
+partial_entry_fill_timeout_ms = 3000
 stop_end_buffer_sec = 60
 
 [paper]

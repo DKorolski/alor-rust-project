@@ -106,6 +106,9 @@ pub trait Strategy: Send + Sync {
         Vec::new()
     }
     fn on_position(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent>;
+    fn on_timer(&mut self, _ctx: &StrategyCtx, _now_ts_utc_ms: i64) -> Vec<Intent> {
+        Vec::new()
+    }
     fn on_bootstrap_snapshot(
         &mut self,
         _ctx: &StrategyCtx,

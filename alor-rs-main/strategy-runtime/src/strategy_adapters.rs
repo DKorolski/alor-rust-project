@@ -229,6 +229,7 @@ impl HybridIntradayAdapter {
                 .repair_backoff_max_sec
                 .max(runtime_settings.repair_backoff_base_sec.max(1)),
             pending_timeout_sec: runtime_settings.pending_timeout_sec.max(1),
+            partial_entry_fill_timeout_ms: runtime_settings.partial_entry_fill_timeout_ms.max(1),
             mr_config: MeanReversionConfig {
                 min_range_long: runtime_settings.mr_min_range_long,
                 max_range_long: runtime_settings.mr_max_range_long,

@@ -598,6 +598,7 @@ struct HybridIntradayConfigFile {
     repair_backoff_base_sec: Option<u64>,
     repair_backoff_max_sec: Option<u64>,
     pending_timeout_sec: Option<u64>,
+    partial_entry_fill_timeout_ms: Option<u64>,
     stop_end_buffer_sec: Option<u64>,
 }
 
@@ -1279,6 +1280,9 @@ fn apply_hybrid_intraday_config_file(
         }
         if let Some(value) = hybrid_file.pending_timeout_sec {
             strategy.pending_timeout_sec = value;
+        }
+        if let Some(value) = hybrid_file.partial_entry_fill_timeout_ms {
+            strategy.partial_entry_fill_timeout_ms = value;
         }
         if let Some(value) = hybrid_file.stop_end_buffer_sec {
             strategy.stop_end_buffer_sec = value;
