@@ -436,6 +436,31 @@ Small-readiness conditions:
 - Redis growth stays within maintenance envelope.
 - Corporate mirror config/logging is confirmed clean before transferring confidence from VPS to corporate infrastructure.
 
+## 2026-06-22 Partial-Entry Follow-Up
+
+The first post-patch quantity-3 partial entry was observed on both IMOEXF
+portfolios at `13:20 MSK`:
+
+- the broker filled the entry as `1 + 2` within milliseconds;
+- target quantity `3` was reached well inside the `3000 ms` timeout;
+- no residual recovery, emergency flatten, reject, or stale protection
+  followed;
+- the later full-size exits returned both portfolios to flat.
+
+Watch items:
+
+- The observed entry belonged to `BO`, while the diagnostic text said
+  `MR entry partially filled`.
+- Review whether accumulation/timeout handling should be explicitly limited to
+  `EntryStyle::Bracket`, leaving BO/ordinary market semantics untouched.
+- Until that review, treat current behavior as operationally convergent but the
+  diagnostic/scope wording as imprecise.
+- Continue waiting for the first genuine MR bracket partial fill before marking
+  the MR-specific production acceptance complete.
+- Continue monitoring gateway disconnect/gap-sync events. The `15:35-15:40
+  MSK` event blocked trading through the live guard and recovered to
+  `ALLOWED / LiveReady` without order activity.
+
 ## Source Journals
 
 - `vps-live-observations-2026-05-19.md`
@@ -453,4 +478,5 @@ Small-readiness conditions:
 - `vps-live-observations-2026-06-07.md`
 - `vps-live-observations-2026-06-09.md`
 - `vps-live-observations-2026-06-15.md`
+- `vps-live-observations-2026-06-20.md`
 - `alor-usdrubf-soak-trade-ledger-2026-06-17.md`

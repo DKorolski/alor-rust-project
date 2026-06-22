@@ -79,3 +79,22 @@ broker-flat reconciliation.
   `27%` used, load average below `0.5`.
 - VPS backup timestamp: `20260622-123219`.
 
+## Post-Rollout Partial-Fill Observation
+
+At `13:20 MSK`, both IMOEXF portfolios entered short quantity `3` through two
+broker fills (`1 + 2`) separated by milliseconds. The full target was reached
+in roughly `0.4-0.5 seconds`, below the configured `3000 ms` timeout. No
+emergency flatten, residual, reject, or stale protection was observed. Later
+full-size exits returned both portfolios to flat.
+
+The entry was BO-owned, but the emitted diagnostic said `MR entry partially
+filled`. This is added to the watchlist as a scope/logging follow-up:
+
+- confirm whether partial-entry accumulation should apply only to bracket MR;
+- keep BO/ordinary market semantics unchanged;
+- retain the current observation as evidence of convergent partial-fill
+  handling, not yet as MR bracket partial-fill acceptance.
+
+The gateway also briefly entered disconnect/gap-sync around `15:35-15:40 MSK`.
+The live guard blocked trading and returned to `ALLOWED / LiveReady`; no order
+anomaly accompanied the recovery.
