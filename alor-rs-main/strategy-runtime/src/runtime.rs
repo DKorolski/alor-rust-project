@@ -2063,7 +2063,16 @@ impl StrategyRuntime {
             }
             self.persist_state(None).await?;
         } else {
-            self.apply_intents(&ctx, event_ts, intents, previous_strategy_state)
+            // Strategy callbacks intentionally receive the previous processed
+            // bar in `ctx.last_bar_ts()`: many strategies need to know whether
+            // the incoming bar is fresh relative to persisted state.  Once a
+            // live bar callback has produced intents, however, the current bar
+            // itself is already the freshness proof for order gating.  Using
+            // the previous bar here can make the first valid bar after an
+            // overnight reconnect look stale and drop the next-bar-open proxy
+            // intent, shifting execution by one completed bar.
+            let emit_ctx = self.strategy_ctx_for_bar_intents(&bar, event_ts);
+            self.apply_intents(&emit_ctx, event_ts, intents, previous_strategy_state)
                 .await?;
         }
         self.flush_risk_gate_session_finalizations().await?;
@@ -2972,6 +2981,10 @@ impl StrategyRuntime {
     fn strategy_ctx(&self) -> StrategyCtx {
         let last_bar_ts = self.strategy_last_bar_ts();
         self.strategy_ctx_with_last_bar(last_bar_ts)
+    }
+
+    fn strategy_ctx_for_bar_intents(&self, bar: &BarEvent, event_ts: i64) -> StrategyCtx {
+        self.strategy_ctx_with_last_bar_and_event_ts(Some(bar.close_time_utc), event_ts)
     }
 
     fn compute_intraday_stop_end_utc(&self, created_ts_utc: i64) -> Option<i64> {
@@ -5199,6 +5212,61 @@ mod tests {
             &ctx_prev,
             first_gap_bar,
             alor_protocol::IntentClass::Exit
+        ));
+    }
+
+    #[test]
+    fn live_bar_intents_use_current_bar_for_silence_gate() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        install_ri_micro_strategy(&mut runtime);
+        runtime.config.strategy.max_silence_bars_sec = 20 * 60;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+
+        let overnight_prev_bar = (chrono::NaiveDate::from_ymd_opt(2026, 6, 22)
+            .unwrap()
+            .and_hms_opt(20, 40, 0)
+            .unwrap())
+        .and_utc()
+        .timestamp();
+        runtime
+            .state
+            .last_processed_bar_ts
+            .insert(runtime.config.strategy.symbol.clone(), overnight_prev_bar);
+
+        let first_live_bar = ri_runtime_bar(
+            2026,
+            6,
+            23,
+            9,
+            0,
+            DataOrigin::Live,
+            (94_900.0, 95_000.0, 94_800.0, 94_950.0),
+        );
+        let event_ts = first_live_bar.close_time_utc;
+        let stale_callback_ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(Some(overnight_prev_bar), event_ts);
+        assert!(!runtime.trading_window_allows_order(
+            &stale_callback_ctx,
+            event_ts,
+            alor_protocol::IntentClass::Entry
+        ));
+
+        let emit_ctx = runtime.strategy_ctx_for_bar_intents(&first_live_bar, event_ts);
+        assert_eq!(emit_ctx.last_bar_ts(), Some(first_live_bar.close_time_utc));
+        assert!(runtime.trading_window_allows_order(
+            &emit_ctx,
+            event_ts,
+            alor_protocol::IntentClass::Entry
         ));
     }
 

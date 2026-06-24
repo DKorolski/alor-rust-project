@@ -463,7 +463,8 @@ Watch items:
 
 ## 2026-06-23 RI Morning-Open Freeze-Contract Latency
 
-Status: P1 parity watch before RI scale-up / no uncontrolled state observed.
+Status: P1 parity watch before RI scale-up / local patch prepared / no
+uncontrolled state observed.
 
 Observation:
 
@@ -511,6 +512,10 @@ Patch candidate:
   closed signal bar can execute on the next-bar-open proxy immediately after
   `ALLOWED / LiveReady`, without weakening stale-bar protection after real
   reconnect gaps.
+- Local patch prepared on `2026-06-24`: live bar callback still receives the
+  previous-bar context, but runtime order gating for intents produced by that
+  current live bar uses the current bar timestamp as freshness proof. See
+  `ri-next-bar-open-timing-hardening-2026-06-24.md`.
 
 ## Source Journals
 
