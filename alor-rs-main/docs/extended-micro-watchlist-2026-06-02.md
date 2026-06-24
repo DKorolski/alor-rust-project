@@ -461,6 +461,57 @@ Watch items:
   MSK` event blocked trading through the live guard and recovered to
   `ALLOWED / LiveReady` without order activity.
 
+## 2026-06-23 RI Morning-Open Freeze-Contract Latency
+
+Status: P1 parity watch before RI scale-up / no uncontrolled state observed.
+
+Observation:
+
+- On both RI micro-live contours (`7502MIW` and `7502T0U`), the first
+  `09:00 MSK` candidate was generated after overnight sync but dropped by the
+  runtime guard:
+  - `intent_dropped_bar_silence`;
+  - `intent_dropped_by_trading_window`;
+  - state transition reverted back to `flat`.
+- The next actionable cycle used scheduled entry `09:10 MSK`, but commands were
+  prepared and emitted on the next processing pass around `09:20 MSK`.
+- Fills then completed normally:
+  - `7502MIW`: short entry filled at `94910`, exit at `93400`;
+  - `7502T0U`: short entry filled at `94890`, exit at `93400`.
+- Later broker snapshots showed `RTS-9.26 = 0` on both portfolios.
+
+Interpretation:
+
+- The intended RI freeze contract is: closed-bar signal -> next-bar-open
+  execution proxy.
+- A compliant live path for a signal on the `09:00-09:10 MSK` bar is market
+  intent emitted immediately after that signal bar closes, with broker fill
+  around `09:10 MSK`.
+- The observed `09:10 -> 09:20 MSK` behavior would be a one-bar-late execution
+  drift relative to the freeze contract and should be treated as a P1 parity
+  issue before RI scale-up.
+- `entry_price = bar.close` in runtime state does not by itself prove a
+  violation; the audit must compare `model_signal_ts`, scheduled entry,
+  `ri_command_prepared` / `intent_emitted`, and broker fill timestamps.
+
+What to watch:
+
+- Repeated `09:00 MSK` `intent_dropped_bar_silence` / trading-window drops on
+  otherwise healthy morning starts.
+- Whether a `09:00-09:10 MSK` signal emits market intent immediately after
+  `09:10 MSK` or drifts to the `09:20 MSK` processing pass.
+- Any mismatch between `model_signal_ts_local`, `scheduled_ts_local`,
+  `created_ts_utc`, `intent_emitted`, and broker `execution_confirmed`.
+- Any divergence between `7502MIW` and `7502T0U` RI entry timing after morning
+  sync.
+
+Patch candidate:
+
+- Review RI morning-start readiness and freeze-contract enforcement so a fresh
+  closed signal bar can execute on the next-bar-open proxy immediately after
+  `ALLOWED / LiveReady`, without weakening stale-bar protection after real
+  reconnect gaps.
+
 ## Source Journals
 
 - `vps-live-observations-2026-05-19.md`
