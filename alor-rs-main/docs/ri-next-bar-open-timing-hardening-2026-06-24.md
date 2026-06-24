@@ -74,14 +74,44 @@ The test reproduces the morning-open shape:
 
 ## Rollout gate
 
-Roll out only when both RI portfolios are broker-flat:
+Roll out only when both RI stacks are broker-flat or the operator explicitly
+accepts restarting shared runtime while another symbol is open:
 
 - `7502MIW / RTS-9.26 = 0`;
 - `7502T0U / RTS-9.26 = 0`;
-- no working RI strategy orders.
+- no working RI strategy orders;
+- no open strategy-managed positions on the same runtime stack unless an
+  explicit manual exception is recorded.
 
 Restart only the two RI strategy-runtime containers. Gateways and Redis do not
 need to restart.
+
+## Pre-rollout check — 2026-06-24 19:58 MSK
+
+Patch is committed locally as `89c5967 Harden live bar intent freshness gate`.
+Runtime image on both RI stacks before rollout:
+`strategy-runtime:manual-20260618-lifecycle-68d1cd1`.
+
+VPS resources were normal:
+
+- load average about `0.79 / 0.41 / 0.33`;
+- memory available about `6.5 GiB`;
+- root disk `28%` used;
+- both RI runtime, gateway, and Redis containers healthy.
+
+Broker snapshots:
+
+- `7502MIW`: `RTS-9.26 = 0`, but `IMOEXF = -3`;
+- `7502T0U`: `RTS-9.26 = 0`, but `IMOEXF = -3`.
+
+RI runtime logs for the last 30 minutes had no `warn`, `error`, `panic`,
+`safe_mode`, `manual_intervention`, `orphan`, `rejected`, `intent_dropped`,
+`partial`, or `emergency` records.
+
+Decision: rollout held. The RI instrument itself is flat, but the runtime stack
+is not fully flat because both portfolios currently hold an open IMOEXF short.
+Deploy in the next fully-flat window, or only after an explicit operator
+decision to restart shared runtime while IMOEXF is open.
 
 ## Post-rollout acceptance
 
