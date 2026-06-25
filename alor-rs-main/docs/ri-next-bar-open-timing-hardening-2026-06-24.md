@@ -202,6 +202,47 @@ Regression coverage added:
 guard_readiness_grace_is_limited_to_gateway_readiness_race
 ```
 
+## Freeze-intent hardening plan — 2026-06-25
+
+The `09:10 MSK` check also exposed a stricter freeze-semantics problem. The
+first RI MR intent was not merely late:
+
+- `09:10:00.305 MSK` on `7502T0U`: Author41 MR `long / Buy` intent emitted,
+  then dropped by guard with `phase=SyncingHistory`, `gateway_ready=false`;
+- `09:10:00.878 MSK` on `7502MIW`: same `long / Buy` shape and same guard
+  drop;
+- runtime later observed `ALLOWED` only around `09:10:08-09:10:11`;
+- at `09:20 MSK`, RI generated and executed a fresh `short / Sell`.
+
+This is worse than a one-bar-late execution: the original frozen MR decision was
+lost, the strategy was reverted to `flat`, and the next bar was allowed to
+replace the missed `long` with an opposite-side `short`.
+
+Patch semantics:
+
+- keep the runtime readiness wait, but extend it to `240 x 250 ms`, i.e. up to
+  about `60 s`, when the only guard reasons are gateway readiness / phase /
+  health propagation;
+- before invoking a strategy on a fresh live bar, perform the same readiness
+  wait so hybrid/IMOEXF-style strategy publish gates can see `LiveReady` before
+  deciding whether to emit bracket intents;
+- if an RI entry intent is still blocked by readiness-only guard after the wait,
+  do not silently roll strategy state back to `flat`;
+- instead, RI records `live_entry_missed_runtime_not_ready`, preserves the
+  frozen metadata (`component`, `side`, `cycle_id`, scheduled entry timestamp),
+  clears any tentative internal live position, marks operator intervention
+  required in runtime health, and blocks fresh replacement entries;
+- BO receives the same defensive missed/blocking behavior if an already-frozen
+  entry reaches this path, but no model-specific BO auto-retry semantics are
+  introduced here.
+
+Regression coverage added:
+
+```text
+micro_live_readiness_blocked_entry_marks_missed_and_blocks_opposite_replacement
+ri_readiness_blocked_entry_hook_keeps_missed_state_and_blocks_replacement
+```
+
 ## Post-rollout acceptance
 
 For the next RI morning session, compare:
