@@ -168,6 +168,40 @@ waiting for the first live bar / session readiness before market open. This is
 normal pre-session behavior; acceptance remains the `09:10 MSK` next-bar-open
 parity check below.
 
+## 09:10 acceptance check and follow-up patch — 2026-06-25
+
+At `09:10:00 MSK`, both RI runtimes emitted the intended entry intent for the
+`09:00-09:10` closed bar. This confirmed that the previous-bar freshness gate
+patch fixed the original `bar_silence` drift.
+
+However, both intents were still dropped by the runtime live guard:
+
+```text
+intent_dropped_by_guard reasons=["phase=SyncingHistory", "gateway_ready=false"]
+```
+
+Gateway reached `LiveReady` at about `09:10:00.25 MSK`, but runtime observed the
+health/readiness transition only several seconds later (`09:10:08-09:10:11`).
+The remaining issue is therefore a first-live-bar readiness propagation race,
+not a model/freeze-bar parity issue.
+
+Follow-up patch:
+
+- when a live intent is blocked only by gateway readiness / phase / health
+  freshness reasons, runtime now performs a bounded readiness grace loop;
+- the loop force-refreshes the latest gateway health event from Redis up to
+  eight times with a `250 ms` pause;
+- if the guard becomes allowed inside that grace window, the original intent is
+  emitted on the same bar and logs `live_guard_readiness_grace_allowed`;
+- the grace path is deliberately not used for operator intervention, stale-bar
+  restart waits, safe-mode/risk reasons, or other non-readiness blocks.
+
+Regression coverage added:
+
+```text
+guard_readiness_grace_is_limited_to_gateway_readiness_race
+```
+
 ## Post-rollout acceptance
 
 For the next RI morning session, compare:
