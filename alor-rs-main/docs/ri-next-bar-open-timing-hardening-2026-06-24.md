@@ -113,6 +113,61 @@ is not fully flat because both portfolios currently hold an open IMOEXF short.
 Deploy in the next fully-flat window, or only after an explicit operator
 decision to restart shared runtime while IMOEXF is open.
 
+## Rollout — 2026-06-25 07:52-07:57 MSK
+
+Operator confirmed the safe window. Repeated preflight at `07:52-07:56 MSK`
+showed both RI stacks fully flat:
+
+- `7502MIW`: `RTS-9.26 = 0`, `IMOEXF = 0`, `USDRUBF = 0`;
+- `7502T0U`: `RTS-9.26 = 0`, `IMOEXF = 0`.
+
+VPS resources were normal before rollout:
+
+- load average about `0.63 / 0.36 / 0.31`;
+- memory available about `6.5 GiB`;
+- root disk `28%` used;
+- both RI runtime, gateway, and Redis containers healthy.
+
+Built and loaded runtime image:
+
+```text
+ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-20260625-ri-timing-b5b010a
+```
+
+Both stack `.env` files were backed up with suffix
+`.env.bak.20260625-075642`, then `RUNTIME_IMAGE_TAG` was changed from
+`manual-20260618-lifecycle-68d1cd1` to
+`manual-20260625-ri-timing-b5b010a`.
+
+Rollout command:
+
+```text
+docker compose up -d strategy-runtime
+```
+
+Note: in these compose files, this also recreated the `alor-gateway`
+dependency for each RI stack. Redis was not restarted. The recreated gateways
+came back healthy and CWS authorization succeeded immediately.
+
+Post-rollout check at `07:56-07:57 MSK`:
+
+- both RI runtime containers healthy on
+  `strategy-runtime:manual-20260625-ri-timing-b5b010a`;
+- both gateways healthy on `alor-gateway:manual-20260618-oauth-68d1cd1`;
+- Redis containers remained healthy and were not restarted;
+- runtime bootstrap reported zero open positions/orders/stops and
+  `ri_bootstrap_reconciled_flat`;
+- runtime state restored clean on both portfolios;
+- latest broker snapshots were empty/flat after gateway restart;
+- no `warn`, `error`, `panic`, `safe_mode`, `manual_intervention`, `orphan`,
+  `rejected`, `intent_dropped`, or `emergency` records appeared in the
+  immediate post-rollout logs.
+
+At `07:57 MSK`, live guard was still expectedly `BLOCKED` on both runtimes while
+waiting for the first live bar / session readiness before market open. This is
+normal pre-session behavior; acceptance remains the `09:10 MSK` next-bar-open
+parity check below.
+
 ## Post-rollout acceptance
 
 For the next RI morning session, compare:
