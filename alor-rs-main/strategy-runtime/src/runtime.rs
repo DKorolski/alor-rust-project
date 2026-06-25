@@ -38,6 +38,8 @@ use crate::{
 
 const MAX_PENDING_LOOPS: usize = 10;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const GUARD_READINESS_GRACE_ATTEMPTS: usize = 8;
+const GUARD_READINESS_GRACE_SLEEP: Duration = Duration::from_millis(250);
 const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
 const SNAPSHOT_SCAN_COUNT: usize = 200;
@@ -3491,7 +3493,10 @@ impl StrategyRuntime {
                     self.persist_state(None).await?;
                     return Ok(());
                 }
-                let decision = self.evaluate_guard_decision();
+                let mut decision = self.evaluate_guard_decision();
+                if !decision.allowed {
+                    decision = self.maybe_wait_for_guard_readiness_race(decision).await?;
+                }
                 if !decision.allowed {
                     self.log_guard_decision_if_due(&decision)?;
                     let has_open_position = ctx.position_qty.unwrap_or(0.0).abs() > 0.0;
@@ -3986,6 +3991,76 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    async fn refresh_health_now(&mut self) -> Result<()> {
+        let stream = match &self.config.streams.health {
+            Some(stream) => stream,
+            None => return Ok(()),
+        };
+        self.metrics.last_health_poll = Some(Instant::now());
+        if let Some(payload) = self.transport.xrevrange_last(stream).await? {
+            match serde_json::from_str::<Envelope<HealthEvent>>(&payload) {
+                Ok(envelope) => {
+                    self.live_guard.update_health(envelope.payload);
+                    self.refresh_health_snapshot();
+                }
+                Err(error) => {
+                    warn!(?error, stream, "failed to decode health event");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn guard_block_may_be_readiness_race(decision: &LiveGuardDecision) -> bool {
+        !decision.allowed
+            && !decision.reasons.is_empty()
+            && decision.reasons.iter().all(|reason| {
+                reason == "gateway_ready=false"
+                    || reason == "gateway_health_stale"
+                    || reason == "ws_connected=false"
+                    || reason == "cws_authorized=false"
+                    || reason == "bootstrap:not_ready"
+                    || reason.starts_with("phase=")
+            })
+    }
+
+    async fn maybe_wait_for_guard_readiness_race(
+        &mut self,
+        decision: LiveGuardDecision,
+    ) -> Result<LiveGuardDecision> {
+        if !Self::guard_block_may_be_readiness_race(&decision) {
+            return Ok(decision);
+        }
+
+        let initial_reasons = decision.reasons.clone();
+        for attempt in 1..=GUARD_READINESS_GRACE_ATTEMPTS {
+            self.refresh_health_now().await?;
+            let current = self.evaluate_guard_decision();
+            self.log_guard_transition_if_needed(&current)?;
+            if current.allowed {
+                info!(
+                    attempt,
+                    initial_reasons = ?initial_reasons,
+                    "live_guard_readiness_grace_allowed"
+                );
+                self.audit_event(
+                    "live_guard_readiness_grace_allowed",
+                    json!({
+                        "attempt": attempt,
+                        "initial_reasons": initial_reasons,
+                    }),
+                );
+                return Ok(current);
+            }
+            if !Self::guard_block_may_be_readiness_race(&current) {
+                return Ok(current);
+            }
+            sleep(GUARD_READINESS_GRACE_SLEEP).await;
+        }
+
+        Ok(self.evaluate_guard_decision())
+    }
+
     async fn log_live_guard_status_if_due(&mut self) -> Result<()> {
         let decision = self.evaluate_guard_decision();
         self.log_guard_transition_if_needed(&decision)?;
@@ -4330,6 +4405,42 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(lines[0]).expect("json line");
         assert_eq!(value["adapter_decision"], "shadow_recorded");
         assert!(runtime.pending_strategy_journal_records.is_empty());
+    }
+
+    #[test]
+    fn guard_readiness_grace_is_limited_to_gateway_readiness_race() {
+        let decision = LiveGuardDecision {
+            allowed: false,
+            reasons: vec![
+                "phase=SyncingHistory".to_string(),
+                "gateway_ready=false".to_string(),
+            ],
+        };
+        assert!(StrategyRuntime::guard_block_may_be_readiness_race(
+            &decision
+        ));
+
+        let operator_blocked = LiveGuardDecision {
+            allowed: false,
+            reasons: vec![
+                "phase=SyncingHistory".to_string(),
+                "strategy:operator_intervention_required".to_string(),
+            ],
+        };
+        assert!(!StrategyRuntime::guard_block_may_be_readiness_race(
+            &operator_blocked
+        ));
+
+        let stale_bar_blocked = LiveGuardDecision {
+            allowed: false,
+            reasons: vec![
+                "gateway_ready=false".to_string(),
+                "waiting_for_next_bar_after_restart".to_string(),
+            ],
+        };
+        assert!(!StrategyRuntime::guard_block_may_be_readiness_race(
+            &stale_bar_blocked
+        ));
     }
 
     #[derive(Default)]
