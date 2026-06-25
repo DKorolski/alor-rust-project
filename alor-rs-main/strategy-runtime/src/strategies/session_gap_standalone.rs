@@ -1,5 +1,3 @@
-#![allow(clippy::collapsible_match)]
-
 use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Timelike, Utc};
 
 use alor_protocol::{AckStatus, CommandAck, IntentClass, Side};

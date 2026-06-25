@@ -48,6 +48,7 @@ pub struct HybridIntradayRuntimeConfig {
     pub repair_backoff_base_sec: u64,
     pub repair_backoff_max_sec: u64,
     pub pending_timeout_sec: u64,
+    pub partial_entry_fill_timeout_ms: u64,
     pub mr_config: MeanReversionConfig,
     pub breakout_config: IntradayBreakoutConfig,
     pub orchestrator_config: HybridOrchestratorConfig,
@@ -91,6 +92,8 @@ struct PendingEntry {
     entry_style: EntryStyle,
     stop_price: Option<f64>,
     take_price: Option<f64>,
+    target_qty: f64,
+    partial_started_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +190,7 @@ pub struct HybridIntradayRuntimeStrategy {
     last_warmup_log: Option<bool>,
     working_orders: HashSet<i64>,
     working_stop_orders: HashSet<String>,
+    cleanup_stop_retry_attempts: u32,
     startup_live_replay_boundary_ts_utc: Option<i64>,
     startup_replay_suppressed_bars: u32,
     risk_gate_shadow_session_date: Option<NaiveDate>,
@@ -203,6 +207,7 @@ pub struct HybridIntradayRuntimeStrategy {
 
 impl HybridIntradayRuntimeStrategy {
     const MIN_MR_TAKE_DISTANCE_TICKS: f64 = 2.0;
+    const MAX_CLEANUP_STOP_RETRIES: u32 = 3;
     const AUTHOR41_SHORT_K: f64 = 0.16;
     const AUTHOR41_SHORT_TAKE_K: f64 = 0.02;
     const AUTHOR41_SHORT_STOP_K: f64 = 0.58;
@@ -290,6 +295,7 @@ impl HybridIntradayRuntimeStrategy {
             last_warmup_log: None,
             working_orders: HashSet::new(),
             working_stop_orders: HashSet::new(),
+            cleanup_stop_retry_attempts: 0,
             startup_live_replay_boundary_ts_utc: None,
             startup_replay_suppressed_bars: 0,
             risk_gate_shadow_session_date: None,
@@ -478,7 +484,6 @@ impl HybridIntradayRuntimeStrategy {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn update_risk_gate_shadow(
         &mut self,
         dt_local: NaiveDateTime,
@@ -1375,6 +1380,90 @@ impl HybridIntradayRuntimeStrategy {
         intents
     }
 
+    fn expected_entry_qty(entry: PendingEntry) -> f64 {
+        match entry.side {
+            Side::Long => entry.target_qty,
+            Side::Short => -entry.target_qty,
+        }
+    }
+
+    fn partial_entry_progress_is_valid(entry: PendingEntry, prev: f64, cur: f64) -> bool {
+        let target = Self::expected_entry_qty(entry);
+        cur.abs() > f64::EPSILON
+            && cur.signum() == target.signum()
+            && cur.abs() <= target.abs() + f64::EPSILON
+            && cur.abs() + f64::EPSILON >= prev.abs()
+    }
+
+    fn emit_partial_entry_timeout_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        now_ts_utc_ms: i64,
+    ) -> Vec<Intent> {
+        let Some(entry) = self.pending_entry else {
+            return Vec::new();
+        };
+        let Some(started_at_ms) = entry.partial_started_at_ms else {
+            return Vec::new();
+        };
+        if self.last_position_qty.abs() <= f64::EPSILON
+            || now_ts_utc_ms.saturating_sub(started_at_ms)
+                < self.config.partial_entry_fill_timeout_ms as i64
+        {
+            return Vec::new();
+        }
+
+        let created_ts_utc = now_ts_utc_ms.div_euclid(1_000);
+        let mut intents = self
+            .working_orders
+            .iter()
+            .copied()
+            .map(|order_id| Intent::Cancel { order_id }.with_class(IntentClass::CancelCleanup))
+            .collect::<Vec<_>>();
+        let side = if self.last_position_qty > 0.0 {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let comment = self.build_comment(ctx, &entry.cycle_id, entry.owner, TagRole::Exit);
+        intents.push(
+            self.build_live_entry_exit_intent(
+                ctx,
+                side,
+                self.last_position_qty.abs(),
+                self.live_reference_price(),
+                Some(comment),
+            )
+            .with_class(IntentClass::Exit),
+        );
+        self.current_owner = Some(entry.owner);
+        self.current_side = Some(entry.side);
+        self.pending_entry = None;
+        self.pending_entry_request_id = None;
+        self.pending_entry_created_ts_utc = None;
+        self.pending_exit = Some(PendingExit {
+            owner: entry.owner,
+            reason: ReasonCode::MeanRevTimeCutoff,
+        });
+        self.pending_exit_request_id = Some(self.live_request_id(ctx, created_ts_utc, side));
+        self.pending_exit_created_ts_utc = Some(created_ts_utc);
+        self.enter_safe_mode("partial_entry_fill_timeout");
+        warn!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "partial_entry_timeout_emergency_exit",
+            owner = ?entry.owner,
+            side = ?entry.side,
+            broker_qty = self.last_position_qty,
+            target_qty = entry.target_qty,
+            elapsed_ms = now_ts_utc_ms.saturating_sub(started_at_ms),
+            timeout_ms = self.config.partial_entry_fill_timeout_ms,
+            working_entry_orders = self.working_orders.len(),
+            "partial MR entry did not reach target; cancel remainder and flatten partial position"
+        );
+        self.sync_state();
+        intents
+    }
+
     fn sync_state(&mut self) {
         let breakout = self.breakout_snapshot();
         let orchestrator = self.orchestrator.snapshot();
@@ -1779,6 +1868,8 @@ impl HybridIntradayRuntimeStrategy {
                         entry_style: entry.entry_style,
                         stop_price: entry.stop_price,
                         take_price: entry.take_price,
+                        target_qty: self.config.qty.max(1.0),
+                        partial_started_at_ms: None,
                     });
                     self.pending_entry_request_id = Some(self.live_request_id(
                         ctx,
@@ -2186,6 +2277,7 @@ mod tests {
             repair_backoff_base_sec: 5,
             repair_backoff_max_sec: 60,
             pending_timeout_sec: 30,
+            partial_entry_fill_timeout_ms: 3_000,
             mr_config: MeanReversionConfig::default(),
             breakout_config: IntradayBreakoutConfig::default(),
             orchestrator_config: HybridOrchestratorConfig::default(),
@@ -4205,6 +4297,63 @@ mod tests {
     }
 
     #[test]
+    fn failed_flat_stop_cleanup_retries_are_bounded_and_reset_after_cancel() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+        strategy.last_position_qty = 0.0;
+        strategy.working_stop_orders.insert("sl-1".to_string());
+
+        for expected_attempt in 1..=HybridIntradayRuntimeStrategy::MAX_CLEANUP_STOP_RETRIES {
+            let intents = strategy.on_ack(
+                &ctx,
+                &CommandAck::error(uuid::Uuid::new_v4(), "cws_error", "transport_error"),
+            );
+            assert_eq!(strategy.cleanup_stop_retry_attempts, expected_attempt);
+            assert_eq!(intents.len(), 1);
+            assert!(matches!(
+                intents[0].base_intent(),
+                Intent::DeleteStopLimit {
+                    order_id,
+                    side: None,
+                    check_duplicates: Some(true),
+                } if order_id == "sl-1"
+            ));
+        }
+
+        let exhausted = strategy.on_ack(
+            &ctx,
+            &CommandAck::error(uuid::Uuid::new_v4(), "cws_error", "transport_error"),
+        );
+        assert!(exhausted.is_empty());
+        assert_eq!(
+            strategy.cleanup_stop_retry_attempts,
+            HybridIntradayRuntimeStrategy::MAX_CLEANUP_STOP_RETRIES
+        );
+
+        let canceled = strategy.on_stop_order(
+            &ctx,
+            &StopOrderEvent {
+                stop_order_id: "sl-1".to_string(),
+                exchange_order_id: None,
+                symbol: "IMOEXF".to_string(),
+                status: "canceled".to_string(),
+                side: "sell".to_string(),
+                qty: 2.0,
+                filled: 0.0,
+                stop_price: 99.0,
+                price: 98.5,
+                existing: false,
+                comment: Some(tag("MR", "abc1230001", "SL")),
+                end_time: None,
+                ts_utc: 1_700_000_130,
+            },
+        );
+        assert!(canceled.is_empty());
+        assert!(strategy.working_stop_orders.is_empty());
+        assert_eq!(strategy.cleanup_stop_retry_attempts, 0);
+    }
+
+    #[test]
     fn partial_protective_fill_emits_cancel_and_emergency_flatten() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.last_position_qty = -2.0;
@@ -4239,6 +4388,107 @@ mod tests {
         assert_eq!(
             strategy.safe_mode_reason.as_deref(),
             Some("broker_position_size_changed")
+        );
+    }
+
+    #[test]
+    fn partial_mr_entry_waits_for_full_target_before_creating_bracket() {
+        let mut cfg = test_config();
+        cfg.qty = 3.0;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.pending_entry = Some(PendingEntry {
+            owner: Owner::MeanReversion,
+            side: Side::Short,
+            cycle_id: *b"abc1230001",
+            reason: ReasonCode::MorningMeanReversionShort,
+            entry_style: EntryStyle::Bracket,
+            stop_price: Some(105.0),
+            take_price: Some(95.0),
+            target_qty: 3.0,
+            partial_started_at_ms: None,
+        });
+        strategy.pending_entry_request_id = Some(uuid::Uuid::new_v4());
+
+        let partial = strategy.on_position(
+            &test_ctx(Some(-1.0)),
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_100,
+            },
+        );
+        assert!(partial.is_empty());
+        assert!(strategy.pending_entry.is_some());
+        assert!(strategy.tp_order_id.is_none());
+        assert!(strategy.sl_stop_order_id.is_none());
+
+        let complete = strategy.on_position(
+            &test_ctx(Some(-3.0)),
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: -3.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_101,
+            },
+        );
+        assert_eq!(complete.len(), 2);
+        assert!(strategy.pending_entry.is_none());
+        assert!(complete.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::Place { qty, side: OrderSide::Buy, .. }
+                    if (*qty - 3.0).abs() <= f64::EPSILON
+            )
+        }));
+        assert!(complete.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::CreateStopLimit { qty, side: OrderSide::Buy, .. }
+                    if (*qty - 3.0).abs() <= f64::EPSILON
+            )
+        }));
+    }
+
+    #[test]
+    fn partial_mr_entry_timeout_cancels_remainder_and_flattens_partial() {
+        let mut cfg = test_config();
+        cfg.qty = 3.0;
+        cfg.partial_entry_fill_timeout_ms = 3_000;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.last_position_qty = -1.0;
+        strategy.working_orders.insert(111);
+        strategy.pending_entry = Some(PendingEntry {
+            owner: Owner::MeanReversion,
+            side: Side::Short,
+            cycle_id: *b"abc1230001",
+            reason: ReasonCode::MorningMeanReversionShort,
+            entry_style: EntryStyle::Bracket,
+            stop_price: Some(105.0),
+            take_price: Some(95.0),
+            target_qty: 3.0,
+            partial_started_at_ms: Some(10_000),
+        });
+
+        let intents = strategy.on_timer(&test_ctx(Some(-1.0)), 13_001);
+
+        assert!(intents
+            .iter()
+            .any(|intent| { matches!(intent.base_intent(), Intent::Cancel { order_id: 111 }) }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::Market { qty, side: OrderSide::Buy, .. }
+                    if (*qty - 1.0).abs() <= f64::EPSILON
+            )
+        }));
+        assert!(strategy.pending_entry.is_none());
+        assert!(strategy.safe_mode_close_only);
+        assert_eq!(
+            strategy.safe_mode_reason.as_deref(),
+            Some("partial_entry_fill_timeout")
         );
     }
 
@@ -4972,6 +5222,40 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 sl_stop_order_id = ?self.sl_stop_order_id,
                 "cleanup command failed while strategy is flat and stop orders are still active"
             );
+            if self.cleanup_stop_retry_attempts < Self::MAX_CLEANUP_STOP_RETRIES {
+                self.cleanup_stop_retry_attempts =
+                    self.cleanup_stop_retry_attempts.saturating_add(1);
+                let mut stop_order_ids =
+                    self.working_stop_orders.iter().cloned().collect::<Vec<_>>();
+                stop_order_ids.sort();
+                info!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    action = "sibling_cleanup_retry",
+                    retry_attempt = self.cleanup_stop_retry_attempts,
+                    max_retries = Self::MAX_CLEANUP_STOP_RETRIES,
+                    stop_order_ids = ?stop_order_ids,
+                    "retrying active sibling stop cleanup while broker position is flat"
+                );
+                self.sync_state();
+                return stop_order_ids
+                    .into_iter()
+                    .map(|order_id| {
+                        Intent::DeleteStopLimit {
+                            order_id,
+                            side: None,
+                            check_duplicates: Some(true),
+                        }
+                        .with_class(IntentClass::CancelCleanup)
+                    })
+                    .collect();
+            }
+            warn!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "sibling_cleanup_retry_exhausted",
+                retry_attempts = self.cleanup_stop_retry_attempts,
+                working_stop_orders_count = self.working_stop_orders.len(),
+                "active sibling stop cleanup retries exhausted while broker position is flat"
+            );
         }
         // Stale/foreign ack: ignore.
         Vec::new()
@@ -5073,6 +5357,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         }
         if Self::is_terminal_stop_order_status(&status) {
             self.working_stop_orders.remove(&ord.stop_order_id);
+            if self.working_stop_orders.is_empty() && self.cleanup_stop_retry_attempts > 0 {
+                info!(
+                    target: "strategy_runtime::hybrid_intraday_runtime",
+                    action = "sibling_cleanup_confirmed",
+                    stop_order_id = %ord.stop_order_id,
+                    status = %status,
+                    retry_attempts = self.cleanup_stop_retry_attempts,
+                    "all strategy-owned sibling stop orders are terminal"
+                );
+                self.cleanup_stop_retry_attempts = 0;
+            }
         } else if !ord.stop_order_id.trim().is_empty() {
             self.working_stop_orders.insert(ord.stop_order_id.clone());
         }
@@ -5098,7 +5393,46 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let mut intents = Vec::new();
         let prev = self.last_position_qty;
         let cur = pos.qty;
-        if prev.abs() > f64::EPSILON
+        let mut completes_pending_entry = false;
+        if let Some(mut entry) = self.pending_entry {
+            if cur.abs() > f64::EPSILON {
+                if !Self::partial_entry_progress_is_valid(entry, prev, cur) {
+                    let reason = if cur.signum() != Self::expected_entry_qty(entry).signum() {
+                        "partial_entry_sign_mismatch"
+                    } else if cur.abs() > entry.target_qty + f64::EPSILON {
+                        "partial_entry_overfill"
+                    } else {
+                        "partial_entry_position_reduced"
+                    };
+                    intents.extend(self.emit_broker_residual_emergency_exit(ctx, pos, reason));
+                    self.pending_entry = None;
+                    self.last_position_qty = cur;
+                    self.sync_state();
+                    return intents;
+                }
+                if cur.abs() + f64::EPSILON < entry.target_qty {
+                    if entry.partial_started_at_ms.is_none() {
+                        entry.partial_started_at_ms = Some(Utc::now().timestamp_millis());
+                    }
+                    self.pending_entry = Some(entry);
+                    self.last_position_qty = cur;
+                    info!(
+                        target: "strategy_runtime::hybrid_intraday_runtime",
+                        action = "partial_entry_progress",
+                        owner = ?entry.owner,
+                        side = ?entry.side,
+                        broker_qty = cur,
+                        target_qty = entry.target_qty,
+                        "MR entry partially filled; waiting for target before creating bracket"
+                    );
+                    self.sync_state();
+                    return intents;
+                }
+                completes_pending_entry = true;
+            }
+        }
+        if !completes_pending_entry
+            && prev.abs() > f64::EPSILON
             && cur.abs() > f64::EPSILON
             && (prev - cur).abs() > f64::EPSILON
         {
@@ -5112,7 +5446,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.sync_state();
             return intents;
         }
-        if prev.abs() <= f64::EPSILON && cur.abs() > f64::EPSILON {
+        if (prev.abs() <= f64::EPSILON || completes_pending_entry) && cur.abs() > f64::EPSILON {
+            self.cleanup_stop_retry_attempts = 0;
             let filled = self.pending_entry.take();
             self.clear_deferred_entry();
             if let Some(entry) = filled {
@@ -5149,6 +5484,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 }
             }
         } else if prev.abs() > f64::EPSILON && cur.abs() <= f64::EPSILON {
+            self.cleanup_stop_retry_attempts = 0;
             let closing_side = self.current_side;
             let owner = self.current_owner.unwrap_or(Owner::MeanReversion);
             self.orchestrator.on_order_filled("exit", owner, None);
@@ -5172,6 +5508,10 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         self.last_position_qty = cur;
         self.sync_state();
         intents
+    }
+
+    fn on_timer(&mut self, ctx: &StrategyCtx, now_ts_utc_ms: i64) -> Vec<Intent> {
+        self.emit_partial_entry_timeout_exit(ctx, now_ts_utc_ms)
     }
 
     fn on_bootstrap_snapshot(
@@ -5487,6 +5827,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     entry_style: EntryStyle::Market,
                     stop_price: None,
                     take_price: None,
+                    target_qty: self.config.qty.max(1.0),
+                    partial_started_at_ms: None,
                 }),
                 _ => None,
             };

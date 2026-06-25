@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use anyhow::anyhow;
 use chrono::Utc;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -180,10 +181,21 @@ impl TokenProvider {
             .post(&self.oauth_url)
             .query(&[("token", self.refresh_token.trim_matches('"').trim())])
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|error| {
+                anyhow!("alor oauth refresh failed: {}", reqwest_error_kind(&error))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("alor oauth refresh returned HTTP {status}"));
+        }
 
-        let payload: TokenResponse = response.json().await?;
+        let payload: TokenResponse = response.json().await.map_err(|error| {
+            anyhow!(
+                "alor oauth response decode failed: {}",
+                reqwest_error_kind(&error)
+            )
+        })?;
         let expires_in = payload.expires_in.unwrap_or(60 * 45);
         let obtained_at = Instant::now();
         let obtained_ts_utc = Utc::now().timestamp();
@@ -257,6 +269,22 @@ fn principal_fingerprint(refresh_token: &str) -> String {
 
 fn access_token_fingerprint(access_token: &str) -> String {
     short_sha256_fingerprint(access_token)
+}
+
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connection_error"
+    } else if error.is_request() {
+        "request_error"
+    } else if error.is_decode() {
+        "decode_error"
+    } else if error.is_body() {
+        "body_error"
+    } else {
+        "transport_error"
+    }
 }
 
 fn short_sha256_fingerprint(value: &str) -> String {

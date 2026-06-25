@@ -62,7 +62,10 @@ pub fn startup_store_config_from_strategy_config(
         None => return Ok(None),
     };
     if !mr_gate_policy_enabled(&runtime_settings.mr_gate_policy)? {
-        bail!("risk gate startup mode {mode:?} requires non-disabled mr_gate_policy");
+        bail!(
+            "risk gate startup mode {:?} requires non-disabled mr_gate_policy",
+            mode
+        );
     }
 
     let profile_id = parse_profile_id(&runtime_settings.profile)?;
@@ -72,12 +75,16 @@ pub fn startup_store_config_from_strategy_config(
         let (ledger_strategy_id, ledger_profile_id) = parse_ledger_stream_identity(raw_ledger_key)?;
         if ledger_strategy_id != strategy_id {
             bail!(
-                "risk gate ledger stream strategy_id mismatch: config={strategy_id} ledger_key={ledger_strategy_id}"
+                "risk gate ledger stream strategy_id mismatch: config={} ledger_key={}",
+                strategy_id,
+                ledger_strategy_id
             );
         }
         if ledger_profile_id != profile_id {
             bail!(
-                "risk gate ledger stream profile_id mismatch: profile={profile_id} ledger_key={ledger_profile_id}"
+                "risk gate ledger stream profile_id mismatch: profile={} ledger_key={}",
+                profile_id,
+                ledger_profile_id
             );
         }
         strategy_id = ledger_strategy_id;
@@ -92,7 +99,7 @@ pub fn startup_store_config_from_strategy_config(
         RiskGateStartupMode::BootstrapFromSeed | RiskGateStartupMode::RebuildFromHistory
     ) && seed_file.is_none()
     {
-        bail!("risk gate mode {mode:?} requires risk_gate_seed_file");
+        bail!("risk gate mode {:?} requires risk_gate_seed_file", mode);
     }
 
     let identity = RiskGateProfileIdentity {

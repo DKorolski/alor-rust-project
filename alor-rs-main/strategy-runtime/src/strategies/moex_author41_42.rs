@@ -1259,9 +1259,8 @@ impl Author41Engine {
             return trades;
         }
         let rel_range = anchor.prev_range / anchor.prev_low;
-        if !(rel_range.is_finite()
-            && self.config.min_range < rel_range
-            && rel_range < self.config.max_range)
+        if !rel_range.is_finite()
+            || !(self.config.min_range < rel_range && rel_range < self.config.max_range)
         {
             return trades;
         }

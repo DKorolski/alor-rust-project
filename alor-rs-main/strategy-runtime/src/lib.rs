@@ -245,6 +245,13 @@ pub struct RiAuthor4142Settings {
     pub allow_order_emission: bool,
     pub execution_path: String,
     pub order_symbol: Option<String>,
+    pub excluded_model_dates: Vec<String>,
+    pub min_anchor_bars: usize,
+    pub anchor_first_bar_at_or_before: String,
+    pub anchor_last_bar_at_or_after: String,
+    pub actual_expiry_date: Option<String>,
+    pub roll_target_sessions_before: u32,
+    pub roll_fallback_sessions_before: u32,
     pub decision_journal_path: Option<String>,
     pub decision_journal_append: bool,
 }
@@ -284,13 +291,19 @@ impl Default for RiAuthor4142Settings {
             allow_order_emission: false,
             execution_path: "action_scoped_only".to_string(),
             order_symbol: None,
+            excluded_model_dates: Vec::new(),
+            min_anchor_bars: 0,
+            anchor_first_bar_at_or_before: "23:59:59".to_string(),
+            anchor_last_bar_at_or_after: "00:00:00".to_string(),
+            actual_expiry_date: None,
+            roll_target_sessions_before: 1,
+            roll_fallback_sessions_before: 2,
             decision_journal_path: None,
             decision_journal_append: true,
         }
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StrategySpecificConfig {
     LimitCancel(LimitCancelSettings),
@@ -349,6 +362,7 @@ pub struct HybridIntradaySettings {
     pub repair_backoff_base_sec: u64,
     pub repair_backoff_max_sec: u64,
     pub pending_timeout_sec: u64,
+    pub partial_entry_fill_timeout_ms: u64,
     pub stop_end_buffer_sec: u64,
 }
 
@@ -391,6 +405,7 @@ impl Default for HybridIntradaySettings {
             repair_backoff_base_sec: 5,
             repair_backoff_max_sec: 60,
             pending_timeout_sec: 60,
+            partial_entry_fill_timeout_ms: 3_000,
             stop_end_buffer_sec: 60,
         }
     }
