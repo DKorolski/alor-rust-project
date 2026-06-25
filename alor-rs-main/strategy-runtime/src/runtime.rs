@@ -220,6 +220,10 @@ struct RuntimeMetrics {
     redis_read_errors_total: u64,
     commands_sent_total: u64,
     publish_failures_total: u64,
+    live_guard_blocked_total: u64,
+    live_guard_allowed_total: u64,
+    last_live_guard_blocked_ts_utc: Option<i64>,
+    last_live_guard_blocked_reasons: Vec<String>,
     readiness_wait_started_total: u64,
     readiness_wait_allowed_total: u64,
     readiness_wait_timeout_total: u64,
@@ -280,6 +284,10 @@ impl Default for RuntimeMetrics {
             redis_read_errors_total: 0,
             commands_sent_total: 0,
             publish_failures_total: 0,
+            live_guard_blocked_total: 0,
+            live_guard_allowed_total: 0,
+            last_live_guard_blocked_ts_utc: None,
+            last_live_guard_blocked_reasons: Vec::new(),
             readiness_wait_started_total: 0,
             readiness_wait_allowed_total: 0,
             readiness_wait_timeout_total: 0,
@@ -501,6 +509,10 @@ impl StrategyRuntime {
             last_bar_ts_utc: None,
             last_ack_ts_utc: None,
             last_intent_ts_utc: None,
+            live_guard_blocked_total: 0,
+            live_guard_allowed_total: 0,
+            last_live_guard_blocked_ts_utc: None,
+            last_live_guard_blocked_reasons: Vec::new(),
             readiness_wait_started_total: 0,
             readiness_wait_allowed_total: 0,
             readiness_wait_timeout_total: 0,
@@ -683,6 +695,11 @@ impl StrategyRuntime {
         guard.scheduler_note = scheduler_note;
         guard.timezone_offset_hours = self.config.strategy.timezone_offset_hours;
         guard.last_bar_ts_utc = self.metrics.bars_last_seen_close_time_utc;
+        guard.live_guard_blocked_total = self.metrics.live_guard_blocked_total;
+        guard.live_guard_allowed_total = self.metrics.live_guard_allowed_total;
+        guard.last_live_guard_blocked_ts_utc = self.metrics.last_live_guard_blocked_ts_utc;
+        guard.last_live_guard_blocked_reasons =
+            self.metrics.last_live_guard_blocked_reasons.clone();
         guard.readiness_wait_started_total = self.metrics.readiness_wait_started_total;
         guard.readiness_wait_allowed_total = self.metrics.readiness_wait_allowed_total;
         guard.readiness_wait_timeout_total = self.metrics.readiness_wait_timeout_total;
@@ -4284,6 +4301,24 @@ impl StrategyRuntime {
 
         if let Some(prev) = &self.metrics.last_live_guard {
             if prev != &snapshot {
+                if prev.status != snapshot.status {
+                    match snapshot.status {
+                        "BLOCKED" => {
+                            self.metrics.live_guard_blocked_total =
+                                self.metrics.live_guard_blocked_total.saturating_add(1);
+                            self.metrics.last_live_guard_blocked_ts_utc = Some(now_ts_utc);
+                            self.metrics.last_live_guard_blocked_reasons = snapshot.reasons.clone();
+                        }
+                        "ALLOWED" => {
+                            self.metrics.live_guard_allowed_total =
+                                self.metrics.live_guard_allowed_total.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                } else if snapshot.status == "BLOCKED" {
+                    self.metrics.last_live_guard_blocked_ts_utc = Some(now_ts_utc);
+                    self.metrics.last_live_guard_blocked_reasons = snapshot.reasons.clone();
+                }
                 info!(
                     from = prev.status,
                     to = snapshot.status,
@@ -4297,6 +4332,8 @@ impl StrategyRuntime {
         } else {
             let to = snapshot.status;
             if to == "BLOCKED" {
+                self.metrics.last_live_guard_blocked_ts_utc = Some(now_ts_utc);
+                self.metrics.last_live_guard_blocked_reasons = snapshot.reasons.clone();
                 info!(to, reasons = ?snapshot.reasons, phase = ?phase, "live_guard_changed");
                 self.metrics.last_live_guard_log_ts_utc = now_ts_utc;
             }
