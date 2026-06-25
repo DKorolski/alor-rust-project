@@ -12,8 +12,8 @@ use crate::strategies::moex_author41_42::{
     ShadowSide,
 };
 use crate::strategy_host::{
-    BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, OrderEvent, PositionEvent,
-    RuntimeStateRestored, Strategy, StrategyCtx,
+    BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, IntentBlockDisposition,
+    IntentBlocked, OrderEvent, PositionEvent, RuntimeStateRestored, Strategy, StrategyCtx,
 };
 use alor_protocol::{AckStatus, IntentClass, Side as OrderSide};
 use uuid::Uuid;
@@ -102,6 +102,7 @@ pub enum RiAuthor4142DecisionAction {
 pub enum RiAuthor4142Phase {
     Flat,
     DryRunInPosition,
+    LiveEntryMissedRuntimeNotReady,
     ManualInterventionRequired,
 }
 
@@ -110,6 +111,7 @@ impl RiAuthor4142Phase {
         match self {
             Self::Flat => "flat",
             Self::DryRunInPosition => "dry_run_in_position",
+            Self::LiveEntryMissedRuntimeNotReady => "live_entry_missed_runtime_not_ready",
             Self::ManualInterventionRequired => "manual_intervention_required",
         }
     }
@@ -1102,6 +1104,9 @@ impl RiAuthor4142LiveStrategy {
             }
             return intents;
         }
+        if self.phase_blocks_fresh_entries() {
+            return intents;
+        }
         if self.live_mr.current_date != Some(bar.ts_local.date()) {
             self.live_mr.current_date = Some(bar.ts_local.date());
             self.live_mr.entries_today = 0;
@@ -1193,6 +1198,9 @@ impl RiAuthor4142LiveStrategy {
                     config.roundtrip_cost_points,
                 ));
             }
+            return intents;
+        }
+        if self.phase_blocks_fresh_entries() {
             return intents;
         }
         self.ensure_bo_session(bar);
@@ -1881,6 +1889,81 @@ impl RiAuthor4142LiveStrategy {
         self.phase_for_test().as_deref() == Some(expected)
     }
 
+    fn phase_blocks_fresh_entries(&self) -> bool {
+        matches!(
+            self.phase_for_test().as_deref(),
+            Some("dry_run_in_position")
+                | Some("manual_intervention_required")
+                | Some("live_entry_missed_runtime_not_ready")
+        )
+    }
+
+    fn guard_reasons_are_runtime_readiness_only(reasons: &[String]) -> bool {
+        !reasons.is_empty()
+            && reasons.iter().all(|reason| {
+                reason == "gateway_ready=false"
+                    || reason == "gateway_health_stale"
+                    || reason == "ws_connected=false"
+                    || reason == "cws_authorized=false"
+                    || reason == "bootstrap:not_ready"
+                    || reason.starts_with("phase=")
+            })
+    }
+
+    fn transition_live_entry_missed_runtime_not_ready(&mut self, event: &IntentBlocked) {
+        self.clear_live_positions();
+        let mut component = None;
+        let mut side = None;
+        let mut cycle_id = None;
+        let mut entry_ts_local = None;
+        let mut exit_ts_local = None;
+        if let StrategyState::RiAuthor4142Live {
+            phase,
+            current_component,
+            current_side,
+            current_cycle_id,
+            current_entry_ts_local,
+            current_exit_ts_local,
+            last_transition_reason,
+            pending_entry_request_id,
+            pending_exit_request_id,
+            ..
+        } = &mut self.state
+        {
+            *phase = RiAuthor4142Phase::LiveEntryMissedRuntimeNotReady
+                .as_str()
+                .to_string();
+            *last_transition_reason = Some(format!(
+                "missed_due_runtime_not_ready:{}:{}",
+                event.created_ts_utc,
+                event.guard_reasons.join(",")
+            ));
+            *pending_entry_request_id = None;
+            *pending_exit_request_id = None;
+            component = current_component.clone();
+            side = current_side.clone();
+            cycle_id = current_cycle_id.clone();
+            entry_ts_local = current_entry_ts_local.clone();
+            exit_ts_local = current_exit_ts_local.clone();
+        }
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_live_entry_missed_runtime_not_ready",
+            reason = event.reason,
+            blocked_action = event.action,
+            intent_class = ?event.intent_class,
+            created_ts_utc = event.created_ts_utc,
+            guard_reasons = ?event.guard_reasons,
+            component = ?component,
+            side = ?side,
+            cycle_id = ?cycle_id,
+            entry_ts_local = ?entry_ts_local,
+            exit_ts_local = ?exit_ts_local,
+            mode = self.config.mode.as_str(),
+            live_adapter_enabled = self.can_emit_orders(),
+        );
+    }
+
     fn pending_entry_request_id(&self) -> Option<Uuid> {
         match &self.state {
             StrategyState::RiAuthor4142Live {
@@ -2180,6 +2263,22 @@ impl Strategy for RiAuthor4142LiveStrategy {
         );
     }
 
+    fn on_intent_blocked(
+        &mut self,
+        _ctx: &StrategyCtx,
+        event: &IntentBlocked,
+    ) -> IntentBlockDisposition {
+        if event.reason == "live_guard"
+            && event.intent_class == IntentClass::Entry
+            && self.phase_is("live_pending_entry")
+            && Self::guard_reasons_are_runtime_readiness_only(&event.guard_reasons)
+        {
+            self.transition_live_entry_missed_runtime_not_ready(event);
+            return IntentBlockDisposition::KeepStrategyState;
+        }
+        IntentBlockDisposition::Rollback
+    }
+
     fn pending_request_ids(&self) -> Vec<Uuid> {
         [
             self.pending_entry_request_id(),
@@ -2195,6 +2294,17 @@ impl Strategy for RiAuthor4142LiveStrategy {
         has_open_position: bool,
     ) -> crate::strategy_host::StrategyExitRiskStatus {
         let phase = self.phase_for_test();
+        if matches!(
+            phase.as_deref(),
+            Some("manual_intervention_required") | Some("live_entry_missed_runtime_not_ready")
+        ) {
+            return crate::strategy_host::StrategyExitRiskStatus {
+                phase_override: phase,
+                exit_recovery_active: false,
+                operator_intervention_required: true,
+                open_risk_position_unflattened: has_open_position,
+            };
+        }
         if matches!(
             phase.as_deref(),
             Some("live_pending_exit") | Some("live_deferred_exit")
@@ -2335,8 +2445,8 @@ mod tests {
         Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
     };
     use crate::strategy_host::{
-        BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, OrderEvent, PositionEvent,
-        RuntimeStateRestored, StopOrderEvent, Strategy,
+        BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, IntentBlockDisposition,
+        IntentBlocked, OrderEvent, PositionEvent, RuntimeStateRestored, StopOrderEvent, Strategy,
     };
     use alor_protocol::{AckStatus, CommandAck, IntentClass, Side as OrderSide};
     use chrono::{Duration, NaiveDate, NaiveDateTime};
@@ -2494,6 +2604,102 @@ mod tests {
         assert_eq!(strategy.phase_for_test().as_deref(), Some("flat"));
         assert!(strategy.live_mr.position.is_none());
         assert!(strategy.live_bo.position.is_none());
+    }
+
+    #[test]
+    fn micro_live_readiness_blocked_entry_marks_missed_and_blocks_opposite_replacement() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("micro strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        strategy.warmup_from_history(&live_ctx(), &[prev_day]);
+
+        let first_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_000.0,
+            100_050.0,
+            99_850.0,
+            99_900.0,
+        );
+        let first_intents = strategy.on_bar(&live_ctx(), &first_bar);
+        assert_eq!(first_intents.len(), 1);
+        match first_intents[0].base_intent() {
+            crate::strategy_host::Intent::Market { side, .. } => {
+                assert_eq!(*side, OrderSide::Buy);
+            }
+            other => panic!("unexpected first intent: {other:?}"),
+        }
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_pending_entry")
+        );
+        assert!(strategy.live_mr.position.is_some());
+
+        let disposition = strategy.on_intent_blocked(
+            &live_ctx(),
+            &IntentBlocked {
+                reason: "live_guard",
+                action: "market",
+                intent_class: IntentClass::Entry,
+                created_ts_utc: first_bar.close_time_utc,
+                guard_reasons: vec![
+                    "phase=SyncingHistory".to_string(),
+                    "gateway_ready=false".to_string(),
+                ],
+            },
+        );
+
+        assert_eq!(disposition, IntentBlockDisposition::KeepStrategyState);
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_entry_missed_runtime_not_ready")
+        );
+        assert!(strategy.live_mr.position.is_none());
+        assert!(strategy.live_bo.position.is_none());
+        if let crate::state::StrategyState::RiAuthor4142Live {
+            current_component,
+            current_side,
+            current_entry_ts_local,
+            ..
+        } = strategy.state()
+        {
+            assert_eq!(current_component.as_deref(), Some("author41_mr"));
+            assert_eq!(current_side.as_deref(), Some("long"));
+            assert_eq!(
+                current_entry_ts_local.as_deref(),
+                Some("2026-05-04 09:00:00")
+            );
+        } else {
+            panic!("unexpected strategy state");
+        }
+
+        let opposite_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 10, 0),
+            DataOrigin::Live,
+            100_000.0,
+            100_140.0,
+            99_990.0,
+            100_100.0,
+        );
+        let replacement_intents = strategy.on_bar(&live_ctx(), &opposite_bar);
+        assert!(
+            replacement_intents.is_empty(),
+            "missed long must not be replaced by opposite short: {replacement_intents:?}"
+        );
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_entry_missed_runtime_not_ready")
+        );
     }
 
     #[test]

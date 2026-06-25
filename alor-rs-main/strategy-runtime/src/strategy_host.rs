@@ -98,6 +98,21 @@ pub struct CommandPrepared {
     pub target_order_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct IntentBlocked {
+    pub reason: &'static str,
+    pub action: &'static str,
+    pub intent_class: IntentClass,
+    pub created_ts_utc: i64,
+    pub guard_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentBlockDisposition {
+    Rollback,
+    KeepStrategyState,
+}
+
 pub trait Strategy: Send + Sync {
     fn on_bar(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent>;
     fn on_ack(&mut self, ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent>;
@@ -138,6 +153,13 @@ pub trait Strategy: Send + Sync {
         None
     }
     fn on_command_prepared(&mut self, _ctx: &StrategyCtx, _command: &CommandPrepared) {}
+    fn on_intent_blocked(
+        &mut self,
+        _ctx: &StrategyCtx,
+        _event: &IntentBlocked,
+    ) -> IntentBlockDisposition {
+        IntentBlockDisposition::Rollback
+    }
     fn pending_request_ids(&self) -> Vec<Uuid> {
         Vec::new()
     }

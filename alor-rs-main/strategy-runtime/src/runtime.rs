@@ -26,8 +26,9 @@ use crate::risk_gate_store::{
 };
 use crate::state::{RuntimeState, StrategyState, StrategyStateEnvelopeCompat};
 use crate::strategy_host::{
-    BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, OrderEvent, PositionEvent,
-    RiskGateRuntimeState, RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
+    BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, IntentBlockDisposition,
+    IntentBlocked, OrderEvent, PositionEvent, RiskGateRuntimeState, RuntimeStateRestored,
+    StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
 };
 use crate::strategy_registry::{StrategyCapabilities, StrategyRegistry};
 use crate::trade_ledger::{OrderRecord, TradeLedger, TradeRecord};
@@ -38,7 +39,7 @@ use crate::{
 
 const MAX_PENDING_LOOPS: usize = 10;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const GUARD_READINESS_GRACE_ATTEMPTS: usize = 8;
+const GUARD_READINESS_GRACE_ATTEMPTS: usize = 240;
 const GUARD_READINESS_GRACE_SLEEP: Duration = Duration::from_millis(250);
 const BARS_STREAM_INFO_GRACE: Duration = Duration::from_secs(30);
 const BARS_STREAM_WARN_GRACE: Duration = Duration::from_secs(120);
@@ -2049,6 +2050,8 @@ impl StrategyRuntime {
         if bar.origin == DataOrigin::Live {
             self.bootstrap_state.seen_live_bar = true;
         }
+        self.maybe_wait_for_live_bar_readiness("on_bar_pre_callback", event_ts, &bar)
+            .await?;
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, event_ts);
         let (intents, previous_strategy_state) =
             self.invoke_strategy_callback(&ctx, "on_bar", |strategy, strategy_ctx| {
@@ -3447,6 +3450,20 @@ impl StrategyRuntime {
         self.state.strategy_state = self.strategy.state().clone();
     }
 
+    fn notify_intents_blocked(&mut self, ctx: &StrategyCtx, events: &[IntentBlocked]) -> bool {
+        let mut keep_strategy_state = false;
+        for event in events {
+            let disposition = self.strategy.on_intent_blocked(ctx, event);
+            self.pending_strategy_journal_records
+                .extend(self.strategy.drain_observation_journal_records());
+            self.state.strategy_state = self.strategy.state().clone();
+            if disposition == IntentBlockDisposition::KeepStrategyState {
+                keep_strategy_state = true;
+            }
+        }
+        keep_strategy_state
+    }
+
     async fn apply_intents(
         &mut self,
         ctx: &StrategyCtx,
@@ -3501,6 +3518,7 @@ impl StrategyRuntime {
                     self.log_guard_decision_if_due(&decision)?;
                     let has_open_position = ctx.position_qty.unwrap_or(0.0).abs() > 0.0;
                     let mut passthrough = Vec::new();
+                    let mut blocked_events = Vec::new();
                     for (intent, intent_class) in accepted {
                         if self.guard_allows_intent_when_blocked(intent_class, has_open_position) {
                             passthrough.push((intent, intent_class));
@@ -3522,9 +3540,29 @@ impl StrategyRuntime {
                                     "created_ts_utc": created_ts_utc,
                                 }),
                             );
+                            blocked_events.push(IntentBlocked {
+                                reason: "live_guard",
+                                action,
+                                intent_class,
+                                created_ts_utc,
+                                guard_reasons: decision.reasons.clone(),
+                            });
                         }
                     }
                     if passthrough.is_empty() {
+                        if self.notify_intents_blocked(ctx, &blocked_events) {
+                            self.audit_event(
+                                "intent_blocked_strategy_state_kept",
+                                json!({
+                                    "reason": "live_guard",
+                                    "blocked_count": blocked_events.len(),
+                                    "created_ts_utc": created_ts_utc,
+                                }),
+                            );
+                            self.flush_strategy_journal_records().await?;
+                            self.persist_state(None).await?;
+                            return Ok(());
+                        }
                         self.restore_strategy_state_after_dropped_intents(
                             previous_strategy_state,
                             "intent_dropped_by_guard",
@@ -4031,6 +4069,9 @@ impl StrategyRuntime {
         if !Self::guard_block_may_be_readiness_race(&decision) {
             return Ok(decision);
         }
+        if self.config.streams.health.is_none() {
+            return Ok(decision);
+        }
 
         let initial_reasons = decision.reasons.clone();
         for attempt in 1..=GUARD_READINESS_GRACE_ATTEMPTS {
@@ -4058,7 +4099,73 @@ impl StrategyRuntime {
             sleep(GUARD_READINESS_GRACE_SLEEP).await;
         }
 
-        Ok(self.evaluate_guard_decision())
+        let final_decision = self.evaluate_guard_decision();
+        warn!(
+            attempts = GUARD_READINESS_GRACE_ATTEMPTS,
+            initial_reasons = ?initial_reasons,
+            final_reasons = ?final_decision.reasons,
+            "live_guard_readiness_grace_timeout"
+        );
+        self.audit_event(
+            "live_guard_readiness_grace_timeout",
+            json!({
+                "attempts": GUARD_READINESS_GRACE_ATTEMPTS,
+                "initial_reasons": initial_reasons,
+                "final_reasons": final_decision.reasons.clone(),
+            }),
+        );
+        Ok(final_decision)
+    }
+
+    async fn maybe_wait_for_live_bar_readiness(
+        &mut self,
+        scope: &'static str,
+        event_ts_utc: i64,
+        bar: &BarEvent,
+    ) -> Result<()> {
+        if self.config.trade_mode != TradeMode::Live || bar.origin != DataOrigin::Live {
+            return Ok(());
+        }
+        let decision = self.evaluate_guard_decision();
+        if decision.allowed || !Self::guard_block_may_be_readiness_race(&decision) {
+            return Ok(());
+        }
+
+        let initial_reasons = decision.reasons.clone();
+        info!(
+            scope,
+            event_ts_utc,
+            initial_reasons = ?initial_reasons,
+            attempts = GUARD_READINESS_GRACE_ATTEMPTS,
+            sleep_ms = GUARD_READINESS_GRACE_SLEEP.as_millis() as u64,
+            "live_bar_readiness_wait_started"
+        );
+        let final_decision = self.maybe_wait_for_guard_readiness_race(decision).await?;
+        if final_decision.allowed {
+            info!(
+                scope,
+                event_ts_utc,
+                initial_reasons = ?initial_reasons,
+                "live_bar_readiness_wait_allowed"
+            );
+            self.audit_event(
+                "live_bar_readiness_wait_allowed",
+                json!({
+                    "scope": scope,
+                    "event_ts_utc": event_ts_utc,
+                    "initial_reasons": initial_reasons,
+                }),
+            );
+        } else {
+            warn!(
+                scope,
+                event_ts_utc,
+                initial_reasons = ?initial_reasons,
+                final_reasons = ?final_decision.reasons,
+                "live_bar_readiness_wait_still_blocked"
+            );
+        }
+        Ok(())
     }
 
     async fn log_live_guard_status_if_due(&mut self) -> Result<()> {
@@ -4749,6 +4856,109 @@ mod tests {
         assert!(matches!(
             &runtime.state.strategy_state,
             StrategyState::RiAuthor4142Live { phase, .. } if phase == "flat"
+        ));
+    }
+
+    #[test]
+    fn ri_readiness_blocked_entry_hook_keeps_missed_state_and_blocks_replacement() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        install_ri_micro_strategy(&mut runtime);
+        let warmup_bar = ri_runtime_bar(
+            2026,
+            5,
+            1,
+            23,
+            40,
+            DataOrigin::History,
+            (100_000.0, 101_000.0, 99_000.0, 100_000.0),
+        );
+        let warmup_ctx = runtime.strategy_ctx();
+        assert_eq!(
+            runtime
+                .strategy
+                .warmup_from_history(&warmup_ctx, &[warmup_bar]),
+            1
+        );
+        runtime.state.strategy_state = runtime.strategy.state().clone();
+
+        let first_bar = ri_runtime_bar(
+            2026,
+            5,
+            4,
+            9,
+            0,
+            DataOrigin::Live,
+            (100_000.0, 100_050.0, 99_850.0, 99_900.0),
+        );
+        let first_ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(None, first_bar.close_time_utc);
+        let (first_intents, _previous_strategy_state) =
+            runtime.invoke_strategy_callback(&first_ctx, "on_bar", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &first_bar)
+            });
+        assert_eq!(first_intents.len(), 1);
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live {
+                phase,
+                current_side,
+                ..
+            } if phase == "live_pending_entry" && current_side.as_deref() == Some("long")
+        ));
+
+        let handled = runtime.notify_intents_blocked(
+            &first_ctx,
+            &[IntentBlocked {
+                reason: "live_guard",
+                action: "market",
+                intent_class: alor_protocol::IntentClass::Entry,
+                created_ts_utc: first_bar.close_time_utc,
+                guard_reasons: vec![
+                    "phase=SyncingHistory".to_string(),
+                    "gateway_ready=false".to_string(),
+                ],
+            }],
+        );
+
+        assert!(handled);
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live {
+                phase,
+                current_side,
+                current_entry_ts_local,
+                ..
+            } if phase == "live_entry_missed_runtime_not_ready"
+                && current_side.as_deref() == Some("long")
+                && current_entry_ts_local.as_deref() == Some("2026-05-04 09:00:00")
+        ));
+
+        let opposite_bar = ri_runtime_bar(
+            2026,
+            5,
+            4,
+            9,
+            10,
+            DataOrigin::Live,
+            (100_000.0, 100_140.0, 99_990.0, 100_100.0),
+        );
+        let opposite_ctx = runtime.strategy_ctx_with_last_bar_and_event_ts(
+            Some(first_bar.close_time_utc),
+            opposite_bar.close_time_utc,
+        );
+        let (replacement_intents, _previous_strategy_state) =
+            runtime.invoke_strategy_callback(&opposite_ctx, "on_bar", |strategy, strategy_ctx| {
+                strategy.on_bar(strategy_ctx, &opposite_bar)
+            });
+
+        assert!(
+            replacement_intents.is_empty(),
+            "missed long must not be replaced by opposite short: {replacement_intents:?}"
+        );
+        assert!(matches!(
+            &runtime.state.strategy_state,
+            StrategyState::RiAuthor4142Live { phase, .. }
+                if phase == "live_entry_missed_runtime_not_ready"
         ));
     }
 
