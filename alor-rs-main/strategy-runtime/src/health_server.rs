@@ -1,6 +1,12 @@
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::{header::CONTENT_TYPE, StatusCode},
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
+};
 use parking_lot::RwLock;
 use serde::Serialize;
 
@@ -54,6 +60,16 @@ struct StreamsReadinessResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct ObservabilityResponse {
+    readiness_wait_started_total: u64,
+    readiness_wait_allowed_total: u64,
+    readiness_wait_timeout_total: u64,
+    intent_blocked_state_kept_total: u64,
+    orphan_trade_total: u64,
+    last_orphan_trade_ts_utc: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
 struct ReadinessResponse {
     readiness: bool,
     runtime_phase: String,
@@ -69,6 +85,7 @@ struct ReadinessResponse {
     gateway: GatewayReadinessResponse,
     scheduler: SchedulerReadinessResponse,
     streams: StreamsReadinessResponse,
+    observability: ObservabilityResponse,
 }
 
 pub async fn spawn_health_server(shared: RuntimeSharedState, cfg: HealthCfg) -> anyhow::Result<()> {
@@ -139,6 +156,14 @@ async fn readiness(
             last_ack_ts_utc: guard.last_ack_ts_utc,
             last_intent_ts_utc: guard.last_intent_ts_utc,
         },
+        observability: ObservabilityResponse {
+            readiness_wait_started_total: guard.readiness_wait_started_total,
+            readiness_wait_allowed_total: guard.readiness_wait_allowed_total,
+            readiness_wait_timeout_total: guard.readiness_wait_timeout_total,
+            intent_blocked_state_kept_total: guard.intent_blocked_state_kept_total,
+            orphan_trade_total: guard.orphan_trade_total,
+            last_orphan_trade_ts_utc: guard.last_orphan_trade_ts_utc,
+        },
     };
 
     let status = if readiness {
@@ -150,10 +175,37 @@ async fn readiness(
 }
 
 async fn metrics(
-    State((_, expose_metrics)): State<(RuntimeSharedState, bool)>,
+    State((state, expose_metrics)): State<(RuntimeSharedState, bool)>,
 ) -> impl IntoResponse {
     if !expose_metrics {
         return StatusCode::NOT_FOUND.into_response();
     }
-    StatusCode::OK.into_response()
+    let guard = state.read().clone();
+    let readiness = if guard.readiness { 1 } else { 0 };
+    let body = format!(
+        concat!(
+            "# TYPE strategy_runtime_readiness gauge\n",
+            "strategy_runtime_readiness {readiness}\n",
+            "# TYPE strategy_runtime_readiness_wait_started_total counter\n",
+            "strategy_runtime_readiness_wait_started_total {readiness_wait_started_total}\n",
+            "# TYPE strategy_runtime_readiness_wait_allowed_total counter\n",
+            "strategy_runtime_readiness_wait_allowed_total {readiness_wait_allowed_total}\n",
+            "# TYPE strategy_runtime_readiness_wait_timeout_total counter\n",
+            "strategy_runtime_readiness_wait_timeout_total {readiness_wait_timeout_total}\n",
+            "# TYPE strategy_runtime_intent_blocked_state_kept_total counter\n",
+            "strategy_runtime_intent_blocked_state_kept_total {intent_blocked_state_kept_total}\n",
+            "# TYPE strategy_runtime_orphan_trade_total counter\n",
+            "strategy_runtime_orphan_trade_total {orphan_trade_total}\n",
+            "# TYPE strategy_runtime_last_orphan_trade_ts_utc gauge\n",
+            "strategy_runtime_last_orphan_trade_ts_utc {last_orphan_trade_ts_utc}\n",
+        ),
+        readiness = readiness,
+        readiness_wait_started_total = guard.readiness_wait_started_total,
+        readiness_wait_allowed_total = guard.readiness_wait_allowed_total,
+        readiness_wait_timeout_total = guard.readiness_wait_timeout_total,
+        intent_blocked_state_kept_total = guard.intent_blocked_state_kept_total,
+        orphan_trade_total = guard.orphan_trade_total,
+        last_orphan_trade_ts_utc = guard.last_orphan_trade_ts_utc.unwrap_or(0),
+    );
+    ([(CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }

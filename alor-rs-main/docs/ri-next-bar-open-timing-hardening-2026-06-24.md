@@ -243,6 +243,16 @@ micro_live_readiness_blocked_entry_marks_missed_and_blocks_opposite_replacement
 ri_readiness_blocked_entry_hook_keeps_missed_state_and_blocks_replacement
 ```
 
+Observability follow-up:
+
+- `/readiness` now includes an `observability` block with counters for readiness
+  waits, readiness timeouts, strategy-kept blocked intents, and `orphan_trade`;
+- `/metrics` now exposes the same counters as Prometheus-style text when
+  `health.expose_metrics=true`;
+- the rollout acceptance check can therefore use both logs and fast health
+  probes to detect any new `live_entry_missed_runtime_not_ready`,
+  readiness-wait timeout, or fill-before-ack correlation event.
+
 ## Post-rollout acceptance
 
 For the next RI morning session, compare:
