@@ -461,6 +461,17 @@ Watch items:
   MSK` event blocked trading through the live guard and recovered to
   `ALLOWED / LiveReady` without order activity.
 
+Cleanup patch note (`2026-06-25`):
+
+- Scope review confirmed this was not only wording in the generic hybrid path:
+  partial-entry wait/timeout logic could be entered for any pending entry.
+- Runtime now limits partial-entry target waiting and timeout flattening to
+  `Owner::MeanReversion + EntryStyle::Bracket`.
+- BO / market entries still confirm from broker position updates, but do not
+  enter the MR partial-wait lifecycle and do not arm MR timeout flattening.
+- `emit_mr_bracket_intents` already had its own MR+Bracket guard; the patch
+  adds the missing lifecycle/timeout guard in front of it.
+
 ## 2026-06-23 RI Morning-Open Freeze-Contract Latency
 
 Status: P1 parity watch before RI scale-up / local patch prepared / no

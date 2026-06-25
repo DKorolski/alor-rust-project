@@ -1387,6 +1387,14 @@ impl HybridIntradayRuntimeStrategy {
         }
     }
 
+    fn is_mr_bracket_entry(entry: PendingEntry) -> bool {
+        entry.owner == Owner::MeanReversion && entry.entry_style == EntryStyle::Bracket
+    }
+
+    fn waits_for_partial_entry_target(entry: PendingEntry) -> bool {
+        Self::is_mr_bracket_entry(entry) && entry.target_qty > 1.0
+    }
+
     fn partial_entry_progress_is_valid(entry: PendingEntry, prev: f64, cur: f64) -> bool {
         let target = Self::expected_entry_qty(entry);
         cur.abs() > f64::EPSILON
@@ -1403,6 +1411,9 @@ impl HybridIntradayRuntimeStrategy {
         let Some(entry) = self.pending_entry else {
             return Vec::new();
         };
+        if !Self::waits_for_partial_entry_target(entry) {
+            return Vec::new();
+        }
         let Some(started_at_ms) = entry.partial_started_at_ms else {
             return Vec::new();
         };
@@ -4453,6 +4464,92 @@ mod tests {
     }
 
     #[test]
+    fn bo_market_entry_partial_fill_completes_without_mr_wait_or_brackets() {
+        let mut cfg = test_config();
+        cfg.qty = 3.0;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.pending_entry = Some(PendingEntry {
+            owner: Owner::IntradayBreakout,
+            side: Side::Short,
+            cycle_id: *b"bo12340001",
+            reason: ReasonCode::BreakoutShort,
+            entry_style: EntryStyle::Market,
+            stop_price: Some(105.0),
+            take_price: Some(95.0),
+            target_qty: 3.0,
+            partial_started_at_ms: None,
+        });
+        strategy.pending_entry_request_id = Some(uuid::Uuid::new_v4());
+
+        let intents = strategy.on_position(
+            &test_ctx(Some(-1.0)),
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_100,
+            },
+        );
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
+        assert_eq!(strategy.current_owner, Some(Owner::IntradayBreakout));
+        assert_eq!(strategy.current_side, Some(Side::Short));
+        assert_eq!(strategy.last_position_qty, -1.0);
+        assert!(strategy.tp_order_id.is_none());
+        assert!(strategy.sl_stop_order_id.is_none());
+        assert!(strategy.pending_tp_request_id.is_none());
+        assert!(strategy.pending_sl_request_id.is_none());
+        assert!(!strategy.safe_mode_close_only);
+    }
+
+    #[test]
+    fn bo_market_entry_partial_marker_does_not_trigger_mr_timeout_flatten() {
+        let mut cfg = test_config();
+        cfg.qty = 3.0;
+        cfg.partial_entry_fill_timeout_ms = 3_000;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.last_position_qty = -1.0;
+        strategy.working_orders.insert(111);
+        strategy.pending_entry = Some(PendingEntry {
+            owner: Owner::IntradayBreakout,
+            side: Side::Short,
+            cycle_id: *b"bo12340001",
+            reason: ReasonCode::BreakoutShort,
+            entry_style: EntryStyle::Market,
+            stop_price: Some(105.0),
+            take_price: Some(95.0),
+            target_qty: 3.0,
+            partial_started_at_ms: Some(10_000),
+        });
+
+        let timeout = strategy.on_timer(&test_ctx(Some(-1.0)), 13_001);
+
+        assert!(timeout.is_empty());
+        assert!(strategy.pending_entry.is_some());
+        assert!(strategy.working_orders.contains(&111));
+        assert!(!strategy.safe_mode_close_only);
+
+        let completed = strategy.on_position(
+            &test_ctx(Some(-1.0)),
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_101,
+            },
+        );
+
+        assert!(completed.is_empty());
+        assert!(strategy.pending_entry.is_none());
+        assert_eq!(strategy.current_owner, Some(Owner::IntradayBreakout));
+        assert_eq!(strategy.current_side, Some(Side::Short));
+        assert!(!strategy.safe_mode_close_only);
+    }
+
+    #[test]
     fn partial_mr_entry_timeout_cancels_remainder_and_flattens_partial() {
         let mut cfg = test_config();
         cfg.qty = 3.0;
@@ -5410,7 +5507,9 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                     self.sync_state();
                     return intents;
                 }
-                if cur.abs() + f64::EPSILON < entry.target_qty {
+                if Self::waits_for_partial_entry_target(entry)
+                    && cur.abs() + f64::EPSILON < entry.target_qty
+                {
                     if entry.partial_started_at_ms.is_none() {
                         entry.partial_started_at_ms = Some(Utc::now().timestamp_millis());
                     }
