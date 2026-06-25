@@ -220,6 +220,12 @@ struct RuntimeMetrics {
     redis_read_errors_total: u64,
     commands_sent_total: u64,
     publish_failures_total: u64,
+    readiness_wait_started_total: u64,
+    readiness_wait_allowed_total: u64,
+    readiness_wait_timeout_total: u64,
+    intent_blocked_state_kept_total: u64,
+    orphan_trade_total: u64,
+    last_orphan_trade_ts_utc: Option<i64>,
     start_time: Instant,
     waiting_for_first_bar_info_logged: bool,
     bars_stream_xlen_last: Option<u64>,
@@ -274,6 +280,12 @@ impl Default for RuntimeMetrics {
             redis_read_errors_total: 0,
             commands_sent_total: 0,
             publish_failures_total: 0,
+            readiness_wait_started_total: 0,
+            readiness_wait_allowed_total: 0,
+            readiness_wait_timeout_total: 0,
+            intent_blocked_state_kept_total: 0,
+            orphan_trade_total: 0,
+            last_orphan_trade_ts_utc: None,
             start_time: Instant::now(),
             waiting_for_first_bar_info_logged: false,
             bars_stream_xlen_last: None,
@@ -489,6 +501,12 @@ impl StrategyRuntime {
             last_bar_ts_utc: None,
             last_ack_ts_utc: None,
             last_intent_ts_utc: None,
+            readiness_wait_started_total: 0,
+            readiness_wait_allowed_total: 0,
+            readiness_wait_timeout_total: 0,
+            intent_blocked_state_kept_total: 0,
+            orphan_trade_total: 0,
+            last_orphan_trade_ts_utc: None,
             orders_mode: runtime_orders_mode(&config).to_string(),
             allow_live_orders: config.allow_live_orders,
             allow_paper_orders: config.allow_paper_orders,
@@ -665,6 +683,12 @@ impl StrategyRuntime {
         guard.scheduler_note = scheduler_note;
         guard.timezone_offset_hours = self.config.strategy.timezone_offset_hours;
         guard.last_bar_ts_utc = self.metrics.bars_last_seen_close_time_utc;
+        guard.readiness_wait_started_total = self.metrics.readiness_wait_started_total;
+        guard.readiness_wait_allowed_total = self.metrics.readiness_wait_allowed_total;
+        guard.readiness_wait_timeout_total = self.metrics.readiness_wait_timeout_total;
+        guard.intent_blocked_state_kept_total = self.metrics.intent_blocked_state_kept_total;
+        guard.orphan_trade_total = self.metrics.orphan_trade_total;
+        guard.last_orphan_trade_ts_utc = self.metrics.last_orphan_trade_ts_utc;
         guard.exit_recovery_active = strategy_risk.exit_recovery_active;
         guard.close_only_degraded = close_only_degraded;
         guard.operator_intervention_required = strategy_risk.operator_intervention_required;
@@ -3126,6 +3150,8 @@ impl StrategyRuntime {
     }
 
     fn record_orphan_trade(&mut self, trade: &TradeEvent) {
+        self.metrics.orphan_trade_total = self.metrics.orphan_trade_total.saturating_add(1);
+        self.metrics.last_orphan_trade_ts_utc = Some(trade.ts_utc);
         let record = TradeRecord {
             ts_utc: trade.ts_utc,
             order_id: trade.order_id,
@@ -3458,6 +3484,10 @@ impl StrategyRuntime {
                 .extend(self.strategy.drain_observation_journal_records());
             self.state.strategy_state = self.strategy.state().clone();
             if disposition == IntentBlockDisposition::KeepStrategyState {
+                self.metrics.intent_blocked_state_kept_total = self
+                    .metrics
+                    .intent_blocked_state_kept_total
+                    .saturating_add(1);
                 keep_strategy_state = true;
             }
         }
@@ -4073,12 +4103,16 @@ impl StrategyRuntime {
             return Ok(decision);
         }
 
+        self.metrics.readiness_wait_started_total =
+            self.metrics.readiness_wait_started_total.saturating_add(1);
         let initial_reasons = decision.reasons.clone();
         for attempt in 1..=GUARD_READINESS_GRACE_ATTEMPTS {
             self.refresh_health_now().await?;
             let current = self.evaluate_guard_decision();
             self.log_guard_transition_if_needed(&current)?;
             if current.allowed {
+                self.metrics.readiness_wait_allowed_total =
+                    self.metrics.readiness_wait_allowed_total.saturating_add(1);
                 info!(
                     attempt,
                     initial_reasons = ?initial_reasons,
@@ -4100,6 +4134,8 @@ impl StrategyRuntime {
         }
 
         let final_decision = self.evaluate_guard_decision();
+        self.metrics.readiness_wait_timeout_total =
+            self.metrics.readiness_wait_timeout_total.saturating_add(1);
         warn!(
             attempts = GUARD_READINESS_GRACE_ATTEMPTS,
             initial_reasons = ?initial_reasons,
