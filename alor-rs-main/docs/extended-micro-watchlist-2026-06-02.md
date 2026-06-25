@@ -471,6 +471,10 @@ Cleanup patch note (`2026-06-25`):
   enter the MR partial-wait lifecycle and do not arm MR timeout flattening.
 - `emit_mr_bracket_intents` already had its own MR+Bracket guard; the patch
   adds the missing lifecycle/timeout guard in front of it.
+- Gateway reconnect/gap-sync noise now has health/metrics observability:
+  `live_guard_blocked_total`, `live_guard_allowed_total`, and the last blocked
+  timestamp/reasons are exposed so reconnect cycles can be tracked without
+  relying only on `live_guard_changed` log inspection.
 
 ## 2026-06-23 RI Morning-Open Freeze-Contract Latency
 

@@ -61,6 +61,10 @@ struct StreamsReadinessResponse {
 
 #[derive(Debug, Serialize)]
 struct ObservabilityResponse {
+    live_guard_blocked_total: u64,
+    live_guard_allowed_total: u64,
+    last_live_guard_blocked_ts_utc: Option<i64>,
+    last_live_guard_blocked_reasons: Vec<String>,
     readiness_wait_started_total: u64,
     readiness_wait_allowed_total: u64,
     readiness_wait_timeout_total: u64,
@@ -157,6 +161,10 @@ async fn readiness(
             last_intent_ts_utc: guard.last_intent_ts_utc,
         },
         observability: ObservabilityResponse {
+            live_guard_blocked_total: guard.live_guard_blocked_total,
+            live_guard_allowed_total: guard.live_guard_allowed_total,
+            last_live_guard_blocked_ts_utc: guard.last_live_guard_blocked_ts_utc,
+            last_live_guard_blocked_reasons: guard.last_live_guard_blocked_reasons,
             readiness_wait_started_total: guard.readiness_wait_started_total,
             readiness_wait_allowed_total: guard.readiness_wait_allowed_total,
             readiness_wait_timeout_total: guard.readiness_wait_timeout_total,
@@ -186,6 +194,12 @@ async fn metrics(
         concat!(
             "# TYPE strategy_runtime_readiness gauge\n",
             "strategy_runtime_readiness {readiness}\n",
+            "# TYPE strategy_runtime_live_guard_blocked_total counter\n",
+            "strategy_runtime_live_guard_blocked_total {live_guard_blocked_total}\n",
+            "# TYPE strategy_runtime_live_guard_allowed_total counter\n",
+            "strategy_runtime_live_guard_allowed_total {live_guard_allowed_total}\n",
+            "# TYPE strategy_runtime_last_live_guard_blocked_ts_utc gauge\n",
+            "strategy_runtime_last_live_guard_blocked_ts_utc {last_live_guard_blocked_ts_utc}\n",
             "# TYPE strategy_runtime_readiness_wait_started_total counter\n",
             "strategy_runtime_readiness_wait_started_total {readiness_wait_started_total}\n",
             "# TYPE strategy_runtime_readiness_wait_allowed_total counter\n",
@@ -200,6 +214,9 @@ async fn metrics(
             "strategy_runtime_last_orphan_trade_ts_utc {last_orphan_trade_ts_utc}\n",
         ),
         readiness = readiness,
+        live_guard_blocked_total = guard.live_guard_blocked_total,
+        live_guard_allowed_total = guard.live_guard_allowed_total,
+        last_live_guard_blocked_ts_utc = guard.last_live_guard_blocked_ts_utc.unwrap_or(0),
         readiness_wait_started_total = guard.readiness_wait_started_total,
         readiness_wait_allowed_total = guard.readiness_wait_allowed_total,
         readiness_wait_timeout_total = guard.readiness_wait_timeout_total,
