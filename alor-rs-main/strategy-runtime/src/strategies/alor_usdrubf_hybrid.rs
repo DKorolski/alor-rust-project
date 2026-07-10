@@ -189,6 +189,7 @@ pub struct AlorUsdrubfHybridStrategy {
     tp_order_id: Option<i64>,
     sl_stop_order_id: Option<String>,
     sl_exchange_order_id: Option<i64>,
+    bracket_terminal_reconcile_started_ms: Option<i64>,
     cash: f64,
     bo_was_long_today: bool,
     bo_was_short_today: bool,
@@ -206,6 +207,8 @@ pub struct AlorUsdrubfHybridStrategy {
 }
 
 impl AlorUsdrubfHybridStrategy {
+    const BRACKET_TERMINAL_RECONCILE_GRACE_MS: i64 = 3_000;
+
     pub fn new(config: AlorUsdrubfHybridConfig) -> Self {
         let mut strategy = Self {
             config,
@@ -276,6 +279,7 @@ impl AlorUsdrubfHybridStrategy {
             tp_order_id: None,
             sl_stop_order_id: None,
             sl_exchange_order_id: None,
+            bracket_terminal_reconcile_started_ms: None,
             cash: 0.0,
             bo_was_long_today: false,
             bo_was_short_today: false,
@@ -721,6 +725,53 @@ impl AlorUsdrubfHybridStrategy {
             "broker position changed while bracket was active; cancel protection and flatten residual"
         );
         intents
+    }
+
+    fn mark_bracket_terminal_reconcile(&mut self) {
+        self.bracket_terminal_reconcile_started_ms = Some(Utc::now().timestamp_millis());
+    }
+
+    fn bracket_terminal_reconcile_active(&self, now_ms: i64) -> bool {
+        self.bracket_terminal_reconcile_started_ms
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) < Self::BRACKET_TERMINAL_RECONCILE_GRACE_MS
+            })
+    }
+
+    fn clear_bracket_terminal_reconcile(&mut self) {
+        self.bracket_terminal_reconcile_started_ms = None;
+    }
+
+    fn emit_bracket_reconcile_timeout_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        now_ts_utc_ms: i64,
+    ) -> Vec<Intent> {
+        let Some(started) = self.bracket_terminal_reconcile_started_ms else {
+            return Vec::new();
+        };
+        if now_ts_utc_ms.saturating_sub(started) < Self::BRACKET_TERMINAL_RECONCILE_GRACE_MS {
+            return Vec::new();
+        }
+        let qty = ctx.position_qty.unwrap_or(0.0);
+        if qty.abs() < 1e-9 {
+            self.clear_bracket_terminal_reconcile();
+            return Vec::new();
+        }
+        self.exit_intent_inflight = false;
+        self.clear_bracket_terminal_reconcile();
+        let pos = PositionEvent {
+            symbol: self.config.symbol.clone(),
+            qty,
+            existing: false,
+            avg_price: self
+                .open_position
+                .as_ref()
+                .map(|position| position.entry_price)
+                .unwrap_or(0.0),
+            ts_utc: now_ts_utc_ms.div_euclid(1_000),
+        };
+        self.emit_broker_residual_emergency_exit(ctx, &pos, "bracket_terminal_reconcile_timeout")
     }
 
     fn maybe_emit_live_entry_intent(
@@ -1460,6 +1511,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                         self.pending_tp_bar_ts_utc = None;
                         self.tp_order_id = Some(ord.order_id);
                         if status == "filled" {
+                            self.mark_bracket_terminal_reconcile();
                             self.exit_intent_inflight = true;
                             self.lifecycle_stage = "mr_tp_filled_awaiting_broker_flat".to_string();
                             self.tp_order_id = None;
@@ -1525,6 +1577,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 status.as_str(),
                 "filled" | "executed" | "triggered" | "done" | "completed"
             ) {
+                self.mark_bracket_terminal_reconcile();
                 self.exit_intent_inflight = true;
                 self.lifecycle_stage = "mr_sl_filled_awaiting_broker_flat".to_string();
                 if let Some(tp_order_id) = self.tp_order_id.take() {
@@ -1575,6 +1628,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             self.open_position = None;
             self.owner_confirmed_by_live_event = true;
             self.exit_intent_inflight = false;
+            self.clear_bracket_terminal_reconcile();
             self.tracked_order_ids.clear();
             self.hybrid_state = if self.pending_entry.is_some() {
                 HybridState::Pending
@@ -1651,6 +1705,13 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             return intents;
         }
         if let Some(open) = self.open_position.as_ref() {
+            if self.exit_intent_inflight
+                || self.bracket_terminal_reconcile_active(Utc::now().timestamp_millis())
+            {
+                self.lifecycle_stage = "exit_filled_awaiting_broker_flat".to_string();
+                self.sync_state();
+                return Vec::new();
+            }
             let previous_qty = match open.side {
                 PositionSide::Long => open.size as f64,
                 PositionSide::Short => -(open.size as f64),
@@ -1673,11 +1734,6 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.hybrid_state = HybridState::Open;
                 self.sync_state();
                 return intents;
-            }
-            if self.exit_intent_inflight {
-                self.lifecycle_stage = "exit_filled_awaiting_broker_flat".to_string();
-                self.sync_state();
-                return Vec::new();
             }
         }
         let entry_price = if pos.avg_price > 0.0 {
@@ -1740,6 +1796,11 @@ impl Strategy for AlorUsdrubfHybridStrategy {
     }
 
     fn on_timer(&mut self, ctx: &StrategyCtx, now_ts_utc_ms: i64) -> Vec<Intent> {
+        let reconcile_intents = self.emit_bracket_reconcile_timeout_exit(ctx, now_ts_utc_ms);
+        if !reconcile_intents.is_empty() {
+            self.sync_state();
+            return reconcile_intents;
+        }
         let Some(pending) = self.pending_entry.clone() else {
             return Vec::new();
         };
@@ -2988,6 +3049,50 @@ mod tests {
         }));
         assert!(!strategy.exit_intent_inflight);
         assert!(strategy.open_position.is_none());
+    }
+
+    #[test]
+    fn filled_mr_tp_reconcile_timeout_emits_single_residual_flatten() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.open_position = Some(OpenPosition {
+            owner: Owner::MeanRev,
+            side: PositionSide::Short,
+            entry_ts: utc_to_local(1_775_490_000, 3),
+            entry_price: 80.0,
+            size: 2,
+            stop_price: Some(80.2),
+            take_price: Some(79.9),
+            stop1: None,
+            stop2: None,
+        });
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        strategy.exit_intent_inflight = true;
+        strategy.bracket_terminal_reconcile_started_ms = Some(10_000);
+        let mut ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+        ctx.position_qty = Some(-1.0);
+
+        let intents = strategy.on_timer(&ctx, 13_001);
+
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::DeleteStopLimit { order_id, .. } if order_id == "sl-1"
+            )
+        }));
+        assert!(intents.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::Market { qty, side: Side::Buy, .. } if (*qty - 1.0).abs() <= f64::EPSILON
+            )
+        }));
+        assert!(strategy.exit_intent_inflight);
+        assert_eq!(
+            strategy.lifecycle_stage,
+            "bracket_terminal_reconcile_timeout"
+        );
+
+        let repeated = strategy.on_timer(&ctx, 16_500);
+        assert!(repeated.is_empty());
     }
 
     #[test]

@@ -176,6 +176,7 @@ pub struct HybridIntradayRuntimeStrategy {
     next_repair_at_ts: Option<i64>,
     repair_backoff_level: u32,
     repair_attempts: u32,
+    bracket_terminal_reconcile_started_ms: Option<i64>,
     active_cycle_id: Option<[u8; 10]>,
     safe_mode_close_only: bool,
     safe_mode_reason: Option<String>,
@@ -208,6 +209,7 @@ pub struct HybridIntradayRuntimeStrategy {
 impl HybridIntradayRuntimeStrategy {
     const MIN_MR_TAKE_DISTANCE_TICKS: f64 = 2.0;
     const MAX_CLEANUP_STOP_RETRIES: u32 = 3;
+    const BRACKET_TERMINAL_RECONCILE_GRACE_MS: i64 = 3_000;
     const AUTHOR41_SHORT_K: f64 = 0.16;
     const AUTHOR41_SHORT_TAKE_K: f64 = 0.02;
     const AUTHOR41_SHORT_STOP_K: f64 = 0.58;
@@ -281,6 +283,7 @@ impl HybridIntradayRuntimeStrategy {
             next_repair_at_ts: None,
             repair_backoff_level: 0,
             repair_attempts: 0,
+            bracket_terminal_reconcile_started_ms: None,
             active_cycle_id: None,
             safe_mode_close_only: false,
             safe_mode_reason: None,
@@ -1378,6 +1381,58 @@ impl HybridIntradayRuntimeStrategy {
             "broker position changed while bracket was active; cancel protection and flatten residual"
         );
         intents
+    }
+
+    fn mark_bracket_terminal_reconcile(&mut self) {
+        self.bracket_terminal_reconcile_started_ms = Some(Utc::now().timestamp_millis());
+    }
+
+    fn bracket_terminal_reconcile_active(&self, now_ms: i64) -> bool {
+        self.bracket_terminal_reconcile_started_ms
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) < Self::BRACKET_TERMINAL_RECONCILE_GRACE_MS
+            })
+    }
+
+    fn clear_bracket_terminal_reconcile(&mut self) {
+        self.bracket_terminal_reconcile_started_ms = None;
+    }
+
+    fn lifecycle_bracket_terminal_reconcile_log(&self, prev: f64, cur: f64) {
+        info!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "bracket_terminal_reconcile_wait",
+            previous_qty = prev,
+            broker_qty = cur,
+            "bracket terminal fill is settling; suppress residual emergency exit until reconcile grace expires"
+        );
+    }
+
+    fn emit_bracket_reconcile_timeout_exit(
+        &mut self,
+        ctx: &StrategyCtx,
+        now_ts_utc_ms: i64,
+    ) -> Vec<Intent> {
+        let Some(started) = self.bracket_terminal_reconcile_started_ms else {
+            return Vec::new();
+        };
+        if now_ts_utc_ms.saturating_sub(started) < Self::BRACKET_TERMINAL_RECONCILE_GRACE_MS {
+            return Vec::new();
+        }
+        let qty = ctx.position_qty.unwrap_or(self.last_position_qty);
+        if qty.abs() <= f64::EPSILON || self.pending_exit_request_id.is_some() {
+            self.clear_bracket_terminal_reconcile();
+            return Vec::new();
+        }
+        let pos = PositionEvent {
+            symbol: self.config.symbol.clone(),
+            qty,
+            existing: false,
+            avg_price: self.live_reference_price(),
+            ts_utc: now_ts_utc_ms.div_euclid(1_000),
+        };
+        self.clear_bracket_terminal_reconcile();
+        self.emit_broker_residual_emergency_exit(ctx, &pos, "bracket_terminal_reconcile_timeout")
     }
 
     fn expected_entry_qty(entry: PendingEntry) -> f64 {
@@ -4365,13 +4420,14 @@ mod tests {
     }
 
     #[test]
-    fn partial_protective_fill_emits_cancel_and_emergency_flatten() {
+    fn partial_protective_fill_waits_for_terminal_reconcile() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.last_position_qty = -2.0;
         strategy.current_owner = Some(Owner::MeanReversion);
         strategy.current_side = Some(Side::Short);
         strategy.active_cycle_id = Some(*b"abc1230001");
         strategy.sl_stop_order_id = Some("sl-1".to_string());
+        strategy.mark_bracket_terminal_reconcile();
         let ctx = test_ctx(Some(-1.0));
         let pos = PositionEvent {
             symbol: "IMOEXF".to_string(),
@@ -4382,6 +4438,24 @@ mod tests {
         };
 
         let intents = strategy.on_position(&ctx, &pos);
+
+        assert!(intents.is_empty());
+        assert!(!strategy.safe_mode_close_only);
+        assert_eq!(strategy.last_position_qty, -1.0);
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+    }
+
+    #[test]
+    fn terminal_reconcile_timeout_emits_single_residual_flatten() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.last_position_qty = -1.0;
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Short);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        strategy.bracket_terminal_reconcile_started_ms = Some(10_000);
+
+        let intents = strategy.on_timer(&test_ctx(Some(-1.0)), 13_001);
 
         assert!(intents.iter().any(|intent| {
             matches!(
@@ -4398,8 +4472,11 @@ mod tests {
         assert!(strategy.safe_mode_close_only);
         assert_eq!(
             strategy.safe_mode_reason.as_deref(),
-            Some("broker_position_size_changed")
+            Some("bracket_terminal_reconcile_timeout")
         );
+
+        let repeated = strategy.on_timer(&test_ctx(Some(-1.0)), 16_500);
+        assert!(repeated.is_empty());
     }
 
     #[test]
@@ -5382,6 +5459,9 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 status.as_str(),
                 "filled" | "canceled" | "cancelled" | "expired" | "rejected"
             ) {
+                if status == "filled" {
+                    self.mark_bracket_terminal_reconcile();
+                }
                 self.tp_order_id = None;
             }
         }
@@ -5421,6 +5501,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
                 status.as_str(),
                 "filled" | "executed" | "triggered" | "done" | "completed"
             ) {
+                self.mark_bracket_terminal_reconcile();
                 self.sl_triggered_ts = Some(ord.ts_utc.max(0));
                 if let Some(tp_order_id) = self.tp_order_id.take() {
                     intents.push(
@@ -5535,6 +5616,12 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             && cur.abs() > f64::EPSILON
             && (prev - cur).abs() > f64::EPSILON
         {
+            if self.bracket_terminal_reconcile_active(Utc::now().timestamp_millis()) {
+                self.last_position_qty = cur;
+                self.lifecycle_bracket_terminal_reconcile_log(prev, cur);
+                self.sync_state();
+                return intents;
+            }
             let reason = if prev.signum() != cur.signum() {
                 "broker_position_sign_flip"
             } else {
@@ -5597,6 +5684,7 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             self.pending_exit_request_id = None;
             self.pending_exit_created_ts_utc = None;
             self.clear_deferred_exit();
+            self.clear_bracket_terminal_reconcile();
             self.active_cycle_id = None;
             self.safe_mode_close_only = false;
             self.safe_mode_reason = None;
@@ -5610,7 +5698,9 @@ impl Strategy for HybridIntradayRuntimeStrategy {
     }
 
     fn on_timer(&mut self, ctx: &StrategyCtx, now_ts_utc_ms: i64) -> Vec<Intent> {
-        self.emit_partial_entry_timeout_exit(ctx, now_ts_utc_ms)
+        let mut intents = self.emit_bracket_reconcile_timeout_exit(ctx, now_ts_utc_ms);
+        intents.extend(self.emit_partial_entry_timeout_exit(ctx, now_ts_utc_ms));
+        intents
     }
 
     fn on_bootstrap_snapshot(
