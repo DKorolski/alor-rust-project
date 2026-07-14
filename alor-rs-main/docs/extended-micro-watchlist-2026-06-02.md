@@ -418,6 +418,130 @@ Daily audit requirement:
 - Classify any mismatch as model drift, Rust state-machine drift, broker
   execution drift, or bracket lifecycle drift.
 
+### 12. Alor-USDRUBF MR Partial TP Fill vs Residual Reconcile, 2026-07-13
+
+Status: local patch prepared / VPS rollout pending flat window.
+
+Observed:
+
+- `7502MIW / Alor-USDRUBF` entered an MR short, qty `2`, at `11:00 MSK`.
+- Protective TP buy limit `2 @ 76.72` and paired SL stop were accepted.
+- The TP filled in two separate broker executions of qty `1`.
+- After the first partial TP fill, broker position moved from `-2` to `-1`.
+- Runtime treated the broker quantity change as residual drift and emitted
+  `broker_residual_emergency_exit`, buying `1` by market.
+- The TP cancel then returned `Order to cancel not found`, because the TP was
+  already terminal or becoming terminal at the broker.
+- The second TP fill arrived after that as an `orphan_trade`, temporarily
+  flipping the account to `+1`.
+- Runtime emitted a second `broker_residual_emergency_exit`, selling `1` by
+  market. Final broker/runtime state converged flat.
+
+Interpretation:
+
+- Safety outcome was acceptable because the contour returned flat, but the
+  lifecycle was not clean.
+- This is the same shared bracket class as the IMOEXF partial-fill/residual
+  incidents: a valid partial protective fill can look like an unexpected broker
+  residual before the terminal TP/SL lifecycle has fully reconciled.
+- The current hardening waits around terminal bracket fills, but this case shows
+  that USDRUBF also needs a partial-fill grace/reconcile path while the TP
+  order is still `working` with `filled > 0`.
+
+Patch posture:
+
+- Treat strategy-owned TP/SL partial fills as bracket lifecycle progress, not
+  immediately as unexpected residual drift.
+- When a TP/SL has `filled_qty > 0` or broker position moves in the expected
+  protective direction, enter a short partial-fill reconcile grace window.
+- During that grace window, suppress residual emergency flatten unless broker
+  truth proves an opposite-side exposure or the timeout expires.
+- After grace timeout, flatten only the exact remaining broker residual if it
+  still exists.
+- Treat TP cancel `Order to cancel not found` as benign/idempotent if broker
+  truth and paired SL cleanup prove the strategy is flat or the TP is already
+  terminal.
+- Add regression tests for two-part TP fill on Alor-USDRUBF MR bracket:
+  first partial fill, delayed second fill, TP cancel-not-found, paired SL
+  cleanup, final flat without extra market churn.
+
+Local patch prepared on `2026-07-13`:
+
+- `Alor-USDRUBF` now starts a short bracket reconcile grace when broker position
+  moves in the expected protective direction, for example short `-2 -> -1`,
+  before final flat confirmation arrives.
+- `Hybrid IMOEXF` received the same state-machine hardening for MR bracket
+  protective partial fills.
+- During this grace, runtime suppresses immediate residual emergency exit.
+- If broker position does not become flat before timeout, the existing
+  bracket-reconcile timeout path still flattens the exact remaining residual.
+- Added regression tests:
+  - `partial_mr_tp_fill_waits_for_broker_flat_without_residual_churn`;
+  - `protective_partial_position_change_starts_reconcile_without_emergency_exit`.
+- Verification: `cargo test -p strategy-runtime` passed locally.
+
+Timing/replay follow-up:
+
+- The 2026-07-13 live trade matched the refreshed model at the idea/component
+  level (`MR short` with take-style exit), but not at exact timing:
+  - live: short around `11:00`, entry near `76.80`, TP `76.72`;
+  - refreshed model replay: short `10:10 -> 11:10`, entry `76.73`, exit
+    `76.538`, reason `mr_take`.
+- Run a focused timing replay before promotion:
+  - confirm live and research feed cut/state;
+  - compare close-bar signal time, scheduled entry time, emitted order time,
+    broker fill time, and bracket install time;
+  - classify any drift as feed-state drift, close-bar/next-bar execution drift,
+    bracket-entry timing drift, or model mismatch.
+
+Scale-up gate:
+
+- Do not increase Alor-USDRUBF quantity above the current validation size until
+  this partial-fill reconcile patch is deployed and observed cleanly.
+- Continue daily broker-round audit for USDRUBF with special focus on
+  protective TP partial fills and cancel/delete cleanup idempotency.
+
+### 13. RI Same-Bar Handoff Rule, 2026-07-10
+
+Status: open research/runtime contract clarification; no uncontrolled live risk.
+
+Observed:
+
+- Raw RI model candidates for 2026-07-10 included:
+  - `author41_mr` long `09:00 -> 09:20`, `+268`;
+  - `author41_mr` short `09:20 -> 10:00`, `+548`;
+  - `author41_mr` long `09:40 -> 09:50`, `+48`.
+- Live executed the `09:00` long and then the `09:20` short.
+- The prospective `09:40` long was logged but not executed because the active
+  broker path was still occupied by the prior short cycle.
+- Local `combo_nooverlap` replay kept the `09:00` long and `09:40` long but
+  removed the `09:20` short because the short entry timestamp matched the prior
+  long exit timestamp.
+
+Interpretation:
+
+- This is not currently classified as a broker/runtime failure.
+- It is a model-contract question: should same-bar handoff/reversal be allowed
+  when the previous model exit timestamp equals the next candidate entry
+  timestamp?
+- Runtime behavior appears more permissive than the current strict
+  `combo_nooverlap` replay.
+
+What to decide:
+
+- Either accept runtime same-bar handoff as intended and update research replay
+  / parity comparison accordingly.
+- Or make runtime match strict `combo_nooverlap` and suppress same-bar reversal
+  candidates.
+
+Validation focus:
+
+- Compare future RI same-bar handoff cases by component, scheduled entry,
+  scheduled exit, overlap decision, active cycle, and broker fill.
+- Do not treat this as a live defect unless it creates duplicate exposure,
+  unmanaged overlap, or a mismatch against the final accepted execution
+  contract.
+
 Current scale-up posture:
 
 - `RI`: continue extended micro; no bracket TP change for MR unless research explicitly validates it.
@@ -551,3 +675,4 @@ Patch candidate:
 - `vps-live-observations-2026-06-15.md`
 - `vps-live-observations-2026-06-20.md`
 - `alor-usdrubf-soak-trade-ledger-2026-06-17.md`
+- `vps-live-observations-2026-07-13.md`

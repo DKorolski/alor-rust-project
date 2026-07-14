@@ -1408,6 +1408,34 @@ impl HybridIntradayRuntimeStrategy {
         );
     }
 
+    fn mr_bracket_protective_partial_progress(&self, prev: f64, cur: f64) -> bool {
+        if self.current_owner != Some(Owner::MeanReversion) {
+            return false;
+        }
+        if prev.abs() <= f64::EPSILON || cur.abs() <= f64::EPSILON {
+            return false;
+        }
+        if prev.signum() != cur.signum() || cur.abs() >= prev.abs() {
+            return false;
+        }
+        matches!(
+            (self.current_side, prev.is_sign_positive()),
+            (Some(Side::Long), true) | (Some(Side::Short), false)
+        )
+    }
+
+    fn lifecycle_bracket_partial_reconcile_log(&self, prev: f64, cur: f64) {
+        info!(
+            target: "strategy_runtime::hybrid_intraday_runtime",
+            action = "bracket_partial_reconcile_wait",
+            previous_qty = prev,
+            broker_qty = cur,
+            current_owner = ?self.current_owner,
+            current_side = ?self.current_side,
+            "MR protective partial fill is settling; suppress residual emergency exit until reconcile grace expires"
+        );
+    }
+
     fn emit_bracket_reconcile_timeout_exit(
         &mut self,
         ctx: &StrategyCtx,
@@ -4446,6 +4474,64 @@ mod tests {
     }
 
     #[test]
+    fn protective_partial_position_change_starts_reconcile_without_emergency_exit() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        strategy.last_position_qty = -2.0;
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Short);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.tp_order_id = Some(111);
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        let ctx = test_ctx(Some(-1.0));
+        let partial = PositionEvent {
+            symbol: "IMOEXF".to_string(),
+            qty: -1.0,
+            existing: false,
+            avg_price: 100.0,
+            ts_utc: 1_700_000_120,
+        };
+
+        let intents = strategy.on_position(&ctx, &partial);
+
+        assert!(intents.is_empty());
+        assert!(!strategy.safe_mode_close_only);
+        assert_eq!(strategy.last_position_qty, -1.0);
+        assert!(strategy.bracket_terminal_reconcile_started_ms.is_some());
+        assert_eq!(strategy.tp_order_id, Some(111));
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+
+        let flat = PositionEvent {
+            symbol: "IMOEXF".to_string(),
+            qty: 0.0,
+            existing: false,
+            avg_price: 0.0,
+            ts_utc: 1_700_000_121,
+        };
+        let cleanup = strategy.on_position(&ctx, &flat);
+
+        assert!(cleanup.iter().all(|intent| {
+            !matches!(
+                intent.base_intent(),
+                Intent::Market {
+                    comment,
+                    ..
+                } if comment.as_deref().is_some_and(|comment| comment.contains("broker_residual"))
+            )
+        }));
+        assert!(cleanup.iter().any(|intent| {
+            matches!(intent.base_intent(), Intent::Cancel { order_id } if *order_id == 111)
+        }));
+        assert!(cleanup.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::DeleteStopLimit { order_id, .. } if order_id == "sl-1"
+            )
+        }));
+        assert_eq!(strategy.last_position_qty, 0.0);
+        assert!(strategy.bracket_terminal_reconcile_started_ms.is_none());
+    }
+
+    #[test]
     fn terminal_reconcile_timeout_emits_single_residual_flatten() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         strategy.last_position_qty = -1.0;
@@ -5616,6 +5702,13 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             && cur.abs() > f64::EPSILON
             && (prev - cur).abs() > f64::EPSILON
         {
+            if self.mr_bracket_protective_partial_progress(prev, cur) {
+                self.mark_bracket_terminal_reconcile();
+                self.last_position_qty = cur;
+                self.lifecycle_bracket_partial_reconcile_log(prev, cur);
+                self.sync_state();
+                return intents;
+            }
             if self.bracket_terminal_reconcile_active(Utc::now().timestamp_millis()) {
                 self.last_position_qty = cur;
                 self.lifecycle_bracket_terminal_reconcile_log(prev, cur);
