@@ -1,0 +1,121 @@
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502MIW"
+exchange = "MOEX"
+source = "strategy-runtime-ri-author41-42-shadow07"
+consumer_group = "strategy-runtime-ri-author41-42-shadow07-7502MIW"
+consumer_name = "auto"
+reset_state_on_start = false
+
+[runtime]
+trade_mode = "paper"
+allow_live_orders = false
+allow_paper_orders = false
+guard_log_interval_ms = 5000
+bootstrap_dump = false
+still_blocked_log_period_sec = 60
+gateway_health_stale_sec = 20
+require_gateway_ready = false
+
+[runtime.health]
+enabled = true
+listen_addr = "127.0.0.1:8192"
+expose_metrics = false
+
+[streams]
+bars = "md.bars.7502MIW.RIU6.10m.moex_early_session"
+orders = "broker.orders.7502MIW"
+trades = "broker.trades.7502MIW"
+positions = "broker.positions.7502MIW"
+commands = "cmd.orders.7502MIW.shadow.ri_author41_42.shadow07"
+acks = "cmd.acks.7502MIW.shadow.ri_author41_42.shadow07"
+snapshots = "broker.snapshots.7502MIW"
+health = "events.health.ri_author41_42.shadow07.7502MIW"
+dlq_prefix = "dlq"
+runtime_state = "runtime.state.ri_author41_42.shadow07.7502MIW"
+
+[read]
+block_ms = 500
+claim_idle_ms = 5000
+claim_batch = 50
+poll_interval_ms = 100
+
+[trim]
+bars = 10000
+orders = 5000
+trades = 5000
+positions = 20000
+commands = 100
+acks = 100
+health = 2000
+runtime_state = 500
+
+[strategy]
+strategy_id = "ri_author41_42.shadow07.7502MIW"
+strategy_kind = "ri_author41_42"
+symbol = "RIU6"
+qty = 1.0
+side = "buy"
+tick_size = 10.0
+session_open_hour = 7
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 49
+entry_after_open_min = 0
+exit_before_close_min = 0
+timezone_offset_hours = 3
+max_silence_bars_sec = 1200
+
+[trading_periods]
+session_start = "07:00:00"
+session_end = "23:49:59"
+break_start_1 = "14:00:00"
+break_end_1 = "14:04:59"
+break_start_2 = "18:50:00"
+break_end_2 = "19:04:59"
+weekends_off = true
+timezone_offset_hours = 3
+
+[strategy.ri_author41_42]
+profile_id = "ri_author41_42_primary_combo_cost2"
+timeframe = "10m"
+mode = "shadow"
+allow_order_emission = false
+execution_path = "action_scoped_only"
+order_symbol = "RTS-9.26"
+session_start_time = "07:00:00"
+session_end_time = "23:49:59"
+author41_entry_end_time = "10:00:00"
+author41_time_exit = "20:00:00"
+author42_exit_time = "23:00:00"
+excluded_model_dates = ["2026-06-12", "2026-11-04"]
+min_anchor_bars = 92
+anchor_first_bar_at_or_before = "07:10:00"
+anchor_last_bar_at_or_after = "23:30:00"
+actual_expiry_date = "2026-09-17"
+roll_target_sessions_before = 1
+roll_fallback_sessions_before = 2
+decision_journal_path = "/reports/moex_early_session_ri_decisions_canonical07.jsonl"
+decision_journal_append = true
+
+[paper]
+enabled = false
+output = "stdout"
+file_path = "/reports/moex_early_session_ri_paper_canonical07.jsonl"
+trades_csv = "/reports/moex_early_session_ri_trades_canonical07.csv"
+summary_json = "/reports/moex_early_session_ri_summary_canonical07.json"
+append = false
+
+[backtest]
+enabled = false
+trade_log = "./strategy-runtime/backtest_trades.log"
+trades_csv = "./strategy-runtime/backtest_trades.csv"
+summary_json = "./strategy-runtime/backtest_summary.json"
+append = false
+
+[replay]
+enabled = false
+bars_csv_path = "./strategy-runtime/ri_author41_42_bars.csv"
+reference_trades_csv_path = "./strategy-runtime/ri_author41_42_reference_trades.csv"
+output_dir = "./strategy-runtime/replay_out"
+price_tolerance = 1e-8
+strict_dedup = true

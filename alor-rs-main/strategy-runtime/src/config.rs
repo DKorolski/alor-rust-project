@@ -660,6 +660,11 @@ struct RiAuthor4142ConfigFile {
     allow_order_emission: Option<bool>,
     execution_path: Option<String>,
     order_symbol: Option<String>,
+    session_start_time: Option<String>,
+    session_end_time: Option<String>,
+    author41_entry_end_time: Option<String>,
+    author41_time_exit: Option<String>,
+    author42_exit_time: Option<String>,
     excluded_model_dates: Option<Vec<String>>,
     min_anchor_bars: Option<usize>,
     anchor_first_bar_at_or_before: Option<String>,
@@ -1380,6 +1385,21 @@ fn apply_ri_author41_42_config_file(
         }
         if let Some(value) = &ri_file.order_symbol {
             settings.order_symbol = Some(value.clone());
+        }
+        if let Some(value) = &ri_file.session_start_time {
+            settings.session_start_time = value.clone();
+        }
+        if let Some(value) = &ri_file.session_end_time {
+            settings.session_end_time = value.clone();
+        }
+        if let Some(value) = &ri_file.author41_entry_end_time {
+            settings.author41_entry_end_time = value.clone();
+        }
+        if let Some(value) = &ri_file.author41_time_exit {
+            settings.author41_time_exit = value.clone();
+        }
+        if let Some(value) = &ri_file.author42_exit_time {
+            settings.author42_exit_time = value.clone();
         }
         if let Some(value) = &ri_file.excluded_model_dates {
             settings.excluded_model_dates = value.clone();

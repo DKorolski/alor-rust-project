@@ -7,9 +7,9 @@ use tracing::{debug, info};
 
 use crate::state::StrategyState;
 use crate::strategies::moex_author41_42::{
-    build_ri_author41_42_combo_shadow_journal, Author41Config, Author42Config, Author42SideMode,
-    Component, ModelBar, ModelProfile, OverlapDecision, RegularSessionPolicy, ShadowJournalRecord,
-    ShadowSide,
+    build_ri_author41_42_combo_shadow_journal_with_configs, Author41Config, Author42Config,
+    Author42SideMode, Component, ModelBar, ModelProfile, OverlapDecision, RegularSessionPolicy,
+    ShadowJournalRecord, ShadowSide,
 };
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, IntentBlockDisposition,
@@ -17,6 +17,11 @@ use crate::strategy_host::{
 };
 use alor_protocol::{AckStatus, IntentClass, Side as OrderSide};
 use uuid::Uuid;
+
+fn parse_ri_time(field: &'static str, raw: &str) -> Result<NaiveTime> {
+    NaiveTime::parse_from_str(raw, "%H:%M:%S")
+        .map_err(|err| anyhow::anyhow!("invalid ri_author41_42 {field} {raw}: {err}"))
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +84,11 @@ pub struct RiAuthor4142LiveConfig {
     pub allow_order_emission: bool,
     pub execution_path: RiAuthor4142ExecutionPath,
     pub order_symbol: Option<String>,
+    pub session_start_time: String,
+    pub session_end_time: String,
+    pub author41_entry_end_time: String,
+    pub author41_time_exit: String,
+    pub author42_exit_time: String,
     pub excluded_model_dates: Vec<String>,
     pub min_anchor_bars: usize,
     pub anchor_first_bar_at_or_before: String,
@@ -395,6 +405,18 @@ impl RiAuthor4142LiveConfig {
                 anyhow::anyhow!("invalid excluded_model_dates value {raw}: {err}")
             })?;
         }
+        let session_start = parse_ri_time("session_start_time", &self.session_start_time)?;
+        let session_end = parse_ri_time("session_end_time", &self.session_end_time)?;
+        if session_start >= session_end {
+            bail!(
+                "ri_author41_42 requires session_start_time < session_end_time, got {} >= {}",
+                self.session_start_time,
+                self.session_end_time
+            );
+        }
+        parse_ri_time("author41_entry_end_time", &self.author41_entry_end_time)?;
+        parse_ri_time("author41_time_exit", &self.author41_time_exit)?;
+        parse_ri_time("author42_exit_time", &self.author42_exit_time)?;
         NaiveTime::parse_from_str(&self.anchor_first_bar_at_or_before, "%H:%M:%S").map_err(
             |err| {
                 anyhow::anyhow!(
@@ -433,6 +455,9 @@ pub struct RiAuthor4142LiveStrategy {
     excluded_model_dates: HashSet<NaiveDate>,
     anchor_first_bar_at_or_before: NaiveTime,
     anchor_last_bar_at_or_after: NaiveTime,
+    author41_entry_end: NaiveTime,
+    author41_time_exit: NaiveTime,
+    author42_exit_time: NaiveTime,
     logged_excluded_dates: HashSet<NaiveDate>,
     model_bars: Vec<ModelBar>,
     emitted_decision_keys: HashSet<String>,
@@ -446,7 +471,9 @@ impl RiAuthor4142LiveStrategy {
     pub fn new(config: RiAuthor4142LiveConfig) -> Result<Self> {
         config.validate()?;
         let profile = ModelProfile::ri_shadow_10m();
-        let session_policy = profile.session_policy;
+        let session_start = parse_ri_time("session_start_time", &config.session_start_time)?;
+        let session_end = parse_ri_time("session_end_time", &config.session_end_time)?;
+        let session_policy = RegularSessionPolicy::new(session_start, session_end, true);
         let live_adapter_enabled = config.can_emit_orders();
         let excluded_model_dates = config
             .excluded_model_dates
@@ -457,11 +484,21 @@ impl RiAuthor4142LiveStrategy {
             NaiveTime::parse_from_str(&config.anchor_first_bar_at_or_before, "%H:%M:%S")?;
         let anchor_last_bar_at_or_after =
             NaiveTime::parse_from_str(&config.anchor_last_bar_at_or_after, "%H:%M:%S")?;
+        let author41_entry_end =
+            parse_ri_time("author41_entry_end_time", &config.author41_entry_end_time)?;
+        let author41_time_exit = parse_ri_time("author41_time_exit", &config.author41_time_exit)?;
+        let author42_exit_time = parse_ri_time("author42_exit_time", &config.author42_exit_time)?;
         info!(
             target: "strategy_runtime::ri_author41_42_live",
-            action = "ri_rollover_policy_loaded",
+            action = "ri_model_policy_loaded",
             active_contract = %config.symbol,
             order_symbol = ?config.order_symbol,
+            profile_id = %profile.profile_id.as_str(),
+            model_session_start = %config.session_start_time,
+            model_session_end = %config.session_end_time,
+            author41_entry_end = %config.author41_entry_end_time,
+            author41_time_exit = %config.author41_time_exit,
+            author42_exit_time = %config.author42_exit_time,
             actual_expiry_date = ?config.actual_expiry_date,
             roll_target_sessions_before = config.roll_target_sessions_before,
             roll_fallback_sessions_before = config.roll_fallback_sessions_before,
@@ -499,6 +536,9 @@ impl RiAuthor4142LiveStrategy {
             excluded_model_dates,
             anchor_first_bar_at_or_before,
             anchor_last_bar_at_or_after,
+            author41_entry_end,
+            author41_time_exit,
+            author42_exit_time,
             logged_excluded_dates: HashSet::new(),
             model_bars: Vec::new(),
             emitted_decision_keys: HashSet::new(),
@@ -599,8 +639,13 @@ impl RiAuthor4142LiveStrategy {
                     || eligible_dates.contains(&bar.ts_local.date())
             })
             .collect::<Vec<_>>();
-        let records =
-            build_ri_author41_42_combo_shadow_journal(&eligible_model_bars, self.session_policy);
+        let records = build_ri_author41_42_combo_shadow_journal_with_configs(
+            &eligible_model_bars,
+            self.session_policy,
+            self.author41_short_config(),
+            self.author41_long_config(),
+            self.author42_config(),
+        );
         let mut decisions = Vec::new();
         for record in records {
             if !is_finalized_record(&record, current_dt_local) {
@@ -1188,7 +1233,7 @@ impl RiAuthor4142LiveStrategy {
         }
         if self.phase_is("live_deferred_exit") {
             if let Some(position) = self.live_bo.position.clone() {
-                let config = Author42Config::ri_grid_k042_both();
+                let config = self.author42_config();
                 intents.push(self.emit_bo_exit_intent(
                     &position,
                     bar,
@@ -1204,7 +1249,7 @@ impl RiAuthor4142LiveStrategy {
             return intents;
         }
         self.ensure_bo_session(bar);
-        let config = Author42Config::ri_grid_k042_both();
+        let config = self.author42_config();
 
         if let Some(pending) = self.live_bo.pending.take() {
             match pending {
@@ -1328,7 +1373,7 @@ impl RiAuthor4142LiveStrategy {
             return;
         }
         let date = bar.ts_local.date();
-        let config = Author42Config::ri_grid_k042_both();
+        let config = self.author42_config();
         let context = self.bo_context_for_date(date);
         let skip_by_date = (config.exclude_friday && date.weekday().number_from_monday() == 5)
             || (config.exclude_june_window && Self::in_author_june_window(date));
@@ -1450,8 +1495,8 @@ impl RiAuthor4142LiveStrategy {
         {
             return None;
         }
-        let short = Author41Config::ri_plateau_short_source();
-        let long = Author41Config::ri_plateau_long_source();
+        let short = self.author41_short_config();
+        let long = self.author41_long_config();
         for (side, config) in [
             (RiAuthor4142Side::Short, short),
             (RiAuthor4142Side::Long, long),
@@ -1848,6 +1893,26 @@ impl RiAuthor4142LiveStrategy {
         stats.bars >= self.config.min_anchor_bars
             && stats.first_bar <= self.anchor_first_bar_at_or_before
             && stats.last_bar >= self.anchor_last_bar_at_or_after
+    }
+
+    fn author41_short_config(&self) -> Author41Config {
+        let mut config = Author41Config::ri_plateau_short_source();
+        config.entry_end = self.author41_entry_end;
+        config.time_exit = self.author41_time_exit;
+        config
+    }
+
+    fn author41_long_config(&self) -> Author41Config {
+        let mut config = Author41Config::ri_plateau_long_source();
+        config.entry_end = self.author41_entry_end;
+        config.time_exit = self.author41_time_exit;
+        config
+    }
+
+    fn author42_config(&self) -> Author42Config {
+        let mut config = Author42Config::ri_grid_k042_both();
+        config.exit_time = self.author42_exit_time;
+        config
     }
 
     fn points_for_side(side: RiAuthor4142Side, entry_price: f64, exit_price: f64) -> f64 {
@@ -2462,6 +2527,11 @@ mod tests {
             allow_order_emission: false,
             execution_path: RiAuthor4142ExecutionPath::ActionScopedOnly,
             order_symbol: None,
+            session_start_time: "09:00:00".to_string(),
+            session_end_time: "23:49:59".to_string(),
+            author41_entry_end_time: "12:00:00".to_string(),
+            author41_time_exit: "20:00:00".to_string(),
+            author42_exit_time: "23:00:00".to_string(),
             excluded_model_dates: Vec::new(),
             min_anchor_bars: 0,
             anchor_first_bar_at_or_before: "23:59:59".to_string(),
@@ -3149,6 +3219,88 @@ mod tests {
         } else {
             panic!("unexpected strategy state");
         }
+    }
+
+    #[test]
+    fn canonical07_feed_guard_excludes_auction_and_accepts_continuous_bars() {
+        let mut config = default_config();
+        config.session_start_time = "07:00:00".to_string();
+        config.author41_entry_end_time = "10:00:00".to_string();
+        config.anchor_first_bar_at_or_before = "07:10:00".to_string();
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+
+        let auction_bar = bar(dt(2026, 7, 16, 6, 50, 0), DataOrigin::Live);
+        let first_continuous_bar = bar(dt(2026, 7, 16, 7, 0, 0), DataOrigin::Live);
+        let pre_legacy_bar = bar(dt(2026, 7, 16, 8, 50, 0), DataOrigin::Live);
+
+        assert!(strategy.update_bar_state(&auction_bar).is_empty());
+        assert!(strategy.update_bar_state(&first_continuous_bar).is_empty());
+        assert!(strategy.update_bar_state(&pre_legacy_bar).is_empty());
+
+        assert_eq!(strategy.model_bars.len(), 2);
+        assert_eq!(strategy.model_bars[0].ts_local, dt(2026, 7, 16, 7, 0, 0));
+        assert_eq!(strategy.model_bars[1].ts_local, dt(2026, 7, 16, 8, 50, 0));
+    }
+
+    #[test]
+    fn legacy09_feed_guard_still_rejects_pre_0900_bars() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+
+        assert!(strategy
+            .update_bar_state(&bar(dt(2026, 7, 16, 8, 50, 0), DataOrigin::Live))
+            .is_empty());
+        assert!(strategy
+            .update_bar_state(&bar(dt(2026, 7, 16, 9, 0, 0), DataOrigin::Live))
+            .is_empty());
+
+        assert_eq!(strategy.model_bars.len(), 1);
+        assert_eq!(strategy.model_bars[0].ts_local, dt(2026, 7, 16, 9, 0, 0));
+    }
+
+    #[test]
+    fn canonical07_clock_translation_keeps_late_exits_unchanged() {
+        let mut config = default_config();
+        config.session_start_time = "07:00:00".to_string();
+        config.author41_entry_end_time = "10:00:00".to_string();
+        config.author41_time_exit = "20:00:00".to_string();
+        config.author42_exit_time = "23:00:00".to_string();
+
+        let strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+
+        assert_eq!(
+            strategy.session_policy.start,
+            chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author41_short_config().entry_end,
+            chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author41_long_config().entry_end,
+            chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author41_short_config().time_exit,
+            chrono::NaiveTime::from_hms_opt(20, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author42_config().exit_time,
+            chrono::NaiveTime::from_hms_opt(23, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn author42_hour_check_sequence_is_relative_to_first_model_bar() {
+        let first = dt(2026, 7, 16, 7, 0, 0);
+
+        assert!(!RiAuthor4142LiveStrategy::is_author42_hour_check(
+            dt(2026, 7, 16, 7, 50, 0),
+            Some(first)
+        ));
+        assert!(RiAuthor4142LiveStrategy::is_author42_hour_check(
+            dt(2026, 7, 16, 8, 50, 0),
+            Some(first)
+        ));
     }
 
     #[test]
