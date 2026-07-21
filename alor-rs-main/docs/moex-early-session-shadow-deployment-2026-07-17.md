@@ -121,3 +121,49 @@ Verification:
 - Logs showed `ri_shadow_path_active` and `ri_shadow_path_superseded`; the
   2026-07-20 canonical07 overlap case was marked with a superseded 09:00 long
   and active 07:40 short.
+
+## Paper trading-window simulation hardening - 2026-07-21
+
+Reason:
+
+- IMOEXF shadow paper simulation could advance a BO entry during Break2
+  (`18:50:00`-`19:04:59`) even though live correctly drops such broker intents
+  before emission.
+- This created a false virtual double-entry sequence around `19:00`/`19:10`
+  and could surface later as a misleading `broker_residual_emergency_exit`
+  (`previous_qty=6`, `broker_qty=12`) in shadow logs.
+
+Patch:
+
+- Commit: `1ac8f8e Harden paper shadow trading-window simulation`
+- Runtime image built on VPS:
+  `ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-20260721-shadow-window-1ac8f8e`
+
+Rollout:
+
+- Recreated only `runtime-shadow09` and `runtime-shadow07` in all three
+  early-session shadow stacks:
+  `trading-moex-early-shadow-ri`,
+  `trading-moex-early-shadow-usdrubf`,
+  `trading-moex-early-shadow-imoexf`.
+- Kept all shadow Redis and gateway containers running.
+- Live micro stacks were not recreated or restarted.
+- Backups were written as `docker-compose.yml.bak-20260721-shadow-window` in
+  each shadow stack directory before image tag replacement.
+
+Verification:
+
+- All six shadow runtime containers were healthy after recreate and used
+  `manual-20260721-shadow-window-1ac8f8e`.
+- Shadow command streams remained empty for RI, USDRUBF, and IMOEXF, including
+  gateway blackhole streams.
+- Runtime consumer groups had `lag=0` and `pending=0` after restart.
+- Fresh logs contained only expected startup warnings for pre-existing bar
+  stream history; no fresh `ERROR`, `panic`, or new
+  `broker_residual_emergency_exit` was observed after rollout.
+
+Follow-up:
+
+- On the next Break2 BO candidate, verify that shadow logs contain
+  `paper_intent_dropped_by_trading_window` and that no synthetic paper position
+  is opened before the `19:05` market reopen.
