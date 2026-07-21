@@ -83,3 +83,41 @@ Follow-up check:
 2. Do not promote live micro to canonical07 before at least 10 sessions unless there is a separate risk decision.
 3. Compare `legacy09` vs `canonical07` by signal timing, component attribution, exits, and live-vs-shadow drift.
 4. Keep live micro unchanged while shadow diagnostics are collected.
+
+## RI shadow path journaling patch - 2026-07-21
+
+Reason:
+
+- The initial RI shadow journal was safe but too incremental for economic
+  comparison: a decision accepted by a partial replay could remain in
+  `shadow_recorded` even after a later replay found an earlier overlapping
+  trade.
+
+Patch:
+
+- Commit: `9f7eafb Harden RI early-session shadow path journaling`
+- Runtime image built on VPS:
+  `ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-20260721-ri-shadow-path-9f7eafb`
+
+Rollout:
+
+- Stopped only `runtime-shadow09` and `runtime-shadow07` in
+  `/opt/trading-moex-early-shadow-ri` before the `07:00` session start.
+- Kept RI shadow Redis and gateway running so market-data bars continued to
+  accumulate.
+- Recreated only `runtime-shadow09` and `runtime-shadow07` on the new runtime
+  image.
+- Gateway image/config and all live micro stacks were unchanged.
+
+Verification:
+
+- `runtime-shadow09` and `runtime-shadow07` healthy after recreate.
+- Runtime image resolved to
+  `manual-20260721-ri-shadow-path-9f7eafb` for both services.
+- Command streams remained empty:
+  `cmd.orders.7502MIW.shadow.ri_author41_42.shadow07 = 0`,
+  `cmd.orders.7502MIW.shadow.ri_author41_42.shadow09 = 0`,
+  `cmd.orders.7502MIW.moex_early_shadow.gateway_blackhole.ri = 0`.
+- Logs showed `ri_shadow_path_active` and `ri_shadow_path_superseded`; the
+  2026-07-20 canonical07 overlap case was marked with a superseded 09:00 long
+  and active 07:40 short.
