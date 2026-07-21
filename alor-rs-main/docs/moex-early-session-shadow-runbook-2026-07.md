@@ -154,6 +154,24 @@ Do not treat raw `shadow_recorded` rows alone as the portfolio path. They are
 kept for audit and can include decisions that were valid under an earlier
 partial replay but were later displaced by an earlier overlapping trade.
 
+## Paper Trading-Window Semantics
+
+Shadow runtimes are diagnostic paper contours, but their virtual execution must
+still obey the same trading-window entry filter used by live.
+
+In particular:
+
+```text
+18:50-19:04:59 Break2 entries must not create paper positions
+19:00 BO entry signals may be observed/journaled
+19:00 BO entry signals must not advance paper execution
+19:10 or later entry signals may advance paper execution after reopen
+```
+
+This keeps shadow reports from creating false virtual positions during exchange
+breaks. The raw signal remains visible in logs/journals, but the paper position
+ledger only reflects entries that live could have emitted.
+
 ## Rollback
 
 Stop and remove only the new shadow services and their isolated consumer

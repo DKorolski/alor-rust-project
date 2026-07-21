@@ -425,6 +425,56 @@ impl StrategyRuntime {
         }
     }
 
+    fn filter_paper_intents_for_simulation(
+        &mut self,
+        ctx: &StrategyCtx,
+        created_ts_utc: i64,
+        intents: Vec<Intent>,
+        previous_strategy_state: StrategyState,
+    ) -> Vec<Intent> {
+        if self.config.trade_mode != TradeMode::Paper {
+            return intents;
+        }
+
+        let mut accepted = Vec::with_capacity(intents.len());
+        let mut blocked_count = 0usize;
+        for intent in intents {
+            let intent_class = Self::resolve_intent_class(ctx, &intent);
+            if self.trading_window_allows_order(ctx, created_ts_utc, intent_class) {
+                accepted.push(intent);
+                continue;
+            }
+
+            blocked_count += 1;
+            let action = self.intent_action_name(&intent);
+            info!(
+                action,
+                class = ?intent_class,
+                created_ts_utc,
+                "paper_intent_dropped_by_trading_window"
+            );
+            self.audit_event(
+                "intent_blocked",
+                json!({
+                    "mode": "paper",
+                    "reason": "trading_window",
+                    "action": action,
+                    "class": format!("{intent_class:?}"),
+                    "created_ts_utc": created_ts_utc,
+                }),
+            );
+        }
+
+        if blocked_count > 0 && accepted.is_empty() {
+            self.restore_strategy_state_after_dropped_intents(
+                previous_strategy_state,
+                "paper_intent_dropped_before_simulation",
+            );
+        }
+
+        accepted
+    }
+
     async fn record_non_live_intents(
         &mut self,
         created_ts_utc: i64,
@@ -809,7 +859,13 @@ impl StrategyRuntime {
                 .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
                 self.simulate_fills(&bar).await?;
-                self.simulate_intents(&bar, intents).await?;
+                let executable_intents = self.filter_paper_intents_for_simulation(
+                    &ctx,
+                    bar.close_time_utc,
+                    intents,
+                    previous_strategy_state,
+                );
+                self.simulate_intents(&bar, executable_intents).await?;
             }
         } else {
             self.apply_intents(&ctx, bar.close_time_utc, intents, previous_strategy_state)
@@ -2105,7 +2161,13 @@ impl StrategyRuntime {
                 .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
                 self.simulate_fills(&bar).await?;
-                self.simulate_intents(&bar, intents).await?;
+                let executable_intents = self.filter_paper_intents_for_simulation(
+                    &ctx,
+                    event_ts,
+                    intents,
+                    previous_strategy_state,
+                );
+                self.simulate_intents(&bar, executable_intents).await?;
             }
             self.persist_state(None).await?;
         } else {
@@ -6247,6 +6309,103 @@ mod tests {
         runtime.config.paper.execution_mode = PaperExecutionMode::HistorySim;
         assert!(runtime.can_advance_paper_execution(DataOrigin::History));
         assert!(runtime.can_advance_paper_execution(DataOrigin::Live));
+    }
+
+    #[test]
+    fn paper_simulation_drops_break_window_entry_and_restores_state() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.config.strategy.max_silence_bars_sec = 0;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+        let last_bar_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(15, 40, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(15, 55, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(Some(last_bar_ts), created_ts_utc);
+        runtime.state.strategy_state = StrategyState::Blocked {
+            reason: "paper entry mutated state before filter".to_string(),
+            last_bar_ts: created_ts_utc,
+        };
+
+        let accepted = runtime.filter_paper_intents_for_simulation(
+            &ctx,
+            created_ts_utc,
+            vec![Intent::Market {
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                fill_price: None,
+                comment: None,
+            }
+            .with_class(alor_protocol::IntentClass::Entry)],
+            StrategyState::Idle,
+        );
+
+        assert!(accepted.is_empty());
+        assert!(matches!(runtime.state.strategy_state, StrategyState::Idle));
+    }
+
+    #[test]
+    fn paper_simulation_allows_entry_after_break_reopen() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.config.strategy.max_silence_bars_sec = 0;
+        runtime.config.strategy.timezone_offset_hours = 3;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            session_end: chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            break_end_1: chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
+            break_start_2: chrono::NaiveTime::from_hms_opt(18, 50, 0).unwrap(),
+            break_end_2: chrono::NaiveTime::from_hms_opt(19, 5, 0).unwrap(),
+            weekends_off: true,
+            timezone_offset_hours: 0,
+        });
+        let last_bar_ts = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(16, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(16, 10, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let ctx =
+            runtime.strategy_ctx_with_last_bar_and_event_ts(Some(last_bar_ts), created_ts_utc);
+
+        let accepted = runtime.filter_paper_intents_for_simulation(
+            &ctx,
+            created_ts_utc,
+            vec![Intent::Market {
+                qty: 1.0,
+                side: alor_protocol::Side::Buy,
+                fill_price: None,
+                comment: None,
+            }
+            .with_class(alor_protocol::IntentClass::Entry)],
+            StrategyState::Idle,
+        );
+
+        assert_eq!(accepted.len(), 1);
     }
 
     #[test]
