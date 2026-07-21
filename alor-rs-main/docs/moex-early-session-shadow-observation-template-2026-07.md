@@ -54,6 +54,10 @@ zero_volume_flags:
 | IMOEXF Hybrid | legacy09 | | | | | |
 | IMOEXF Hybrid | canonical07 | | | | | |
 
+For RI, count economics from `shadow_path_active` rows after excluding decision
+keys later marked as `shadow_path_superseded`. `shadow_recorded` is an audit
+trace, not the final no-overlap portfolio path.
+
 ## Divergence Classification
 
 ```text

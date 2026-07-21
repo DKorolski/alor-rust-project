@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{bail, Result};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
@@ -352,6 +352,8 @@ impl Default for RiAuthor4142LiveBoState {
 #[serde(rename_all = "snake_case")]
 pub enum RiAuthor4142JournalDecision {
     ShadowRecorded,
+    ShadowPathActive,
+    ShadowPathSuperseded,
     IntentSuppressed,
     IntentEmitted,
     ManualInterventionRequired,
@@ -461,6 +463,8 @@ pub struct RiAuthor4142LiveStrategy {
     logged_excluded_dates: HashSet<NaiveDate>,
     model_bars: Vec<ModelBar>,
     emitted_decision_keys: HashSet<String>,
+    shadow_path_keys_by_date: BTreeMap<NaiveDate, BTreeSet<String>>,
+    shadow_decisions_by_key: BTreeMap<String, RiAuthor4142ModelDecision>,
     journal_records: Vec<RiAuthor4142JournalRecord>,
     live_mr: RiAuthor4142LiveMrState,
     live_bo: RiAuthor4142LiveBoState,
@@ -542,6 +546,8 @@ impl RiAuthor4142LiveStrategy {
             logged_excluded_dates: HashSet::new(),
             model_bars: Vec::new(),
             emitted_decision_keys: HashSet::new(),
+            shadow_path_keys_by_date: BTreeMap::new(),
+            shadow_decisions_by_key: BTreeMap::new(),
             journal_records: Vec::new(),
             live_mr: RiAuthor4142LiveMrState::default(),
             live_bo: RiAuthor4142LiveBoState::default(),
@@ -646,27 +652,100 @@ impl RiAuthor4142LiveStrategy {
             self.author41_long_config(),
             self.author42_config(),
         );
+        let finalized = finalized_decisions_from_records(records, current_dt_local);
+        if !self.can_emit_orders() {
+            return self.collect_shadow_decisions(finalized, current_dt_local);
+        }
+        self.collect_incremental_decisions(finalized)
+    }
+
+    fn collect_incremental_decisions(
+        &mut self,
+        finalized: Vec<RiAuthor4142ModelDecision>,
+    ) -> Vec<RiAuthor4142ModelDecision> {
         let mut decisions = Vec::new();
-        for record in records {
-            if !is_finalized_record(&record, current_dt_local) {
+        for decision in finalized {
+            if !self
+                .emitted_decision_keys
+                .insert(decision.decision_key.clone())
+            {
                 continue;
             }
-            let key = decision_key(&record);
-            if !self.emitted_decision_keys.insert(key.clone()) {
-                continue;
-            }
-            let Some(decision) = RiAuthor4142ModelDecision::from_shadow_record(record, key) else {
-                continue;
-            };
             self.record_decision_state(&decision);
             self.record_shadow_journal(&decision);
             self.log_decision(&decision);
-            if !self.can_emit_orders() {
-                self.apply_dry_run_decision(&decision);
-            }
             decisions.push(decision);
         }
         decisions
+    }
+
+    fn collect_shadow_decisions(
+        &mut self,
+        finalized: Vec<RiAuthor4142ModelDecision>,
+        current_dt_local: NaiveDateTime,
+    ) -> Vec<RiAuthor4142ModelDecision> {
+        let new_decisions = self.collect_incremental_decisions(finalized.clone());
+        for decision in &new_decisions {
+            self.apply_dry_run_decision(decision);
+        }
+        self.update_shadow_portfolio_path(&finalized, current_dt_local);
+        new_decisions
+    }
+
+    fn update_shadow_portfolio_path(
+        &mut self,
+        finalized: &[RiAuthor4142ModelDecision],
+        current_dt_local: NaiveDateTime,
+    ) {
+        let mut keys_by_date = BTreeMap::<NaiveDate, BTreeSet<String>>::new();
+        keys_by_date.entry(current_dt_local.date()).or_default();
+        for decision in finalized {
+            self.shadow_decisions_by_key
+                .insert(decision.decision_key.clone(), decision.clone());
+            if !is_shadow_portfolio_path_member(decision) {
+                continue;
+            }
+            keys_by_date
+                .entry(decision_entry_date(decision))
+                .or_default()
+                .insert(decision.decision_key.clone());
+        }
+
+        for (date, current_keys) in keys_by_date {
+            let previous_keys = self
+                .shadow_path_keys_by_date
+                .get(&date)
+                .cloned()
+                .unwrap_or_default();
+            if previous_keys == current_keys {
+                continue;
+            }
+
+            for removed_key in previous_keys.difference(&current_keys) {
+                if let Some(decision) = self.shadow_decisions_by_key.get(removed_key).cloned() {
+                    self.record_shadow_path_superseded_journal(&decision);
+                    self.log_shadow_path_change(
+                        "ri_shadow_path_superseded",
+                        &decision,
+                        date,
+                        current_dt_local,
+                    );
+                }
+            }
+            for added_key in current_keys.difference(&previous_keys) {
+                if let Some(decision) = self.shadow_decisions_by_key.get(added_key).cloned() {
+                    self.record_shadow_path_active_journal(&decision);
+                    self.log_shadow_path_change(
+                        "ri_shadow_path_active",
+                        &decision,
+                        date,
+                        current_dt_local,
+                    );
+                }
+            }
+
+            self.shadow_path_keys_by_date.insert(date, current_keys);
+        }
     }
 
     fn record_decision_state(&mut self, decision: &RiAuthor4142ModelDecision) {
@@ -689,6 +768,31 @@ impl RiAuthor4142LiveStrategy {
             component = decision.component.as_str(),
             side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
             model_signal_ts_local = %decision.model_signal_ts_local,
+            scheduled_entry_ts_local = ?decision.scheduled_entry_ts_local,
+            scheduled_exit_ts_local = ?decision.scheduled_exit_ts_local,
+            reason = %decision.reason,
+            overlap_decision = %decision.overlap_decision,
+            shadow_pnl_points = ?decision.shadow_pnl_points,
+            decision_key = %decision.decision_key,
+            mode = self.config.mode.as_str(),
+            live_adapter_enabled = self.can_emit_orders(),
+        );
+    }
+
+    fn log_shadow_path_change(
+        &self,
+        action: &'static str,
+        decision: &RiAuthor4142ModelDecision,
+        path_date: NaiveDate,
+        current_dt_local: NaiveDateTime,
+    ) {
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action,
+            path_date = %path_date,
+            recomputed_at_local = %current_dt_local,
+            component = decision.component.as_str(),
+            side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
             scheduled_entry_ts_local = ?decision.scheduled_entry_ts_local,
             scheduled_exit_ts_local = ?decision.scheduled_exit_ts_local,
             reason = %decision.reason,
@@ -791,6 +895,24 @@ impl RiAuthor4142LiveStrategy {
             RiAuthor4142JournalDecision::ShadowRecorded,
             None,
             None,
+        ));
+    }
+
+    fn record_shadow_path_active_journal(&mut self, decision: &RiAuthor4142ModelDecision) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::ShadowPathActive,
+            None,
+            None,
+        ));
+    }
+
+    fn record_shadow_path_superseded_journal(&mut self, decision: &RiAuthor4142ModelDecision) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::ShadowPathSuperseded,
+            None,
+            Some("shadow_path_recomputed"),
         ));
     }
 
@@ -2456,6 +2578,59 @@ impl RiAuthor4142JournalRecord {
     }
 }
 
+fn finalized_decisions_from_records(
+    records: Vec<ShadowJournalRecord>,
+    current_dt_local: NaiveDateTime,
+) -> Vec<RiAuthor4142ModelDecision> {
+    let mut decisions = records
+        .into_iter()
+        .filter(|record| is_finalized_record(record, current_dt_local))
+        .filter_map(|record| {
+            let key = decision_key(&record);
+            RiAuthor4142ModelDecision::from_shadow_record(record, key)
+        })
+        .collect::<Vec<_>>();
+    decisions.sort_by(|left, right| {
+        (
+            decision_entry_ts(left),
+            decision_component_sort_key(left.component),
+            left.scheduled_exit_ts_local,
+            left.decision_key.as_str(),
+        )
+            .cmp(&(
+                decision_entry_ts(right),
+                decision_component_sort_key(right.component),
+                right.scheduled_exit_ts_local,
+                right.decision_key.as_str(),
+            ))
+    });
+    decisions
+}
+
+fn decision_entry_ts(decision: &RiAuthor4142ModelDecision) -> NaiveDateTime {
+    decision
+        .scheduled_entry_ts_local
+        .unwrap_or(decision.model_signal_ts_local)
+}
+
+fn decision_entry_date(decision: &RiAuthor4142ModelDecision) -> NaiveDate {
+    decision_entry_ts(decision).date()
+}
+
+fn decision_component_sort_key(component: RiAuthor4142Component) -> u8 {
+    match component {
+        RiAuthor4142Component::Author41Mr => 0,
+        RiAuthor4142Component::Author42Bo => 1,
+    }
+}
+
+fn is_shadow_portfolio_path_member(decision: &RiAuthor4142ModelDecision) -> bool {
+    decision.action == RiAuthor4142DecisionAction::Enter
+        && decision.overlap_decision == "Accepted"
+        && decision.scheduled_entry_ts_local.is_some()
+        && decision.scheduled_exit_ts_local.is_some()
+}
+
 fn non_zero_or_close(value: f64, close: f64) -> f64 {
     if value.is_finite() && value != 0.0 {
         value
@@ -3445,6 +3620,87 @@ mod tests {
     }
 
     #[test]
+    fn shadow_path_marks_recomputed_overlap_decision_as_superseded() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let later_long = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Long,
+            dt(2026, 7, 20, 9, 0, 0),
+            dt(2026, 7, 20, 9, 10, 0),
+            "take_author_close",
+            208.0,
+        );
+        let later_long_key = later_long.decision_key.clone();
+
+        strategy.collect_shadow_decisions(vec![later_long], dt(2026, 7, 20, 9, 20, 0));
+
+        let active_after_first = strategy
+            .shadow_path_keys_by_date
+            .get(&NaiveDate::from_ymd_opt(2026, 7, 20).unwrap())
+            .expect("path date");
+        assert!(active_after_first.contains(&later_long_key));
+
+        let earlier_short = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Short,
+            dt(2026, 7, 20, 7, 40, 0),
+            dt(2026, 7, 20, 9, 30, 0),
+            "take_author_close",
+            918.0,
+        );
+        let earlier_short_key = earlier_short.decision_key.clone();
+
+        strategy.collect_shadow_decisions(vec![earlier_short], dt(2026, 7, 20, 9, 40, 0));
+
+        let active_after_recompute = strategy
+            .shadow_path_keys_by_date
+            .get(&NaiveDate::from_ymd_opt(2026, 7, 20).unwrap())
+            .expect("path date");
+        assert!(!active_after_recompute.contains(&later_long_key));
+        assert!(active_after_recompute.contains(&earlier_short_key));
+
+        let journal = strategy.journal_records_for_test();
+        assert!(journal.iter().any(|row| {
+            row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathSuperseded
+                && row.decision_key == later_long_key
+        }));
+        assert!(journal.iter().any(|row| {
+            row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathActive
+                && row.decision_key == earlier_short_key
+        }));
+    }
+
+    #[test]
+    fn shadow_path_does_not_duplicate_active_rows_when_path_is_unchanged() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let decision = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Long,
+            dt(2026, 7, 20, 9, 0, 0),
+            dt(2026, 7, 20, 9, 10, 0),
+            "take_author_close",
+            208.0,
+        );
+
+        strategy.collect_shadow_decisions(vec![decision.clone()], dt(2026, 7, 20, 9, 20, 0));
+        strategy.collect_shadow_decisions(vec![decision], dt(2026, 7, 20, 9, 30, 0));
+
+        let active_rows = strategy
+            .journal_records_for_test()
+            .iter()
+            .filter(|row| row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathActive)
+            .count();
+        let superseded_rows = strategy
+            .journal_records_for_test()
+            .iter()
+            .filter(|row| row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathSuperseded)
+            .count();
+
+        assert_eq!(active_rows, 1);
+        assert_eq!(superseded_rows, 0);
+    }
+
+    #[test]
     fn suppress_decision_keeps_flat_phase() {
         let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
         let record = sample_record(OverlapDecision::DroppedMrOverlap, "mr_interval_overlap");
@@ -3859,6 +4115,26 @@ mod tests {
             shadow_pnl_points: Some(10.0),
             feed_quality_flags: Vec::new(),
         }
+    }
+
+    fn accepted_shadow_decision(
+        component: Component,
+        side: ShadowSide,
+        entry_ts: NaiveDateTime,
+        exit_ts: NaiveDateTime,
+        reason: &str,
+        pnl_points: f64,
+    ) -> super::RiAuthor4142ModelDecision {
+        let mut record = sample_record(OverlapDecision::Accepted, reason);
+        record.component = component;
+        record.side = Some(side);
+        record.bar_ts_local = entry_ts;
+        record.scheduled_entry_ts_local = Some(entry_ts);
+        record.scheduled_exit_ts_local = Some(exit_ts);
+        record.exit_reason = Some(reason.to_string());
+        record.shadow_pnl_points = Some(pnl_points);
+        let key = super::decision_key(&record);
+        super::RiAuthor4142ModelDecision::from_shadow_record(record, key).expect("decision")
     }
 
     fn dt(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> NaiveDateTime {

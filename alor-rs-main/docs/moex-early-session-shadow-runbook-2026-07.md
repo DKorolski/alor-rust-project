@@ -137,6 +137,23 @@ auction bars excluded
 pre-09 volume diagnostics populated
 ```
 
+## RI Shadow Path Semantics
+
+RI shadow writes two layers of decision evidence:
+
+```text
+shadow_recorded       raw finalized model decision observed by incremental runtime replay
+shadow_path_active    decision currently included in the recomputed chronological no-overlap path
+shadow_path_superseded previously active decision removed by a later path recompute
+```
+
+For `legacy09` vs `canonical07` economics, use `shadow_path_active` rows and
+exclude any decision key later marked as `shadow_path_superseded`.
+
+Do not treat raw `shadow_recorded` rows alone as the portfolio path. They are
+kept for audit and can include decisions that were valid under an earlier
+partial replay but were later displaced by an earlier overlapping trade.
+
 ## Rollback
 
 Stop and remove only the new shadow services and their isolated consumer
