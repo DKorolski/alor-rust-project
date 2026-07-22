@@ -351,6 +351,8 @@ pub struct HybridIntradaySettings {
     #[serde(default)]
     pub risk_gate_ledger_key: Option<String>,
     #[serde(default)]
+    pub risk_gate_persist_in_shadow: bool,
+    #[serde(default)]
     pub model_session_start_time: String,
     #[serde(default)]
     pub model_session_end_time: String,
@@ -395,6 +397,7 @@ impl Default for HybridIntradaySettings {
             risk_gate_mode: "disabled".to_string(),
             risk_gate_seed_file: None,
             risk_gate_ledger_key: None,
+            risk_gate_persist_in_shadow: false,
             model_session_start_time: String::new(),
             model_session_end_time: String::new(),
             mr_min_range_long: 0.013,

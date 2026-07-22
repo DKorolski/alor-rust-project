@@ -646,6 +646,7 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
         legacy_strategy.risk_gate_ledger_key.as_deref(),
         Some("runtime.riskgate.sessions.hybrid_imoexf_shadow09.imoexf_primary_high180_lb120")
     );
+    assert!(legacy_strategy.risk_gate_persist_in_shadow);
 
     assert_eq!(canonical_strategy.model_session_start_time, "07:00:00");
     assert_eq!(canonical_strategy.mr_session_end_time, "09:59:00");
@@ -654,6 +655,7 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
         canonical_strategy.risk_gate_ledger_key.as_deref(),
         Some("runtime.riskgate.sessions.hybrid_imoexf_shadow07.imoexf_primary_high180_lb120")
     );
+    assert!(canonical_strategy.risk_gate_persist_in_shadow);
     assert_eq!(
         canonical_strategy.orchestrator_breakout_eod_mode,
         "same_day"

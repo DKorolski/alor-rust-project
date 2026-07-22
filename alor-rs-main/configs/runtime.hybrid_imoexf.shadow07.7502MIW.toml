@@ -86,6 +86,7 @@ mr_gate_policy = "shadow_pnl_lb120_positive"
 risk_gate_mode = "bootstrap_from_seed"
 risk_gate_seed_file = "/configs/riskgate_high180_lb120_seed_2026-04-26.csv"
 risk_gate_ledger_key = "runtime.riskgate.sessions.hybrid_imoexf_shadow07.imoexf_primary_high180_lb120"
+risk_gate_persist_in_shadow = true
 model_session_start_time = "07:00:00"
 model_session_end_time = "23:49:59"
 mr_min_range_long = 0.013

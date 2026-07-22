@@ -568,6 +568,7 @@ struct HybridIntradayConfigFile {
     risk_gate_mode: Option<String>,
     risk_gate_seed_file: Option<String>,
     risk_gate_ledger_key: Option<String>,
+    risk_gate_persist_in_shadow: Option<bool>,
     model_session_start_time: Option<String>,
     model_session_end_time: Option<String>,
     mr_min_range_long: Option<f64>,
@@ -1195,6 +1196,9 @@ fn apply_hybrid_intraday_config_file(
         }
         if let Some(value) = &hybrid_file.risk_gate_ledger_key {
             strategy.risk_gate_ledger_key = Some(value.clone());
+        }
+        if let Some(value) = hybrid_file.risk_gate_persist_in_shadow {
+            strategy.risk_gate_persist_in_shadow = value;
         }
         if let Some(value) = &hybrid_file.model_session_start_time {
             strategy.model_session_start_time = value.clone();

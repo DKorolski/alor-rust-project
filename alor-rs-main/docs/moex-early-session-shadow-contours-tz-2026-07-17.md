@@ -11,6 +11,16 @@ NO_LIVE_CONFIG_CHANGE
 NO_ORDER_EMISSION
 ```
 
+Implementation addendum after the first offline `2026-07-14..2026-07-21` A/B:
+
+```text
+docs/moex-early-session-shadow-patch-tz-2026-07-22.md
+```
+
+The addendum is authoritative for the IMOEXF MR override-cutoff patch, current
+replay evidence and the extended observation gate. This document remains the
+base safety and deployment contract.
+
 ## 1. Work Name
 
 MOEX early-session recut: deploy isolated `07:00` shadow contours for:
