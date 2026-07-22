@@ -641,6 +641,7 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
 
     assert_eq!(legacy_strategy.model_session_start_time, "09:00:00");
     assert_eq!(legacy_strategy.mr_session_end_time, "11:59:00");
+    assert_eq!(legacy_strategy.risk_gate_mode, "normal_append");
     assert_eq!(legacy_strategy.bo_wait_hours, 3.0);
     assert_eq!(
         legacy_strategy.risk_gate_ledger_key.as_deref(),
@@ -650,6 +651,7 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
 
     assert_eq!(canonical_strategy.model_session_start_time, "07:00:00");
     assert_eq!(canonical_strategy.mr_session_end_time, "09:59:00");
+    assert_eq!(canonical_strategy.risk_gate_mode, "normal_append");
     assert_eq!(canonical_strategy.bo_wait_hours, 3.0);
     assert_eq!(
         canonical_strategy.risk_gate_ledger_key.as_deref(),
