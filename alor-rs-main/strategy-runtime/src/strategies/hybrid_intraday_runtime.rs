@@ -31,6 +31,7 @@ pub struct HybridIntradayRuntimeConfig {
     pub risk_gate_mode: RiskGateMode,
     pub risk_gate_seed_file: Option<String>,
     pub risk_gate_ledger_key: Option<String>,
+    pub risk_gate_persist_in_shadow: bool,
     pub model_session_start_time: Option<NaiveTime>,
     pub model_session_end_time: Option<NaiveTime>,
     pub qty: f64,
@@ -215,8 +216,6 @@ impl HybridIntradayRuntimeStrategy {
     const AUTHOR41_SHORT_STOP_K: f64 = 0.58;
     const AUTHOR41_MIN_REL_RANGE: f64 = 0.005;
     const AUTHOR41_MAX_REL_RANGE: f64 = 0.075;
-    const AUTHOR41_ENTRY_END_HOUR: u32 = 12;
-    const AUTHOR41_ENTRY_END_MINUTE: u32 = 0;
     const AUTHOR41_TIME_EXIT_HOUR: u32 = 20;
     const AUTHOR41_TIME_EXIT_MINUTE: u32 = 0;
 
@@ -249,8 +248,9 @@ impl HybridIntradayRuntimeStrategy {
         let mr = MeanReversionEngine::new(config.mr_config);
         let br = IntradayBreakoutEngine::new(config.breakout_config);
         let orchestrator = HybridOrchestrator::new(mr, br, config.orchestrator_config);
-        let high180_mr = High180MrEngine::new(High180MrConfig::default());
-        let risk_gate_shadow_mr = High180MrEngine::new(High180MrConfig::default());
+        let high180_config = Self::high180_config_from_mr_cutoff(config.mr_config.session_end_time);
+        let high180_mr = High180MrEngine::new(high180_config);
+        let risk_gate_shadow_mr = High180MrEngine::new(high180_config);
         Self {
             config,
             orchestrator,
@@ -461,6 +461,17 @@ impl HybridIntradayRuntimeStrategy {
         self.uses_high180_mr() && self.config.mr_gate_policy == MrGatePolicy::ShadowPnlLb120Positive
     }
 
+    fn mr_entry_cutoff(&self) -> NaiveTime {
+        self.config.mr_config.session_end_time
+    }
+
+    fn high180_config_from_mr_cutoff(entry_end_time: NaiveTime) -> High180MrConfig {
+        High180MrConfig {
+            entry_end_time,
+            ..High180MrConfig::default()
+        }
+    }
+
     fn finalize_risk_gate_shadow_session(&mut self, session_date: NaiveDate) {
         if matches!(session_date.weekday(), Weekday::Sat | Weekday::Sun) {
             return;
@@ -567,7 +578,7 @@ impl HybridIntradayRuntimeStrategy {
                 });
                 self.risk_gate_shadow_open = Some(High180Open::from_signal(
                     &signal,
-                    High180MrConfig::default(),
+                    self.risk_gate_shadow_mr.config(),
                 ));
                 debug!(
                     target: "strategy_runtime::hybrid_intraday_runtime",
@@ -623,12 +634,7 @@ impl HybridIntradayRuntimeStrategy {
         close_prev: f64,
         day_range_prev: f64,
     ) -> Option<EntrySignal> {
-        let entry_end = NaiveTime::from_hms_opt(
-            Self::AUTHOR41_ENTRY_END_HOUR,
-            Self::AUTHOR41_ENTRY_END_MINUTE,
-            0,
-        )
-        .unwrap_or(NaiveTime::MIN);
+        let entry_end = self.mr_entry_cutoff();
         if dt_local.time() > entry_end {
             return None;
         }
@@ -2353,6 +2359,7 @@ mod tests {
             risk_gate_mode: RiskGateMode::Disabled,
             risk_gate_seed_file: None,
             risk_gate_ledger_key: None,
+            risk_gate_persist_in_shadow: false,
             model_session_start_time: None,
             model_session_end_time: None,
             qty: 1.0,
@@ -2485,6 +2492,33 @@ mod tests {
     }
 
     #[test]
+    fn author41_boundary_short_variant_uses_resolved_mr_entry_cutoff() {
+        let mut cfg = test_config();
+        cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
+        cfg.mr_config.session_end_time =
+            NaiveTime::from_hms_opt(9, 59, 0).unwrap_or(NaiveTime::MIN);
+        let strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 22).expect("date");
+
+        assert!(strategy
+            .author41_boundary_short_entry_signal(
+                date.and_hms_opt(9, 59, 0).expect("cutoff"),
+                100.2,
+                100.0,
+                2.0,
+            )
+            .is_some());
+        assert!(strategy
+            .author41_boundary_short_entry_signal(
+                date.and_hms_opt(10, 0, 0).expect("after cutoff"),
+                100.2,
+                100.0,
+                2.0,
+            )
+            .is_none());
+    }
+
+    #[test]
     fn author41_near_zero_take_after_rounding_suppresses_live_entry() {
         let mut cfg = test_config();
         cfg.mr_variant = MeanReversionVariant::Author41BoundaryShort;
@@ -2592,6 +2626,45 @@ mod tests {
         assert_eq!(pending.entry_style, EntryStyle::Bracket);
         assert_eq!(pending.take_price, Some(100.85));
         assert!((pending.stop_price.unwrap_or_default() - 91.65).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn high180_variant_uses_resolved_mr_entry_cutoff_for_live_and_shadow_engines() {
+        let mut cfg = risk_gate_test_config();
+        cfg.mr_config.session_end_time =
+            NaiveTime::from_hms_opt(9, 59, 0).unwrap_or(NaiveTime::MIN);
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+
+        assert_eq!(
+            strategy.high180_mr.config().entry_end_time,
+            NaiveTime::from_hms_opt(9, 59, 0).unwrap_or(NaiveTime::MIN)
+        );
+        assert_eq!(
+            strategy.risk_gate_shadow_mr.config().entry_end_time,
+            NaiveTime::from_hms_opt(9, 59, 0).unwrap_or(NaiveTime::MIN)
+        );
+
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 22).expect("date");
+        strategy
+            .high180_mr
+            .on_bar(date.and_hms_opt(9, 50, 0).expect("bar"), 102.0, 99.7);
+
+        assert!(strategy
+            .high180_entry_signal(
+                date.and_hms_opt(9, 59, 0).expect("cutoff"),
+                99.7,
+                100.0,
+                4.0,
+            )
+            .is_some());
+        assert!(strategy
+            .high180_entry_signal(
+                date.and_hms_opt(10, 0, 0).expect("after cutoff"),
+                99.7,
+                100.0,
+                4.0,
+            )
+            .is_none());
     }
 
     #[test]

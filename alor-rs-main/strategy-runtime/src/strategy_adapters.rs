@@ -204,6 +204,7 @@ impl HybridIntradayAdapter {
             risk_gate_mode,
             risk_gate_seed_file: runtime_settings.risk_gate_seed_file.clone(),
             risk_gate_ledger_key: runtime_settings.risk_gate_ledger_key.clone(),
+            risk_gate_persist_in_shadow: runtime_settings.risk_gate_persist_in_shadow,
             model_session_start_time: Self::parse_optional_time(
                 &runtime_settings.model_session_start_time,
                 "model_session_start_time",
@@ -500,6 +501,21 @@ mod tests {
             runtime_config.risk_gate_mode,
             RiskGateMode::BootstrapFromSeed
         );
+    }
+
+    #[test]
+    fn hybrid_adapter_propagates_shadow_risk_gate_persistence_flag() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = config.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
+        settings.strategy.risk_gate_mode = "normal_append".to_string();
+        settings.strategy.mr_variant = "high180".to_string();
+        settings.strategy.risk_gate_persist_in_shadow = true;
+
+        let runtime_config =
+            HybridIntradayAdapter::from_strategy_config(&config).expect("runtime config");
+
+        assert!(runtime_config.risk_gate_persist_in_shadow);
     }
 
     #[test]

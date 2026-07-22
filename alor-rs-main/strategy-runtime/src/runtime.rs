@@ -979,13 +979,23 @@ impl StrategyRuntime {
         self.state.strategy_state = self.strategy.state().clone();
     }
 
+    fn risk_gate_session_persistence_enabled(&self) -> bool {
+        self.config.trade_mode == TradeMode::Live
+            || (self.config.trade_mode == TradeMode::Paper
+                && self
+                    .config
+                    .strategy
+                    .hybrid_intraday()
+                    .is_some_and(|settings| settings.strategy.risk_gate_persist_in_shadow))
+    }
+
     async fn flush_risk_gate_session_finalizations(&mut self) -> Result<()> {
         let finalizations = self.strategy.risk_gate_session_finalizations();
         if finalizations.is_empty() {
             return Ok(());
         }
 
-        if self.config.trade_mode != TradeMode::Live {
+        if !self.risk_gate_session_persistence_enabled() {
             let session_dates = finalizations
                 .iter()
                 .map(|finalization| finalization.session_date)
@@ -4651,6 +4661,44 @@ mod tests {
             .create(&runtime.config.strategy)
             .expect("ri strategy");
         runtime.state.strategy_state = runtime.strategy.state().clone();
+    }
+
+    fn install_hybrid_riskgate_strategy_config(runtime: &mut StrategyRuntime, persist: bool) {
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        runtime.config.strategy.strategy_id = "hybrid_imoexf_shadow07".to_string();
+        if let Some(settings) = runtime.config.strategy.hybrid_intraday_mut() {
+            settings.strategy.profile = "imoexf_primary_riskgate_high180_lb120".to_string();
+            settings.strategy.mr_variant = "high180".to_string();
+            settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
+            settings.strategy.risk_gate_mode = "normal_append".to_string();
+            settings.strategy.risk_gate_persist_in_shadow = persist;
+        }
+    }
+
+    #[test]
+    fn risk_gate_session_persistence_is_enabled_for_live() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        install_hybrid_riskgate_strategy_config(&mut runtime, false);
+
+        assert!(runtime.risk_gate_session_persistence_enabled());
+    }
+
+    #[test]
+    fn risk_gate_session_persistence_in_paper_requires_explicit_shadow_flag() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        install_hybrid_riskgate_strategy_config(&mut runtime, false);
+        assert!(!runtime.risk_gate_session_persistence_enabled());
+
+        install_hybrid_riskgate_strategy_config(&mut runtime, true);
+        assert!(runtime.risk_gate_session_persistence_enabled());
+    }
+
+    #[test]
+    fn risk_gate_session_persistence_stays_disabled_for_backtest_even_with_shadow_flag() {
+        let mut runtime = test_runtime(TradeMode::Backtest);
+        install_hybrid_riskgate_strategy_config(&mut runtime, true);
+
+        assert!(!runtime.risk_gate_session_persistence_enabled());
     }
 
     fn ri_runtime_bar(
