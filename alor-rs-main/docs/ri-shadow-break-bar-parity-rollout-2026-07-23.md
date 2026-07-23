@@ -2,7 +2,7 @@
 
 ## Status
 
-`DEPLOYED / SHADOW_ONLY / LIVE RI UNCHANGED`
+`DEPLOYED / SHADOW_ONLY / LIVE RI UNCHANGED / PARITY INVESTIGATION OPEN`
 
 ## Released Change
 
@@ -11,9 +11,10 @@ operational shadow path only. The shadow feed now excludes bars in the regular
 MOEX breaks `14:00:00..14:04:59` and `18:50:00..19:04:59` before model state
 updates. The live RI contract is unchanged.
 
-The guard aligns the runtime with the frozen analytic policy and closes the
-operational discrepancy where the canonical07 shadow had no BO record for
-`2026-07-15 21:00`.
+The guard aligns the runtime feed filter with the frozen analytic policy. It
+does not by itself close the operational discrepancy where canonical07 has no
+BO record for `2026-07-15 21:00`; that remaining Rust/Python Author42 parity
+gap is tracked below.
 
 ## VPS Rollout
 
@@ -43,17 +44,15 @@ All recreated containers became healthy. Both RI shadow command streams and
 the shadow gateway blackhole stream were empty after startup, confirming that
 the shadows remain non-trading.
 
-The canonical07 startup journal now contains the previously missing expected
-BO decision:
+The canonical07 startup replay completed successfully, but a follow-up
+economic recomputation found that the expected `2026-07-15 21:00` Author42 BO
+record is still absent. The raw VPS 10m bars match the analytic input around
+that time, so this is not a timestamp or missing-feed issue. It is a remaining
+Rust/Python Author42 replay/journal parity issue.
 
-```text
-2026-07-15 21:00
-component=author42_bo
-side=short
-scheduled_exit=23:00
-reason=time_exit_same_bar_close
-shadow_pnl_points=208.0
-```
+The shadow service remains useful and safe for observation, but its historical
+canonical07 BO attribution must not be used for a promotion decision until a
+fixture-level parity patch restores or formally explains this row.
 
 Alor-USDRUBF restarted flat with no orders or stops and waits for a fresh live
 bar. Its image also contains the prior BO partial-entry hardening patch.
@@ -69,3 +68,12 @@ Before rollout:
 pre-existing findings outside this change. They are tracked separately and did
 not block this targeted safe rollout.
 
+## Follow-Up Required
+
+1. Add a fixture-level Rust/Python parity test for the verified `2026-07-15`
+   canonical07 input and expected Author42 path.
+2. Journal Author42 level construction, hourly checks and candidate suppression
+   reasons so the next mismatch is observable without offline reconstruction.
+3. Rebuild the shadow history only after the test proves the expected late BO
+   is either reproduced or explicitly classified as an intentional contract
+   difference.
