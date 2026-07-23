@@ -566,6 +566,7 @@ impl RiAuthor4142LiveStrategy {
         };
         let excluded_date = self.excluded_model_dates.contains(&dt_local.date());
         let is_model_bar = self.session_policy.is_model_bar(dt_local)
+            && !self.is_operational_shadow_break_bar(dt_local)
             && !excluded_date
             && bar.origin != DataOrigin::HistoryGap;
         if excluded_date && self.logged_excluded_dates.insert(dt_local.date()) {
@@ -625,6 +626,18 @@ impl RiAuthor4142LiveStrategy {
         }
 
         self.collect_new_decisions(dt_local)
+    }
+
+    fn is_operational_shadow_break_bar(&self, dt_local: NaiveDateTime) -> bool {
+        if self.config.mode != RiAuthor4142RuntimeMode::Shadow {
+            return false;
+        }
+
+        let bar_time = dt_local.time();
+        (bar_time >= NaiveTime::from_hms_opt(14, 0, 0).unwrap_or(NaiveTime::MIN)
+            && bar_time <= NaiveTime::from_hms_opt(14, 4, 59).unwrap_or(NaiveTime::MIN))
+            || (bar_time >= NaiveTime::from_hms_opt(18, 50, 0).unwrap_or(NaiveTime::MIN)
+                && bar_time <= NaiveTime::from_hms_opt(19, 4, 59).unwrap_or(NaiveTime::MIN))
     }
 
     fn collect_new_decisions(
@@ -1230,6 +1243,7 @@ impl RiAuthor4142LiveStrategy {
         }
         let dt_local = self.local_dt(bar.close_time_utc)?;
         if !self.session_policy.is_model_bar(dt_local)
+            || self.is_operational_shadow_break_bar(dt_local)
             || self.excluded_model_dates.contains(&dt_local.date())
         {
             return None;
@@ -3418,6 +3432,25 @@ mod tests {
     }
 
     #[test]
+    fn operational_shadow_excludes_moex_break_bars_without_changing_live_contract() {
+        let break_one = bar(dt(2026, 7, 15, 14, 0, 0), DataOrigin::Live);
+        let break_two = bar(dt(2026, 7, 15, 18, 50, 0), DataOrigin::Live);
+
+        let mut shadow = RiAuthor4142LiveStrategy::new(default_config()).expect("shadow");
+        assert!(shadow.update_bar_state(&break_one).is_empty());
+        assert!(shadow.update_bar_state(&break_two).is_empty());
+        assert!(shadow.model_bars.is_empty());
+
+        let mut live_config = default_config();
+        live_config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        live_config.allow_order_emission = true;
+        let mut live = RiAuthor4142LiveStrategy::new(live_config).expect("live");
+        assert!(live.update_bar_state(&break_one).is_empty());
+        assert!(live.update_bar_state(&break_two).is_empty());
+        assert_eq!(live.model_bars.len(), 2);
+    }
+
+    #[test]
     fn legacy09_feed_guard_still_rejects_pre_0900_bars() {
         let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
 
@@ -3698,6 +3731,40 @@ mod tests {
 
         assert_eq!(active_rows, 1);
         assert_eq!(superseded_rows, 0);
+    }
+
+    #[test]
+    fn shadow_path_keeps_late_bo_after_mr_time_exit() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let mr = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Long,
+            dt(2026, 7, 15, 8, 10, 0),
+            dt(2026, 7, 15, 20, 0, 0),
+            "time_exit",
+            -1342.0,
+        );
+        let late_bo = accepted_shadow_decision(
+            Component::Author42Bo,
+            ShadowSide::Short,
+            dt(2026, 7, 15, 21, 0, 0),
+            dt(2026, 7, 15, 23, 0, 0),
+            "time_exit_same_bar_close",
+            208.0,
+        );
+        let late_bo_key = late_bo.decision_key.clone();
+
+        strategy.collect_shadow_decisions(vec![mr, late_bo], dt(2026, 7, 15, 23, 10, 0));
+
+        let active = strategy
+            .shadow_path_keys_by_date
+            .get(&NaiveDate::from_ymd_opt(2026, 7, 15).unwrap())
+            .expect("path date");
+        assert!(active.contains(&late_bo_key));
+        assert!(strategy.journal_records_for_test().iter().any(|row| {
+            row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathActive
+                && row.decision_key == late_bo_key
+        }));
     }
 
     #[test]

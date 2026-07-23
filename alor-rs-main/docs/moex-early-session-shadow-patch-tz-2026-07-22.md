@@ -262,6 +262,66 @@ actually consumed. Engineering must nevertheless add or verify the following:
 The `08:00/11:00` and `09:00/12:00` variants remain offline sensitivity rows.
 Do not deploy them as additional VPS services during the first extended A/B.
 
+### 6.1. Mandatory MR/BO arbitration diagnostic
+
+The six-session combo advantage must not be described as standalone BO
+improvement. Standalone Author42 BO produced:
+
+```text
+canonical07_phase10 = +6756.0 points
+legacy09            = +7230.0 points
+```
+
+The accepted combo BO attribution became `+7762.0` versus `+4142.0` because of
+MR-priority/no-overlap:
+
+- on `2026-07-20`, legacy09 retained an MR short losing `-2639.5` points and
+  dropped the overlapping `15:00` BO long that made `+3088.0` standalone;
+- on `2026-07-15`, canonical07 retained an MR long losing `-1342.0` points and
+  dropped three overlapping BO shorts totalling `-1006.0` standalone.
+
+Before any RI session or arbitration promotion, replay two predeclared modes:
+
+```text
+strict_no_overlap_mr_priority
+opposite_bo_priority_handoff_diagnostic
+```
+
+The challenger is decision-only. When a confirmed next-bar Author42 entry is
+opposite an active MR position, record a hypothetical MR close followed by a
+BO entry using the existing next-bar contract. Do not synthesize an intrabar or
+same-bar fill. Same-side BO candidates remain separately classified and must
+not be silently treated as a reversal.
+
+Run the comparison over the full frozen RI history and the post-`2026-07-14`
+session-recut sample. Report MR PnL surrendered, BO PnL recovered, turnover,
+drawdown, tail losses, handoff count and cost stress. This diagnostic does not
+change the frozen live no-overlap contract.
+
+#### Resolution: missing `2026-07-15 21:00` BO in operational shadow
+
+The frozen canonical07 replay contains an accepted Author42 BO short from
+`21:00` to `23:00` (`+208` points) after the Author41 MR time exit at `20:00`.
+The operational shadow journal did not contain this row.
+
+The retained Redis bar stream has already been trimmed past `2026-07-15`, so
+the exact process history cannot be replayed byte-for-byte. The feed-contract
+gap is nevertheless confirmed: the analytical canonical07 preparation removes
+the MOEX break bars at `14:00` and `18:50`, while the RI operational shadow had
+previously admitted them into model state. That can alter the Author42 pending
+entry/exit sequence and therefore the final no-overlap path.
+
+The shadow-only guard now excludes `14:00..14:04:59` and
+`18:50..19:04:59`, matching the frozen canonical07 preparation. It does not
+change the live RI contract. Regression coverage verifies both break-bar
+exclusion and retention of the late BO after the `20:00` MR exit.
+
+The pre-patch `2026-07-15` operational row remains an explicitly classified
+feed-contract drift and must not be used for operational-PnL aggregation. From
+the patched restart onward, the decision journal is the acceptance source:
+every finalized accepted BO must produce one `shadow_path_active` row unless a
+later `shadow_path_superseded` row replaces it.
+
 ## 7. P1: Alor-USDRUBF Shadow Hardening
 
 The required TOMLs already exist:
