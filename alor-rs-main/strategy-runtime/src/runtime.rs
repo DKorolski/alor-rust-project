@@ -1808,16 +1808,7 @@ impl StrategyRuntime {
         message_id: String,
         ack: alor_protocol::CommandAck,
     ) -> Result<()> {
-        if self.our_request_ids.remove(&ack.request_id) {
-            if let Some(order_id) = ack.broker_order_id {
-                self.our_order_ids.insert(order_id);
-                if let Some(trades) = self.pending_trades_by_order_id.remove(&order_id) {
-                    for trade in trades {
-                        self.apply_trade_execution(trade);
-                    }
-                }
-            }
-        }
+        self.register_acknowledged_order(&ack);
         match ack.status {
             alor_protocol::AckStatus::Rejected
             | alor_protocol::AckStatus::Expired
@@ -1884,6 +1875,16 @@ impl StrategyRuntime {
         Ok(())
     }
 
+    fn register_acknowledged_order(&mut self, ack: &alor_protocol::CommandAck) {
+        if self.our_request_ids.remove(&ack.request_id) {
+            if let Some(order_id) = ack.broker_order_id {
+                self.our_order_ids.insert(order_id);
+                self.replay_pending_trades_for_order(order_id);
+            }
+        }
+        self.flush_unmatched_pre_ack_trades();
+    }
+
     async fn handle_order(
         &mut self,
         stream: String,
@@ -1920,7 +1921,9 @@ impl StrategyRuntime {
             }),
         );
         self.update_ledger_from_order(&order)?;
-        self.state.orders.insert(order.order_id, order);
+        let order_id = order.order_id;
+        self.state.orders.insert(order_id, order);
+        self.replay_pending_trades_for_order(order_id);
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
     }
@@ -1997,6 +2000,10 @@ impl StrategyRuntime {
         }
         let owned = self.our_order_ids.contains(&trade.order_id);
         if !owned {
+            if self.buffer_pre_ack_trade(trade.clone()) {
+                self.transport.xack(&stream, &message_id).await?;
+                return Ok(());
+            }
             warn!(
                 trade_id = trade.trade_id,
                 order_id = trade.order_id,
@@ -2023,9 +2030,98 @@ impl StrategyRuntime {
             ts_utc = trade.ts_utc,
             "trade event accepted"
         );
-        self.apply_trade_execution(trade);
+        self.queue_or_apply_owned_trade(trade);
         self.transport.xack(&stream, &message_id).await?;
         Ok(())
+    }
+
+    fn buffer_pre_ack_trade(&mut self, trade: TradeEvent) -> bool {
+        if self.our_request_ids.is_empty() {
+            return false;
+        }
+        let buffered_count = {
+            let trades = self
+                .pending_trades_by_order_id
+                .entry(trade.order_id)
+                .or_default();
+            trades.push(trade.clone());
+            trades.len()
+        };
+        info!(
+            action = "trade_buffered_pending_ack",
+            trade_id = trade.trade_id,
+            order_id = trade.order_id,
+            symbol = trade.symbol,
+            qty = trade.qty,
+            pending_request_count = self.our_request_ids.len(),
+            buffered_trade_count = buffered_count,
+            "trade arrived before matching command acknowledgment; retaining until order ownership is known"
+        );
+        true
+    }
+
+    fn queue_or_apply_owned_trade(&mut self, trade: TradeEvent) {
+        if self.state.orders.contains_key(&trade.order_id) {
+            self.apply_trade_execution(trade);
+            return;
+        }
+        let buffered_count = {
+            let trades = self
+                .pending_trades_by_order_id
+                .entry(trade.order_id)
+                .or_default();
+            trades.push(trade.clone());
+            trades.len()
+        };
+        info!(
+            action = "trade_buffered_pending_order",
+            trade_id = trade.trade_id,
+            order_id = trade.order_id,
+            symbol = trade.symbol,
+            qty = trade.qty,
+            buffered_trade_count = buffered_count,
+            "owned trade arrived before order event; retaining until execution target is known"
+        );
+    }
+
+    fn replay_pending_trades_for_order(&mut self, order_id: i64) {
+        if !self.our_order_ids.contains(&order_id) || !self.state.orders.contains_key(&order_id) {
+            return;
+        }
+        if let Some(trades) = self.pending_trades_by_order_id.remove(&order_id) {
+            for trade in trades {
+                self.apply_trade_execution(trade);
+            }
+        }
+    }
+
+    fn flush_unmatched_pre_ack_trades(&mut self) {
+        if !self.our_request_ids.is_empty() {
+            return;
+        }
+        let unmatched_order_ids = self
+            .pending_trades_by_order_id
+            .keys()
+            .copied()
+            .filter(|order_id| !self.our_order_ids.contains(order_id))
+            .collect::<Vec<_>>();
+        for order_id in unmatched_order_ids {
+            if let Some(trades) = self.pending_trades_by_order_id.remove(&order_id) {
+                for trade in trades {
+                    warn!(
+                        trade_id = trade.trade_id,
+                        order_id = trade.order_id,
+                        symbol = trade.symbol,
+                        side = trade.side,
+                        qty = trade.qty,
+                        price = trade.price,
+                        "orphan_trade_after_ack_settled"
+                    );
+                    self.our_order_ids.insert(trade.order_id);
+                    self.record_orphan_trade(&trade);
+                }
+            }
+        }
     }
 
     fn apply_trade_execution(&mut self, trade: TradeEvent) {
@@ -5971,6 +6067,96 @@ mod tests {
             owned: true,
         });
         assert_eq!(runtime.ledger.trades()[0].price, 110.0);
+    }
+
+    #[test]
+    fn pre_ack_partial_trades_replay_after_ack_and_order() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        let request_id = uuid::Uuid::new_v4();
+        let order_id = 42;
+        runtime.our_request_ids.insert(request_id);
+
+        for (trade_id, qty) in [("fill-1", 1.0), ("fill-2", 5.0)] {
+            assert!(runtime.buffer_pre_ack_trade(TradeEvent {
+                trade_id: trade_id.to_string(),
+                order_id,
+                symbol: "SBER".to_string(),
+                side: "buy".to_string(),
+                qty,
+                price: 100.0,
+                commission: 0.1,
+                existing: false,
+                ts_utc: 100,
+            }));
+        }
+        assert_eq!(runtime.pending_trades_by_order_id[&order_id].len(), 2);
+        assert_eq!(runtime.metrics.orphan_trade_total, 0);
+
+        runtime.register_acknowledged_order(&alor_protocol::CommandAck::confirmed(
+            request_id,
+            Some(order_id),
+        ));
+        assert!(runtime.pending_trades_by_order_id.contains_key(&order_id));
+
+        let order = OrderEvent {
+            order_id,
+            request_id: Some(request_id),
+            symbol: "SBER".to_string(),
+            status: "filled".to_string(),
+            side: "buy".to_string(),
+            order_type: "limit".to_string(),
+            qty: 6.0,
+            filled: 6.0,
+            price: 101.0,
+            existing: false,
+            comment: None,
+            ts_utc: 101,
+        };
+        runtime.update_ledger_from_order(&order).unwrap();
+        runtime.state.orders.insert(order_id, order);
+        runtime.replay_pending_trades_for_order(order_id);
+
+        assert!(!runtime.pending_trades_by_order_id.contains_key(&order_id));
+        assert_eq!(runtime.metrics.orphan_trade_total, 0);
+        assert_eq!(runtime.ledger.trades().len(), 2);
+        assert_eq!(
+            runtime
+                .ledger
+                .trades()
+                .iter()
+                .map(|trade| trade.qty)
+                .sum::<f64>(),
+            6.0
+        );
+        assert!(runtime.ledger.trades().iter().all(|trade| trade.owned));
+    }
+
+    #[test]
+    fn unmatched_pre_ack_trade_becomes_orphan_after_requests_settle() {
+        let mut runtime = test_runtime(TradeMode::Live);
+        let request_id = uuid::Uuid::new_v4();
+        runtime.our_request_ids.insert(request_id);
+        assert!(runtime.buffer_pre_ack_trade(TradeEvent {
+            trade_id: "foreign-fill".to_string(),
+            order_id: 99,
+            symbol: "SBER".to_string(),
+            side: "buy".to_string(),
+            qty: 1.0,
+            price: 100.0,
+            commission: 0.1,
+            existing: false,
+            ts_utc: 100,
+        }));
+
+        runtime.register_acknowledged_order(&alor_protocol::CommandAck::confirmed(
+            request_id,
+            Some(42),
+        ));
+
+        assert!(runtime.pending_trades_by_order_id.is_empty());
+        assert_eq!(runtime.metrics.orphan_trade_total, 1);
+        assert_eq!(runtime.ledger.trades().len(), 1);
+        assert!(!runtime.ledger.trades()[0].owned);
     }
 
     #[test]
