@@ -1,6 +1,12 @@
 # MR Bracket Partial-Entry Hardening, 2026-06-22
 
-## Scope
+## Historical Scope
+
+This document records the MR-bracket-only hardening released on 2026-06-22.
+It has been extended by the generic trade-ordering and multi-lot BO entry
+contract in [Partial Entry Reconciliation Hardening, 2026-07-23](partial-entry-reconciliation-hardening-2026-07-23.md).
+
+## Original Scope
 
 The patch applies to MR entries that create broker TP/SL protection after the
 entry. BO and ordinary market entry/exit behavior are unchanged.
