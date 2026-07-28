@@ -749,6 +749,33 @@ impl AlorUsdrubfHybridStrategy {
         self.bracket_terminal_reconcile_started_ms = None;
     }
 
+    fn mr_bracket_protective_partial_progress(open: &OpenPosition, broker_qty: f64) -> bool {
+        if open.owner != Owner::MeanRev || broker_qty.abs() < 1e-9 {
+            return false;
+        }
+        let previous_qty = match open.side {
+            PositionSide::Long => open.size as f64,
+            PositionSide::Short => -(open.size as f64),
+        };
+        if previous_qty.abs() <= 1e-9 {
+            return false;
+        }
+        previous_qty.signum() == broker_qty.signum()
+            && broker_qty.abs() + f64::EPSILON < previous_qty.abs()
+    }
+
+    fn mark_mr_bracket_partial_reconcile(&mut self, broker_qty: f64) {
+        self.mark_bracket_terminal_reconcile();
+        self.exit_intent_inflight = true;
+        self.lifecycle_stage = "mr_bracket_partial_awaiting_broker_flat".to_string();
+        info!(
+            target: "strategy_runtime::alor_usdrubf_hybrid",
+            action = "bracket_partial_reconcile_wait",
+            broker_qty,
+            "MR protective partial fill is settling; suppress residual emergency exit until reconcile grace expires"
+        );
+    }
+
     fn emit_bracket_reconcile_timeout_exit(
         &mut self,
         ctx: &StrategyCtx,
@@ -1722,6 +1749,11 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 || self.bracket_terminal_reconcile_active(Utc::now().timestamp_millis())
             {
                 self.lifecycle_stage = "exit_filled_awaiting_broker_flat".to_string();
+                self.sync_state();
+                return Vec::new();
+            }
+            if Self::mr_bracket_protective_partial_progress(open, pos.qty) {
+                self.mark_mr_bracket_partial_reconcile(pos.qty);
                 self.sync_state();
                 return Vec::new();
             }
@@ -3088,6 +3120,59 @@ mod tests {
         assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
 
         let flat_cleanup = strategy.on_position(&ctx, &position_event(1_775_490_123, 0.0, 0.0));
+        assert!(flat_cleanup.iter().any(|intent| {
+            matches!(
+                intent.base_intent(),
+                Intent::DeleteStopLimit { order_id, .. } if order_id == "sl-1"
+            )
+        }));
+        assert!(!strategy.exit_intent_inflight);
+        assert!(strategy.open_position.is_none());
+    }
+
+    #[test]
+    fn partial_mr_tp_fill_waits_for_broker_flat_without_residual_churn() {
+        let mut strategy = AlorUsdrubfHybridStrategy::new(test_config());
+        strategy.open_position = Some(OpenPosition {
+            owner: Owner::MeanRev,
+            side: PositionSide::Short,
+            entry_ts: utc_to_local(1_775_490_000, 3),
+            entry_price: 80.0,
+            size: 2,
+            stop_price: Some(80.2),
+            take_price: Some(79.9),
+            stop1: None,
+            stop2: None,
+        });
+        strategy.tp_order_id = Some(111);
+        strategy.sl_stop_order_id = Some("sl-1".to_string());
+        let ctx = test_ctx(TradeMode::Live, 1_775_490_120);
+
+        let partial = strategy.on_position(&ctx, &position_event(1_775_490_121, -1.0, 80.0));
+
+        assert!(partial.is_empty());
+        assert!(strategy.exit_intent_inflight);
+        assert_eq!(
+            strategy.lifecycle_stage,
+            "mr_bracket_partial_awaiting_broker_flat"
+        );
+        assert_eq!(strategy.tp_order_id, Some(111));
+        assert_eq!(strategy.sl_stop_order_id.as_deref(), Some("sl-1"));
+
+        let flat_cleanup = strategy.on_position(&ctx, &position_event(1_775_490_122, 0.0, 0.0));
+
+        assert!(flat_cleanup.iter().all(|intent| {
+            !matches!(
+                intent.base_intent(),
+                Intent::Market {
+                    comment,
+                    ..
+                } if comment.as_deref() == Some("USDRUBF|exit|broker_residual")
+            )
+        }));
+        assert!(flat_cleanup.iter().any(|intent| {
+            matches!(intent.base_intent(), Intent::Cancel { order_id } if *order_id == 111)
+        }));
         assert!(flat_cleanup.iter().any(|intent| {
             matches!(
                 intent.base_intent(),
