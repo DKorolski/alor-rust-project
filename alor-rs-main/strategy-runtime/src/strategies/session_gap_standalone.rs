@@ -1728,6 +1728,7 @@ impl Strategy for SessionGapStandaloneStrategy {
         intents
     }
 
+    #[allow(clippy::collapsible_match)]
     fn on_ack(&mut self, ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
         let mut intents = Vec::new();
         let mut phase_to_persist: Option<SessionGapLivePhase> = None;

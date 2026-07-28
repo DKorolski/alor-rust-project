@@ -134,7 +134,7 @@ impl BarQualityStats {
                 count: *count,
             })
             .collect();
-        dropped.sort_by(|a, b| b.count.cmp(&a.count));
+        dropped.sort_by_key(|entry| std::cmp::Reverse(entry.count));
         let mut ignored: Vec<IgnoredReasonCount> = self
             .ignored
             .iter()
@@ -144,7 +144,7 @@ impl BarQualityStats {
                 count: *count,
             })
             .collect();
-        ignored.sort_by(|a, b| b.count.cmp(&a.count));
+        ignored.sort_by_key(|entry| std::cmp::Reverse(entry.count));
         DataQualityReport {
             received: self.received.clone(),
             emitted: self.emitted.clone(),

@@ -53,6 +53,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .expect("lock env mutex")
 }
 
+fn repo_config_path(relative_path: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join(relative_path)
+}
+
 #[test]
 fn loads_toml_defaults() {
     let _env_guard = env_lock();

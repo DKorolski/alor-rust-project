@@ -3430,7 +3430,7 @@ impl StrategyRuntime {
                 ts_utc: order.ts_utc,
             })
             .collect();
-        orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+        orders.sort_by_key(|order| order.order_id);
         info!(
             source = "snapshot",
             snapshot_ts_utc,
@@ -3466,7 +3466,7 @@ impl StrategyRuntime {
                 (*order_id, status)
             })
             .collect();
-        active_known_orders.sort_by(|a, b| a.0.cmp(&b.0));
+        active_known_orders.sort_by_key(|order| order.0);
         info!(
             source = "runtime_state",
             active_known_orders = ?active_known_orders,

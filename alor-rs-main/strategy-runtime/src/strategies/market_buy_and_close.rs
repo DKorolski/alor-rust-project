@@ -424,6 +424,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
         intents
     }
 
+    #[allow(clippy::collapsible_match)]
     fn on_ack(&mut self, _ctx: &StrategyCtx, ack: &CommandAck) -> Vec<Intent> {
         match &mut self.state {
             StrategyState::MarketLivePendingEntry {
@@ -473,6 +474,7 @@ impl Strategy for MarketBuyAndCloseStrategy {
         Vec::new()
     }
 
+    #[allow(clippy::collapsible_match)]
     fn on_position(&mut self, ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
         if pos.symbol != self.config.symbol {
             return Vec::new();
