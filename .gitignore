@@ -28,6 +28,26 @@ target/
 **/*.log
 .local/
 
+# Private operational evidence. Files already tracked in origin/main remain tracked;
+# these rules prevent new live-soak and broker artifacts from being added by accident.
+private/
+private_docs/
+**/runtime_artifacts/
+**/review_artifacts/
+**/reports/
+alor-rs-main/docs/vps-live-observations-*.md
+alor-rs-main/docs/vps-live-weekly-reconciliation-*.md
+alor-rs-main/docs/*broker-ledger*
+alor-rs-main/docs/*trade-ledger*
+alor-rs-main/docs/*live-economics*
+alor-rs-main/docs/*live-observation*
+alor-rs-main/docs/*live-observations*
+alor-rs-main/docs/*soak-observation*
+alor-rs-main/docs/*soak-results*
+alor-rs-main/docs/*development-observations*
+alor-rs-main/docs/*local-bringup*
+scripts/*.expect
+
 # OS / editor metadata
 **/.DS_Store
 **/Thumbs.db
