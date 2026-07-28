@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{bail, Result};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
@@ -7,9 +7,9 @@ use tracing::{debug, info};
 
 use crate::state::StrategyState;
 use crate::strategies::moex_author41_42::{
-    build_ri_author41_42_combo_shadow_journal, Author41Config, Author42Config, Author42SideMode,
-    Component, ModelBar, ModelProfile, OverlapDecision, RegularSessionPolicy, ShadowJournalRecord,
-    ShadowSide,
+    build_ri_author41_42_combo_shadow_journal_with_configs, Author41Config, Author42Config,
+    Author42SideMode, Component, ModelBar, ModelProfile, OverlapDecision, RegularSessionPolicy,
+    ShadowJournalRecord, ShadowSide,
 };
 use crate::strategy_host::{
     BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, Intent, IntentBlockDisposition,
@@ -17,6 +17,11 @@ use crate::strategy_host::{
 };
 use alor_protocol::{AckStatus, IntentClass, Side as OrderSide};
 use uuid::Uuid;
+
+fn parse_ri_time(field: &'static str, raw: &str) -> Result<NaiveTime> {
+    NaiveTime::parse_from_str(raw, "%H:%M:%S")
+        .map_err(|err| anyhow::anyhow!("invalid ri_author41_42 {field} {raw}: {err}"))
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -79,10 +84,19 @@ pub struct RiAuthor4142LiveConfig {
     pub allow_order_emission: bool,
     pub execution_path: RiAuthor4142ExecutionPath,
     pub order_symbol: Option<String>,
+    pub session_start_time: String,
+    pub session_end_time: String,
+    pub author41_entry_end_time: String,
+    pub author41_time_exit: String,
+    pub author42_exit_time: String,
     pub excluded_model_dates: Vec<String>,
     pub min_anchor_bars: usize,
     pub anchor_first_bar_at_or_before: String,
     pub anchor_last_bar_at_or_after: String,
+    pub anchor_transition_date: Option<String>,
+    pub pre_transition_min_anchor_bars: Option<usize>,
+    pub pre_transition_anchor_first_bar_at_or_before: Option<String>,
+    pub pre_transition_anchor_last_bar_at_or_after: Option<String>,
     pub actual_expiry_date: Option<String>,
     pub roll_target_sessions_before: u32,
     pub roll_fallback_sessions_before: u32,
@@ -239,6 +253,19 @@ struct RiDailyStats {
     last_bar: NaiveTime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RiAnchorCompletenessRule {
+    min_bars: usize,
+    first_bar_at_or_before: NaiveTime,
+    last_bar_at_or_after: NaiveTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RiAnchorTransitionRule {
+    starts_on: NaiveDate,
+    pre_transition: RiAnchorCompletenessRule,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct RiDailyAnchor {
     prev_close: f64,
@@ -342,6 +369,8 @@ impl Default for RiAuthor4142LiveBoState {
 #[serde(rename_all = "snake_case")]
 pub enum RiAuthor4142JournalDecision {
     ShadowRecorded,
+    ShadowPathActive,
+    ShadowPathSuperseded,
     IntentSuppressed,
     IntentEmitted,
     ManualInterventionRequired,
@@ -368,6 +397,7 @@ pub struct RiAuthor4142JournalRecord {
     pub candidate_intent_class: Option<IntentClass>,
     pub execution_path: String,
     pub decision_key: String,
+    pub shadow_pnl_points: Option<f64>,
 }
 
 impl RiAuthor4142LiveConfig {
@@ -395,6 +425,18 @@ impl RiAuthor4142LiveConfig {
                 anyhow::anyhow!("invalid excluded_model_dates value {raw}: {err}")
             })?;
         }
+        let session_start = parse_ri_time("session_start_time", &self.session_start_time)?;
+        let session_end = parse_ri_time("session_end_time", &self.session_end_time)?;
+        if session_start >= session_end {
+            bail!(
+                "ri_author41_42 requires session_start_time < session_end_time, got {} >= {}",
+                self.session_start_time,
+                self.session_end_time
+            );
+        }
+        parse_ri_time("author41_entry_end_time", &self.author41_entry_end_time)?;
+        parse_ri_time("author41_time_exit", &self.author41_time_exit)?;
+        parse_ri_time("author42_exit_time", &self.author42_exit_time)?;
         NaiveTime::parse_from_str(&self.anchor_first_bar_at_or_before, "%H:%M:%S").map_err(
             |err| {
                 anyhow::anyhow!(
@@ -411,6 +453,42 @@ impl RiAuthor4142LiveConfig {
                 )
             },
         )?;
+        let transition_fields_configured = self.anchor_transition_date.is_some()
+            || self.pre_transition_min_anchor_bars.is_some()
+            || self.pre_transition_anchor_first_bar_at_or_before.is_some()
+            || self.pre_transition_anchor_last_bar_at_or_after.is_some();
+        if transition_fields_configured {
+            let transition_date = self.anchor_transition_date.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("anchor transition requires anchor_transition_date")
+            })?;
+            NaiveDate::parse_from_str(transition_date, "%Y-%m-%d").map_err(|err| {
+                anyhow::anyhow!("invalid anchor_transition_date {transition_date}: {err}")
+            })?;
+            if self.pre_transition_min_anchor_bars.is_none()
+                || self.pre_transition_anchor_first_bar_at_or_before.is_none()
+                || self.pre_transition_anchor_last_bar_at_or_after.is_none()
+            {
+                bail!(
+                    "anchor transition requires pre_transition_min_anchor_bars and both pre_transition anchor times"
+                );
+            }
+            let first = self
+                .pre_transition_anchor_first_bar_at_or_before
+                .as_deref()
+                .expect("validated above");
+            NaiveTime::parse_from_str(first, "%H:%M:%S").map_err(|err| {
+                anyhow::anyhow!(
+                    "invalid pre_transition_anchor_first_bar_at_or_before {first}: {err}"
+                )
+            })?;
+            let last = self
+                .pre_transition_anchor_last_bar_at_or_after
+                .as_deref()
+                .expect("validated above");
+            NaiveTime::parse_from_str(last, "%H:%M:%S").map_err(|err| {
+                anyhow::anyhow!("invalid pre_transition_anchor_last_bar_at_or_after {last}: {err}")
+            })?;
+        }
         if let Some(raw) = &self.actual_expiry_date {
             NaiveDate::parse_from_str(raw, "%Y-%m-%d")
                 .map_err(|err| anyhow::anyhow!("invalid actual_expiry_date {raw}: {err}"))?;
@@ -431,11 +509,17 @@ pub struct RiAuthor4142LiveStrategy {
     config: RiAuthor4142LiveConfig,
     session_policy: RegularSessionPolicy,
     excluded_model_dates: HashSet<NaiveDate>,
-    anchor_first_bar_at_or_before: NaiveTime,
-    anchor_last_bar_at_or_after: NaiveTime,
+    canonical_anchor_rule: RiAnchorCompletenessRule,
+    anchor_transition_rule: Option<RiAnchorTransitionRule>,
+    author41_entry_end: NaiveTime,
+    author41_time_exit: NaiveTime,
+    author42_exit_time: NaiveTime,
     logged_excluded_dates: HashSet<NaiveDate>,
+    logged_anchor_context_dates: HashSet<NaiveDate>,
     model_bars: Vec<ModelBar>,
     emitted_decision_keys: HashSet<String>,
+    shadow_path_keys_by_date: BTreeMap<NaiveDate, BTreeSet<String>>,
+    shadow_decisions_by_key: BTreeMap<String, RiAuthor4142ModelDecision>,
     journal_records: Vec<RiAuthor4142JournalRecord>,
     live_mr: RiAuthor4142LiveMrState,
     live_bo: RiAuthor4142LiveBoState,
@@ -446,22 +530,66 @@ impl RiAuthor4142LiveStrategy {
     pub fn new(config: RiAuthor4142LiveConfig) -> Result<Self> {
         config.validate()?;
         let profile = ModelProfile::ri_shadow_10m();
-        let session_policy = profile.session_policy;
+        let session_start = parse_ri_time("session_start_time", &config.session_start_time)?;
+        let session_end = parse_ri_time("session_end_time", &config.session_end_time)?;
+        let session_policy = RegularSessionPolicy::new(session_start, session_end, true);
         let live_adapter_enabled = config.can_emit_orders();
         let excluded_model_dates = config
             .excluded_model_dates
             .iter()
             .map(|raw| NaiveDate::parse_from_str(raw, "%Y-%m-%d"))
             .collect::<std::result::Result<HashSet<_>, _>>()?;
-        let anchor_first_bar_at_or_before =
-            NaiveTime::parse_from_str(&config.anchor_first_bar_at_or_before, "%H:%M:%S")?;
-        let anchor_last_bar_at_or_after =
-            NaiveTime::parse_from_str(&config.anchor_last_bar_at_or_after, "%H:%M:%S")?;
+        let canonical_anchor_rule = RiAnchorCompletenessRule {
+            min_bars: config.min_anchor_bars,
+            first_bar_at_or_before: NaiveTime::parse_from_str(
+                &config.anchor_first_bar_at_or_before,
+                "%H:%M:%S",
+            )?,
+            last_bar_at_or_after: NaiveTime::parse_from_str(
+                &config.anchor_last_bar_at_or_after,
+                "%H:%M:%S",
+            )?,
+        };
+        let anchor_transition_rule = match config.anchor_transition_date.as_deref() {
+            None => None,
+            Some(starts_on) => Some(RiAnchorTransitionRule {
+                starts_on: NaiveDate::parse_from_str(starts_on, "%Y-%m-%d")?,
+                pre_transition: RiAnchorCompletenessRule {
+                    min_bars: config
+                        .pre_transition_min_anchor_bars
+                        .expect("validated transition configuration"),
+                    first_bar_at_or_before: NaiveTime::parse_from_str(
+                        config
+                            .pre_transition_anchor_first_bar_at_or_before
+                            .as_deref()
+                            .expect("validated transition configuration"),
+                        "%H:%M:%S",
+                    )?,
+                    last_bar_at_or_after: NaiveTime::parse_from_str(
+                        config
+                            .pre_transition_anchor_last_bar_at_or_after
+                            .as_deref()
+                            .expect("validated transition configuration"),
+                        "%H:%M:%S",
+                    )?,
+                },
+            }),
+        };
+        let author41_entry_end =
+            parse_ri_time("author41_entry_end_time", &config.author41_entry_end_time)?;
+        let author41_time_exit = parse_ri_time("author41_time_exit", &config.author41_time_exit)?;
+        let author42_exit_time = parse_ri_time("author42_exit_time", &config.author42_exit_time)?;
         info!(
             target: "strategy_runtime::ri_author41_42_live",
-            action = "ri_rollover_policy_loaded",
+            action = "ri_model_policy_loaded",
             active_contract = %config.symbol,
             order_symbol = ?config.order_symbol,
+            profile_id = %profile.profile_id.as_str(),
+            model_session_start = %config.session_start_time,
+            model_session_end = %config.session_end_time,
+            author41_entry_end = %config.author41_entry_end_time,
+            author41_time_exit = %config.author41_time_exit,
+            author42_exit_time = %config.author42_exit_time,
             actual_expiry_date = ?config.actual_expiry_date,
             roll_target_sessions_before = config.roll_target_sessions_before,
             roll_fallback_sessions_before = config.roll_fallback_sessions_before,
@@ -469,6 +597,10 @@ impl RiAuthor4142LiveStrategy {
             min_anchor_bars = config.min_anchor_bars,
             anchor_first_bar_at_or_before = %config.anchor_first_bar_at_or_before,
             anchor_last_bar_at_or_after = %config.anchor_last_bar_at_or_after,
+            anchor_transition_date = ?config.anchor_transition_date,
+            pre_transition_min_anchor_bars = ?config.pre_transition_min_anchor_bars,
+            pre_transition_anchor_first_bar_at_or_before = ?config.pre_transition_anchor_first_bar_at_or_before,
+            pre_transition_anchor_last_bar_at_or_after = ?config.pre_transition_anchor_last_bar_at_or_after,
         );
         Ok(Self {
             state: StrategyState::RiAuthor4142Live {
@@ -497,11 +629,17 @@ impl RiAuthor4142LiveStrategy {
             config,
             session_policy,
             excluded_model_dates,
-            anchor_first_bar_at_or_before,
-            anchor_last_bar_at_or_after,
+            canonical_anchor_rule,
+            anchor_transition_rule,
+            author41_entry_end,
+            author41_time_exit,
+            author42_exit_time,
             logged_excluded_dates: HashSet::new(),
+            logged_anchor_context_dates: HashSet::new(),
             model_bars: Vec::new(),
             emitted_decision_keys: HashSet::new(),
+            shadow_path_keys_by_date: BTreeMap::new(),
+            shadow_decisions_by_key: BTreeMap::new(),
             journal_records: Vec::new(),
             live_mr: RiAuthor4142LiveMrState::default(),
             live_bo: RiAuthor4142LiveBoState::default(),
@@ -520,6 +658,8 @@ impl RiAuthor4142LiveStrategy {
         };
         let excluded_date = self.excluded_model_dates.contains(&dt_local.date());
         let is_model_bar = self.session_policy.is_model_bar(dt_local)
+            && !self.is_operational_shadow_break_bar(dt_local)
+            && !self.is_pre_transition_service_bar(dt_local)
             && !excluded_date
             && bar.origin != DataOrigin::HistoryGap;
         if excluded_date && self.logged_excluded_dates.insert(dt_local.date()) {
@@ -581,12 +721,34 @@ impl RiAuthor4142LiveStrategy {
         self.collect_new_decisions(dt_local)
     }
 
+    fn is_operational_shadow_break_bar(&self, dt_local: NaiveDateTime) -> bool {
+        if self.config.mode != RiAuthor4142RuntimeMode::Shadow {
+            return false;
+        }
+
+        let bar_time = dt_local.time();
+        (bar_time >= NaiveTime::from_hms_opt(14, 0, 0).unwrap_or(NaiveTime::MIN)
+            && bar_time <= NaiveTime::from_hms_opt(14, 4, 59).unwrap_or(NaiveTime::MIN))
+            || (bar_time >= NaiveTime::from_hms_opt(18, 50, 0).unwrap_or(NaiveTime::MIN)
+                && bar_time <= NaiveTime::from_hms_opt(19, 4, 59).unwrap_or(NaiveTime::MIN))
+    }
+
+    fn is_pre_transition_service_bar(&self, dt_local: NaiveDateTime) -> bool {
+        let Some(transition) = self.anchor_transition_rule else {
+            return false;
+        };
+        self.config.mode == RiAuthor4142RuntimeMode::Shadow
+            && dt_local.date() < transition.starts_on
+            && dt_local.time() < NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN)
+    }
+
     fn collect_new_decisions(
         &mut self,
         current_dt_local: NaiveDateTime,
     ) -> Vec<RiAuthor4142ModelDecision> {
-        let eligible_dates = self
-            .daily_stats_before(current_dt_local.date())
+        let eligible_anchor_sessions = self.daily_stats_before(current_dt_local.date());
+        self.log_anchor_context(current_dt_local.date(), &eligible_anchor_sessions);
+        let eligible_dates = eligible_anchor_sessions
             .into_iter()
             .map(|(date, _)| date)
             .collect::<HashSet<_>>();
@@ -599,29 +761,107 @@ impl RiAuthor4142LiveStrategy {
                     || eligible_dates.contains(&bar.ts_local.date())
             })
             .collect::<Vec<_>>();
-        let records =
-            build_ri_author41_42_combo_shadow_journal(&eligible_model_bars, self.session_policy);
+        let records = build_ri_author41_42_combo_shadow_journal_with_configs(
+            &eligible_model_bars,
+            self.session_policy,
+            self.author41_short_config(),
+            self.author41_long_config(),
+            self.author42_config(),
+        );
+        let finalized = finalized_decisions_from_records(records, current_dt_local);
+        if !self.can_emit_orders() {
+            return self.collect_shadow_decisions(finalized, current_dt_local);
+        }
+        self.collect_incremental_decisions(finalized)
+    }
+
+    fn collect_incremental_decisions(
+        &mut self,
+        finalized: Vec<RiAuthor4142ModelDecision>,
+    ) -> Vec<RiAuthor4142ModelDecision> {
         let mut decisions = Vec::new();
-        for record in records {
-            if !is_finalized_record(&record, current_dt_local) {
+        for decision in finalized {
+            if !self
+                .emitted_decision_keys
+                .insert(decision.decision_key.clone())
+            {
                 continue;
             }
-            let key = decision_key(&record);
-            if !self.emitted_decision_keys.insert(key.clone()) {
-                continue;
-            }
-            let Some(decision) = RiAuthor4142ModelDecision::from_shadow_record(record, key) else {
-                continue;
-            };
             self.record_decision_state(&decision);
             self.record_shadow_journal(&decision);
             self.log_decision(&decision);
-            if !self.can_emit_orders() {
-                self.apply_dry_run_decision(&decision);
-            }
             decisions.push(decision);
         }
         decisions
+    }
+
+    fn collect_shadow_decisions(
+        &mut self,
+        finalized: Vec<RiAuthor4142ModelDecision>,
+        current_dt_local: NaiveDateTime,
+    ) -> Vec<RiAuthor4142ModelDecision> {
+        let new_decisions = self.collect_incremental_decisions(finalized.clone());
+        for decision in &new_decisions {
+            self.apply_dry_run_decision(decision);
+        }
+        self.update_shadow_portfolio_path(&finalized, current_dt_local);
+        new_decisions
+    }
+
+    fn update_shadow_portfolio_path(
+        &mut self,
+        finalized: &[RiAuthor4142ModelDecision],
+        current_dt_local: NaiveDateTime,
+    ) {
+        let mut keys_by_date = BTreeMap::<NaiveDate, BTreeSet<String>>::new();
+        keys_by_date.entry(current_dt_local.date()).or_default();
+        for decision in finalized {
+            self.shadow_decisions_by_key
+                .insert(decision.decision_key.clone(), decision.clone());
+            if !is_shadow_portfolio_path_member(decision) {
+                continue;
+            }
+            keys_by_date
+                .entry(decision_entry_date(decision))
+                .or_default()
+                .insert(decision.decision_key.clone());
+        }
+
+        for (date, current_keys) in keys_by_date {
+            let previous_keys = self
+                .shadow_path_keys_by_date
+                .get(&date)
+                .cloned()
+                .unwrap_or_default();
+            if previous_keys == current_keys {
+                continue;
+            }
+
+            for removed_key in previous_keys.difference(&current_keys) {
+                if let Some(decision) = self.shadow_decisions_by_key.get(removed_key).cloned() {
+                    self.record_shadow_path_superseded_journal(&decision);
+                    self.log_shadow_path_change(
+                        "ri_shadow_path_superseded",
+                        &decision,
+                        date,
+                        current_dt_local,
+                    );
+                }
+            }
+            for added_key in current_keys.difference(&previous_keys) {
+                if let Some(decision) = self.shadow_decisions_by_key.get(added_key).cloned() {
+                    self.record_shadow_path_active_journal(&decision);
+                    self.log_shadow_path_change(
+                        "ri_shadow_path_active",
+                        &decision,
+                        date,
+                        current_dt_local,
+                    );
+                }
+            }
+
+            self.shadow_path_keys_by_date.insert(date, current_keys);
+        }
     }
 
     fn record_decision_state(&mut self, decision: &RiAuthor4142ModelDecision) {
@@ -644,6 +884,31 @@ impl RiAuthor4142LiveStrategy {
             component = decision.component.as_str(),
             side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
             model_signal_ts_local = %decision.model_signal_ts_local,
+            scheduled_entry_ts_local = ?decision.scheduled_entry_ts_local,
+            scheduled_exit_ts_local = ?decision.scheduled_exit_ts_local,
+            reason = %decision.reason,
+            overlap_decision = %decision.overlap_decision,
+            shadow_pnl_points = ?decision.shadow_pnl_points,
+            decision_key = %decision.decision_key,
+            mode = self.config.mode.as_str(),
+            live_adapter_enabled = self.can_emit_orders(),
+        );
+    }
+
+    fn log_shadow_path_change(
+        &self,
+        action: &'static str,
+        decision: &RiAuthor4142ModelDecision,
+        path_date: NaiveDate,
+        current_dt_local: NaiveDateTime,
+    ) {
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action,
+            path_date = %path_date,
+            recomputed_at_local = %current_dt_local,
+            component = decision.component.as_str(),
+            side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
             scheduled_entry_ts_local = ?decision.scheduled_entry_ts_local,
             scheduled_exit_ts_local = ?decision.scheduled_exit_ts_local,
             reason = %decision.reason,
@@ -746,6 +1011,24 @@ impl RiAuthor4142LiveStrategy {
             RiAuthor4142JournalDecision::ShadowRecorded,
             None,
             None,
+        ));
+    }
+
+    fn record_shadow_path_active_journal(&mut self, decision: &RiAuthor4142ModelDecision) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::ShadowPathActive,
+            None,
+            None,
+        ));
+    }
+
+    fn record_shadow_path_superseded_journal(&mut self, decision: &RiAuthor4142ModelDecision) {
+        self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
+            decision,
+            RiAuthor4142JournalDecision::ShadowPathSuperseded,
+            None,
+            Some("shadow_path_recomputed"),
         ));
     }
 
@@ -1063,6 +1346,7 @@ impl RiAuthor4142LiveStrategy {
         }
         let dt_local = self.local_dt(bar.close_time_utc)?;
         if !self.session_policy.is_model_bar(dt_local)
+            || self.is_operational_shadow_break_bar(dt_local)
             || self.excluded_model_dates.contains(&dt_local.date())
         {
             return None;
@@ -1188,7 +1472,7 @@ impl RiAuthor4142LiveStrategy {
         }
         if self.phase_is("live_deferred_exit") {
             if let Some(position) = self.live_bo.position.clone() {
-                let config = Author42Config::ri_grid_k042_both();
+                let config = self.author42_config();
                 intents.push(self.emit_bo_exit_intent(
                     &position,
                     bar,
@@ -1204,7 +1488,7 @@ impl RiAuthor4142LiveStrategy {
             return intents;
         }
         self.ensure_bo_session(bar);
-        let config = Author42Config::ri_grid_k042_both();
+        let config = self.author42_config();
 
         if let Some(pending) = self.live_bo.pending.take() {
             match pending {
@@ -1328,7 +1612,7 @@ impl RiAuthor4142LiveStrategy {
             return;
         }
         let date = bar.ts_local.date();
-        let config = Author42Config::ri_grid_k042_both();
+        let config = self.author42_config();
         let context = self.bo_context_for_date(date);
         let skip_by_date = (config.exclude_friday && date.weekday().number_from_monday() == 5)
             || (config.exclude_june_window && Self::in_author_june_window(date));
@@ -1450,8 +1734,8 @@ impl RiAuthor4142LiveStrategy {
         {
             return None;
         }
-        let short = Author41Config::ri_plateau_short_source();
-        let long = Author41Config::ri_plateau_long_source();
+        let short = self.author41_short_config();
+        let long = self.author41_long_config();
         for (side, config) in [
             (RiAuthor4142Side::Short, short),
             (RiAuthor4142Side::Long, long),
@@ -1840,14 +2124,80 @@ impl RiAuthor4142LiveStrategy {
         }
         by_day
             .into_iter()
-            .filter(|(_, stats)| self.is_eligible_anchor_session(*stats))
+            .filter(|(session_date, stats)| self.is_eligible_anchor_session(*session_date, *stats))
             .collect()
     }
 
-    fn is_eligible_anchor_session(&self, stats: RiDailyStats) -> bool {
-        stats.bars >= self.config.min_anchor_bars
-            && stats.first_bar <= self.anchor_first_bar_at_or_before
-            && stats.last_bar >= self.anchor_last_bar_at_or_after
+    fn anchor_rule_for_date(&self, date: NaiveDate) -> RiAnchorCompletenessRule {
+        match self.anchor_transition_rule {
+            Some(transition) if date < transition.starts_on => transition.pre_transition,
+            _ => self.canonical_anchor_rule,
+        }
+    }
+
+    fn is_eligible_anchor_session(&self, date: NaiveDate, stats: RiDailyStats) -> bool {
+        let rule = self.anchor_rule_for_date(date);
+        stats.bars >= rule.min_bars
+            && stats.first_bar <= rule.first_bar_at_or_before
+            && stats.last_bar >= rule.last_bar_at_or_after
+    }
+
+    fn log_anchor_context(
+        &mut self,
+        current_date: NaiveDate,
+        eligible_sessions: &[(NaiveDate, RiDailyStats)],
+    ) {
+        if !self.logged_anchor_context_dates.insert(current_date) {
+            return;
+        }
+        let summarize = |offset: usize| {
+            eligible_sessions
+                .iter()
+                .rev()
+                .nth(offset)
+                .map(|(date, stats)| {
+                    let rule = self.anchor_rule_for_date(*date);
+                    (
+                        date.to_string(),
+                        stats.bars,
+                        stats.first_bar.to_string(),
+                        stats.last_bar.to_string(),
+                        rule.min_bars,
+                        rule.first_bar_at_or_before.to_string(),
+                        rule.last_bar_at_or_after.to_string(),
+                    )
+                })
+        };
+        let prev = summarize(0);
+        let prev2 = summarize(1);
+        info!(
+            target: "strategy_runtime::ri_author41_42_live",
+            action = "ri_anchor_context_resolved",
+            current_date = %current_date,
+            eligible_anchor_sessions = eligible_sessions.len(),
+            prev = ?prev,
+            prev2 = ?prev2,
+        );
+    }
+
+    fn author41_short_config(&self) -> Author41Config {
+        let mut config = Author41Config::ri_plateau_short_source();
+        config.entry_end = self.author41_entry_end;
+        config.time_exit = self.author41_time_exit;
+        config
+    }
+
+    fn author41_long_config(&self) -> Author41Config {
+        let mut config = Author41Config::ri_plateau_long_source();
+        config.entry_end = self.author41_entry_end;
+        config.time_exit = self.author41_time_exit;
+        config
+    }
+
+    fn author42_config(&self) -> Author42Config {
+        let mut config = Author42Config::ri_grid_k042_both();
+        config.exit_time = self.author42_exit_time;
+        config
     }
 
     fn points_for_side(side: RiAuthor4142Side, entry_price: f64, exit_price: f64) -> f64 {
@@ -2387,8 +2737,62 @@ impl RiAuthor4142JournalRecord {
                 .map(|candidate| candidate.execution_path.as_str().to_string())
                 .unwrap_or_else(|| "not_applicable_pre_go".to_string()),
             decision_key: decision.decision_key.clone(),
+            shadow_pnl_points: decision.shadow_pnl_points,
         }
     }
+}
+
+fn finalized_decisions_from_records(
+    records: Vec<ShadowJournalRecord>,
+    current_dt_local: NaiveDateTime,
+) -> Vec<RiAuthor4142ModelDecision> {
+    let mut decisions = records
+        .into_iter()
+        .filter(|record| is_finalized_record(record, current_dt_local))
+        .filter_map(|record| {
+            let key = decision_key(&record);
+            RiAuthor4142ModelDecision::from_shadow_record(record, key)
+        })
+        .collect::<Vec<_>>();
+    decisions.sort_by(|left, right| {
+        (
+            decision_entry_ts(left),
+            decision_component_sort_key(left.component),
+            left.scheduled_exit_ts_local,
+            left.decision_key.as_str(),
+        )
+            .cmp(&(
+                decision_entry_ts(right),
+                decision_component_sort_key(right.component),
+                right.scheduled_exit_ts_local,
+                right.decision_key.as_str(),
+            ))
+    });
+    decisions
+}
+
+fn decision_entry_ts(decision: &RiAuthor4142ModelDecision) -> NaiveDateTime {
+    decision
+        .scheduled_entry_ts_local
+        .unwrap_or(decision.model_signal_ts_local)
+}
+
+fn decision_entry_date(decision: &RiAuthor4142ModelDecision) -> NaiveDate {
+    decision_entry_ts(decision).date()
+}
+
+fn decision_component_sort_key(component: RiAuthor4142Component) -> u8 {
+    match component {
+        RiAuthor4142Component::Author41Mr => 0,
+        RiAuthor4142Component::Author42Bo => 1,
+    }
+}
+
+fn is_shadow_portfolio_path_member(decision: &RiAuthor4142ModelDecision) -> bool {
+    decision.action == RiAuthor4142DecisionAction::Enter
+        && decision.overlap_decision == "Accepted"
+        && decision.scheduled_entry_ts_local.is_some()
+        && decision.scheduled_exit_ts_local.is_some()
 }
 
 fn non_zero_or_close(value: f64, close: f64) -> f64 {
@@ -2442,7 +2846,8 @@ mod tests {
         RiAuthor4142LiveStrategy, RiAuthor4142Phase, RiAuthor4142RuntimeMode, RiAuthor4142Side,
     };
     use crate::strategies::moex_author41_42::{
-        Component, Instrument, OverlapDecision, ProfileId, ShadowJournalRecord, ShadowSide,
+        Component, Instrument, ModelBar, OverlapDecision, ProfileId, ShadowJournalRecord,
+        ShadowSide,
     };
     use crate::strategy_host::{
         BarEvent, BootstrapSnapshot, CommandPrepared, DataOrigin, IntentBlockDisposition,
@@ -2462,16 +2867,59 @@ mod tests {
             allow_order_emission: false,
             execution_path: RiAuthor4142ExecutionPath::ActionScopedOnly,
             order_symbol: None,
+            session_start_time: "09:00:00".to_string(),
+            session_end_time: "23:49:59".to_string(),
+            author41_entry_end_time: "12:00:00".to_string(),
+            author41_time_exit: "20:00:00".to_string(),
+            author42_exit_time: "23:00:00".to_string(),
             excluded_model_dates: Vec::new(),
             min_anchor_bars: 0,
             anchor_first_bar_at_or_before: "23:59:59".to_string(),
             anchor_last_bar_at_or_after: "00:00:00".to_string(),
+            anchor_transition_date: None,
+            pre_transition_min_anchor_bars: None,
+            pre_transition_anchor_first_bar_at_or_before: None,
+            pre_transition_anchor_last_bar_at_or_after: None,
             actual_expiry_date: None,
             roll_target_sessions_before: 1,
             roll_fallback_sessions_before: 2,
             qty: 1.0,
             timezone_offset_hours: 3,
         }
+    }
+
+    fn canonical07_transition_config() -> RiAuthor4142LiveConfig {
+        let mut config = default_config();
+        config.session_start_time = "07:00:00".to_string();
+        config.author41_entry_end_time = "10:00:00".to_string();
+        config.min_anchor_bars = 92;
+        config.anchor_first_bar_at_or_before = "07:10:00".to_string();
+        config.anchor_last_bar_at_or_after = "23:30:00".to_string();
+        config.anchor_transition_date = Some("2026-07-14".to_string());
+        config.pre_transition_min_anchor_bars = Some(80);
+        config.pre_transition_anchor_first_bar_at_or_before = Some("09:10:00".to_string());
+        config.pre_transition_anchor_last_bar_at_or_after = Some("23:30:00".to_string());
+        config
+    }
+
+    fn canonical07_transition_fixture_bars() -> Vec<ModelBar> {
+        include_str!("../../tests/fixtures/ri_canonical07_transition_2026_07_10_15.csv")
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let fields = line.split(',').collect::<Vec<_>>();
+                assert_eq!(fields.len(), 6, "fixture row must have six columns");
+                ModelBar {
+                    ts_local: NaiveDateTime::parse_from_str(fields[0], "%Y-%m-%d %H:%M:%S")
+                        .expect("fixture timestamp"),
+                    open: fields[1].parse().expect("fixture open"),
+                    high: fields[2].parse().expect("fixture high"),
+                    low: fields[3].parse().expect("fixture low"),
+                    close: fields[4].parse().expect("fixture close"),
+                    volume: fields[5].parse().expect("fixture volume"),
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -3152,6 +3600,127 @@ mod tests {
     }
 
     #[test]
+    fn canonical07_feed_guard_excludes_auction_and_accepts_continuous_bars() {
+        let mut config = default_config();
+        config.session_start_time = "07:00:00".to_string();
+        config.author41_entry_end_time = "10:00:00".to_string();
+        config.anchor_first_bar_at_or_before = "07:10:00".to_string();
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+
+        let auction_bar = bar(dt(2026, 7, 16, 6, 50, 0), DataOrigin::Live);
+        let first_continuous_bar = bar(dt(2026, 7, 16, 7, 0, 0), DataOrigin::Live);
+        let pre_legacy_bar = bar(dt(2026, 7, 16, 8, 50, 0), DataOrigin::Live);
+
+        assert!(strategy.update_bar_state(&auction_bar).is_empty());
+        assert!(strategy.update_bar_state(&first_continuous_bar).is_empty());
+        assert!(strategy.update_bar_state(&pre_legacy_bar).is_empty());
+
+        assert_eq!(strategy.model_bars.len(), 2);
+        assert_eq!(strategy.model_bars[0].ts_local, dt(2026, 7, 16, 7, 0, 0));
+        assert_eq!(strategy.model_bars[1].ts_local, dt(2026, 7, 16, 8, 50, 0));
+    }
+
+    #[test]
+    fn transition_feed_guard_excludes_legacy_pre_session_service_bar() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(canonical07_transition_config())
+            .expect("transition strategy");
+
+        assert!(strategy
+            .update_bar_state(&bar(dt(2026, 7, 13, 8, 50, 0), DataOrigin::History))
+            .is_empty());
+        assert!(strategy
+            .update_bar_state(&bar(dt(2026, 7, 13, 9, 0, 0), DataOrigin::History))
+            .is_empty());
+        assert!(strategy
+            .update_bar_state(&bar(dt(2026, 7, 14, 7, 0, 0), DataOrigin::History))
+            .is_empty());
+
+        assert_eq!(strategy.model_bars.len(), 2);
+        assert_eq!(strategy.model_bars[0].ts_local, dt(2026, 7, 13, 9, 0, 0));
+        assert_eq!(strategy.model_bars[1].ts_local, dt(2026, 7, 14, 7, 0, 0));
+    }
+
+    #[test]
+    fn operational_shadow_excludes_moex_break_bars_without_changing_live_contract() {
+        let break_one = bar(dt(2026, 7, 15, 14, 0, 0), DataOrigin::Live);
+        let break_two = bar(dt(2026, 7, 15, 18, 50, 0), DataOrigin::Live);
+
+        let mut shadow = RiAuthor4142LiveStrategy::new(default_config()).expect("shadow");
+        assert!(shadow.update_bar_state(&break_one).is_empty());
+        assert!(shadow.update_bar_state(&break_two).is_empty());
+        assert!(shadow.model_bars.is_empty());
+
+        let mut live_config = default_config();
+        live_config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        live_config.allow_order_emission = true;
+        let mut live = RiAuthor4142LiveStrategy::new(live_config).expect("live");
+        assert!(live.update_bar_state(&break_one).is_empty());
+        assert!(live.update_bar_state(&break_two).is_empty());
+        assert_eq!(live.model_bars.len(), 2);
+    }
+
+    #[test]
+    fn legacy09_feed_guard_still_rejects_pre_0900_bars() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+
+        assert!(strategy
+            .update_bar_state(&bar(dt(2026, 7, 16, 8, 50, 0), DataOrigin::Live))
+            .is_empty());
+        assert!(strategy
+            .update_bar_state(&bar(dt(2026, 7, 16, 9, 0, 0), DataOrigin::Live))
+            .is_empty());
+
+        assert_eq!(strategy.model_bars.len(), 1);
+        assert_eq!(strategy.model_bars[0].ts_local, dt(2026, 7, 16, 9, 0, 0));
+    }
+
+    #[test]
+    fn canonical07_clock_translation_keeps_late_exits_unchanged() {
+        let mut config = default_config();
+        config.session_start_time = "07:00:00".to_string();
+        config.author41_entry_end_time = "10:00:00".to_string();
+        config.author41_time_exit = "20:00:00".to_string();
+        config.author42_exit_time = "23:00:00".to_string();
+
+        let strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+
+        assert_eq!(
+            strategy.session_policy.start,
+            chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author41_short_config().entry_end,
+            chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author41_long_config().entry_end,
+            chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author41_short_config().time_exit,
+            chrono::NaiveTime::from_hms_opt(20, 0, 0).unwrap()
+        );
+        assert_eq!(
+            strategy.author42_config().exit_time,
+            chrono::NaiveTime::from_hms_opt(23, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn author42_hour_check_sequence_is_relative_to_first_model_bar() {
+        let first = dt(2026, 7, 16, 7, 0, 0);
+
+        assert!(!RiAuthor4142LiveStrategy::is_author42_hour_check(
+            dt(2026, 7, 16, 7, 50, 0),
+            Some(first)
+        ));
+        assert!(RiAuthor4142LiveStrategy::is_author42_hour_check(
+            dt(2026, 7, 16, 8, 50, 0),
+            Some(first)
+        ));
+    }
+
+    #[test]
     fn configured_special_session_is_excluded_from_model_and_live_emission() {
         let mut config = default_config();
         config.mode = RiAuthor4142RuntimeMode::MicroLive;
@@ -3234,6 +3803,73 @@ mod tests {
     }
 
     #[test]
+    fn transition_anchor_guard_accepts_complete_legacy_sessions_only_before_cutover() {
+        let strategy = RiAuthor4142LiveStrategy::new(canonical07_transition_config())
+            .expect("transition strategy");
+        let legacy_stats = super::RiDailyStats {
+            high: 100.0,
+            low: 90.0,
+            close: 95.0,
+            bars: 86,
+            first_bar: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            last_bar: chrono::NaiveTime::from_hms_opt(23, 40, 0).unwrap(),
+        };
+        let canonical_stats = super::RiDailyStats {
+            bars: 98,
+            first_bar: chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap(),
+            ..legacy_stats
+        };
+
+        assert!(strategy.is_eligible_anchor_session(
+            NaiveDate::from_ymd_opt(2026, 7, 13).unwrap(),
+            legacy_stats
+        ));
+        assert!(!strategy.is_eligible_anchor_session(
+            NaiveDate::from_ymd_opt(2026, 7, 14).unwrap(),
+            legacy_stats
+        ));
+        assert!(strategy.is_eligible_anchor_session(
+            NaiveDate::from_ymd_opt(2026, 7, 14).unwrap(),
+            canonical_stats
+        ));
+    }
+
+    #[test]
+    fn transition_fixture_restores_expected_early_author42_bo_paths() {
+        let mut transition = RiAuthor4142LiveStrategy::new(canonical07_transition_config())
+            .expect("transition strategy");
+        transition.model_bars = canonical07_transition_fixture_bars();
+        let decisions = transition.collect_new_decisions(dt(2026, 7, 15, 23, 40, 0));
+
+        let expected = [
+            (dt(2026, 7, 14, 15, 0, 0), dt(2026, 7, 14, 23, 0, 0), 718.0),
+            (dt(2026, 7, 15, 21, 0, 0), dt(2026, 7, 15, 23, 0, 0), 208.0),
+        ];
+        for (entry, exit, pnl) in expected {
+            assert!(decisions.iter().any(|decision| {
+                decision.component == super::RiAuthor4142Component::Author42Bo
+                    && decision.overlap_decision == "Accepted"
+                    && decision.scheduled_entry_ts_local == Some(entry)
+                    && decision.scheduled_exit_ts_local == Some(exit)
+                    && decision.shadow_pnl_points == Some(pnl)
+            }));
+        }
+
+        let mut uniform_config = canonical07_transition_config();
+        uniform_config.anchor_transition_date = None;
+        uniform_config.pre_transition_min_anchor_bars = None;
+        uniform_config.pre_transition_anchor_first_bar_at_or_before = None;
+        uniform_config.pre_transition_anchor_last_bar_at_or_after = None;
+        let mut uniform = RiAuthor4142LiveStrategy::new(uniform_config).expect("uniform strategy");
+        uniform.model_bars = canonical07_transition_fixture_bars();
+        let uniform_decisions = uniform.collect_new_decisions(dt(2026, 7, 15, 23, 40, 0));
+        assert!(!uniform_decisions.iter().any(|decision| {
+            decision.component == super::RiAuthor4142Component::Author42Bo
+                && decision.scheduled_entry_ts_local == Some(dt(2026, 7, 14, 15, 0, 0))
+        }));
+    }
+
+    #[test]
     fn rollover_policy_requires_ordered_positive_offsets() {
         let mut config = default_config();
         config.roll_target_sessions_before = 2;
@@ -3290,6 +3926,121 @@ mod tests {
             strategy.phase_for_test().as_deref(),
             Some(RiAuthor4142Phase::Flat.as_str())
         );
+    }
+
+    #[test]
+    fn shadow_path_marks_recomputed_overlap_decision_as_superseded() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let later_long = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Long,
+            dt(2026, 7, 20, 9, 0, 0),
+            dt(2026, 7, 20, 9, 10, 0),
+            "take_author_close",
+            208.0,
+        );
+        let later_long_key = later_long.decision_key.clone();
+
+        strategy.collect_shadow_decisions(vec![later_long], dt(2026, 7, 20, 9, 20, 0));
+
+        let active_after_first = strategy
+            .shadow_path_keys_by_date
+            .get(&NaiveDate::from_ymd_opt(2026, 7, 20).unwrap())
+            .expect("path date");
+        assert!(active_after_first.contains(&later_long_key));
+
+        let earlier_short = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Short,
+            dt(2026, 7, 20, 7, 40, 0),
+            dt(2026, 7, 20, 9, 30, 0),
+            "take_author_close",
+            918.0,
+        );
+        let earlier_short_key = earlier_short.decision_key.clone();
+
+        strategy.collect_shadow_decisions(vec![earlier_short], dt(2026, 7, 20, 9, 40, 0));
+
+        let active_after_recompute = strategy
+            .shadow_path_keys_by_date
+            .get(&NaiveDate::from_ymd_opt(2026, 7, 20).unwrap())
+            .expect("path date");
+        assert!(!active_after_recompute.contains(&later_long_key));
+        assert!(active_after_recompute.contains(&earlier_short_key));
+
+        let journal = strategy.journal_records_for_test();
+        assert!(journal.iter().any(|row| {
+            row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathSuperseded
+                && row.decision_key == later_long_key
+        }));
+        assert!(journal.iter().any(|row| {
+            row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathActive
+                && row.decision_key == earlier_short_key
+        }));
+    }
+
+    #[test]
+    fn shadow_path_does_not_duplicate_active_rows_when_path_is_unchanged() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let decision = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Long,
+            dt(2026, 7, 20, 9, 0, 0),
+            dt(2026, 7, 20, 9, 10, 0),
+            "take_author_close",
+            208.0,
+        );
+
+        strategy.collect_shadow_decisions(vec![decision.clone()], dt(2026, 7, 20, 9, 20, 0));
+        strategy.collect_shadow_decisions(vec![decision], dt(2026, 7, 20, 9, 30, 0));
+
+        let active_rows = strategy
+            .journal_records_for_test()
+            .iter()
+            .filter(|row| row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathActive)
+            .count();
+        let superseded_rows = strategy
+            .journal_records_for_test()
+            .iter()
+            .filter(|row| row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathSuperseded)
+            .count();
+
+        assert_eq!(active_rows, 1);
+        assert_eq!(superseded_rows, 0);
+    }
+
+    #[test]
+    fn shadow_path_keeps_late_bo_after_mr_time_exit() {
+        let mut strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
+        let mr = accepted_shadow_decision(
+            Component::Author41Mr,
+            ShadowSide::Long,
+            dt(2026, 7, 15, 8, 10, 0),
+            dt(2026, 7, 15, 20, 0, 0),
+            "time_exit",
+            -1342.0,
+        );
+        let late_bo = accepted_shadow_decision(
+            Component::Author42Bo,
+            ShadowSide::Short,
+            dt(2026, 7, 15, 21, 0, 0),
+            dt(2026, 7, 15, 23, 0, 0),
+            "time_exit_same_bar_close",
+            208.0,
+        );
+        let late_bo_key = late_bo.decision_key.clone();
+
+        strategy.collect_shadow_decisions(vec![mr, late_bo], dt(2026, 7, 15, 23, 10, 0));
+
+        let active = strategy
+            .shadow_path_keys_by_date
+            .get(&NaiveDate::from_ymd_opt(2026, 7, 15).unwrap())
+            .expect("path date");
+        assert!(active.contains(&late_bo_key));
+        assert!(strategy.journal_records_for_test().iter().any(|row| {
+            row.adapter_decision == RiAuthor4142JournalDecision::ShadowPathActive
+                && row.decision_key == late_bo_key
+        }));
     }
 
     #[test]
@@ -3707,6 +4458,26 @@ mod tests {
             shadow_pnl_points: Some(10.0),
             feed_quality_flags: Vec::new(),
         }
+    }
+
+    fn accepted_shadow_decision(
+        component: Component,
+        side: ShadowSide,
+        entry_ts: NaiveDateTime,
+        exit_ts: NaiveDateTime,
+        reason: &str,
+        pnl_points: f64,
+    ) -> super::RiAuthor4142ModelDecision {
+        let mut record = sample_record(OverlapDecision::Accepted, reason);
+        record.component = component;
+        record.side = Some(side);
+        record.bar_ts_local = entry_ts;
+        record.scheduled_entry_ts_local = Some(entry_ts);
+        record.scheduled_exit_ts_local = Some(exit_ts);
+        record.exit_reason = Some(reason.to_string());
+        record.shadow_pnl_points = Some(pnl_points);
+        let key = super::decision_key(&record);
+        super::RiAuthor4142ModelDecision::from_shadow_record(record, key).expect("decision")
     }
 
     fn dt(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> NaiveDateTime {

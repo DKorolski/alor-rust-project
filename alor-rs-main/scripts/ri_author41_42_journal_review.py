@@ -14,12 +14,15 @@ import json
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 
 EXPECTED_PRE_GO_DECISIONS = {
     "shadow_recorded",
+    "shadow_path_active",
+    "shadow_path_superseded",
     "intent_suppressed",
     "manual_intervention_required",
 }
@@ -29,10 +32,15 @@ EXPECTED_EXECUTION_PATH = "action_scoped_only"
 @dataclass(frozen=True)
 class Review:
     path: Path
+    from_date: date | None
+    to_date: date | None
     total_rows: int
     bad_lines: list[str]
     counts: dict[str, Counter[str]]
-    shadow_duplicate_keys: dict[str, int]
+    shadow_path_replayed_keys: dict[str, int]
+    final_active_shadow_path_rows: list[dict[str, Any]]
+    final_superseded_shadow_path_rows: list[dict[str, Any]]
+    final_active_shadow_pnl_points: float
     live_evidence_rows: list[dict[str, Any]]
     unexpected_decision_rows: list[dict[str, Any]]
     unexpected_execution_path_rows: list[dict[str, Any]]
@@ -43,10 +51,6 @@ class Review:
         violations: list[str] = []
         if self.bad_lines:
             violations.append(f"bad_json_lines={len(self.bad_lines)}")
-        if self.shadow_duplicate_keys:
-            violations.append(
-                f"duplicate_shadow_recorded_keys={len(self.shadow_duplicate_keys)}"
-            )
         if self.live_evidence_rows:
             violations.append(f"live_emission_evidence_rows={len(self.live_evidence_rows)}")
         if self.unexpected_decision_rows:
@@ -63,6 +67,16 @@ class Review:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("journal", help="Path to RI Author41/42 JSONL decision journal.")
+    parser.add_argument(
+        "--from-date",
+        type=date.fromisoformat,
+        help="Optional inclusive model-signal start date (YYYY-MM-DD) for path economics.",
+    )
+    parser.add_argument(
+        "--to-date",
+        type=date.fromisoformat,
+        help="Optional inclusive model-signal end date (YYYY-MM-DD) for path economics.",
+    )
     parser.add_argument("--tail", type=int, default=10, help="Number of recent rows to print.")
     parser.add_argument(
         "--strict-pre-go",
@@ -101,7 +115,34 @@ def value(row: dict[str, Any], key: str) -> str:
     return str(raw)
 
 
-def build_review(path: Path, tail: int) -> Review:
+def number(row: dict[str, Any], key: str) -> float:
+    raw = row.get(key)
+    if raw is None:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def in_economic_scope(row: dict[str, Any], from_date: date | None, to_date: date | None) -> bool:
+    raw = value(row, "model_signal_ts_local")
+    if raw == "none":
+        return from_date is None and to_date is None
+    try:
+        signal_date = date.fromisoformat(raw[:10])
+    except ValueError:
+        return False
+    return (from_date is None or signal_date >= from_date) and (
+        to_date is None or signal_date <= to_date
+    )
+
+
+def build_review(
+    path: Path, tail: int, from_date: date | None, to_date: date | None
+) -> Review:
+    if from_date and to_date and from_date > to_date:
+        raise ValueError("--from-date must not be later than --to-date")
     rows, bad_lines = load_jsonl(path)
     counts: dict[str, Counter[str]] = {
         "adapter_decision": Counter(value(row, "adapter_decision") for row in rows),
@@ -114,15 +155,40 @@ def build_review(path: Path, tail: int) -> Review:
         "candidate_intent_class": Counter(value(row, "candidate_intent_class") for row in rows),
     }
 
-    shadow_keys = Counter(
-        value(row, "decision_key")
+    shadow_path_rows = [
+        row
         for row in rows
-        if value(row, "adapter_decision") == "shadow_recorded"
+        if value(row, "adapter_decision")
+        in {"shadow_path_active", "shadow_path_superseded"}
         and value(row, "decision_key") != "none"
-    )
-    shadow_duplicate_keys = {
-        key: count for key, count in shadow_keys.items() if count > 1
+    ]
+    shadow_path_key_counts = Counter(value(row, "decision_key") for row in shadow_path_rows)
+    shadow_path_replayed_keys = {
+        key: count for key, count in shadow_path_key_counts.items() if count > 1
     }
+    # JSONL is intentionally append-only. A restart may append an already active
+    # path again, so economics use the latest status for each decision key.
+    latest_shadow_path_by_key = {
+        value(row, "decision_key"): row for row in shadow_path_rows
+    }
+    scoped_shadow_path_rows = [
+        row
+        for row in latest_shadow_path_by_key.values()
+        if in_economic_scope(row, from_date, to_date)
+    ]
+    final_active_shadow_path_rows = [
+        row
+        for row in scoped_shadow_path_rows
+        if value(row, "adapter_decision") == "shadow_path_active"
+    ]
+    final_superseded_shadow_path_rows = [
+        row
+        for row in scoped_shadow_path_rows
+        if value(row, "adapter_decision") == "shadow_path_superseded"
+    ]
+    counts["final_shadow_path_status"] = Counter(
+        value(row, "adapter_decision") for row in scoped_shadow_path_rows
+    )
     live_evidence_rows = [
         row
         for row in rows
@@ -142,10 +208,17 @@ def build_review(path: Path, tail: int) -> Review:
 
     return Review(
         path=path,
+        from_date=from_date,
+        to_date=to_date,
         total_rows=len(rows),
         bad_lines=bad_lines,
         counts=counts,
-        shadow_duplicate_keys=shadow_duplicate_keys,
+        shadow_path_replayed_keys=shadow_path_replayed_keys,
+        final_active_shadow_path_rows=final_active_shadow_path_rows,
+        final_superseded_shadow_path_rows=final_superseded_shadow_path_rows,
+        final_active_shadow_pnl_points=sum(
+            number(row, "shadow_pnl_points") for row in final_active_shadow_path_rows
+        ),
         live_evidence_rows=live_evidence_rows,
         unexpected_decision_rows=unexpected_decision_rows,
         unexpected_execution_path_rows=unexpected_execution_path_rows,
@@ -182,6 +255,7 @@ def render_markdown(review: Review, strict_pre_go: bool) -> str:
         "",
         f"- Journal: `{review.path}`",
         f"- Rows: `{review.total_rows}`",
+        f"- Economics scope: `{review.from_date or 'all'}..{review.to_date or 'all'}`",
         f"- Strict pre-GO: `{strict_pre_go}`",
         f"- Status: `{status}`",
         "",
@@ -196,17 +270,20 @@ def render_markdown(review: Review, strict_pre_go: bool) -> str:
             "## Safety Checks",
             "",
             f"- Bad JSON lines: `{len(review.bad_lines)}`",
-            f"- Duplicate `shadow_recorded` decision keys: `{len(review.shadow_duplicate_keys)}`",
+            f"- Replayed raw path keys: `{len(review.shadow_path_replayed_keys)}`",
+            f"- Final-active path rows: `{len(review.final_active_shadow_path_rows)}`",
+            f"- Final-superseded path rows: `{len(review.final_superseded_shadow_path_rows)}`",
+            f"- Final-active path PnL: `{review.final_active_shadow_pnl_points:.6g}`",
             f"- Live emission evidence rows: `{len(review.live_evidence_rows)}`",
             f"- Unexpected adapter decisions: `{len(review.unexpected_decision_rows)}`",
             f"- Unexpected execution paths: `{len(review.unexpected_execution_path_rows)}`",
             "",
         ]
     )
-    if review.shadow_duplicate_keys:
-        lines.append("## Duplicate Shadow Keys")
+    if review.shadow_path_replayed_keys:
+        lines.append("## Replayed Raw Path Keys")
         lines.append("")
-        for key, count in sorted(review.shadow_duplicate_keys.items()):
+        for key, count in sorted(review.shadow_path_replayed_keys.items()):
             lines.append(f"- `{key}`: `{count}`")
         lines.append("")
     if review.violations:
@@ -229,13 +306,18 @@ def render_markdown(review: Review, strict_pre_go: bool) -> str:
 def render_json(review: Review, strict_pre_go: bool) -> dict[str, Any]:
     return {
         "journal": str(review.path),
+        "from_date": review.from_date.isoformat() if review.from_date else None,
+        "to_date": review.to_date.isoformat() if review.to_date else None,
         "rows": review.total_rows,
         "strict_pre_go": strict_pre_go,
         "status": "PASS" if not review.violations else "FAIL",
         "violations": review.violations,
         "counts": {name: dict(counter) for name, counter in review.counts.items()},
         "bad_json_lines": review.bad_lines,
-        "duplicate_shadow_recorded_decision_keys": review.shadow_duplicate_keys,
+        "replayed_raw_shadow_path_decision_keys": review.shadow_path_replayed_keys,
+        "final_active_shadow_path_rows": len(review.final_active_shadow_path_rows),
+        "final_superseded_shadow_path_rows": len(review.final_superseded_shadow_path_rows),
+        "final_active_shadow_pnl_points": review.final_active_shadow_pnl_points,
         "live_emission_evidence_rows": len(review.live_evidence_rows),
         "unexpected_adapter_decision_rows": len(review.unexpected_decision_rows),
         "unexpected_execution_path_rows": len(review.unexpected_execution_path_rows),
@@ -249,7 +331,11 @@ def main() -> int:
     if not path.exists():
         print(f"journal not found: {path}", file=sys.stderr)
         return 2
-    review = build_review(path, args.tail)
+    try:
+        review = build_review(path, args.tail, args.from_date, args.to_date)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     markdown = render_markdown(review, args.strict_pre_go)
     print(markdown)
 

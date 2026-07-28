@@ -16,6 +16,8 @@ pub struct AlorUsdrubfHybridConfig {
     pub symbol: String,
     pub timezone_offset_hours: i32,
     pub tick_size: f64,
+    pub model_session_start_time: NaiveTime,
+    pub model_session_end_time: NaiveTime,
     pub mr_min_rel_range: f64,
     pub mr_max_rel_range: f64,
     pub mr_k_short: f64,
@@ -425,6 +427,11 @@ impl AlorUsdrubfHybridStrategy {
         self.day_volume_sum += volume;
         self.day_vwap_num += typical_price * volume;
         self.session_start_local.get_or_insert(local_dt);
+    }
+
+    fn is_model_session_bar(&self, local_dt: NaiveDateTime) -> bool {
+        let time = local_dt.time();
+        time >= self.config.model_session_start_time && time <= self.config.model_session_end_time
     }
 
     fn reset_day(&mut self, local_date: NaiveDate) {
@@ -1332,6 +1339,12 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         }
 
         let local_dt = utc_to_local(bar.close_time_utc, self.config.timezone_offset_hours);
+        if !self.is_model_session_bar(local_dt) {
+            self.lifecycle_stage = "outside_model_session_suppressed".to_string();
+            self.last_processed_bar_ts = Some(bar.close_time_utc);
+            self.sync_state();
+            return Vec::new();
+        }
         let local_date = local_dt.date();
         if self.current_date_local != Some(local_date) {
             self.reset_day(local_date);
@@ -2054,6 +2067,10 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 continue;
             }
             let local_dt = utc_to_local(bar.close_time_utc, self.config.timezone_offset_hours);
+            if !self.is_model_session_bar(local_dt) {
+                self.last_processed_bar_ts = Some(bar.close_time_utc);
+                continue;
+            }
             let local_date = local_dt.date();
             if self.current_date_local != Some(local_date) {
                 self.reset_day_aggregates(local_date);
@@ -2269,6 +2286,8 @@ mod tests {
             symbol: "USDRUBF".to_string(),
             timezone_offset_hours: 3,
             tick_size: 0.01,
+            model_session_start_time: NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN),
+            model_session_end_time: NaiveTime::from_hms_opt(23, 49, 59).unwrap_or(NaiveTime::MIN),
             mr_min_rel_range: 0.006,
             mr_max_rel_range: 0.050,
             mr_k_short: 0.045,
@@ -2346,6 +2365,34 @@ mod tests {
 
         let expected_typical = (79.0 + 77.0 + 78.0) / 3.0;
         assert!((strategy.session_vwap(bar.close) - expected_typical).abs() < 1e-9);
+    }
+
+    #[test]
+    fn model_session_guard_excludes_service_bars_from_live_and_warmup_state() {
+        let mut cfg = test_config();
+        cfg.model_session_start_time = NaiveTime::from_hms_opt(7, 0, 0).unwrap_or(NaiveTime::MIN);
+        cfg.model_session_end_time = NaiveTime::from_hms_opt(23, 49, 59).unwrap_or(NaiveTime::MIN);
+        let ctx = test_ctx(TradeMode::Paper, 1_785_124_800);
+        let service_bar = bar(1_785_124_200, 77.0); // 06:50 Moscow.
+        let opening_bar = bar(1_785_124_800, 78.0); // 07:00 Moscow.
+        let after_session_bar = bar(1_785_185_400, 79.0); // 23:50 Moscow.
+
+        let mut live = AlorUsdrubfHybridStrategy::new(cfg.clone());
+        assert!(live.on_bar(&ctx, &service_bar).is_empty());
+        assert_eq!(live.day_open, None);
+        assert!(live.on_bar(&ctx, &opening_bar).is_empty());
+        assert_eq!(live.day_open, Some(78.0));
+        assert_eq!(
+            live.session_start_local.map(|value| value.time()),
+            Some(NaiveTime::from_hms_opt(7, 0, 0).unwrap_or(NaiveTime::MIN))
+        );
+        assert!(live.on_bar(&ctx, &after_session_bar).is_empty());
+        assert_eq!(live.day_open, Some(78.0));
+
+        let mut warmup = AlorUsdrubfHybridStrategy::new(cfg);
+        let processed = warmup.warmup_from_history(&ctx, &[service_bar, opening_bar]);
+        assert_eq!(processed, 1);
+        assert_eq!(warmup.day_open, Some(78.0));
     }
 
     fn position_event(ts_utc: i64, qty: f64, avg_price: f64) -> PositionEvent {

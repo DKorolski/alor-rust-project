@@ -302,6 +302,14 @@ impl RiAuthor4142Adapter {
             min_anchor_bars: settings.min_anchor_bars,
             anchor_first_bar_at_or_before: settings.anchor_first_bar_at_or_before.clone(),
             anchor_last_bar_at_or_after: settings.anchor_last_bar_at_or_after.clone(),
+            anchor_transition_date: settings.anchor_transition_date.clone(),
+            pre_transition_min_anchor_bars: settings.pre_transition_min_anchor_bars,
+            pre_transition_anchor_first_bar_at_or_before: settings
+                .pre_transition_anchor_first_bar_at_or_before
+                .clone(),
+            pre_transition_anchor_last_bar_at_or_after: settings
+                .pre_transition_anchor_last_bar_at_or_after
+                .clone(),
             actual_expiry_date: settings.actual_expiry_date.clone(),
             roll_target_sessions_before: settings.roll_target_sessions_before,
             roll_fallback_sessions_before: settings.roll_fallback_sessions_before,
@@ -324,6 +332,16 @@ impl AlorUsdrubfHybridAdapter {
             StrategySpecificConfig::AlorUsdrubfHybrid(settings) => Ok(AlorUsdrubfHybridConfig {
                 symbol: config.symbol.clone(),
                 timezone_offset_hours: config.timezone_offset_hours,
+                model_session_start_time: NaiveTime::parse_from_str(
+                    &settings.model_session_start_time,
+                    "%H:%M:%S",
+                )
+                .unwrap_or_else(|_| NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN)),
+                model_session_end_time: NaiveTime::parse_from_str(
+                    &settings.model_session_end_time,
+                    "%H:%M:%S",
+                )
+                .unwrap_or_else(|_| NaiveTime::from_hms_opt(23, 49, 59).unwrap_or(NaiveTime::MIN)),
                 mr_min_rel_range: settings.mr_min_rel_range,
                 mr_max_rel_range: settings.mr_max_rel_range,
                 mr_k_short: settings.mr_k_short,
@@ -514,5 +532,26 @@ mod tests {
         assert!(err
             .to_string()
             .contains("requires AlorUsdrubfHybrid payload"));
+    }
+
+    #[test]
+    fn alor_usdrubf_hybrid_adapter_propagates_model_session_window() {
+        let mut config = StrategyConfig::defaults_for_kind(StrategyKind::AlorUsdrubfHybrid);
+        let settings = config
+            .alor_usdrubf_hybrid_mut()
+            .expect("alor-usdrubf hybrid settings");
+        settings.model_session_start_time = "07:00:00".to_string();
+        settings.model_session_end_time = "23:49:59".to_string();
+
+        let runtime_config =
+            AlorUsdrubfHybridAdapter::from_strategy_config(&config).expect("runtime config");
+        assert_eq!(
+            runtime_config.model_session_start_time,
+            NaiveTime::from_hms_opt(7, 0, 0).unwrap_or(NaiveTime::MIN)
+        );
+        assert_eq!(
+            runtime_config.model_session_end_time,
+            NaiveTime::from_hms_opt(23, 49, 59).unwrap_or(NaiveTime::MIN)
+        );
     }
 }

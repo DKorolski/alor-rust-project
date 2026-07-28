@@ -226,6 +226,8 @@ pub struct HybridIntradayStrategySettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AlorUsdrubfHybridSettings {
+    pub model_session_start_time: String,
+    pub model_session_end_time: String,
     pub mr_min_rel_range: f64,
     pub mr_max_rel_range: f64,
     pub mr_k_short: f64,
@@ -259,6 +261,10 @@ pub struct RiAuthor4142Settings {
     pub min_anchor_bars: usize,
     pub anchor_first_bar_at_or_before: String,
     pub anchor_last_bar_at_or_after: String,
+    pub anchor_transition_date: Option<String>,
+    pub pre_transition_min_anchor_bars: Option<usize>,
+    pub pre_transition_anchor_first_bar_at_or_before: Option<String>,
+    pub pre_transition_anchor_last_bar_at_or_after: Option<String>,
     pub actual_expiry_date: Option<String>,
     pub roll_target_sessions_before: u32,
     pub roll_fallback_sessions_before: u32,
@@ -269,6 +275,8 @@ pub struct RiAuthor4142Settings {
 impl Default for AlorUsdrubfHybridSettings {
     fn default() -> Self {
         Self {
+            model_session_start_time: "09:00:00".to_string(),
+            model_session_end_time: "23:49:59".to_string(),
             mr_min_rel_range: 0.006,
             mr_max_rel_range: 0.050,
             mr_k_short: 0.045,
@@ -305,6 +313,10 @@ impl Default for RiAuthor4142Settings {
             min_anchor_bars: 0,
             anchor_first_bar_at_or_before: "23:59:59".to_string(),
             anchor_last_bar_at_or_after: "00:00:00".to_string(),
+            anchor_transition_date: None,
+            pre_transition_min_anchor_bars: None,
+            pre_transition_anchor_first_bar_at_or_before: None,
+            pre_transition_anchor_last_bar_at_or_after: None,
             actual_expiry_date: None,
             roll_target_sessions_before: 1,
             roll_fallback_sessions_before: 2,

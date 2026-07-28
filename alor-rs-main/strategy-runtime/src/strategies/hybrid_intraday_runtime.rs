@@ -2305,6 +2305,37 @@ impl HybridIntradayRuntimeStrategy {
         );
         self.sync_state();
     }
+
+    fn clear_broker_lifecycle_for_paper_bootstrap(&mut self) {
+        self.last_position_qty = 0.0;
+        self.current_owner = None;
+        self.current_side = None;
+        self.pending_entry = None;
+        self.pending_entry_request_id = None;
+        self.pending_entry_created_ts_utc = None;
+        self.clear_deferred_entry();
+        self.pending_exit = None;
+        self.pending_exit_request_id = None;
+        self.pending_exit_created_ts_utc = None;
+        self.clear_deferred_exit();
+        self.pending_tp_request_id = None;
+        self.pending_tp_created_ts_utc = None;
+        self.pending_sl_request_id = None;
+        self.pending_sl_created_ts_utc = None;
+        self.tp_order_id = None;
+        self.sl_stop_order_id = None;
+        self.sl_exchange_order_id = None;
+        self.sl_triggered_ts = None;
+        self.mr_take_price = None;
+        self.mr_stop_price = None;
+        self.active_cycle_id = None;
+        self.safe_mode_close_only = false;
+        self.safe_mode_reason = None;
+        self.working_orders.clear();
+        self.working_stop_orders.clear();
+        self.reset_repair_tracking();
+        self.orchestrator.reset();
+    }
 }
 
 #[cfg(test)]
@@ -4774,6 +4805,47 @@ mod tests {
     }
 
     #[test]
+    fn paper_bootstrap_ignores_external_broker_lifecycle_state() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let mut ctx = test_ctx(Some(6.0));
+        ctx.trade_mode = TradeMode::Paper;
+        ctx.allow_live_orders = false;
+        strategy.last_position_qty = 6.0;
+        strategy.current_owner = Some(Owner::MeanReversion);
+        strategy.current_side = Some(Side::Long);
+        strategy.active_cycle_id = Some(*b"abc1230001");
+        strategy.tp_order_id = Some(101);
+        strategy.working_orders.insert(101);
+        strategy.safe_mode_close_only = true;
+
+        let mut snapshot = crate::BootstrapSnapshot {
+            positions_strategy: std::collections::HashMap::new(),
+            working_orders_strategy: std::collections::HashMap::new(),
+            working_stop_orders_strategy: std::collections::HashMap::new(),
+            snapshot_ts_utc: Some(1_700_000_300),
+        };
+        snapshot.positions_strategy.insert(
+            "IMOEXF".to_string(),
+            PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: 6.0,
+                existing: true,
+                avg_price: 100.0,
+                ts_utc: 1_700_000_300,
+            },
+        );
+
+        assert!(strategy.on_bootstrap_snapshot(&ctx, &snapshot).is_empty());
+        assert_eq!(strategy.last_position_qty, 0.0);
+        assert!(strategy.current_owner.is_none());
+        assert!(strategy.current_side.is_none());
+        assert!(strategy.active_cycle_id.is_none());
+        assert!(strategy.tp_order_id.is_none());
+        assert!(strategy.working_orders.is_empty());
+        assert!(!strategy.safe_mode_close_only);
+    }
+
+    #[test]
     fn stop_order_lag_event_adopts_sl_state() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let ctx = test_ctx(Some(1.0));
@@ -5715,6 +5787,17 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         ctx: &StrategyCtx,
         snapshot: &crate::BootstrapSnapshot,
     ) -> Vec<Intent> {
+        if ctx.trade_mode != crate::TradeMode::Live {
+            self.clear_broker_lifecycle_for_paper_bootstrap();
+            self.sync_state();
+            info!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "paper_bootstrap_broker_state_ignored",
+                trade_mode = ?ctx.trade_mode,
+                "paper/backtest bootstrap keeps model state but ignores broker lifecycle state"
+            );
+            return Vec::new();
+        }
         self.working_orders.clear();
         self.working_stop_orders.clear();
         self.tp_order_id = None;

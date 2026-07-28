@@ -631,6 +631,8 @@ struct SessionGapConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 struct AlorUsdrubfHybridConfigFile {
+    model_session_start_time: Option<String>,
+    model_session_end_time: Option<String>,
     mr_min_rel_range: Option<f64>,
     mr_max_rel_range: Option<f64>,
     mr_k_short: Option<f64>,
@@ -664,6 +666,10 @@ struct RiAuthor4142ConfigFile {
     min_anchor_bars: Option<usize>,
     anchor_first_bar_at_or_before: Option<String>,
     anchor_last_bar_at_or_after: Option<String>,
+    anchor_transition_date: Option<String>,
+    pre_transition_min_anchor_bars: Option<usize>,
+    pre_transition_anchor_first_bar_at_or_before: Option<String>,
+    pre_transition_anchor_last_bar_at_or_after: Option<String>,
     actual_expiry_date: Option<String>,
     roll_target_sessions_before: Option<u32>,
     roll_fallback_sessions_before: Option<u32>,
@@ -1298,6 +1304,12 @@ fn apply_alor_usdrubf_hybrid_config_file(
 ) {
     if let Some(settings) = strategy.alor_usdrubf_hybrid_mut() {
         sources.alor_usdrubf_hybrid = source;
+        if let Some(value) = &alor_file.model_session_start_time {
+            settings.model_session_start_time = value.clone();
+        }
+        if let Some(value) = &alor_file.model_session_end_time {
+            settings.model_session_end_time = value.clone();
+        }
         if let Some(value) = alor_file.mr_min_rel_range {
             settings.mr_min_rel_range = value;
         }
@@ -1392,6 +1404,18 @@ fn apply_ri_author41_42_config_file(
         }
         if let Some(value) = &ri_file.anchor_last_bar_at_or_after {
             settings.anchor_last_bar_at_or_after = value.clone();
+        }
+        if let Some(value) = &ri_file.anchor_transition_date {
+            settings.anchor_transition_date = Some(value.clone());
+        }
+        if let Some(value) = ri_file.pre_transition_min_anchor_bars {
+            settings.pre_transition_min_anchor_bars = Some(value);
+        }
+        if let Some(value) = &ri_file.pre_transition_anchor_first_bar_at_or_before {
+            settings.pre_transition_anchor_first_bar_at_or_before = Some(value.clone());
+        }
+        if let Some(value) = &ri_file.pre_transition_anchor_last_bar_at_or_after {
+            settings.pre_transition_anchor_last_bar_at_or_after = Some(value.clone());
         }
         if let Some(value) = &ri_file.actual_expiry_date {
             settings.actual_expiry_date = Some(value.clone());
@@ -2632,6 +2656,47 @@ side = "buy"
         assert_eq!(
             resolved.config.strategy.strategy_kind,
             StrategyKind::HybridIntraday
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_parses_alor_usdrubf_model_session_window() {
+        let path = write_temp_config(
+            "alor-usdrubf-model-session-window",
+            r#"
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502MIW"
+exchange = "MOEX"
+
+[strategy]
+strategy_id = "alor_usdrubf_hybrid_v1"
+strategy_kind = "alor_usdrubf_hybrid"
+symbol = "USDRUBF"
+qty = 2.0
+side = "buy"
+
+[strategy.alor_usdrubf_hybrid]
+model_session_start_time = "07:00:00"
+model_session_end_time = "23:49:59"
+mr_last_entry_time = "09:40:00"
+mr_force_exit_time = "09:50:00"
+"#,
+        );
+
+        let resolved = load_runtime_config(path.clone(), false).expect("load config");
+        let settings = resolved
+            .config
+            .strategy
+            .alor_usdrubf_hybrid()
+            .expect("alor-usdrubf settings");
+        assert_eq!(settings.model_session_start_time, "07:00:00");
+        assert_eq!(settings.model_session_end_time, "23:49:59");
+        assert_eq!(settings.mr_last_entry_time, "09:40:00");
+        assert_eq!(settings.mr_force_exit_time, "09:50:00");
+        assert_eq!(
+            resolved.sources.strategy.alor_usdrubf_hybrid,
+            ConfigSource::File
         );
         let _ = std::fs::remove_file(path);
     }

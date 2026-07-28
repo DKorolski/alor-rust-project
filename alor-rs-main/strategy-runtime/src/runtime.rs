@@ -1230,6 +1230,29 @@ impl StrategyRuntime {
             }
         }
 
+        if self.config.trade_mode != TradeMode::Live {
+            // Paper/backtest owns its simulated portfolio. A real broker snapshot can
+            // otherwise be combined with a synthetic fill and corrupt paper PnL.
+            self.state.orders.clear();
+            self.state.stop_orders.clear();
+            self.state.positions.clear();
+            self.bootstrap_state.orders_snapshot_loaded = orders_snapshot.is_some();
+            self.bootstrap_state.positions_snapshot_loaded = positions_snapshot.is_some();
+            self.bootstrap_snapshot = Some(BootstrapSnapshot {
+                positions_strategy: HashMap::new(),
+                working_orders_strategy: HashMap::new(),
+                working_stop_orders_strategy: HashMap::new(),
+                snapshot_ts_utc: None,
+            });
+            info!(
+                trade_mode = ?self.config.trade_mode,
+                orders_loaded = self.bootstrap_state.orders_snapshot_loaded,
+                positions_loaded = self.bootstrap_state.positions_snapshot_loaded,
+                "bootstrap: ignored external broker state for non-live runtime"
+            );
+            return Ok(());
+        }
+
         let mut positions_strategy = HashMap::new();
         let mut working_orders_strategy = HashMap::new();
         let mut working_stop_orders_strategy = HashMap::new();
