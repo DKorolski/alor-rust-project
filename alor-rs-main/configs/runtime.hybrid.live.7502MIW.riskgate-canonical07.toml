@@ -89,6 +89,11 @@ mr_gate_policy = "shadow_pnl_lb120_positive"
 risk_gate_mode = "normal_append"
 risk_gate_seed_file = "/configs/riskgate_high180_lb120_seed_2026-04-26.csv"
 risk_gate_ledger_key = "runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120"
+# Existing rows keep their audited live09 identity. The first row reconstructed
+# by this rollout uses canonical07; update this date if the rollout is delayed.
+risk_gate_legacy_session_start_time = "09:00:00"
+risk_gate_legacy_session_end_time = "23:49:59"
+risk_gate_session_policy_transition_date = "2026-07-28"
 model_session_start_time = "07:00:00"
 model_session_end_time = "23:49:59"
 mr_min_range_long = 0.013

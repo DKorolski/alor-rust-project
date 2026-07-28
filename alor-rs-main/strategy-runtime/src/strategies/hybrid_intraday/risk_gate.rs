@@ -52,6 +52,8 @@ pub struct RiskGateProfileIdentity {
     pub mr_variant: String,
     pub timeframe: String,
     pub session_policy: String,
+    pub legacy_session_policy: Option<String>,
+    pub session_policy_transition_date: Option<NaiveDate>,
     pub model_version: String,
 }
 
@@ -107,6 +109,18 @@ impl RiskGateRedisKeys {
             finalized_key: format!(
                 "runtime.riskgate.finalized.{strategy_id}.{profile_id}.{session_date}"
             ),
+        }
+    }
+}
+
+impl RiskGateProfileIdentity {
+    pub fn session_policy_for_date(&self, session_date: NaiveDate) -> &str {
+        match (
+            self.legacy_session_policy.as_deref(),
+            self.session_policy_transition_date,
+        ) {
+            (Some(legacy), Some(transition_date)) if session_date < transition_date => legacy,
+            _ => &self.session_policy,
         }
     }
 }
@@ -673,7 +687,9 @@ pub fn build_ledger_records_from_rows(
             profile_id: identity.profile_id.clone(),
             mr_variant: identity.mr_variant.clone(),
             timeframe: identity.timeframe.clone(),
-            session_policy: identity.session_policy.clone(),
+            session_policy: identity
+                .session_policy_for_date(rows[idx].session_date)
+                .to_string(),
             rolling_sum_lb120,
             mr_enabled_next_session,
             model_version: identity.model_version.clone(),
@@ -718,10 +734,11 @@ pub fn validate_ledger_record_identity(
                 record.timeframe, identity.timeframe
             ));
         }
-        if record.session_policy != identity.session_policy {
+        let expected_session_policy = identity.session_policy_for_date(record.row.session_date);
+        if record.session_policy != expected_session_policy {
             return Err(format!(
                 "risk gate ledger session_policy mismatch: {} != {}",
-                record.session_policy, identity.session_policy
+                record.session_policy, expected_session_policy
             ));
         }
     }
@@ -829,8 +846,55 @@ mod tests {
             mr_variant: "high180".to_string(),
             timeframe: "10m".to_string(),
             session_policy: "Mon-Fri 09:00..23:49".to_string(),
+            legacy_session_policy: None,
+            session_policy_transition_date: None,
             model_version: "2026-04-26".to_string(),
         }
+    }
+
+    #[test]
+    fn ledger_identity_supports_an_explicit_session_policy_transition() {
+        let transition_date = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap_or(NaiveDate::MIN);
+        let mut before = row(5, 1.0);
+        before.session_date = NaiveDate::from_ymd_opt(2026, 7, 27).unwrap_or(NaiveDate::MIN);
+        let mut after = row(6, 2.0);
+        after.session_date = transition_date;
+        let transition_identity = RiskGateProfileIdentity {
+            session_policy: "Mon-Fri 07:00..23:49".to_string(),
+            legacy_session_policy: Some("Mon-Fri 09:00..23:49".to_string()),
+            session_policy_transition_date: Some(transition_date),
+            ..identity()
+        };
+
+        let records =
+            build_ledger_records_from_rows(&[before, after], &transition_identity, 1_785_200_000)
+                .expect("transition records");
+
+        assert_eq!(records[0].session_policy, "Mon-Fri 09:00..23:49");
+        assert_eq!(records[1].session_policy, "Mon-Fri 07:00..23:49");
+        assert!(validate_ledger_record_identity(&records, &transition_identity).is_ok());
+    }
+
+    #[test]
+    fn ledger_identity_rejects_legacy_policy_after_transition() {
+        let transition_date = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap_or(NaiveDate::MIN);
+        let mut current = row(6, 2.0);
+        current.session_date = transition_date;
+        let transition_identity = RiskGateProfileIdentity {
+            session_policy: "Mon-Fri 07:00..23:49".to_string(),
+            legacy_session_policy: Some("Mon-Fri 09:00..23:49".to_string()),
+            session_policy_transition_date: Some(transition_date),
+            ..identity()
+        };
+        let mut records =
+            build_ledger_records_from_rows(&[current], &transition_identity, 1_785_200_000)
+                .expect("transition record");
+        records[0].session_policy = "Mon-Fri 09:00..23:49".to_string();
+
+        let err = validate_ledger_record_identity(&records, &transition_identity)
+            .expect_err("legacy policy after transition must be rejected");
+
+        assert!(err.contains("Mon-Fri 09:00..23:49 != Mon-Fri 07:00..23:49"));
     }
 
     #[test]

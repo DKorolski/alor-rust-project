@@ -102,15 +102,30 @@ pub fn startup_store_config_from_strategy_config(
         bail!("risk gate mode {:?} requires risk_gate_seed_file", mode);
     }
 
+    let session_policy = session_policy_from_config(
+        &runtime_settings.model_session_start_time,
+        &runtime_settings.model_session_end_time,
+    )?;
+    let (legacy_session_policy, session_policy_transition_date) =
+        legacy_session_policy_transition_from_config(
+            runtime_settings
+                .risk_gate_legacy_session_start_time
+                .as_deref(),
+            runtime_settings
+                .risk_gate_legacy_session_end_time
+                .as_deref(),
+            runtime_settings
+                .risk_gate_session_policy_transition_date
+                .as_deref(),
+        )?;
     let identity = RiskGateProfileIdentity {
         strategy_id,
         profile_id,
         mr_variant,
         timeframe: "10m".to_string(),
-        session_policy: session_policy_from_config(
-            &runtime_settings.model_session_start_time,
-            &runtime_settings.model_session_end_time,
-        )?,
+        session_policy,
+        legacy_session_policy,
+        session_policy_transition_date,
         model_version: model_version_from_seed_file(seed_file.as_ref()),
     };
 
@@ -448,6 +463,29 @@ fn session_policy_from_config(start: &str, end: &str) -> Result<String> {
     ))
 }
 
+fn legacy_session_policy_transition_from_config(
+    start: Option<&str>,
+    end: Option<&str>,
+    transition_date: Option<&str>,
+) -> Result<(Option<String>, Option<NaiveDate>)> {
+    match (start, end, transition_date) {
+        (None, None, None) => Ok((None, None)),
+        (Some(start), Some(end), Some(transition_date)) => {
+            let policy = session_policy_from_config(start, end)?;
+            let transition_date = NaiveDate::parse_from_str(transition_date.trim(), "%Y-%m-%d")
+                .map_err(|err| {
+                    anyhow!(
+                        "invalid risk_gate_session_policy_transition_date: {transition_date}: {err}"
+                    )
+                })?;
+            Ok((Some(policy), Some(transition_date)))
+        }
+        _ => bail!(
+            "risk gate legacy session transition requires start time, end time, and transition date"
+        ),
+    }
+}
+
 fn model_version_from_seed_file(seed_file: Option<&PathBuf>) -> String {
     seed_file
         .and_then(|path| path.file_stem())
@@ -487,6 +525,8 @@ mod tests {
             mr_variant: "high180".to_string(),
             timeframe: "10m".to_string(),
             session_policy: "Mon-Fri 09:00..23:49".to_string(),
+            legacy_session_policy: None,
+            session_policy_transition_date: None,
             model_version: "2026-04-26".to_string(),
         }
     }
@@ -592,6 +632,8 @@ mod tests {
         assert_eq!(config.identity.mr_variant, "high180");
         assert_eq!(config.identity.timeframe, "10m");
         assert_eq!(config.identity.session_policy, "Mon-Fri 09:00..23:49");
+        assert_eq!(config.identity.legacy_session_policy, None);
+        assert_eq!(config.identity.session_policy_transition_date, None);
         assert_eq!(
             config.identity.model_version,
             "riskgate_lb120_seed_2026_04_26"
@@ -612,6 +654,54 @@ mod tests {
             .expect("startup config");
 
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn startup_config_supports_audited_session_policy_transition() {
+        let mut strategy = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        strategy.common.strategy_id = "hybrid_imoexf".to_string();
+        let settings = strategy.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.profile = "imoexf_primary_riskgate".to_string();
+        settings.strategy.mr_variant = "high180".to_string();
+        settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
+        settings.strategy.risk_gate_mode = "normal_append".to_string();
+        settings.strategy.model_session_start_time = "07:00:00".to_string();
+        settings.strategy.model_session_end_time = "23:49:59".to_string();
+        settings.strategy.risk_gate_legacy_session_start_time = Some("09:00:00".to_string());
+        settings.strategy.risk_gate_legacy_session_end_time = Some("23:49:59".to_string());
+        settings.strategy.risk_gate_session_policy_transition_date = Some("2026-07-28".to_string());
+
+        let config = startup_store_config_from_strategy_config(&strategy, 1_785_200_000)
+            .expect("startup config")
+            .expect("enabled");
+
+        assert_eq!(config.identity.session_policy, "Mon-Fri 07:00..23:49");
+        assert_eq!(
+            config.identity.legacy_session_policy.as_deref(),
+            Some("Mon-Fri 09:00..23:49")
+        );
+        assert_eq!(
+            config.identity.session_policy_transition_date,
+            NaiveDate::from_ymd_opt(2026, 7, 28)
+        );
+    }
+
+    #[test]
+    fn startup_config_rejects_incomplete_session_policy_transition() {
+        let mut strategy = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        let settings = strategy.hybrid_intraday_mut().expect("hybrid settings");
+        settings.strategy.profile = "imoexf_primary_riskgate".to_string();
+        settings.strategy.mr_variant = "high180".to_string();
+        settings.strategy.mr_gate_policy = "shadow_pnl_lb120_positive".to_string();
+        settings.strategy.risk_gate_mode = "normal_append".to_string();
+        settings.strategy.risk_gate_legacy_session_start_time = Some("09:00:00".to_string());
+
+        let err =
+            startup_store_config_from_strategy_config(&strategy, 1_785_200_000).expect_err("err");
+
+        assert!(err
+            .to_string()
+            .contains("requires start time, end time, and transition date"));
     }
 
     #[test]

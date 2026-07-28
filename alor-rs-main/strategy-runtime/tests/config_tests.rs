@@ -1054,6 +1054,18 @@ fn loads_live_imoexf_canonical07_replacement_candidate() {
     assert_eq!(hybrid.bo_wait_hours, 3.0);
     assert_eq!(hybrid.risk_gate_mode, "normal_append");
     assert_eq!(
+        hybrid.risk_gate_legacy_session_start_time.as_deref(),
+        Some("09:00:00")
+    );
+    assert_eq!(
+        hybrid.risk_gate_legacy_session_end_time.as_deref(),
+        Some("23:49:59")
+    );
+    assert_eq!(
+        hybrid.risk_gate_session_policy_transition_date.as_deref(),
+        Some("2026-07-28")
+    );
+    assert_eq!(
         hybrid.risk_gate_ledger_key.as_deref(),
         Some("runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120")
     );

@@ -54,6 +54,14 @@ The candidate uses a new consumer group and runtime-state key. This gives the
 runtime a clean operational bootstrap without deleting or rebuilding the
 long-lived risk-gate ledger.
 
+The risk-gate ledger has an explicit audited session-policy transition. Rows
+before `2026-07-28` retain `Mon-Fri 09:00..23:49`; rows from `2026-07-28`
+onward use `Mon-Fri 07:00..23:49`. Runtime identity validation accepts each
+policy only on its proper side of that boundary. It does not relabel historical
+rows. If rollout is delayed beyond the planned 2026-07-29 session, the
+transition date must be moved to the first prior session that the new runtime
+will reconstruct as canonical07.
+
 ## RI Prospective Shadow
 
 The canonical07 runtime config now uses:
@@ -103,8 +111,10 @@ Do not replace the IMOEXF live contour unless all conditions are true:
 3. Runtime has no pending entry, exit or protective-repair lifecycle.
 4. The canonical risk-gate ledger exists and its last finalized session is
    recorded before the restart.
-5. The exchange session is closed or the work is performed before 07:00 MSK.
-6. The old live09 and new live07 runtime are never active simultaneously.
+5. The configured risk-gate session-policy transition date matches the actual
+   rollout/reconstruction boundary.
+6. The exchange session is closed or the work is performed before 07:00 MSK.
+7. The old live09 and new live07 runtime are never active simultaneously.
 
 The RI prospective shadow should also start before 07:00 MSK so its first
 journal date is a complete session.
@@ -128,8 +138,9 @@ journal date is a complete session.
 4. Start the gateway first and wait for `LiveReady`.
 5. Start the runtime and confirm clean history/startup replay suppression.
 6. Confirm production risk-gate ledger load and current gate state.
-7. Confirm quantity `6`, session start `07:00`, MR end `09:59` and BO wait `3`.
-8. Observe the first full session without changing K, quantity or exit policy.
+7. Confirm legacy ledger rows remain `09:00` and the first new row is `07:00`.
+8. Confirm quantity `6`, session start `07:00`, MR end `09:59` and BO wait `3`.
+9. Observe the first full session without changing K, quantity or exit policy.
 
 ## Verification
 
