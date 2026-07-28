@@ -298,6 +298,11 @@ impl RiAuthor4142Adapter {
                 .map(|symbol| symbol.trim())
                 .filter(|symbol| !symbol.is_empty())
                 .map(ToString::to_string),
+            session_start_time: settings.session_start_time.clone(),
+            session_end_time: settings.session_end_time.clone(),
+            author41_entry_end_time: settings.author41_entry_end_time.clone(),
+            author41_time_exit: settings.author41_time_exit.clone(),
+            author42_exit_time: settings.author42_exit_time.clone(),
             excluded_model_dates: settings.excluded_model_dates.clone(),
             min_anchor_bars: settings.min_anchor_bars,
             anchor_first_bar_at_or_before: settings.anchor_first_bar_at_or_before.clone(),

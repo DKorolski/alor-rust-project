@@ -139,6 +139,14 @@ impl RegularSessionPolicy {
         }
     }
 
+    pub fn new(start: NaiveTime, end: NaiveTime, weekdays_only: bool) -> Self {
+        Self {
+            start,
+            end,
+            weekdays_only,
+        }
+    }
+
     pub fn is_model_bar(self, dt_local: NaiveDateTime) -> bool {
         if self.weekdays_only && dt_local.weekday().number_from_monday() > 5 {
             return false;
@@ -382,6 +390,20 @@ pub fn replay_ri_author41_dual_no_overlap_source(
     bars: &[ModelBar],
     session_policy: RegularSessionPolicy,
 ) -> Author41ReplayResult {
+    replay_ri_author41_dual_no_overlap_source_with_configs(
+        bars,
+        session_policy,
+        Author41Config::ri_plateau_short_source(),
+        Author41Config::ri_plateau_long_source(),
+    )
+}
+
+pub fn replay_ri_author41_dual_no_overlap_source_with_configs(
+    bars: &[ModelBar],
+    session_policy: RegularSessionPolicy,
+    short_config: Author41Config,
+    long_config: Author41Config,
+) -> Author41ReplayResult {
     let mut filtered: Vec<ModelBar> = bars
         .iter()
         .copied()
@@ -389,16 +411,8 @@ pub fn replay_ri_author41_dual_no_overlap_source(
         .collect();
     filtered.sort_by_key(|bar| bar.ts_local);
 
-    let short = replay_author41(
-        &filtered,
-        Author41Config::ri_plateau_short_source(),
-        session_policy,
-    );
-    let long = replay_author41(
-        &filtered,
-        Author41Config::ri_plateau_long_source(),
-        session_policy,
-    );
+    let short = replay_author41(&filtered, short_config, session_policy);
+    let long = replay_author41(&filtered, long_config, session_policy);
 
     let mut candidates = short.trades;
     candidates.extend(long.trades);
@@ -486,9 +500,30 @@ pub fn replay_ri_author41_42_combo_cost2(
     bars: &[ModelBar],
     session_policy: RegularSessionPolicy,
 ) -> ComboReplayResult {
+    replay_ri_author41_42_combo_cost2_with_configs(
+        bars,
+        session_policy,
+        Author41Config::ri_plateau_short_source(),
+        Author41Config::ri_plateau_long_source(),
+        Author42Config::ri_grid_k042_both(),
+    )
+}
+
+pub fn replay_ri_author41_42_combo_cost2_with_configs(
+    bars: &[ModelBar],
+    session_policy: RegularSessionPolicy,
+    author41_short: Author41Config,
+    author41_long: Author41Config,
+    author42: Author42Config,
+) -> ComboReplayResult {
     let profile = ModelProfile::ri_shadow_10m();
-    let author41 = replay_ri_author41_dual_no_overlap_source(bars, session_policy);
-    let author42 = replay_author42(bars, Author42Config::ri_grid_k042_both(), session_policy);
+    let author41 = replay_ri_author41_dual_no_overlap_source_with_configs(
+        bars,
+        session_policy,
+        author41_short,
+        author41_long,
+    );
+    let author42 = replay_author42(bars, author42, session_policy);
     replay_combo_from_components(&profile, &author41, &author42)
 }
 
@@ -496,9 +531,30 @@ pub fn build_ri_author41_42_combo_shadow_journal(
     bars: &[ModelBar],
     session_policy: RegularSessionPolicy,
 ) -> Vec<ShadowJournalRecord> {
+    build_ri_author41_42_combo_shadow_journal_with_configs(
+        bars,
+        session_policy,
+        Author41Config::ri_plateau_short_source(),
+        Author41Config::ri_plateau_long_source(),
+        Author42Config::ri_grid_k042_both(),
+    )
+}
+
+pub fn build_ri_author41_42_combo_shadow_journal_with_configs(
+    bars: &[ModelBar],
+    session_policy: RegularSessionPolicy,
+    author41_short: Author41Config,
+    author41_long: Author41Config,
+    author42_config: Author42Config,
+) -> Vec<ShadowJournalRecord> {
     let profile = ModelProfile::ri_shadow_10m();
-    let author41 = replay_ri_author41_dual_no_overlap_source(bars, session_policy);
-    let author42 = replay_author42(bars, Author42Config::ri_grid_k042_both(), session_policy);
+    let author41 = replay_ri_author41_dual_no_overlap_source_with_configs(
+        bars,
+        session_policy,
+        author41_short,
+        author41_long,
+    );
+    let author42 = replay_author42(bars, author42_config, session_policy);
 
     let mut records = Vec::new();
     for trade in &author41.trades {
