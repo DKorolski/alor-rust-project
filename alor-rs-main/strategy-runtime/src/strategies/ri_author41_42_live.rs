@@ -27,6 +27,7 @@ fn parse_ri_time(field: &'static str, raw: &str) -> Result<NaiveTime> {
 #[serde(rename_all = "snake_case")]
 pub enum RiAuthor4142RuntimeMode {
     Shadow,
+    ProspectiveShadow,
     DryRun,
     MicroLive,
 }
@@ -35,6 +36,7 @@ impl RiAuthor4142RuntimeMode {
     pub fn parse(raw: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "" | "shadow" | "shadow_only" => Ok(Self::Shadow),
+            "prospective_shadow" | "shadow_prospective" => Ok(Self::ProspectiveShadow),
             "dry_run" | "dryrun" => Ok(Self::DryRun),
             "micro_live" | "live_micro" => Ok(Self::MicroLive),
             other => bail!("unsupported ri_author41_42 mode: {other}"),
@@ -45,9 +47,14 @@ impl RiAuthor4142RuntimeMode {
         matches!(self, Self::MicroLive)
     }
 
+    pub fn runs_prospective_adapter(self) -> bool {
+        matches!(self, Self::ProspectiveShadow)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Shadow => "shadow",
+            Self::ProspectiveShadow => "prospective_shadow",
             Self::DryRun => "dry_run",
             Self::MicroLive => "micro_live",
         }
@@ -371,6 +378,7 @@ pub enum RiAuthor4142JournalDecision {
     ShadowRecorded,
     ShadowPathActive,
     ShadowPathSuperseded,
+    ProspectiveIntentSuppressed,
     IntentSuppressed,
     IntentEmitted,
     ManualInterventionRequired,
@@ -395,6 +403,7 @@ pub struct RiAuthor4142JournalRecord {
     pub candidate_qty: Option<f64>,
     pub candidate_order_style: Option<String>,
     pub candidate_intent_class: Option<IntentClass>,
+    pub candidate_scheduled_ts_local: Option<String>,
     pub execution_path: String,
     pub decision_key: String,
     pub shadow_pnl_points: Option<f64>,
@@ -403,6 +412,10 @@ pub struct RiAuthor4142JournalRecord {
 impl RiAuthor4142LiveConfig {
     pub fn can_emit_orders(&self) -> bool {
         self.mode.can_emit_orders() && self.allow_order_emission
+    }
+
+    pub fn runs_prospective_adapter(&self) -> bool {
+        self.mode.runs_prospective_adapter() && !self.allow_order_emission
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -601,6 +614,9 @@ impl RiAuthor4142LiveStrategy {
             pre_transition_min_anchor_bars = ?config.pre_transition_min_anchor_bars,
             pre_transition_anchor_first_bar_at_or_before = ?config.pre_transition_anchor_first_bar_at_or_before,
             pre_transition_anchor_last_bar_at_or_after = ?config.pre_transition_anchor_last_bar_at_or_after,
+            mode = config.mode.as_str(),
+            allow_order_emission = config.allow_order_emission,
+            prospective_adapter_enabled = config.runs_prospective_adapter(),
         );
         Ok(Self {
             state: StrategyState::RiAuthor4142Live {
@@ -722,7 +738,10 @@ impl RiAuthor4142LiveStrategy {
     }
 
     fn is_operational_shadow_break_bar(&self, dt_local: NaiveDateTime) -> bool {
-        if self.config.mode != RiAuthor4142RuntimeMode::Shadow {
+        if !matches!(
+            self.config.mode,
+            RiAuthor4142RuntimeMode::Shadow | RiAuthor4142RuntimeMode::ProspectiveShadow
+        ) {
             return false;
         }
 
@@ -737,8 +756,10 @@ impl RiAuthor4142LiveStrategy {
         let Some(transition) = self.anchor_transition_rule else {
             return false;
         };
-        self.config.mode == RiAuthor4142RuntimeMode::Shadow
-            && dt_local.date() < transition.starts_on
+        matches!(
+            self.config.mode,
+            RiAuthor4142RuntimeMode::Shadow | RiAuthor4142RuntimeMode::ProspectiveShadow
+        ) && dt_local.date() < transition.starts_on
             && dt_local.time() < NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN)
     }
 
@@ -801,8 +822,10 @@ impl RiAuthor4142LiveStrategy {
         current_dt_local: NaiveDateTime,
     ) -> Vec<RiAuthor4142ModelDecision> {
         let new_decisions = self.collect_incremental_decisions(finalized.clone());
-        for decision in &new_decisions {
-            self.apply_dry_run_decision(decision);
+        if !self.config.runs_prospective_adapter() {
+            for decision in &new_decisions {
+                self.apply_dry_run_decision(decision);
+            }
         }
         self.update_shadow_portfolio_path(&finalized, current_dt_local);
         new_decisions
@@ -1334,11 +1357,11 @@ impl RiAuthor4142LiveStrategy {
         );
     }
 
-    fn live_model_bar_for_emit(&self, ctx: &StrategyCtx, bar: &BarEvent) -> Option<ModelBar> {
-        if !self.can_emit_orders()
-            || ctx.trade_mode != crate::TradeMode::Live
-            || !ctx.allow_live_orders
-        {
+    fn runtime_adapter_model_bar(&self, ctx: &StrategyCtx, bar: &BarEvent) -> Option<ModelBar> {
+        let live_emission_allowed = self.can_emit_orders()
+            && ctx.trade_mode == crate::TradeMode::Live
+            && ctx.allow_live_orders;
+        if !live_emission_allowed && !self.config.runs_prospective_adapter() {
             return None;
         }
         if bar.origin != DataOrigin::Live {
@@ -1359,6 +1382,33 @@ impl RiAuthor4142LiveStrategy {
             close: bar.close,
             volume: bar.v,
         })
+    }
+
+    fn finalize_prospective_adapter_transition(&mut self) {
+        match self.phase_for_test().as_deref() {
+            Some("live_pending_entry") => {
+                if let StrategyState::RiAuthor4142Live {
+                    phase,
+                    last_transition_reason,
+                    pending_entry_request_id,
+                    pending_exit_request_id,
+                    ..
+                } = &mut self.state
+                {
+                    *phase = "live_in_position".to_string();
+                    *last_transition_reason =
+                        Some("prospective_shadow_entry_assumed_filled".to_string());
+                    *pending_entry_request_id = None;
+                    *pending_exit_request_id = None;
+                }
+            }
+            Some("live_pending_exit") | Some("live_deferred_exit") => {
+                self.transition_live_flat_with_reason(
+                    "prospective_shadow_exit_assumed_filled".to_string(),
+                );
+            }
+            _ => {}
+        }
     }
 
     fn live_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
@@ -1927,9 +1977,14 @@ impl RiAuthor4142LiveStrategy {
         candidate: &RiAuthor4142CandidateIntent,
         decision: &RiAuthor4142ModelDecision,
     ) {
+        let adapter_decision = if self.config.runs_prospective_adapter() {
+            RiAuthor4142JournalDecision::ProspectiveIntentSuppressed
+        } else {
+            RiAuthor4142JournalDecision::IntentEmitted
+        };
         self.push_journal_record(RiAuthor4142JournalRecord::from_decision(
             decision,
-            RiAuthor4142JournalDecision::IntentEmitted,
+            adapter_decision,
             Some(candidate),
             None,
         ));
@@ -1940,6 +1995,29 @@ impl RiAuthor4142LiveStrategy {
         candidate: &RiAuthor4142CandidateIntent,
         decision: &RiAuthor4142ModelDecision,
     ) {
+        if self.config.runs_prospective_adapter() {
+            info!(
+                target: "strategy_runtime::ri_author41_42_live",
+                action = "ri_prospective_intent_suppressed",
+                suppression_reason = "prospective_shadow_no_broker_emission",
+                role = candidate.role.as_str(),
+                component = candidate.component.as_str(),
+                model_side = decision.side.map(RiAuthor4142Side::as_str).unwrap_or("none"),
+                order_side = ?candidate.side,
+                qty = candidate.qty,
+                order_style = candidate.order_style,
+                intent_class = ?candidate.intent_class,
+                scheduled_ts_local = %candidate.scheduled_ts_local,
+                comment = %candidate.comment,
+                execution_path = candidate.execution_path.as_str(),
+                decision_key = %candidate.decision_key,
+                shadow_pnl_points = ?decision.shadow_pnl_points,
+                mode = self.config.mode.as_str(),
+                allow_order_emission = self.config.allow_order_emission,
+                live_adapter_enabled = self.can_emit_orders(),
+            );
+            return;
+        }
         info!(
             target: "strategy_runtime::ri_author41_42_live",
             action = "ri_intent_emitted",
@@ -2395,13 +2473,21 @@ impl RiAuthor4142LiveStrategy {
 impl Strategy for RiAuthor4142LiveStrategy {
     fn on_bar(&mut self, ctx: &StrategyCtx, bar: &BarEvent) -> Vec<Intent> {
         let _decisions = self.update_bar_state(bar);
-        let Some(model_bar) = self.live_model_bar_for_emit(ctx, bar) else {
+        let Some(model_bar) = self.runtime_adapter_model_bar(ctx, bar) else {
             return Vec::new();
         };
-        self.live_intents_for_bar(model_bar)
+        let intents = self.live_intents_for_bar(model_bar);
+        if self.config.runs_prospective_adapter() {
+            self.finalize_prospective_adapter_transition();
+            return Vec::new();
+        }
+        intents
     }
 
     fn on_ack(&mut self, ctx: &StrategyCtx, ack: &alor_protocol::CommandAck) -> Vec<Intent> {
+        if !self.can_emit_orders() {
+            return Vec::new();
+        }
         if !matches!(
             ack.status,
             AckStatus::Rejected | AckStatus::Expired | AckStatus::Error
@@ -2505,6 +2591,9 @@ impl Strategy for RiAuthor4142LiveStrategy {
     }
 
     fn on_position(&mut self, _ctx: &StrategyCtx, pos: &PositionEvent) -> Vec<Intent> {
+        if !self.can_emit_orders() {
+            return Vec::new();
+        }
         let mut mark_flat = false;
         let mut clear_pending_entry = false;
         if let StrategyState::RiAuthor4142Live {
@@ -2539,6 +2628,9 @@ impl Strategy for RiAuthor4142LiveStrategy {
         _ctx: &StrategyCtx,
         snapshot: &BootstrapSnapshot,
     ) -> Vec<Intent> {
+        if self.config.runs_prospective_adapter() {
+            return Vec::new();
+        }
         self.handle_bootstrap_snapshot(snapshot);
         Vec::new()
     }
@@ -2548,6 +2640,9 @@ impl Strategy for RiAuthor4142LiveStrategy {
         _ctx: &StrategyCtx,
         state: &RuntimeStateRestored,
     ) -> Vec<Intent> {
+        if self.config.runs_prospective_adapter() {
+            return Vec::new();
+        }
         self.handle_runtime_state_restored(state);
         Vec::new()
     }
@@ -2599,6 +2694,9 @@ impl Strategy for RiAuthor4142LiveStrategy {
     }
 
     fn on_command_prepared(&mut self, _ctx: &StrategyCtx, command: &CommandPrepared) {
+        if !self.can_emit_orders() {
+            return;
+        }
         self.set_pending_request_id(command.intent_class, command.request_id);
         info!(
             target: "strategy_runtime::ri_author41_42_live",
@@ -2618,6 +2716,9 @@ impl Strategy for RiAuthor4142LiveStrategy {
         _ctx: &StrategyCtx,
         event: &IntentBlocked,
     ) -> IntentBlockDisposition {
+        if !self.can_emit_orders() {
+            return IntentBlockDisposition::Rollback;
+        }
         if event.reason == "live_guard"
             && event.intent_class == IntentClass::Entry
             && self.phase_is("live_pending_entry")
@@ -2733,6 +2834,8 @@ impl RiAuthor4142JournalRecord {
             candidate_qty: candidate.map(|candidate| candidate.qty),
             candidate_order_style: candidate.map(|candidate| candidate.order_style.to_string()),
             candidate_intent_class: candidate.map(|candidate| candidate.intent_class),
+            candidate_scheduled_ts_local: candidate
+                .map(|candidate| candidate.scheduled_ts_local.to_string()),
             execution_path: candidate
                 .map(|candidate| candidate.execution_path.as_str().to_string())
                 .unwrap_or_else(|| "not_applicable_pre_go".to_string()),
@@ -2926,6 +3029,109 @@ mod tests {
     fn shadow_mode_scaffold_cannot_emit_orders() {
         let strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
         assert!(!strategy.can_emit_orders());
+    }
+
+    #[test]
+    fn prospective_shadow_matches_live_adapter_without_emitting_orders() {
+        let mut prospective_config = default_config();
+        prospective_config.mode = RiAuthor4142RuntimeMode::ProspectiveShadow;
+        let mut prospective =
+            RiAuthor4142LiveStrategy::new(prospective_config).expect("prospective strategy");
+
+        let mut live_config = default_config();
+        live_config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        live_config.allow_order_emission = true;
+        let mut live = RiAuthor4142LiveStrategy::new(live_config).expect("live strategy");
+
+        let prev_day = bar_with_ohlc(
+            dt(2026, 5, 1, 23, 40, 0),
+            DataOrigin::History,
+            100_000.0,
+            101_000.0,
+            99_000.0,
+            100_000.0,
+        );
+        prospective.warmup_from_history(&test_ctx(), std::slice::from_ref(&prev_day));
+        live.warmup_from_history(&live_ctx(), &[prev_day]);
+
+        let entry_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 0, 0),
+            DataOrigin::Live,
+            100_050.0,
+            100_120.0,
+            100_030.0,
+            100_100.0,
+        );
+        assert!(prospective.on_bar(&test_ctx(), &entry_bar).is_empty());
+        assert_eq!(
+            prospective.phase_for_test().as_deref(),
+            Some("live_in_position")
+        );
+
+        assert_eq!(live.on_bar(&live_ctx(), &entry_bar).len(), 1);
+        live.on_position(
+            &live_ctx_with_position(-1.0),
+            &PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 100_100.0,
+                ts_utc: entry_bar.close_time_utc,
+            },
+        );
+
+        let exit_bar = bar_with_ohlc(
+            dt(2026, 5, 4, 9, 10, 0),
+            DataOrigin::Live,
+            100_090.0,
+            100_100.0,
+            99_890.0,
+            99_900.0,
+        );
+        assert!(prospective.on_bar(&test_ctx(), &exit_bar).is_empty());
+        assert_eq!(
+            prospective.phase_for_test().as_deref(),
+            Some(RiAuthor4142Phase::Flat.as_str())
+        );
+        assert_eq!(live.on_bar(&live_ctx(), &exit_bar).len(), 1);
+
+        let prospective_rows = prospective
+            .journal_records_for_test()
+            .iter()
+            .filter(|row| {
+                row.adapter_decision == RiAuthor4142JournalDecision::ProspectiveIntentSuppressed
+            })
+            .collect::<Vec<_>>();
+        let live_rows = live
+            .journal_records_for_test()
+            .iter()
+            .filter(|row| row.adapter_decision == RiAuthor4142JournalDecision::IntentEmitted)
+            .collect::<Vec<_>>();
+
+        assert_eq!(prospective_rows.len(), 2);
+        assert_eq!(live_rows.len(), 2);
+        for (prospective_row, live_row) in prospective_rows.iter().zip(live_rows.iter()) {
+            assert_eq!(prospective_row.component, live_row.component);
+            assert_eq!(prospective_row.side, live_row.side);
+            assert_eq!(prospective_row.role, live_row.role);
+            assert_eq!(
+                prospective_row.candidate_scheduled_ts_local,
+                live_row.candidate_scheduled_ts_local
+            );
+            assert_eq!(
+                prospective_row.entry_exit_reason,
+                live_row.entry_exit_reason
+            );
+            assert_eq!(prospective_row.decision_key, live_row.decision_key);
+            assert_eq!(
+                prospective_row.shadow_pnl_points,
+                live_row.shadow_pnl_points
+            );
+        }
+        assert!(prospective
+            .journal_records_for_test()
+            .iter()
+            .all(|row| { row.adapter_decision != RiAuthor4142JournalDecision::IntentEmitted }));
     }
 
     #[test]
@@ -3638,6 +3844,19 @@ mod tests {
         assert_eq!(strategy.model_bars.len(), 2);
         assert_eq!(strategy.model_bars[0].ts_local, dt(2026, 7, 13, 9, 0, 0));
         assert_eq!(strategy.model_bars[1].ts_local, dt(2026, 7, 14, 7, 0, 0));
+
+        let mut prospective_config = canonical07_transition_config();
+        prospective_config.mode = RiAuthor4142RuntimeMode::ProspectiveShadow;
+        let mut prospective =
+            RiAuthor4142LiveStrategy::new(prospective_config).expect("prospective transition");
+        for event in [
+            bar(dt(2026, 7, 13, 8, 50, 0), DataOrigin::History),
+            bar(dt(2026, 7, 13, 9, 0, 0), DataOrigin::History),
+            bar(dt(2026, 7, 14, 7, 0, 0), DataOrigin::History),
+        ] {
+            assert!(prospective.update_bar_state(&event).is_empty());
+        }
+        assert_eq!(prospective.model_bars, strategy.model_bars);
     }
 
     #[test]
@@ -3649,6 +3868,17 @@ mod tests {
         assert!(shadow.update_bar_state(&break_one).is_empty());
         assert!(shadow.update_bar_state(&break_two).is_empty());
         assert!(shadow.model_bars.is_empty());
+
+        let mut prospective_config = default_config();
+        prospective_config.mode = RiAuthor4142RuntimeMode::ProspectiveShadow;
+        let mut prospective =
+            RiAuthor4142LiveStrategy::new(prospective_config).expect("prospective");
+        assert!(prospective.on_bar(&test_ctx(), &break_one).is_empty());
+        assert!(prospective.on_bar(&test_ctx(), &break_two).is_empty());
+        assert!(prospective.model_bars.is_empty());
+        assert!(prospective.journal_records_for_test().iter().all(|row| {
+            row.adapter_decision != RiAuthor4142JournalDecision::ProspectiveIntentSuppressed
+        }));
 
         let mut live_config = default_config();
         live_config.mode = RiAuthor4142RuntimeMode::MicroLive;

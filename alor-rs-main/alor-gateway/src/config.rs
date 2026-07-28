@@ -1811,6 +1811,49 @@ refresh_token = "   "
     }
 
     #[test]
+    fn loads_imoexf_canonical07_action_scoped_gateway_candidate() {
+        let _guard = env_lock().lock().expect("lock env");
+        unsafe {
+            std::env::set_var("ALOR_REFRESH_TOKEN", "test-token");
+        }
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .to_path_buf();
+        let path = repo_root
+            .join("configs/gateway.hybrid.live.7502MIW.action-scoped.canonical07.toml")
+            .to_string_lossy()
+            .to_string();
+
+        let resolved = AlorGatewayConfig::from_file_with_sources(path).expect("load config");
+        let config = resolved.config;
+
+        assert_eq!(config.portfolio, "7502MIW");
+        assert_eq!(config.symbols, vec!["IMOEXF".to_string()]);
+        assert_eq!(config.tf_sec, 600);
+        assert_eq!(config.session_rollover_hour_utc, 6);
+        assert_eq!(config.control_cws_mode, ControlCwsMode::ActionScoped);
+        assert!(config.action_scope_enable_market);
+        assert!(config.action_scope_enable_create_limit);
+        assert!(config.action_scope_enable_delete_limit);
+        assert!(config.action_scope_enable_exit);
+        assert!(config.action_scope_force_token_refresh_before_authorize);
+        let trading_periods = config.trading_periods.expect("trading periods");
+        assert_eq!(
+            trading_periods.session_start,
+            chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap()
+        );
+        assert_eq!(
+            trading_periods.session_end,
+            chrono::NaiveTime::from_hms_opt(23, 49, 0).unwrap()
+        );
+
+        unsafe {
+            std::env::remove_var("ALOR_REFRESH_TOKEN");
+        }
+    }
+
+    #[test]
     fn loads_ri_author41_42_7502miw_pending_micro_gateway_config() {
         let _guard = env_lock().lock().expect("lock env");
         unsafe {

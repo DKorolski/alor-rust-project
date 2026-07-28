@@ -457,6 +457,207 @@ fn loads_ri_author41_42_riu6_roll_candidates() {
 }
 
 #[test]
+fn loads_moex_early_session_shadow_configs_as_diagnostics_only() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    for (relative_path, expected_kind, expected_state) in [
+        (
+            "configs/runtime.ri_author41_42.shadow09.7502MIW.toml",
+            strategy_runtime::StrategyKind::RiAuthor4142,
+            "runtime.state.ri_author41_42.shadow09.7502MIW",
+        ),
+        (
+            "configs/runtime.ri_author41_42.shadow07.7502MIW.toml",
+            strategy_runtime::StrategyKind::RiAuthor4142,
+            "runtime.state.ri_author41_42.shadow07.prospective_v1.7502MIW",
+        ),
+        (
+            "configs/runtime.alor_usdrubf.shadow09.7502MIW.toml",
+            strategy_runtime::StrategyKind::AlorUsdrubfHybrid,
+            "runtime.state.alor_usdrubf_hybrid_v1.shadow09.usdrubf.7502MIW",
+        ),
+        (
+            "configs/runtime.alor_usdrubf.shadow07.7502MIW.toml",
+            strategy_runtime::StrategyKind::AlorUsdrubfHybrid,
+            "runtime.state.alor_usdrubf_hybrid_v1.shadow07.usdrubf.7502MIW",
+        ),
+        (
+            "configs/runtime.hybrid_imoexf.shadow09.7502MIW.toml",
+            strategy_runtime::StrategyKind::HybridIntraday,
+            "runtime.state.hybrid_intraday.shadow09.imoexf.7502MIW",
+        ),
+        (
+            "configs/runtime.hybrid_imoexf.shadow07.7502MIW.toml",
+            strategy_runtime::StrategyKind::HybridIntraday,
+            "runtime.state.hybrid_intraday.shadow07.imoexf.7502MIW",
+        ),
+    ] {
+        let resolved = load_runtime_config(repo_config_path(relative_path), false)
+            .expect("load shadow config");
+
+        assert_eq!(
+            resolved.config.trade_mode,
+            strategy_runtime::TradeMode::Paper
+        );
+        assert!(!resolved.config.allow_live_orders);
+        assert!(!resolved.config.allow_paper_orders);
+        assert!(!resolved.config.require_gateway_ready);
+        assert_eq!(resolved.config.strategy.strategy_kind, expected_kind);
+        assert_eq!(resolved.config.streams.runtime_state, expected_state);
+        assert!(
+            resolved.config.streams.commands.contains(".shadow."),
+            "shadow configs must use isolated non-live command streams: {relative_path}"
+        );
+        assert!(
+            resolved.config.streams.acks.contains(".shadow."),
+            "shadow configs must use isolated non-live ack streams: {relative_path}"
+        );
+    }
+}
+
+#[test]
+fn loads_moex_early_session_ri_shadow_policies() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let legacy = load_runtime_config(
+        repo_config_path("configs/runtime.ri_author41_42.shadow09.7502MIW.toml"),
+        false,
+    )
+    .expect("load legacy09 ri shadow config");
+    let canonical = load_runtime_config(
+        repo_config_path("configs/runtime.ri_author41_42.shadow07.7502MIW.toml"),
+        false,
+    )
+    .expect("load canonical07 ri shadow config");
+
+    let legacy_settings = legacy
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("legacy ri settings");
+    let canonical_settings = canonical
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("canonical ri settings");
+
+    assert_eq!(legacy_settings.mode, "shadow");
+    assert_eq!(canonical_settings.mode, "prospective_shadow");
+    assert!(!legacy_settings.allow_order_emission);
+    assert!(!canonical_settings.allow_order_emission);
+    assert_eq!(legacy_settings.order_symbol.as_deref(), Some("RTS-9.26"));
+    assert_eq!(canonical_settings.order_symbol.as_deref(), Some("RTS-9.26"));
+
+    assert_eq!(legacy_settings.session_start_time, "09:00:00");
+    assert_eq!(legacy_settings.author41_entry_end_time, "12:00:00");
+    assert_eq!(legacy_settings.min_anchor_bars, 80);
+    assert_eq!(legacy_settings.anchor_first_bar_at_or_before, "09:10:00");
+
+    assert_eq!(canonical_settings.session_start_time, "07:00:00");
+    assert_eq!(canonical_settings.author41_entry_end_time, "10:00:00");
+    assert_eq!(canonical_settings.author41_time_exit, "20:00:00");
+    assert_eq!(canonical_settings.author42_exit_time, "23:00:00");
+    assert_eq!(canonical_settings.min_anchor_bars, 92);
+    assert_eq!(canonical_settings.anchor_first_bar_at_or_before, "07:10:00");
+    assert_eq!(canonical_settings.anchor_last_bar_at_or_after, "23:30:00");
+}
+
+#[test]
+fn loads_moex_early_session_usdrubf_shadow_policies() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let legacy = load_runtime_config(
+        repo_config_path("configs/runtime.alor_usdrubf.shadow09.7502MIW.toml"),
+        false,
+    )
+    .expect("load legacy09 usdrubf shadow config");
+    let canonical = load_runtime_config(
+        repo_config_path("configs/runtime.alor_usdrubf.shadow07.7502MIW.toml"),
+        false,
+    )
+    .expect("load canonical07 usdrubf shadow config");
+
+    let legacy_settings = legacy
+        .config
+        .strategy
+        .alor_usdrubf_hybrid()
+        .expect("legacy usdrubf settings");
+    let canonical_settings = canonical
+        .config
+        .strategy
+        .alor_usdrubf_hybrid()
+        .expect("canonical usdrubf settings");
+
+    assert_eq!(legacy_settings.mr_last_entry_time, "11:40:00");
+    assert_eq!(legacy_settings.mr_force_exit_time, "11:50:00");
+    assert_eq!(legacy_settings.bo_wait_hours, 2.0);
+    assert!(!legacy_settings.enable_live_execution);
+
+    assert_eq!(canonical_settings.mr_last_entry_time, "09:40:00");
+    assert_eq!(canonical_settings.mr_force_exit_time, "09:50:00");
+    assert_eq!(canonical_settings.bo_wait_hours, 2.0);
+    assert_eq!(canonical_settings.bo_eod_exit_time, "23:30:00");
+    assert!(!canonical_settings.enable_live_execution);
+}
+
+#[test]
+fn loads_moex_early_session_imoexf_shadow_policies() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let legacy = load_runtime_config(
+        repo_config_path("configs/runtime.hybrid_imoexf.shadow09.7502MIW.toml"),
+        false,
+    )
+    .expect("load legacy09 imoexf shadow config");
+    let canonical = load_runtime_config(
+        repo_config_path("configs/runtime.hybrid_imoexf.shadow07.7502MIW.toml"),
+        false,
+    )
+    .expect("load canonical07 imoexf shadow config");
+
+    let legacy_strategy = &legacy
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("legacy imoexf settings")
+        .strategy;
+    let canonical_strategy = &canonical
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("canonical imoexf settings")
+        .strategy;
+
+    assert_eq!(legacy_strategy.model_session_start_time, "09:00:00");
+    assert_eq!(legacy_strategy.mr_session_end_time, "11:59:00");
+    assert_eq!(legacy_strategy.risk_gate_mode, "normal_append");
+    assert_eq!(legacy_strategy.bo_wait_hours, 3.0);
+    assert_eq!(
+        legacy_strategy.risk_gate_ledger_key.as_deref(),
+        Some("runtime.riskgate.sessions.hybrid_imoexf_shadow09.imoexf_primary_high180_lb120")
+    );
+    assert!(legacy_strategy.risk_gate_persist_in_shadow);
+
+    assert_eq!(canonical_strategy.model_session_start_time, "07:00:00");
+    assert_eq!(canonical_strategy.mr_session_end_time, "09:59:00");
+    assert_eq!(canonical_strategy.risk_gate_mode, "normal_append");
+    assert_eq!(canonical_strategy.bo_wait_hours, 3.0);
+    assert_eq!(
+        canonical_strategy.risk_gate_ledger_key.as_deref(),
+        Some("runtime.riskgate.sessions.hybrid_imoexf_shadow07.imoexf_primary_high180_lb120")
+    );
+    assert!(canonical_strategy.risk_gate_persist_in_shadow);
+    assert_eq!(
+        canonical_strategy.orchestrator_breakout_eod_mode,
+        "same_day"
+    );
+}
+
+#[test]
 fn loads_paper_report_paths() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&[
@@ -805,6 +1006,58 @@ fn loads_live_imoexf_riskgate_shadow_configs() {
             .risk_gate_mode,
         "normal_append"
     );
+}
+
+#[test]
+fn loads_live_imoexf_canonical07_replacement_candidate() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let resolved = load_runtime_config(
+        repo_config_path("configs/runtime.hybrid.live.7502MIW.riskgate-canonical07.toml"),
+        false,
+    )
+    .expect("load IMOEXF canonical07 live candidate");
+    let common = &resolved.config.strategy.common;
+    let hybrid = &resolved
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("hybrid settings")
+        .strategy;
+
+    assert_eq!(resolved.config.portfolio, "7502MIW");
+    assert_eq!(
+        resolved.config.trade_mode,
+        strategy_runtime::TradeMode::Live
+    );
+    assert!(resolved.config.allow_live_orders);
+    assert!(resolved.config.require_gateway_ready);
+    assert_eq!(common.strategy_id, "hybrid_imoexf");
+    assert_eq!(common.symbol, "IMOEXF");
+    assert_eq!(common.qty, 6.0);
+    assert_eq!(
+        resolved.config.streams.runtime_state,
+        "runtime.state.hybrid_intraday.live.riskgate_canonical07_v1.imoexf.7502MIW"
+    );
+    assert_eq!(
+        common
+            .trading_periods
+            .as_ref()
+            .expect("trading periods")
+            .session_start,
+        chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap()
+    );
+    assert_eq!(hybrid.model_session_start_time, "07:00:00");
+    assert_eq!(hybrid.mr_session_end_time, "09:59:00");
+    assert_eq!(hybrid.mr_exit_offset_min, 10);
+    assert_eq!(hybrid.bo_wait_hours, 3.0);
+    assert_eq!(hybrid.risk_gate_mode, "normal_append");
+    assert_eq!(
+        hybrid.risk_gate_ledger_key.as_deref(),
+        Some("runtime.riskgate.sessions.hybrid_imoexf.imoexf_primary_high180_lb120")
+    );
+    assert!(!hybrid.risk_gate_persist_in_shadow);
 }
 
 #[test]

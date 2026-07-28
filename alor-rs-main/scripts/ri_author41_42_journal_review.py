@@ -23,6 +23,7 @@ EXPECTED_PRE_GO_DECISIONS = {
     "shadow_recorded",
     "shadow_path_active",
     "shadow_path_superseded",
+    "prospective_intent_suppressed",
     "intent_suppressed",
     "manual_intervention_required",
 }
@@ -41,6 +42,8 @@ class Review:
     final_active_shadow_path_rows: list[dict[str, Any]]
     final_superseded_shadow_path_rows: list[dict[str, Any]]
     final_active_shadow_pnl_points: float
+    final_prospective_exit_rows: list[dict[str, Any]]
+    final_prospective_pnl_points: float
     live_evidence_rows: list[dict[str, Any]]
     unexpected_decision_rows: list[dict[str, Any]]
     unexpected_execution_path_rows: list[dict[str, Any]]
@@ -189,6 +192,24 @@ def build_review(
     counts["final_shadow_path_status"] = Counter(
         value(row, "adapter_decision") for row in scoped_shadow_path_rows
     )
+    prospective_exit_rows = [
+        row
+        for row in rows
+        if value(row, "adapter_decision") == "prospective_intent_suppressed"
+        and value(row, "role") == "exit"
+        and value(row, "decision_key") != "none"
+    ]
+    latest_prospective_exit_by_key = {
+        value(row, "decision_key"): row for row in prospective_exit_rows
+    }
+    final_prospective_exit_rows = [
+        row
+        for row in latest_prospective_exit_by_key.values()
+        if in_economic_scope(row, from_date, to_date)
+    ]
+    counts["final_prospective_component"] = Counter(
+        value(row, "component") for row in final_prospective_exit_rows
+    )
     live_evidence_rows = [
         row
         for row in rows
@@ -219,6 +240,10 @@ def build_review(
         final_active_shadow_pnl_points=sum(
             number(row, "shadow_pnl_points") for row in final_active_shadow_path_rows
         ),
+        final_prospective_exit_rows=final_prospective_exit_rows,
+        final_prospective_pnl_points=sum(
+            number(row, "shadow_pnl_points") for row in final_prospective_exit_rows
+        ),
         live_evidence_rows=live_evidence_rows,
         unexpected_decision_rows=unexpected_decision_rows,
         unexpected_execution_path_rows=unexpected_execution_path_rows,
@@ -235,6 +260,7 @@ def fmt_counter(counter: Counter[str]) -> str:
 def compact_row(row: dict[str, Any]) -> str:
     fields = [
         ("bar", "bar_ts_local"),
+        ("scheduled", "candidate_scheduled_ts_local"),
         ("adapter", "adapter_decision"),
         ("component", "component"),
         ("role", "role"),
@@ -274,6 +300,8 @@ def render_markdown(review: Review, strict_pre_go: bool) -> str:
             f"- Final-active path rows: `{len(review.final_active_shadow_path_rows)}`",
             f"- Final-superseded path rows: `{len(review.final_superseded_shadow_path_rows)}`",
             f"- Final-active path PnL: `{review.final_active_shadow_pnl_points:.6g}`",
+            f"- Final prospective exit rows: `{len(review.final_prospective_exit_rows)}`",
+            f"- Final prospective PnL: `{review.final_prospective_pnl_points:.6g}`",
             f"- Live emission evidence rows: `{len(review.live_evidence_rows)}`",
             f"- Unexpected adapter decisions: `{len(review.unexpected_decision_rows)}`",
             f"- Unexpected execution paths: `{len(review.unexpected_execution_path_rows)}`",
@@ -318,6 +346,8 @@ def render_json(review: Review, strict_pre_go: bool) -> dict[str, Any]:
         "final_active_shadow_path_rows": len(review.final_active_shadow_path_rows),
         "final_superseded_shadow_path_rows": len(review.final_superseded_shadow_path_rows),
         "final_active_shadow_pnl_points": review.final_active_shadow_pnl_points,
+        "final_prospective_exit_rows": len(review.final_prospective_exit_rows),
+        "final_prospective_pnl_points": review.final_prospective_pnl_points,
         "live_emission_evidence_rows": len(review.live_evidence_rows),
         "unexpected_adapter_decision_rows": len(review.unexpected_decision_rows),
         "unexpected_execution_path_rows": len(review.unexpected_execution_path_rows),

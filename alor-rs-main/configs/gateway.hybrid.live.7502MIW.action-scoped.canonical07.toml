@@ -1,0 +1,82 @@
+# IMOEXF live07 gateway replacement candidate for portfolio 7502MIW.
+# The action-scoped control contract is unchanged from the validated live09
+# contour; only the accepted regular-session start moves from 09:00 to 07:00.
+BAR_DUMP_PATH="./bars.7502MIW.imoexf.csv"
+portfolio = "7502MIW"
+exchange = "MOEX"
+instrument_group = "RFUD"
+symbols = ["IMOEXF"]
+
+tf_sec = 600
+from_ts = 0
+
+ws_url = "wss://api.alor.ru/ws"
+cws_url = "wss://api.alor.ru/cws"
+oauth_url = "https://oauth.alor.ru/refresh"
+
+log_positions_filter = ["IMOEXF"]
+log_cash_positions = false
+cash_symbols = ["RUB", "SUR"]
+log_existing_snapshot_orders = false
+
+skip_history_bars = false
+skip_history_positions = false
+skip_history_orders = false
+split_adjust = true
+format = "Simple"
+frequency_ms = 250
+
+backoff_initial_ms = 1000
+backoff_max_ms = 30000
+backoff_multiplier = 2
+
+max_silence_bars_sec = 1200
+
+history_sessions = 4
+history_days_back = 4
+session_rollover_hour_utc = 6
+health_listen_addr = "127.0.0.1:8081"
+control_path_stale_after_sec = 900
+control_path_pre_entry_recycle_enabled = true
+control_path_recycle_timeout_ms = 5000
+control_path_hardening_log_only = false
+
+control_cws_mode = "action_scoped"
+action_scope_enable_market = true
+action_scope_enable_create_limit = true
+action_scope_enable_delete_limit = true
+action_scope_enable_replace_limit = false
+action_scope_enable_exit = true
+action_scope_open_timeout_ms = 5000
+action_scope_authorize_timeout_ms = 5000
+action_scope_force_token_refresh_before_authorize = true
+action_scope_followup_window_ms = 5000
+action_scope_max_session_lifetime_ms = 15000
+action_scope_close_timeout_ms = 2000
+
+[trading_periods]
+session_start = "07:00:00"
+session_end = "23:49:00"
+break_start_1 = "14:00:00"
+break_end_1 = "14:04:59"
+break_start_2 = "18:50:00"
+break_end_2 = "19:04:59"
+weekends_off = false
+timezone_offset_hours = 3
+
+[ws]
+ws_idle_timeout_sec = 70
+ws_ping_interval_sec = 30
+ws_ping_timeout_sec = 15
+subscribe_ack_timeout_ms = 5000
+subscribe_ack_retries = 3
+
+[reconnect]
+warm_reconnect_max_gap_sec = 21600
+gap_backfill_padding_bars = 2
+cold_start_history_days_back = 4
+bar_silence_resync_min_sec = 1200
+
+[general]
+price_step = 0.5
+volume_step = 1

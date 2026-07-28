@@ -1,8 +1,8 @@
 redis_url = "redis://127.0.0.1/"
 portfolio = "7502MIW"
 exchange = "MOEX"
-source = "strategy-runtime-ri-author41-42-shadow07"
-consumer_group = "strategy-runtime-ri-author41-42-shadow07-7502MIW"
+source = "strategy-runtime-ri-author41-42-shadow07-prospective-v1"
+consumer_group = "strategy-runtime-ri-author41-42-shadow07-prospective-v1-7502MIW"
 consumer_name = "auto"
 reset_state_on_start = false
 
@@ -26,12 +26,12 @@ bars = "md.bars.7502MIW.RIU6.10m.moex_early_session"
 orders = "broker.orders.7502MIW"
 trades = "broker.trades.7502MIW"
 positions = "broker.positions.7502MIW"
-commands = "cmd.orders.7502MIW.shadow.ri_author41_42.shadow07"
-acks = "cmd.acks.7502MIW.shadow.ri_author41_42.shadow07"
+commands = "cmd.orders.7502MIW.shadow.ri_author41_42.shadow07.prospective_v1"
+acks = "cmd.acks.7502MIW.shadow.ri_author41_42.shadow07.prospective_v1"
 snapshots = "broker.snapshots.7502MIW"
 health = "events.health.ri_author41_42.shadow07.7502MIW"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.ri_author41_42.shadow07.7502MIW"
+runtime_state = "runtime.state.ri_author41_42.shadow07.prospective_v1.7502MIW"
 
 [read]
 block_ms = 500
@@ -50,7 +50,7 @@ health = 2000
 runtime_state = 500
 
 [strategy]
-strategy_id = "ri_author41_42.shadow07.7502MIW"
+strategy_id = "ri_author41_42.shadow07.prospective_v1.7502MIW"
 strategy_kind = "ri_author41_42"
 symbol = "RIU6"
 qty = 1.0
@@ -78,7 +78,7 @@ timezone_offset_hours = 3
 [strategy.ri_author41_42]
 profile_id = "ri_author41_42_primary_combo_cost2"
 timeframe = "10m"
-mode = "shadow"
+mode = "prospective_shadow"
 allow_order_emission = false
 execution_path = "action_scoped_only"
 order_symbol = "RTS-9.26"
@@ -100,7 +100,7 @@ pre_transition_anchor_last_bar_at_or_after = "23:30:00"
 actual_expiry_date = "2026-09-17"
 roll_target_sessions_before = 1
 roll_fallback_sessions_before = 2
-decision_journal_path = "/reports/moex_early_session_ri_decisions_canonical07.jsonl"
+decision_journal_path = "/reports/moex_early_session_ri_decisions_canonical07_prospective_v1.jsonl"
 decision_journal_append = true
 
 [paper]

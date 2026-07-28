@@ -576,3 +576,29 @@ P3  hold a separate session-freeze promotion review
 The short A/B currently supports proceeding with engineering and shadow
 observation. It does not support changing the live model start from `09:00` to
 `07:00` yet.
+
+## 15. Implementation Update - 2026-07-28
+
+Later operational evidence showed that finalized RI shadow paths and the
+micro-live event loop are not the same comparison surface. The finalized
+batch/no-overlap journal remains valid for frozen replay parity, but it can
+replace an earlier prospective candidate after later same-session decisions
+become known.
+
+The RI canonical07 contour is therefore upgraded to
+`mode=prospective_shadow`. It now records both:
+
+- the existing finalized `shadow_path_active` path;
+- live-like entry/exit candidates as `prospective_intent_suppressed`.
+
+The second path executes the same in-process prospective state machine as
+micro-live but returns no intents to the host and ignores broker lifecycle
+callbacks. It starts with a new runtime-state, consumer and journal generation.
+RI live remains on its current live09 contract until 5-10 complete prospective
+sessions are available.
+
+IMOEXF has a separate controlled live07 replacement candidate. Its signal,
+risk-gate, quantity, action-scoped execution and no-overnight contracts are
+unchanged; only the session-clock translation is applied. Deployment and
+rollback gates are defined in
+`docs/moex-early-session-live07-rollout-2026-07-28.md`.
