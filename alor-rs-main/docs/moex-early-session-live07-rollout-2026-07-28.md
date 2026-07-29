@@ -180,3 +180,92 @@ The old live09 configs and runtime-state key remain intact. Rollback is:
 5. verify the old runtime-state reconciliation and broker-flat state.
 
 Never roll back by running both live generations together.
+
+## Actual Rollout Record - 2026-07-29
+
+### Deployment outcome
+
+The rollout was performed before the regular session after confirming:
+
+- portfolio `7502MIW` was broker-flat;
+- there were no working regular or stop orders;
+- the VPS had approximately 6 GiB available RAM and 37 GiB free disk space.
+
+RI canonical07 was restarted only as an isolated prospective shadow:
+
+- config: `runtime.ri_author41_42.shadow07.7502MIW.toml`;
+- image: `ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-20260728-ri-prospective-riskgate-c73a79e`;
+- mode: `prospective_shadow`;
+- both live and paper order emission were disabled;
+- the isolated command stream remained empty and no broker request identifiers were produced.
+
+RI live09 and legacy09 shadow were not changed.
+
+IMOEXF was moved from live09 to canonical07 using:
+
+- gateway config: `gateway.hybrid.live.7502MIW.action-scoped.canonical07.toml`;
+- runtime config: `runtime.hybrid.live.7502MIW.riskgate-canonical07.toml`;
+- runtime image: `ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-20260728-ri-prospective-riskgate-c73a79e`.
+
+The old runtime and gateway were stopped before the new generation started. The
+gateway was started first and reached CWS-authorized readiness. The runtime then
+reached `LiveReady` at `07:10:08 MSK`; the startup replay guard was released by
+the first live 10-minute bar. The deployed contract was confirmed as quantity
+`6`, session start `07:00`, MR end `09:59`, BO wait `3` hours and action-scoped
+gateway execution.
+
+### Risk-gate continuity
+
+Before rollout, the production ledger contained 237 finalized sessions through
+`2026-07-27`, with rolling `lb120` shadow PnL of approximately `117` and the MR
+gate enabled.
+
+A clean runtime generation does not reconstruct the previous unfinished
+risk-gate session from warmup bars. Therefore, the canonical07 shadow result for
+`2026-07-28` was imported into the production ledger through the same
+idempotent `SETNX`/`XADD`/`HSET` write contract:
+
+- `shadow_pnl_points=3.9`;
+- `shadow_trade_count=1`;
+- rolling `lb120` changed from approximately `117` to `112`;
+- `mr_enabled_current_session=true`;
+- `mr_enabled_next_session=true`;
+- session policy: regular weekdays, `07:00..23:49`.
+
+Pre-import backups were saved on the VPS:
+
+- `/opt/rollout-candidates/c73a79e/riskgate-production-ledger.pre-20260728-backfill.json`;
+- `/opt/rollout-candidates/c73a79e/riskgate-production-state.pre-20260728-backfill.json`.
+
+The resulting materialized state had 238 rows, last finalized session
+`2026-07-28`, rolling `lb120=112.00000000000003`, current shadow session
+`2026-07-29` and the MR gate enabled.
+
+The already-running process retained its startup diagnostic rolling value until
+the next finalization or controlled restart. No intraday restart was performed
+because both persisted and in-memory states kept the gate enabled, so trading
+behavior was unaffected.
+
+### Startup catch-up observation
+
+The new consumer generation initially read historical broker trade/order events.
+This produced catch-up-only orphan/stale-stop warnings and stale cancel attempts,
+mostly `Order to cancel not found`, plus one transient OAuth refresh `502`.
+Broker truth remained flat, no regular or stop orders were created, and consumer
+lag converged to zero.
+
+Follow-up hardening: a future clean-generation rollout should initialize
+non-bar consumer groups at the stream tail while retaining historical bar warmup.
+
+### Post-check
+
+After the first live bar:
+
+- all target containers were healthy;
+- all portfolio positions, regular orders and stop orders were empty;
+- RI prospective shadow had emitted zero commands;
+- no target `WARN` or `ERROR` events appeared after `07:10`;
+- VPS memory and disk headroom remained safe.
+
+Status: rollout completed successfully; continue controlled live/shadow
+observation without changing quantity, K values or exit policy.
