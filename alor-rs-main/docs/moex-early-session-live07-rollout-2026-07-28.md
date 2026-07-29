@@ -409,3 +409,7 @@ live entry rather than replaying the earlier request:
 This position is controlled by the unchanged BO stop/EOD contract. It also
 provides the first deployed evidence that a fresh live entry no longer reuses
 the stale `6a16ab8800` cycle.
+
+The following live bar kept broker and runtime position at `+6 @ 2246.5`.
+No `breakout_no_overnight_guard_exit`, exit intent, `WARN` or `ERROR` occurred,
+confirming that the stale-cycle false overnight rescue did not recur.
