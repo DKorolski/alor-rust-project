@@ -376,7 +376,8 @@ Post-restart checks:
 - both shadow command streams remained absent/empty;
 - live released `waiting_for_next_bar_after_restart` on the next 10-minute bar
   and did not re-emit the earlier BO entry;
-- no post-restart broker position, regular order or stop order was created.
+- the guard-release bar did not create a broker position, regular order or stop
+  order.
 
 The naturally occurring shadow BO candidate at model time `20:10 MSK` then
 provided the focused production confirmation. More than 60 seconds after the
@@ -392,3 +393,19 @@ candidate, both shadow states still retained their pending entry. On the next
 No `hybrid_pending_gc_entry`, `broker_residual_emergency_exit`, live broker
 command or shadow command-stream record accompanied the transition. The
 bar-driven paper fill fix is therefore confirmed in the deployed event loop.
+
+On the following live bar, the still-valid BO-long condition generated a new
+live entry rather than replaying the earlier request:
+
+- model event time: `20:20 MSK`;
+- request id: `fd98f330-8ff5-5a05-bcd9-a3c415636ca9`;
+- action-scoped CWS result: accepted, HTTP `200`;
+- broker fill: `6 @ 2246.5`;
+- broker/runtime cycle: `6a6a364000`, representing the current `2026-07-29`
+  session;
+- owner: `IntradayBreakout`;
+- safe mode: disabled.
+
+This position is controlled by the unchanged BO stop/EOD contract. It also
+provides the first deployed evidence that a fresh live entry no longer reuses
+the stale `6a16ab8800` cycle.
