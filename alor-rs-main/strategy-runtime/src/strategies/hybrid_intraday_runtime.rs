@@ -959,7 +959,11 @@ impl HybridIntradayRuntimeStrategy {
         ));
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.last_bar_close = Some(bar.close);
-        self.clear_stale_pending_tail(bar.close_time_utc, ctx.position_qty.unwrap_or(0.0));
+        self.clear_stale_pending_tail(
+            bar.close_time_utc,
+            ctx.position_qty.unwrap_or(0.0),
+            ctx.trade_mode,
+        );
         self.startup_replay_suppressed_bars = self.startup_replay_suppressed_bars.saturating_add(1);
         let should_log_info =
             bar.origin == DataOrigin::Live || self.startup_replay_suppressed_bars == 1;
@@ -1953,9 +1957,9 @@ impl HybridIntradayRuntimeStrategy {
                     self.orchestrator.on_order_rejected("entry");
                     return Vec::new();
                 }
-                let cycle_id = self
-                    .active_cycle_id
-                    .unwrap_or_else(|| self.next_cycle_id(created_ts_utc));
+                // A new flat-to-open lifecycle must never inherit a cycle observed
+                // from historical working orders during startup catch-up.
+                let cycle_id = self.next_cycle_id(created_ts_utc);
                 if can_execute {
                     self.pending_entry = Some(PendingEntry {
                         owner: entry.owner,
@@ -2221,7 +2225,18 @@ impl HybridIntradayRuntimeStrategy {
         self.config.pending_timeout_sec.max(1) as i64
     }
 
-    fn clear_stale_pending_tail(&mut self, now_ts: i64, position_qty: f64) {
+    fn clear_stale_pending_tail(
+        &mut self,
+        now_ts: i64,
+        position_qty: f64,
+        trade_mode: crate::TradeMode,
+    ) {
+        // Paper/backtest fills are intentionally bar-driven. Applying the live
+        // broker timeout before the next bar would discard the pending entry
+        // immediately before its synthetic fill.
+        if trade_mode != crate::TradeMode::Live {
+            return;
+        }
         if position_qty.abs() > f64::EPSILON {
             return;
         }
@@ -3326,6 +3341,85 @@ mod tests {
     }
 
     #[test]
+    fn historical_working_stop_cycle_is_replaced_by_fresh_bo_entry_cycle() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let ctx = test_ctx(Some(0.0));
+        let old_cycle = "6a16ab8800";
+
+        for status in ["working", "canceled"] {
+            let _ = strategy.on_stop_order(
+                &ctx,
+                &StopOrderEvent {
+                    stop_order_id: "121773048".to_string(),
+                    exchange_order_id: None,
+                    symbol: "IMOEXF".to_string(),
+                    status: status.to_string(),
+                    side: "sell".to_string(),
+                    qty: 6.0,
+                    filled: 0.0,
+                    stop_price: 2167.0,
+                    price: 2166.5,
+                    existing: true,
+                    comment: Some(tag("MR", old_cycle, "SL")),
+                    end_time: None,
+                    ts_utc: ts_local(2026, 5, 27, 11, 30, 0),
+                },
+            );
+        }
+        assert_eq!(
+            strategy
+                .active_cycle_id
+                .map(|id| HybridIntradayRuntimeStrategy::format_cycle_id(&id)),
+            Some(old_cycle.to_string())
+        );
+        assert!(strategy.working_stop_orders.is_empty());
+
+        strategy.entry_ready = true;
+        let entry_ts = ts_local(2026, 7, 29, 11, 0, 0);
+        let intents = strategy.map_action_to_intents(
+            &ctx,
+            entry_ts,
+            true,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::IntradayBreakout,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: ReasonCode::BreakoutLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        assert_eq!(intents.len(), 1);
+        assert_eq!(
+            strategy.active_cycle_local_day(),
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap())
+        );
+
+        let _ = strategy.on_position(
+            &ctx,
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: 6.0,
+                existing: false,
+                avg_price: 2229.0,
+                ts_utc: entry_ts + 1,
+            },
+        );
+        let mut actions = Vec::new();
+        strategy.append_breakout_no_overnight_guard(
+            &mut actions,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 29)
+                .unwrap()
+                .and_hms_opt(11, 10, 0)
+                .unwrap(),
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap()),
+            true,
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
     fn working_tagged_order_can_restore_active_cycle() {
         let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let ctx = test_ctx(Some(0.0));
@@ -3480,7 +3574,11 @@ mod tests {
         );
         assert!(strategy.pending_entry.is_some());
         assert!(strategy.pending_entry_request_id.is_some());
-        strategy.clear_stale_pending_tail(10 + test_config().pending_timeout_sec as i64 + 1, 0.0);
+        strategy.clear_stale_pending_tail(
+            10 + test_config().pending_timeout_sec as i64 + 1,
+            0.0,
+            TradeMode::Live,
+        );
         assert!(strategy.pending_entry.is_none());
         assert!(strategy.pending_entry_request_id.is_none());
         assert!(strategy.pending_entry_created_ts_utc.is_none());
@@ -3513,10 +3611,59 @@ mod tests {
         );
         assert!(strategy.pending_entry.is_some());
         assert!(strategy.pending_entry_request_id.is_some());
-        strategy
-            .clear_stale_pending_tail(created_ts + test_config().pending_timeout_sec as i64, 0.0);
+        strategy.clear_stale_pending_tail(
+            created_ts + test_config().pending_timeout_sec as i64,
+            0.0,
+            TradeMode::Live,
+        );
         assert!(strategy.pending_entry.is_some());
         assert!(strategy.pending_entry_request_id.is_some());
+    }
+
+    #[test]
+    fn paper_pending_entry_survives_live_timeout_until_synthetic_fill() {
+        let mut strategy = HybridIntradayRuntimeStrategy::new(test_config());
+        let mut ctx = test_ctx(Some(0.0));
+        ctx.trade_mode = TradeMode::Paper;
+        ctx.allow_live_orders = false;
+        strategy.entry_ready = true;
+        let created_ts = ts_local(2026, 7, 29, 11, 0, 0);
+
+        let intents = strategy.map_action_to_intents(
+            &ctx,
+            created_ts,
+            true,
+            true,
+            Action::SubmitEntry(crate::strategies::hybrid_intraday::EntrySignal {
+                owner: Owner::IntradayBreakout,
+                side: Side::Long,
+                entry_style: EntryStyle::Market,
+                reason: ReasonCode::BreakoutLong,
+                stop_price: None,
+                take_price: None,
+            }),
+        );
+        assert_eq!(intents.len(), 1);
+        assert!(strategy.pending_entry.is_some());
+
+        strategy.clear_stale_pending_tail(created_ts + 600, 0.0, TradeMode::Paper);
+        assert!(strategy.pending_entry.is_some());
+
+        let feedback = strategy.on_position(
+            &ctx,
+            &PositionEvent {
+                symbol: "IMOEXF".to_string(),
+                qty: 1.0,
+                existing: false,
+                avg_price: 2229.0,
+                ts_utc: created_ts + 600,
+            },
+        );
+        assert!(feedback.is_empty());
+        assert!(strategy.pending_entry.is_none());
+        assert_eq!(strategy.current_owner, Some(Owner::IntradayBreakout));
+        assert_eq!(strategy.last_position_qty, 1.0);
+        assert!(!strategy.safe_mode_close_only);
     }
 
     #[test]
@@ -5373,7 +5520,11 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         }
         self.last_processed_bar_ts = Some(bar.close_time_utc);
         self.last_bar_close = Some(bar.close);
-        self.clear_stale_pending_tail(bar.close_time_utc, ctx.position_qty.unwrap_or(0.0));
+        self.clear_stale_pending_tail(
+            bar.close_time_utc,
+            ctx.position_qty.unwrap_or(0.0),
+            ctx.trade_mode,
+        );
         let can_emit = self.can_emit_now(ctx, bar.origin == DataOrigin::Live);
         let can_execute = self.can_execute_now(ctx, bar.origin == DataOrigin::Live);
         let created_ts_utc = self.effective_created_ts_utc(ctx, bar.close_time_utc);

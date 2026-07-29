@@ -269,3 +269,75 @@ After the first live bar:
 
 Status: rollout completed successfully; continue controlled live/shadow
 observation without changing quantity, K values or exit policy.
+
+## Post-Rollout Hybrid Lifecycle Incident - 2026-07-29
+
+### Live false overnight rescue
+
+The first canonical07 IMOEXF BO entry inherited `active_cycle_id=6a16ab8800`
+from a historical tagged stop observed during startup catch-up. The stop later
+became terminal, but the historical cycle remained available and
+`SubmitEntry` reused it for a new flat-to-open BO lifecycle.
+
+The cycle encoded `2026-05-27`, while the new entry occurred on `2026-07-29`.
+The no-overnight guard therefore classified the valid intraday position as a
+cross-day carry and emitted an early market exit. Broker truth converged to
+flat, but the exit was not a model exit.
+
+Fix:
+
+- every accepted flat-to-open hybrid entry allocates a fresh cycle from the
+  final runtime event timestamp;
+- historical tagged orders may still restore lifecycle context for
+  reconciliation, but that context cannot be reused by a later new entry;
+- a regression test covers a historical working-to-canceled stop followed by a
+  fresh BO entry and requires no premature no-overnight action.
+
+### Paper synthetic-fill residual
+
+The IMOEXF shadow runtimes create a paper entry on one model bar and apply its
+synthetic fill on the following 10-minute bar. The shared pending cleanup used
+the live `pending_timeout_sec=60`, so the next bar first cleared the pending
+entry at age 600 seconds and then treated the synthetic position fill as an
+unexpected broker residual.
+
+Fix:
+
+- wall-clock pending timeout cleanup is now live-only;
+- paper and backtest pending state remains valid until the bar-driven synthetic
+  fill or the paper lifecycle resolves it;
+- a regression test advances a paper entry by 600 seconds and requires the
+  following synthetic fill to be accepted without residual safe mode.
+
+### Validation and rollout scope
+
+Validation completed locally:
+
+- `cargo fmt --all -- --check`;
+- full `cargo test -p strategy-runtime`;
+- `cargo clippy -p strategy-runtime --all-targets -- -D warnings`;
+- dedicated stale-cycle and paper next-bar-fill regression tests.
+
+The runtime-only rollout is limited to:
+
+- `/opt/trading-hybrid`, service `strategy-runtime`;
+- `/opt/trading-moex-early-shadow-imoexf`, services `runtime-shadow07` and
+  `runtime-shadow09`.
+
+RI, USDRUBF, all gateways, Redis instances, strategy parameters and risk-gate
+formulas remain unchanged. The canonical risk-gate streams and materialized
+state must be preserved. Shadow runtime state may be restarted cleanly, but its
+risk-gate ledgers must not be reset.
+
+Acceptance after deployment:
+
+- all three target runtimes become healthy;
+- live broker truth is flat with no working regular or stop orders before
+  restart;
+- the live risk-gate ledger row count, last finalized session and gate status
+  remain unchanged;
+- both shadow command streams remain empty;
+- no new `breakout_no_overnight_guard_exit` may reference a cycle date older
+  than the current live entry;
+- no paper synthetic fill may produce
+  `broker_residual_emergency_exit` after `hybrid_pending_gc_entry`.
