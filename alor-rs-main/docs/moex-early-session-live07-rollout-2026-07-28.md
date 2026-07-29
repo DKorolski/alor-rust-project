@@ -341,3 +341,54 @@ Acceptance after deployment:
   than the current live entry;
 - no paper synthetic fill may produce
   `broker_residual_emergency_exit` after `hybrid_pending_gc_entry`.
+
+### Actual hardening rollout
+
+The runtime hardening was deployed at `20:14 MSK` on `2026-07-29` after all
+portfolio instruments were broker-flat and no working regular or stop orders
+remained.
+
+- commit: `244be59`;
+- image tag: `manual-20260729-hybrid-lifecycle-244be59`;
+- image architecture: `linux/amd64`;
+- image tar SHA-256:
+  `ebf3bad81ba3243ea7cecaee9e0fb63e4bdf9588b4a15c942d3cf46011b7190a`.
+
+The GHCR push was denied because the local registry session did not have usable
+package-write credentials. The exact tagged image was therefore exported and
+loaded directly into Docker on the VPS. This does not change the running image
+identity, but the tag is VPS-local until it is later published to GHCR.
+
+Only the live IMOEXF runtime and the two IMOEXF shadow runtimes were recreated.
+The two shadow operational runtime-state streams were archived and reset.
+Gate ledgers and materialized gate state were retained.
+
+Pre-rollout backups are stored under `/opt/rollout-candidates/244be59`.
+
+Post-restart checks:
+
+- all three target containers were healthy;
+- live gate state remained at 238 rows, last finalized `2026-07-28`, rolling
+  `lb120=112.0`, with current and next MR sessions enabled;
+- shadow07 and shadow09 remained at 184 rows each, with their rolling values
+  unchanged;
+- shadow current-session metadata advanced cleanly to `2026-07-29`;
+- both shadow command streams remained absent/empty;
+- live released `waiting_for_next_bar_after_restart` on the next 10-minute bar
+  and did not re-emit the earlier BO entry;
+- no post-restart broker position, regular order or stop order was created.
+
+The naturally occurring shadow BO candidate at model time `20:10 MSK` then
+provided the focused production confirmation. More than 60 seconds after the
+candidate, both shadow states still retained their pending entry. On the next
+10-minute bar they accepted the synthetic fill and converged to:
+
+- `last_position_qty=6`;
+- `current_owner=intraday_breakout`;
+- `pending_entry=null`;
+- `active_cycle_id=6a6a33e800`, representing the current session;
+- `safe_mode_close_only=false`.
+
+No `hybrid_pending_gc_entry`, `broker_residual_emergency_exit`, live broker
+command or shadow command-stream record accompanied the transition. The
+bar-driven paper fill fix is therefore confirmed in the deployed event loop.
