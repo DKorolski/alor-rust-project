@@ -398,8 +398,15 @@ impl StrategyRuntime {
         let (intents, previous_strategy_state) =
             self.invoke_strategy_callback(ctx, callback_name, callback);
         let intents_count = intents.len();
-        self.apply_intents(ctx, created_ts_utc, intents, previous_strategy_state)
-            .await?;
+        let dispatch_ts_utc = chrono::Utc::now().timestamp().max(created_ts_utc);
+        self.apply_intents(
+            ctx,
+            created_ts_utc,
+            dispatch_ts_utc,
+            intents,
+            previous_strategy_state,
+        )
+        .await?;
         Ok(intents_count)
     }
 
@@ -855,8 +862,6 @@ impl StrategyRuntime {
 
         if self.config.trade_mode != TradeMode::Live {
             self.flush_strategy_journal_records().await?;
-            self.record_non_live_intents(bar.close_time_utc, &intents, self.config.trade_mode)
-                .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
                 self.simulate_fills(&bar).await?;
                 let executable_intents = self.filter_paper_intents_for_simulation(
@@ -865,11 +870,24 @@ impl StrategyRuntime {
                     intents,
                     previous_strategy_state,
                 );
+                self.record_non_live_intents(
+                    bar.close_time_utc,
+                    &executable_intents,
+                    self.config.trade_mode,
+                )
+                .await?;
                 self.simulate_intents(&bar, executable_intents).await?;
             }
         } else {
-            self.apply_intents(&ctx, bar.close_time_utc, intents, previous_strategy_state)
-                .await?;
+            let dispatch_ts_utc = chrono::Utc::now().timestamp().max(bar.close_time_utc);
+            self.apply_intents(
+                &ctx,
+                bar.close_time_utc,
+                dispatch_ts_utc,
+                intents,
+                previous_strategy_state,
+            )
+            .await?;
         }
         self.state
             .update_last_bar_ts(&bar.symbol, bar.close_time_utc);
@@ -2286,8 +2304,6 @@ impl StrategyRuntime {
         self.metrics.bars_last_seen_close_time_utc = Some(bar.close_time_utc);
         if self.config.trade_mode != TradeMode::Live {
             self.flush_strategy_journal_records().await?;
-            self.record_non_live_intents(event_ts, &intents, self.config.trade_mode)
-                .await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
                 self.simulate_fills(&bar).await?;
                 let executable_intents = self.filter_paper_intents_for_simulation(
@@ -2296,6 +2312,8 @@ impl StrategyRuntime {
                     intents,
                     previous_strategy_state,
                 );
+                self.record_non_live_intents(event_ts, &executable_intents, self.config.trade_mode)
+                    .await?;
                 self.simulate_intents(&bar, executable_intents).await?;
             }
             self.persist_state(None).await?;
@@ -2309,8 +2327,15 @@ impl StrategyRuntime {
             // overnight reconnect look stale and drop the next-bar-open proxy
             // intent, shifting execution by one completed bar.
             let emit_ctx = self.strategy_ctx_for_bar_intents(&bar, event_ts);
-            self.apply_intents(&emit_ctx, event_ts, intents, previous_strategy_state)
-                .await?;
+            let dispatch_ts_utc = chrono::Utc::now().timestamp().max(event_ts);
+            self.apply_intents(
+                &emit_ctx,
+                event_ts,
+                dispatch_ts_utc,
+                intents,
+                previous_strategy_state,
+            )
+            .await?;
         }
         self.flush_risk_gate_session_finalizations().await?;
         self.state
@@ -3564,13 +3589,14 @@ impl StrategyRuntime {
         &mut self,
         ctx: &StrategyCtx,
         created_ts_utc: i64,
+        dispatch_ts_utc: i64,
         intent: Intent,
         intent_class: alor_protocol::IntentClass,
     ) -> Result<bool> {
         if intent_class != alor_protocol::IntentClass::Exit {
             return Ok(false);
         }
-        let Some((market_state, now_local)) = self.current_market_state(created_ts_utc) else {
+        let Some((market_state, now_local)) = self.current_market_state(dispatch_ts_utc) else {
             return Ok(false);
         };
         if market_state == MarketState::Open {
@@ -3585,6 +3611,7 @@ impl StrategyRuntime {
             class = ?intent_class,
             state = ?market_state,
             created_ts_utc,
+            dispatch_ts_utc,
             now_local,
             request_id = %command.request_id,
             "intent_deferred_by_trading_window_pre_emit"
@@ -3598,6 +3625,7 @@ impl StrategyRuntime {
                 "state": format!("{market_state:?}"),
                 "request_id": command.request_id.to_string(),
                 "created_ts_utc": created_ts_utc,
+                "dispatch_ts_utc": dispatch_ts_utc,
                 "synthetic_ack": true,
             }),
         );
@@ -3607,14 +3635,14 @@ impl StrategyRuntime {
             "trading_window_closed",
             "validation failed",
         );
-        ack.processed_ts_utc = created_ts_utc;
+        ack.processed_ts_utc = dispatch_ts_utc;
 
         let last_bar_ts = self
             .state
             .last_processed_bar_ts
             .get(&self.config.strategy.symbol)
             .copied();
-        let ack_ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, created_ts_utc);
+        let ack_ctx = self.strategy_ctx_with_last_bar_and_event_ts(last_bar_ts, dispatch_ts_utc);
         let (follow_up_intents, _previous_strategy_state) = self.invoke_strategy_callback(
             &ack_ctx,
             "on_ack_pre_emit_window_closed",
@@ -3632,7 +3660,7 @@ impl StrategyRuntime {
             "order_acknowledged_by_strategy",
             json!({
                 "callback": "on_ack_pre_emit_window_closed",
-                "event_ts_utc": created_ts_utc,
+                "event_ts_utc": dispatch_ts_utc,
                 "request_id": ack.request_id.to_string(),
                 "intents_count": intents_count,
                 "synthetic_ack": true,
@@ -3706,6 +3734,7 @@ impl StrategyRuntime {
         &mut self,
         ctx: &StrategyCtx,
         created_ts_utc: i64,
+        dispatch_ts_utc: i64,
         intents: Vec<Intent>,
         previous_strategy_state: StrategyState,
     ) -> Result<()> {
@@ -3720,7 +3749,7 @@ impl StrategyRuntime {
                 let mut accepted = Vec::new();
                 for intent in intents {
                     let intent_class = Self::resolve_intent_class(ctx, &intent);
-                    if !self.trading_window_allows_order(ctx, created_ts_utc, intent_class) {
+                    if !self.trading_window_allows_order(ctx, dispatch_ts_utc, intent_class) {
                         let action = self.intent_action_name(&intent);
                         info!(
                             action,
@@ -3734,6 +3763,7 @@ impl StrategyRuntime {
                                 "action": action,
                                 "class": format!("{intent_class:?}"),
                                 "created_ts_utc": created_ts_utc,
+                                "dispatch_ts_utc": dispatch_ts_utc,
                             }),
                         );
                         continue;
@@ -3814,6 +3844,7 @@ impl StrategyRuntime {
                             .maybe_defer_exit_before_emit(
                                 ctx,
                                 created_ts_utc,
+                                dispatch_ts_utc,
                                 intent.clone(),
                                 intent_class,
                             )
@@ -3852,6 +3883,7 @@ impl StrategyRuntime {
                         .maybe_defer_exit_before_emit(
                             ctx,
                             created_ts_utc,
+                            dispatch_ts_utc,
                             intent.clone(),
                             intent_class,
                         )
@@ -5122,6 +5154,7 @@ mod tests {
             .block_on(runtime.apply_intents(
                 &entry_ctx,
                 entry_bar.close_time_utc,
+                entry_bar.close_time_utc,
                 entry_intents,
                 previous_strategy_state,
             ))
@@ -5669,7 +5702,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_window_exit_is_deferred_before_emit() {
+    fn exit_uses_dispatch_time_for_pre_emit_window_check() {
         let mut runtime = test_runtime(TradeMode::Live);
         runtime.strategy = Box::new(WindowClosedExitSpyStrategy::default());
         runtime.config.strategy.max_silence_bars_sec = 0;
@@ -5713,9 +5746,17 @@ mod tests {
             last_event_ts: Utc::now().timestamp(),
         });
 
+        // The 13:50 local model bar is processed at the 14:00 break boundary.
+        // Command identity keeps model time, while the scheduler must use dispatch time.
         let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
             .unwrap()
-            .and_hms_opt(15, 55, 0)
+            .and_hms_opt(10, 50, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let dispatch_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
+            .unwrap()
+            .and_hms_opt(11, 0, 0)
             .unwrap()
             .and_utc()
             .timestamp();
@@ -5742,6 +5783,7 @@ mod tests {
             .block_on(runtime.apply_intents(
                 &ctx,
                 created_ts_utc,
+                dispatch_ts_utc,
                 vec![intent],
                 runtime.state.strategy_state.clone(),
             ))
@@ -5752,7 +5794,7 @@ mod tests {
             &runtime.state.strategy_state,
             StrategyState::Blocked { reason, last_bar_ts: state_last_bar_ts }
                 if reason == &format!("ack:{expected_request_id}:trading_window_closed")
-                    && *state_last_bar_ts == created_ts_utc
+                    && *state_last_bar_ts == dispatch_ts_utc
         ));
     }
 

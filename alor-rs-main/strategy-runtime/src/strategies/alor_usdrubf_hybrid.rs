@@ -185,6 +185,7 @@ pub struct AlorUsdrubfHybridStrategy {
     open_position: Option<OpenPosition>,
     exit_intent_inflight: bool,
     exit_reject_deferred_until_bar_ts: Option<i64>,
+    deferred_exit_reason: Option<String>,
     owner_confirmed_by_live_event: bool,
     pending_tp_bar_ts_utc: Option<i64>,
     pending_sl_bar_ts_utc: Option<i64>,
@@ -275,6 +276,7 @@ impl AlorUsdrubfHybridStrategy {
             open_position: None,
             exit_intent_inflight: false,
             exit_reject_deferred_until_bar_ts: None,
+            deferred_exit_reason: None,
             owner_confirmed_by_live_event: true,
             pending_tp_bar_ts_utc: None,
             pending_sl_bar_ts_utc: None,
@@ -443,6 +445,8 @@ impl AlorUsdrubfHybridStrategy {
         self.tracked_order_ids.clear();
         self.entry_intent_inflight = false;
         self.exit_intent_inflight = false;
+        self.exit_reject_deferred_until_bar_ts = None;
+        self.deferred_exit_reason = None;
         self.hybrid_state = HybridState::Flat;
         self.last_logged_broker_qty = 0.0;
         self.last_logged_broker_avg = 0.0;
@@ -933,6 +937,7 @@ impl AlorUsdrubfHybridStrategy {
             fill_price: Some(exit_price),
             comment: Some(format!("{}|exit|{}", self.config.symbol, reason)),
         });
+        self.deferred_exit_reason = Some(reason.clone());
         self.exit_intent_inflight = true;
         self.lifecycle_stage = "live_exit_intent_emitted".to_string();
         self.log_live_intent_emitted_exit(ctx, bar_ts_utc, qty, side, exit_price, reason.as_str());
@@ -1400,7 +1405,34 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 .exit_reject_deferred_until_bar_ts
                 .is_some_and(|ts| bar.close_time_utc > ts)
             {
+                let deferred_reason = self
+                    .deferred_exit_reason
+                    .clone()
+                    .unwrap_or_else(|| "deferred_exit_retry".to_string());
                 self.exit_reject_deferred_until_bar_ts = None;
+                if self.open_position.is_some() && !self.exit_intent_inflight {
+                    info!(
+                        strategy_id = ctx.strategy_id.as_str(),
+                        strategy = "alor_usdrubf_hybrid",
+                        action = "deferred_exit_reissued",
+                        original_exit_reason = deferred_reason.as_str(),
+                        rejected_after_bar_ts_utc = ?self.last_logged_exit_reject_defer_ts,
+                        retry_bar_ts_utc = bar.close_time_utc,
+                        "reissuing rejected exit on first following live bar"
+                    );
+                    self.maybe_emit_live_exit_intent(
+                        ctx,
+                        deferred_reason,
+                        bar.close,
+                        bar.close_time_utc,
+                        &mut intents,
+                    );
+                    self.log_entry_exit_inflight_transitions(ctx);
+                    self.last_processed_bar_ts = Some(bar.close_time_utc);
+                    self.sync_state();
+                    return intents;
+                }
+                self.deferred_exit_reason = None;
             }
             self.maybe_emit_live_mr_brackets(ctx, bar.close_time_utc, &mut intents);
             if let Some((reason, exit_price)) = self.evaluate_exit_research(&research) {
@@ -1677,6 +1709,8 @@ impl Strategy for AlorUsdrubfHybridStrategy {
             self.open_position = None;
             self.owner_confirmed_by_live_event = true;
             self.exit_intent_inflight = false;
+            self.exit_reject_deferred_until_bar_ts = None;
+            self.deferred_exit_reason = None;
             self.clear_bracket_terminal_reconcile();
             self.tracked_order_ids.clear();
             self.hybrid_state = if self.pending_entry.is_some() {
@@ -1905,6 +1939,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.exit_intent_inflight = false;
         self.entry_reject_deferred_until_bar_ts = None;
         self.exit_reject_deferred_until_bar_ts = None;
+        self.deferred_exit_reason = None;
         self.pending_request_ids.clear();
         self.tracked_order_ids.clear();
         self.clear_mr_protection_tracking();
@@ -2027,6 +2062,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
         self.exit_intent_inflight = false;
         self.entry_reject_deferred_until_bar_ts = None;
         self.exit_reject_deferred_until_bar_ts = None;
+        self.deferred_exit_reason = None;
         self.clear_mr_protection_tracking();
         self.owner_confirmed_by_live_event = true;
         info!(
@@ -2261,6 +2297,7 @@ impl Strategy for AlorUsdrubfHybridStrategy {
                 self.lifecycle_stage != "bootstrap_non_flat_owner_unconfirmed";
             self.entry_reject_deferred_until_bar_ts = None;
             self.exit_reject_deferred_until_bar_ts = None;
+            self.deferred_exit_reason = None;
             self.last_logged_entry_inflight = self.entry_intent_inflight;
             self.last_logged_exit_inflight = self.exit_intent_inflight;
             self.last_logged_entry_reject_defer_ts = self.entry_reject_deferred_until_bar_ts;
@@ -3801,6 +3838,26 @@ mod tests {
         );
         assert!(risk.exit_recovery_active);
         assert!(risk.open_risk_position_unflattened);
+
+        strategy.deferred_exit_reason = Some("bo_stop1_long".to_string());
+        let retry_bar_ts = 1_775_490_600;
+        let retry_ctx = test_ctx(TradeMode::Live, retry_bar_ts);
+        let retry_intents = strategy.on_bar(
+            &retry_ctx,
+            &bar_with_origin(retry_bar_ts, 80.2, DataOrigin::Live),
+        );
+        assert!(retry_intents.iter().any(|intent| {
+            matches!(
+                intent,
+                Intent::Market {
+                    side: Side::Sell,
+                    comment: Some(comment),
+                    ..
+                } if comment.ends_with("|exit|bo_stop1_long")
+            )
+        }));
+        assert!(strategy.exit_intent_inflight);
+        assert!(strategy.exit_reject_deferred_until_bar_ts.is_none());
     }
 
     #[test]
