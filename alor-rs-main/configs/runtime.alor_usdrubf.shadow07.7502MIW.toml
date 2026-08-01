@@ -104,7 +104,7 @@ output = "stdout"
 file_path = "/reports/moex_early_session_usdrubf_paper_canonical07.jsonl"
 trades_csv = "/reports/moex_early_session_usdrubf_trades_canonical07.csv"
 summary_json = "/reports/moex_early_session_usdrubf_summary_canonical07.json"
-append = false
+append = true
 
 [backtest]
 enabled = false

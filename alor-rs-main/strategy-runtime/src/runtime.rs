@@ -1002,6 +1002,11 @@ impl StrategyRuntime {
             "risk gate startup store bootstrap started"
         );
         let result = run_risk_gate_startup_store(&self.transport, &config).await?;
+        let recent_weekday_gaps = result
+            .recent_weekday_gaps
+            .iter()
+            .map(|date| date.format("%Y-%m-%d").to_string())
+            .collect::<Vec<_>>();
         self.apply_risk_gate_materialized_state(
             config.identity.profile_id.clone(),
             &result.artifacts.materialized_state,
@@ -1019,8 +1024,17 @@ impl StrategyRuntime {
                 "state_refreshed": result.write_summary.state_refreshed,
                 "ledger_rows_count": result.artifacts.materialized_state.ledger_rows_count,
                 "seed_loaded": result.artifacts.materialized_state.seed_loaded,
+                "recent_weekday_gaps": &recent_weekday_gaps,
             }),
         );
+        if !recent_weekday_gaps.is_empty() {
+            warn!(
+                strategy = %self.config.strategy.strategy_id,
+                profile = %config.identity.profile_id,
+                gaps = ?recent_weekday_gaps,
+                "risk gate ledger has possible recent weekday gaps"
+            );
+        }
         info!(
             strategy = %self.config.strategy.strategy_id,
             profile = %config.identity.profile_id,
@@ -3043,12 +3057,14 @@ impl StrategyRuntime {
                 &self.config.strategy.symbol,
                 &self.config.paper.trades_csv,
                 &self.config.paper.summary_json,
+                self.config.paper.append,
             ),
             TradeMode::Backtest => self.ledger.persist_reports(
                 &self.config.strategy.strategy_id,
                 &self.config.strategy.symbol,
                 &self.config.backtest.trades_csv,
                 &self.config.backtest.summary_json,
+                self.config.backtest.append,
             ),
             TradeMode::Live => Ok(()),
         }

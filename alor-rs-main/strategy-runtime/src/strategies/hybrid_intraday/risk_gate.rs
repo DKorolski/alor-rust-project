@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 use serde::Deserialize;
 
 pub const SHADOW_PNL_LB120_LOOKBACK_SESSIONS: usize = 120;
@@ -515,6 +515,35 @@ pub fn validate_regular_session_ledger(rows: &[RiskGateSessionRow]) -> Result<()
     Ok(())
 }
 
+pub fn recent_regular_weekday_gaps(
+    rows: &[RiskGateSessionRow],
+    lookback_days: i64,
+) -> Result<Vec<NaiveDate>, String> {
+    validate_regular_session_ledger(rows)?;
+    let Some(last_date) = rows.last().map(|row| row.session_date) else {
+        return Ok(Vec::new());
+    };
+    let cutoff = last_date
+        .checked_sub_signed(Duration::days(lookback_days.max(0)))
+        .unwrap_or(NaiveDate::MIN);
+    let mut gaps = Vec::new();
+    for pair in rows.windows(2) {
+        let mut date = pair[0].session_date.succ_opt();
+        while let Some(candidate) = date.filter(|date| *date < pair[1].session_date) {
+            if candidate >= cutoff
+                && !matches!(
+                    candidate.weekday(),
+                    chrono::Weekday::Sat | chrono::Weekday::Sun
+                )
+            {
+                gaps.push(candidate);
+            }
+            date = candidate.succ_opt();
+        }
+    }
+    Ok(gaps)
+}
+
 pub fn reconcile_seed_with_ledger(
     mode: RiskGateStartupMode,
     existing_rows: &[RiskGateSessionRow],
@@ -917,6 +946,33 @@ mod tests {
         let rows = [row(5, 1.0), row(5, 2.0)];
 
         assert!(validate_regular_session_ledger(&rows).is_err());
+    }
+
+    #[test]
+    fn recent_weekday_gaps_report_missing_friday_but_not_weekend() {
+        let mut thursday = row(5, 1.0);
+        thursday.session_date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap_or(NaiveDate::MIN);
+        let mut monday = row(6, 2.0);
+        monday.session_date = NaiveDate::from_ymd_opt(2026, 7, 27).unwrap_or(NaiveDate::MIN);
+
+        let gaps = recent_regular_weekday_gaps(&[thursday, monday], 21).expect("gaps");
+
+        assert_eq!(
+            gaps,
+            [NaiveDate::from_ymd_opt(2026, 7, 24).unwrap_or(NaiveDate::MIN)]
+        );
+    }
+
+    #[test]
+    fn recent_weekday_gaps_respect_zero_day_lookback() {
+        let mut old = row(5, 1.0);
+        old.session_date = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap_or(NaiveDate::MIN);
+        let mut current = row(6, 2.0);
+        current.session_date = NaiveDate::from_ymd_opt(2026, 7, 27).unwrap_or(NaiveDate::MIN);
+
+        let gaps = recent_regular_weekday_gaps(&[old, current], 0).expect("gaps");
+
+        assert!(gaps.is_empty());
     }
 
     #[test]

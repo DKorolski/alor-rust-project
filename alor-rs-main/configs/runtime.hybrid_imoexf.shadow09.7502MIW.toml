@@ -126,7 +126,7 @@ output = "stdout"
 file_path = "/reports/moex_early_session_imoexf_paper_legacy09.jsonl"
 trades_csv = "/reports/moex_early_session_imoexf_trades_legacy09.csv"
 summary_json = "/reports/moex_early_session_imoexf_summary_legacy09.json"
-append = false
+append = true
 
 [backtest]
 enabled = false

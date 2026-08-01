@@ -8,14 +8,15 @@ use crate::redis_transport::{RedisRuntimeTransport, RedisStreamFieldMessage};
 use crate::strategies::hybrid_intraday::{
     build_ledger_records_from_rows, build_runtime_session_row, parse_seed_csv,
     plan_risk_gate_startup, rebuild_materialized_state_from_ledger_records,
-    rows_from_ledger_records, validate_ledger_record_identity, RiskGateLedgerRecord,
-    RiskGateMaterializedState, RiskGateProfileIdentity, RiskGateRedisKeys, RiskGateRowSource,
-    RiskGateSessionRow, RiskGateStartupArtifacts, RiskGateStartupMode,
+    recent_regular_weekday_gaps, rows_from_ledger_records, validate_ledger_record_identity,
+    RiskGateLedgerRecord, RiskGateMaterializedState, RiskGateProfileIdentity, RiskGateRedisKeys,
+    RiskGateRowSource, RiskGateSessionRow, RiskGateStartupArtifacts, RiskGateStartupMode,
 };
 use crate::strategy_host::RiskGateSessionFinalization;
 use crate::{StrategyConfig, StrategySpecificConfig};
 
 pub const RISK_GATE_LEDGER_RECOVERY_SCAN_COUNT: usize = 256;
+pub const RISK_GATE_CONTINUITY_LOOKBACK_DAYS: i64 = 21;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskGateWriteSummary {
@@ -41,6 +42,7 @@ pub struct RiskGateStartupStoreResult {
     pub previous_state: Option<RiskGateMaterializedState>,
     pub artifacts: RiskGateStartupArtifacts,
     pub write_summary: RiskGateWriteSummary,
+    pub recent_weekday_gaps: Vec<NaiveDate>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,12 +202,20 @@ pub async fn run_risk_gate_startup_store(
     .context("risk gate startup plan failed")?;
     let write_summary =
         persist_risk_gate_startup_artifacts(transport, &config.identity, &artifacts).await?;
+    let ledger_rows = rows_from_ledger_records(&artifacts.ledger_records)
+        .map_err(anyhow::Error::msg)
+        .context("risk gate continuity rows invalid")?;
+    let recent_weekday_gaps =
+        recent_regular_weekday_gaps(&ledger_rows, RISK_GATE_CONTINUITY_LOOKBACK_DAYS)
+            .map_err(anyhow::Error::msg)
+            .context("risk gate continuity scan failed")?;
 
     Ok(RiskGateStartupStoreResult {
         existing_records_loaded: existing_records.len(),
         previous_state,
         artifacts,
         write_summary,
+        recent_weekday_gaps,
     })
 }
 

@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::Result;
-use serde::Serialize;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+static REPORT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TradeRecord {
@@ -31,7 +34,7 @@ pub struct OrderRecord {
     pub owned: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosedTradeRecord {
     pub entry_ts_utc: i64,
     pub exit_ts_utc: i64,
@@ -43,6 +46,37 @@ pub struct ClosedTradeRecord {
     pub commission_total: f64,
     pub pnl_gross: f64,
     pub pnl_net: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ClosedTradeKey {
+    entry_ts_utc: i64,
+    exit_ts_utc: i64,
+    symbol: String,
+    side: String,
+    qty: u64,
+    entry_price: u64,
+    exit_price: u64,
+    commission_total: u64,
+    pnl_gross: u64,
+    pnl_net: u64,
+}
+
+impl From<&ClosedTradeRecord> for ClosedTradeKey {
+    fn from(trade: &ClosedTradeRecord) -> Self {
+        Self {
+            entry_ts_utc: trade.entry_ts_utc,
+            exit_ts_utc: trade.exit_ts_utc,
+            symbol: trade.symbol.clone(),
+            side: trade.side.clone(),
+            qty: trade.qty.to_bits(),
+            entry_price: trade.entry_price.to_bits(),
+            exit_price: trade.exit_price.to_bits(),
+            commission_total: trade.commission_total.to_bits(),
+            pnl_gross: trade.pnl_gross.to_bits(),
+            pnl_net: trade.pnl_net.to_bits(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,7 +121,15 @@ impl TradeLedger {
     }
 
     pub fn summary(&self, strategy_id: &str, symbol: &str) -> LedgerSummary {
-        let trades_total = self.closed_trades.len();
+        Self::summary_for_trades(strategy_id, symbol, &self.closed_trades)
+    }
+
+    fn summary_for_trades(
+        strategy_id: &str,
+        symbol: &str,
+        closed_trades: &[ClosedTradeRecord],
+    ) -> LedgerSummary {
+        let trades_total = closed_trades.len();
         let mut gross_profit = 0.0;
         let mut gross_loss = 0.0;
         let mut max_pnl = 0.0;
@@ -95,7 +137,7 @@ impl TradeLedger {
         let mut pnl_gross_total = 0.0;
         let mut pnl_net_total = 0.0;
         let mut commission_total = 0.0;
-        for (idx, trade) in self.closed_trades.iter().enumerate() {
+        for (idx, trade) in closed_trades.iter().enumerate() {
             pnl_gross_total += trade.pnl_gross;
             pnl_net_total += trade.pnl_net;
             commission_total += trade.commission_total;
@@ -117,8 +159,7 @@ impl TradeLedger {
         } else {
             pnl_total / trades_total as f64
         };
-        let wins = self
-            .closed_trades
+        let wins = closed_trades
             .iter()
             .filter(|trade| trade.pnl_net > 0.0)
             .count();
@@ -149,9 +190,11 @@ impl TradeLedger {
         symbol: &str,
         trades_csv: &str,
         summary_json: &str,
+        append: bool,
     ) -> Result<()> {
-        self.write_trades_csv(trades_csv)?;
-        self.write_summary_json(strategy_id, symbol, summary_json)?;
+        let report_trades = self.report_trades(trades_csv, append)?;
+        Self::write_trades_csv(trades_csv, &report_trades)?;
+        Self::write_summary_json(strategy_id, symbol, summary_json, &report_trades)?;
         Ok(())
     }
 
@@ -171,43 +214,79 @@ impl TradeLedger {
         &self.closed_trades
     }
 
-    fn write_trades_csv(&self, path: &str) -> Result<()> {
-        ensure_parent_dir(path)?;
-        let mut file = File::create(path)?;
-        writeln!(
-            file,
-            "entry_ts_utc,exit_ts_utc,symbol,side,qty,entry_price,exit_price,commission_total,pnl_gross,pnl_net"
-        )?;
-        for trade in &self.closed_trades {
-            writeln!(
-                file,
-                "{},{},{},{},{},{},{},{},{},{}",
-                trade.entry_ts_utc,
-                trade.exit_ts_utc,
-                trade.symbol,
-                trade.side,
-                trade.qty,
-                trade.entry_price,
-                trade.exit_price,
-                trade.commission_total,
-                trade.pnl_gross,
-                trade.pnl_net
-            )?;
-        }
-        Ok(())
+    fn report_trades(&self, path: &str, append: bool) -> Result<Vec<ClosedTradeRecord>> {
+        let mut trades = if append && Path::new(path).exists() {
+            Self::read_trades_csv(path)?
+        } else {
+            Vec::new()
+        };
+        trades.extend(self.closed_trades.iter().cloned());
+        trades.sort_by(|left, right| {
+            left.entry_ts_utc
+                .cmp(&right.entry_ts_utc)
+                .then(left.exit_ts_utc.cmp(&right.exit_ts_utc))
+                .then(left.symbol.cmp(&right.symbol))
+                .then(left.side.cmp(&right.side))
+        });
+        let mut seen = HashSet::with_capacity(trades.len());
+        trades.retain(|trade| seen.insert(ClosedTradeKey::from(trade)));
+        Ok(trades)
     }
 
-    fn write_summary_json(&self, strategy_id: &str, symbol: &str, path: &str) -> Result<()> {
+    fn read_trades_csv(path: &str) -> Result<Vec<ClosedTradeRecord>> {
+        if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0) {
+            return Ok(Vec::new());
+        }
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(path)
+            .with_context(|| format!("open existing trade report: {path}"))?;
+        reader
+            .deserialize()
+            .collect::<std::result::Result<Vec<ClosedTradeRecord>, csv::Error>>()
+            .with_context(|| format!("parse existing trade report: {path}"))
+    }
+
+    fn write_trades_csv(path: &str, trades: &[ClosedTradeRecord]) -> Result<()> {
         ensure_parent_dir(path)?;
-        let summary = self.summary(strategy_id, symbol);
+        replace_file_atomically(path, |file| {
+            writeln!(
+                file,
+                "entry_ts_utc,exit_ts_utc,symbol,side,qty,entry_price,exit_price,commission_total,pnl_gross,pnl_net"
+            )?;
+            for trade in trades {
+                writeln!(
+                    file,
+                    "{},{},{},{},{},{},{},{},{},{}",
+                    trade.entry_ts_utc,
+                    trade.exit_ts_utc,
+                    trade.symbol,
+                    trade.side,
+                    trade.qty,
+                    trade.entry_price,
+                    trade.exit_price,
+                    trade.commission_total,
+                    trade.pnl_gross,
+                    trade.pnl_net
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn write_summary_json(
+        strategy_id: &str,
+        symbol: &str,
+        path: &str,
+        trades: &[ClosedTradeRecord],
+    ) -> Result<()> {
+        ensure_parent_dir(path)?;
+        let summary = Self::summary_for_trades(strategy_id, symbol, trades);
         let payload = serde_json::to_string_pretty(&summary)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
-        file.write_all(payload.as_bytes())?;
-        Ok(())
+        replace_file_atomically(path, |file| {
+            file.write_all(payload.as_bytes())?;
+            Ok(())
+        })
     }
 
     fn apply_fill(&mut self, trade: &TradeRecord) {
@@ -357,6 +436,28 @@ fn ensure_parent_dir(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn replace_file_atomically(path: &str, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+    let sequence = REPORT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary_path = format!("{path}.tmp-{}-{sequence}", std::process::id());
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temporary_path)?;
+        write(&mut file)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +522,7 @@ mod tests {
                 "SBER",
                 trades.to_str().expect("trades path utf8"),
                 summary.to_str().expect("summary path utf8"),
+                false,
             )
             .expect("persist reports");
         assert!(trades.exists());

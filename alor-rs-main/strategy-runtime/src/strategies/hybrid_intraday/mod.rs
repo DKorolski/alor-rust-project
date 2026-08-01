@@ -14,8 +14,8 @@ pub use orchestrator::{
 pub use risk_gate::{
     build_ledger_records_from_rows, build_runtime_session_row, mr_enabled_for_next_session,
     mr_enabled_for_session, parse_seed_csv, plan_risk_gate_startup,
-    rebuild_materialized_state_from_ledger_records, reconcile_seed_with_ledger,
-    rolling_shadow_pnl_before_next_session, rows_from_ledger_records,
+    rebuild_materialized_state_from_ledger_records, recent_regular_weekday_gaps,
+    reconcile_seed_with_ledger, rolling_shadow_pnl_before_next_session, rows_from_ledger_records,
     validate_ledger_record_identity, validate_regular_session_ledger, RiskGateLedgerRecord,
     RiskGateMaterializedState, RiskGateProfileIdentity, RiskGateRedisKeys, RiskGateRowSource,
     RiskGateRowStatus, RiskGateSessionRow, RiskGateStartupArtifacts, RiskGateStartupDecision,

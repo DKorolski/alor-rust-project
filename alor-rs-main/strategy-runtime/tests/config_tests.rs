@@ -510,6 +510,16 @@ fn loads_moex_early_session_shadow_configs_as_diagnostics_only() {
         assert!(!resolved.config.allow_live_orders);
         assert!(!resolved.config.allow_paper_orders);
         assert!(!resolved.config.require_gateway_ready);
+        if matches!(
+            expected_kind,
+            strategy_runtime::StrategyKind::AlorUsdrubfHybrid
+                | strategy_runtime::StrategyKind::HybridIntraday
+        ) {
+            assert!(
+                resolved.config.paper.append,
+                "USDRUBF/IMOEXF shadow reports must survive restarts: {relative_path}"
+            );
+        }
         assert_eq!(resolved.config.strategy.strategy_kind, expected_kind);
         assert_eq!(resolved.config.streams.runtime_state, expected_state);
         assert!(
