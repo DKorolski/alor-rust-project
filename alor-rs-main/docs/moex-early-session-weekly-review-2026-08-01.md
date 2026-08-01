@@ -106,9 +106,10 @@ shadow PnL.
 - Exact broker-truth reconstruction is reliable for July 27-31. The current
   Redis history does not provide a complete, balanced broker ledger for every
   cycle from July 14 onward, so no exact full-period broker PnL is claimed.
-- The isolated IMOEXF shadow risk-gate ledgers are missing the July 24 session
-  row. The production live risk-gate ledger contains that row and is complete
-  through July 30, so live gate operation was not affected.
+- The isolated IMOEXF shadow risk-gate ledgers have a historical Jul9-Jul21
+  observation gap from before continuous ledger ownership and are also missing
+  the July 24 row inside the active observation interval. The production live
+  ledger is complete through July 30, so live gate operation was not affected.
 
 ## Verdict
 

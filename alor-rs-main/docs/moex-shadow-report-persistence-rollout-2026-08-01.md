@@ -10,8 +10,8 @@ the previous file with trades from the new process generation. This made the
 files unsuitable as a continuous operational soak record.
 
 The isolated IMOEXF shadow risk-gate ledgers also had no operator-visible
-warning for a missing recent weekday row. The July 24 row was absent from both
-isolated ledgers, while the production live ledger remained complete.
+warning for missing recent weekday rows. The production live ledger remained
+complete.
 
 ## Patch Scope
 
@@ -104,4 +104,51 @@ deleted during rollback.
 
 ## Actual Rollout Record
 
-Pending.
+The patch was committed and deployed on 2026-08-01 during the weekend window.
+
+```text
+commit: 5b394ae
+image: ghcr.io/dkorolski/alor-rust-project/strategy-runtime:manual-20260801-shadow-reports-5b394ae
+image id: sha256:6ee6f6a7eeea3a3cb7fc9ed042120ad6528c642f7b89d9f96f3193d876267042
+architecture: amd64
+```
+
+Pre-rollout resources were approximately 5.9 GiB available RAM and 48 GiB free
+disk space. The image was built on the VPS from a clean `git archive` of the
+commit. No environment or token files were included in the build context.
+
+Backups and Redis exports were stored under:
+
+```text
+/opt/rollout-candidates/5b394ae
+```
+
+Only the two USDRUBF and two IMOEXF shadow runtime services were recreated.
+Their Redis and gateway services, both RI shadow runtimes and all live services
+were left running.
+
+Post-rollout checks:
+
+- all four target containers became healthy on the first start;
+- mounted configs resolved with `paper.append=true`;
+- Jul31 CSV line counts were unchanged by the restart;
+- both isolated risk-gate streams remained at 186 rows;
+- shadow07 retained last finalized `2026-07-30`, rolling `152.7`, gate enabled;
+- shadow09 retained last finalized `2026-07-30`, rolling `161.8`, gate enabled;
+- startup refreshed only `current_shadow_session_date` to `2026-08-01`;
+- no risk-gate record was inserted or removed;
+- all isolated shadow command streams remained absent/empty;
+- all nine live/shadow runtime containers were healthy after rollout.
+
+The continuity warning reported these absent weekday rows:
+
+```text
+2026-07-09, 2026-07-10, 2026-07-13, 2026-07-14, 2026-07-15,
+2026-07-16, 2026-07-17, 2026-07-20, 2026-07-21, 2026-07-24
+```
+
+The Jul9-Jul21 interval predates continuous ledger ownership by the isolated
+shadow generations and is classified as a historical observation gap. Jul24 is
+the gap inside the active isolated-ledger observation interval. None of these
+dates were automatically backfilled, and the complete production live ledger
+was not modified.
