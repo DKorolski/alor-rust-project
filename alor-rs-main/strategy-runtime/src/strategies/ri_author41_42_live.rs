@@ -1514,6 +1514,9 @@ impl RiAuthor4142LiveStrategy {
 
     fn live_bo_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
         let mut intents = Vec::new();
+        let config = self.author42_config();
+        self.observe_bo_bar(bar, config);
+
         if self.phase_is("live_pending_entry") {
             return intents;
         }
@@ -1522,7 +1525,6 @@ impl RiAuthor4142LiveStrategy {
         }
         if self.phase_is("live_deferred_exit") {
             if let Some(position) = self.live_bo.position.clone() {
-                let config = self.author42_config();
                 intents.push(self.emit_bo_exit_intent(
                     &position,
                     bar,
@@ -1537,13 +1539,22 @@ impl RiAuthor4142LiveStrategy {
         if self.phase_blocks_fresh_entries() {
             return intents;
         }
-        self.ensure_bo_session(bar);
-        let config = self.author42_config();
 
         if let Some(pending) = self.live_bo.pending.take() {
             match pending {
                 RiAuthor4142LiveBoPending::Entry(side) => {
-                    if self.live_mr.position.is_none() && self.live_bo.position.is_none() {
+                    if bar.ts_local.time() >= config.exit_time {
+                        info!(
+                            target: "strategy_runtime::ri_author41_42_live",
+                            action = "ri_bo_entry_suppressed",
+                            reason = "entry_at_or_after_exit_time",
+                            side = side.as_str(),
+                            bar_ts_local = %bar.ts_local,
+                            exit_time = %config.exit_time,
+                            mode = self.config.mode.as_str(),
+                            live_adapter_enabled = self.can_emit_orders(),
+                        );
+                    } else if self.live_mr.position.is_none() && self.live_bo.position.is_none() {
                         let decision_key = format!(
                             "{}|author42_bo|{}|Some({:?})|live_prospective",
                             self.config.profile_id, bar.ts_local, side
@@ -1595,9 +1606,6 @@ impl RiAuthor4142LiveStrategy {
                 }
             }
         }
-
-        self.live_bo.day_hh = self.live_bo.day_hh.max(bar.high);
-        self.live_bo.day_ll = self.live_bo.day_ll.min(bar.low);
 
         if let Some(mut position) = self.live_bo.position.take() {
             position.bars_held = position.bars_held.saturating_add(1);
@@ -1652,9 +1660,50 @@ impl RiAuthor4142LiveStrategy {
             }
         }
 
-        self.update_bo_levels_and_pending_entry(bar, config);
-        self.live_bo.bar_index = self.live_bo.bar_index.saturating_add(1);
+        self.update_bo_pending_entry(bar, config);
         intents
+    }
+
+    fn observe_bo_bar(&mut self, bar: ModelBar, config: Author42Config) {
+        let can_start_new_session = self.live_bo.position.is_none()
+            && !matches!(
+                self.live_bo.pending,
+                Some(RiAuthor4142LiveBoPending::Exit(_))
+            );
+        if self.live_bo.current_date != Some(bar.ts_local.date()) && can_start_new_session {
+            self.ensure_bo_session(bar);
+        }
+        if self.live_bo.current_date != Some(bar.ts_local.date()) {
+            return;
+        }
+
+        self.live_bo.day_hh = self.live_bo.day_hh.max(bar.high);
+        self.live_bo.day_ll = self.live_bo.day_ll.min(bar.low);
+
+        if let Some(context) = self.live_bo.context {
+            if self.live_bo.bar_index == 5 {
+                if let Some(first_bar) = self.live_bo.first_bar {
+                    self.live_bo.long_level = Some(
+                        (context.prev_close + config.k * context.prev_range)
+                            .max(bar.close)
+                            .max(first_bar.high),
+                    );
+                    self.live_bo.short_level = Some(
+                        (context.prev_close - config.k * context.prev_range)
+                            .min(bar.close)
+                            .min(first_bar.low),
+                    );
+                }
+                if config.use_first_hour_extreme_filter
+                    && (bar.close - context.prev_close).abs()
+                        > config.first_hour_extreme_k * context.prev_range
+                {
+                    self.live_bo.trade_allowed = false;
+                }
+            }
+        }
+
+        self.live_bo.bar_index = self.live_bo.bar_index.saturating_add(1);
     }
 
     fn ensure_bo_session(&mut self, bar: ModelBar) {
@@ -1689,30 +1738,10 @@ impl RiAuthor4142LiveStrategy {
         };
     }
 
-    fn update_bo_levels_and_pending_entry(&mut self, bar: ModelBar, config: Author42Config) {
+    fn update_bo_pending_entry(&mut self, bar: ModelBar, config: Author42Config) {
         let Some(context) = self.live_bo.context else {
             return;
         };
-        if self.live_bo.bar_index == 5 {
-            if let Some(first_bar) = self.live_bo.first_bar {
-                self.live_bo.long_level = Some(
-                    (context.prev_close + config.k * context.prev_range)
-                        .max(bar.close)
-                        .max(first_bar.high),
-                );
-                self.live_bo.short_level = Some(
-                    (context.prev_close - config.k * context.prev_range)
-                        .min(bar.close)
-                        .min(first_bar.low),
-                );
-            }
-            if config.use_first_hour_extreme_filter
-                && (bar.close - context.prev_close).abs()
-                    > config.first_hour_extreme_k * context.prev_range
-            {
-                self.live_bo.trade_allowed = false;
-            }
-        }
         if self.live_bo.pending.is_some()
             || self.live_bo.position.is_some()
             || self.live_mr.position.is_some()
@@ -3951,6 +3980,174 @@ mod tests {
     }
 
     #[test]
+    fn author42_observation_does_not_skip_bar_while_mr_entry_is_pending() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+        let date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let bars = [
+            model_bar(dt(2026, 8, 5, 9, 0, 0), 89_620.0, 89_670.0, 89_580.0),
+            model_bar(dt(2026, 8, 5, 9, 10, 0), 89_630.0, 89_660.0, 89_590.0),
+            model_bar(dt(2026, 8, 5, 9, 20, 0), 89_590.0, 89_650.0, 89_550.0),
+            model_bar(dt(2026, 8, 5, 9, 30, 0), 89_670.0, 89_700.0, 89_560.0),
+            model_bar(dt(2026, 8, 5, 9, 40, 0), 89_570.0, 89_690.0, 89_540.0),
+            model_bar(dt(2026, 8, 5, 9, 50, 0), 90_120.0, 90_140.0, 89_560.0),
+        ];
+        strategy.live_bo = super::RiAuthor4142LiveBoState {
+            current_date: Some(date),
+            context: Some(super::RiAuthor4142LiveBoContext {
+                prev_close: 89_150.0,
+                prev2_close: 88_900.0,
+                prev_range: 2_300.0,
+                prev_hl_ratio: 1.026,
+                prev_ret: 0.0028,
+            }),
+            first_bar: Some(bars[0]),
+            trade_allowed: true,
+            ..super::RiAuthor4142LiveBoState::default()
+        };
+
+        for (index, bar) in bars.into_iter().enumerate() {
+            if index == 2 {
+                if let crate::state::StrategyState::RiAuthor4142Live { phase, .. } =
+                    &mut strategy.state
+                {
+                    *phase = "live_pending_entry".to_string();
+                }
+            }
+            assert!(strategy.live_bo_intents_for_bar(bar).is_empty());
+            if index == 2 {
+                if let crate::state::StrategyState::RiAuthor4142Live { phase, .. } =
+                    &mut strategy.state
+                {
+                    *phase = RiAuthor4142Phase::Flat.as_str().to_string();
+                }
+            }
+        }
+
+        assert_eq!(strategy.live_bo.bar_index, 6);
+        assert_eq!(strategy.live_bo.long_level, Some(90_120.0));
+
+        let trigger_bar = model_bar(dt(2026, 8, 5, 21, 50, 0), 90_130.0, 90_150.0, 90_100.0);
+        assert!(strategy.live_bo_intents_for_bar(trigger_bar).is_empty());
+        assert_eq!(
+            strategy.live_bo.pending,
+            Some(super::RiAuthor4142LiveBoPending::Entry(
+                RiAuthor4142Side::Long
+            ))
+        );
+
+        let entry_bar = model_bar(dt(2026, 8, 5, 22, 0, 0), 90_120.0, 90_160.0, 90_110.0);
+        let intents = strategy.live_bo_intents_for_bar(entry_bar);
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].explicit_class(), Some(IntentClass::Entry));
+    }
+
+    #[test]
+    fn author42_observation_survives_real_mr_entry_in_shared_live_path() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+        strategy.model_bars = vec![
+            model_bar(dt(2026, 8, 3, 23, 40, 0), 88_900.0, 89_500.0, 87_500.0),
+            model_bar(dt(2026, 8, 4, 23, 40, 0), 89_150.0, 89_440.0, 87_140.0),
+        ];
+        let bars = [
+            model_bar(dt(2026, 8, 5, 9, 0, 0), 89_620.0, 89_670.0, 89_580.0),
+            model_bar(dt(2026, 8, 5, 9, 10, 0), 89_630.0, 89_660.0, 89_590.0),
+            model_bar(dt(2026, 8, 5, 9, 20, 0), 89_590.0, 89_650.0, 89_550.0),
+            model_bar(dt(2026, 8, 5, 9, 30, 0), 89_670.0, 89_700.0, 89_560.0),
+            model_bar(dt(2026, 8, 5, 9, 40, 0), 89_570.0, 89_690.0, 89_540.0),
+            model_bar(dt(2026, 8, 5, 9, 50, 0), 90_120.0, 90_140.0, 89_560.0),
+        ];
+
+        assert!(strategy.live_intents_for_bar(bars[0]).is_empty());
+        assert!(strategy.live_intents_for_bar(bars[1]).is_empty());
+        let mr_intents = strategy.live_intents_for_bar(bars[2]);
+
+        assert_eq!(mr_intents.len(), 1);
+        assert_eq!(mr_intents[0].explicit_class(), Some(IntentClass::Entry));
+        assert!(matches!(
+            mr_intents[0].base_intent(),
+            crate::strategy_host::Intent::Market {
+                side: OrderSide::Sell,
+                ..
+            }
+        ));
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_pending_entry")
+        );
+        assert_eq!(strategy.live_bo.bar_index, 3);
+
+        strategy.on_position(
+            &live_ctx_with_position(-1.0),
+            &PositionEvent {
+                symbol: "RIM6".to_string(),
+                qty: -1.0,
+                existing: false,
+                avg_price: 89_590.0,
+                ts_utc: (bars[2].ts_local - Duration::hours(3))
+                    .and_utc()
+                    .timestamp(),
+            },
+        );
+        assert_eq!(
+            strategy.phase_for_test().as_deref(),
+            Some("live_in_position")
+        );
+
+        for bar in bars.into_iter().skip(3) {
+            assert!(strategy.live_intents_for_bar(bar).is_empty());
+        }
+
+        assert_eq!(strategy.live_bo.bar_index, 6);
+        assert_eq!(strategy.live_bo.long_level, Some(90_120.0));
+    }
+
+    #[test]
+    fn author42_pending_entry_is_suppressed_at_exit_time() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+        let first_bar = model_bar(dt(2026, 8, 5, 9, 0, 0), 89_620.0, 89_670.0, 89_580.0);
+        strategy.live_bo = super::RiAuthor4142LiveBoState {
+            current_date: Some(first_bar.ts_local.date()),
+            context: Some(super::RiAuthor4142LiveBoContext {
+                prev_close: 89_150.0,
+                prev2_close: 88_900.0,
+                prev_range: 2_300.0,
+                prev_hl_ratio: 1.026,
+                prev_ret: 0.0028,
+            }),
+            first_bar: Some(first_bar),
+            bar_index: 84,
+            long_level: Some(90_120.0),
+            short_level: Some(88_184.0),
+            trade_allowed: true,
+            pending: Some(super::RiAuthor4142LiveBoPending::Entry(
+                RiAuthor4142Side::Long,
+            )),
+            ..super::RiAuthor4142LiveBoState::default()
+        };
+
+        let exit_bar = model_bar(dt(2026, 8, 5, 23, 0, 0), 90_140.0, 90_170.0, 90_090.0);
+        let intents = strategy.live_bo_intents_for_bar(exit_bar);
+
+        assert!(intents.is_empty());
+        assert!(strategy.live_bo.pending.is_none());
+        assert!(strategy.live_bo.position.is_none());
+        assert_eq!(strategy.phase_for_test().as_deref(), Some("flat"));
+        assert!(strategy
+            .journal_records_for_test()
+            .iter()
+            .all(|row| row.adapter_decision != RiAuthor4142JournalDecision::IntentEmitted));
+    }
+
+    #[test]
     fn configured_special_session_is_excluded_from_model_and_live_emission() {
         let mut config = default_config();
         config.mode = RiAuthor4142RuntimeMode::MicroLive;
@@ -4719,6 +4916,17 @@ mod tests {
 
     fn bar(dt_local: NaiveDateTime, origin: DataOrigin) -> BarEvent {
         bar_with_ohlc(dt_local, origin, 99_990.0, 100_010.0, 99_980.0, 100_000.0)
+    }
+
+    fn model_bar(dt_local: NaiveDateTime, close: f64, high: f64, low: f64) -> ModelBar {
+        ModelBar {
+            ts_local: dt_local,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 10.0,
+        }
     }
 
     fn bar_with_ohlc(
