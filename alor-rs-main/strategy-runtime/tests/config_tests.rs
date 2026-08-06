@@ -650,6 +650,7 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
         .strategy;
 
     assert_eq!(legacy_strategy.model_session_start_time, "09:00:00");
+    assert!(legacy_strategy.live_mr_entries_enabled);
     assert_eq!(legacy_strategy.mr_session_end_time, "11:59:00");
     assert_eq!(legacy_strategy.risk_gate_mode, "normal_append");
     assert_eq!(legacy_strategy.bo_wait_hours, 3.0);
@@ -660,6 +661,7 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
     assert!(legacy_strategy.risk_gate_persist_in_shadow);
 
     assert_eq!(canonical_strategy.model_session_start_time, "07:00:00");
+    assert!(canonical_strategy.live_mr_entries_enabled);
     assert_eq!(canonical_strategy.mr_session_end_time, "09:59:00");
     assert_eq!(canonical_strategy.risk_gate_mode, "normal_append");
     assert_eq!(canonical_strategy.bo_wait_hours, 3.0);
@@ -1066,6 +1068,7 @@ fn loads_live_imoexf_canonical07_replacement_candidate() {
         chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap()
     );
     assert_eq!(hybrid.model_session_start_time, "07:00:00");
+    assert!(!hybrid.live_mr_entries_enabled);
     assert_eq!(hybrid.mr_session_end_time, "09:59:00");
     assert_eq!(hybrid.mr_exit_offset_min, 10);
     assert_eq!(hybrid.bo_wait_hours, 3.0);

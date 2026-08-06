@@ -27,6 +27,10 @@ pub use crate::strategy_host::{
     RuntimeStateRestored, StopOrderEvent, Strategy, StrategyCtx, TradeEvent,
 };
 
+fn default_live_mr_entries_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     pub redis_url: String,
@@ -354,6 +358,8 @@ pub struct HybridIntradaySettings {
     pub profile: String,
     #[serde(default)]
     pub mr_variant: String,
+    #[serde(default = "default_live_mr_entries_enabled")]
+    pub live_mr_entries_enabled: bool,
     #[serde(default)]
     pub mr_gate_policy: String,
     #[serde(default)]
@@ -411,6 +417,7 @@ impl Default for HybridIntradaySettings {
         Self {
             profile: "baseline_runtime_hybrid".to_string(),
             mr_variant: "classic_prev_day_range".to_string(),
+            live_mr_entries_enabled: true,
             mr_gate_policy: "disabled".to_string(),
             risk_gate_mode: "disabled".to_string(),
             risk_gate_seed_file: None,

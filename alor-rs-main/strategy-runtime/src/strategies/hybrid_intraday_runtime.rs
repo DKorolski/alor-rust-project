@@ -27,6 +27,7 @@ pub struct HybridIntradayRuntimeConfig {
     pub symbol: String,
     pub profile: HybridIntradayProfile,
     pub mr_variant: MeanReversionVariant,
+    pub live_mr_entries_enabled: bool,
     pub mr_gate_policy: MrGatePolicy,
     pub risk_gate_mode: RiskGateMode,
     pub risk_gate_seed_file: Option<String>,
@@ -455,6 +456,39 @@ impl HybridIntradayRuntimeStrategy {
                 _ => true,
             },
         }
+    }
+
+    fn apply_live_mr_entry_policy(
+        &self,
+        dt_local: NaiveDateTime,
+        origin: &DataOrigin,
+        signal: Option<EntrySignal>,
+    ) -> Option<EntrySignal> {
+        if self.config.live_mr_entries_enabled || signal.is_none() {
+            return signal;
+        }
+
+        let signal = signal.expect("checked MR signal");
+        if origin == &DataOrigin::Live {
+            info!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "mr_entry_suppressed",
+                reason = "live_mr_entries_disabled",
+                dt_local = %dt_local,
+                mr_variant = ?self.config.mr_variant,
+                side = ?signal.side,
+            );
+        } else {
+            debug!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                action = "mr_entry_suppressed",
+                reason = "live_mr_entries_disabled",
+                dt_local = %dt_local,
+                mr_variant = ?self.config.mr_variant,
+                side = ?signal.side,
+            );
+        }
+        None
     }
 
     fn risk_gate_shadow_enabled(&self) -> bool {
@@ -2406,6 +2440,7 @@ mod tests {
             risk_gate_persist_in_shadow: false,
             model_session_start_time: None,
             model_session_end_time: None,
+            live_mr_entries_enabled: true,
             qty: 1.0,
             live_order_style: MarketBuyAndCloseLiveOrderStyle::Market,
             tick_size: 0.5,
@@ -2673,6 +2708,78 @@ mod tests {
     }
 
     #[test]
+    fn disabled_live_mr_entries_keep_shadow_accounting_and_do_not_block_bo() {
+        let mut cfg = risk_gate_test_config();
+        cfg.live_mr_entries_enabled = false;
+        cfg.breakout_config.wait_hours = 0.0;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        strategy.prev_day_close = Some(100.0);
+        strategy.prev_day_range = Some(4.0);
+        strategy.entry_ready = true;
+        strategy.last_day_local =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 6).unwrap_or(chrono::NaiveDate::MIN));
+        strategy.orchestrator.warm_bar(
+            crate::strategies::hybrid_intraday::orchestrator::BarInput {
+                dt: chrono::NaiveDate::from_ymd_opt(2026, 1, 5)
+                    .expect("previous date")
+                    .and_hms_opt(9, 0, 0)
+                    .expect("previous session start"),
+                open: 100.0,
+                high: 102.0,
+                low: 98.0,
+                close: 100.0,
+                close_prev: 0.0,
+                day_range_prev: 0.0,
+                has_open_position: false,
+                has_live_orders: false,
+            },
+        );
+        let ctx = test_ctx(Some(0.0));
+
+        let mr_intents = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 0, 0),
+                99.7,
+                102.0,
+                99.7,
+                99.7,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert!(mr_intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
+        assert!(strategy.risk_gate_shadow_open.is_some());
+
+        let bo_intents = strategy.on_bar(
+            &ctx,
+            &test_bar_ohlc(
+                ts_local(2026, 1, 6, 9, 10, 0),
+                103.0,
+                103.0,
+                102.5,
+                103.0,
+                DataOrigin::Live,
+            ),
+        );
+
+        assert_eq!(bo_intents.len(), 1);
+        assert!(matches!(
+            bo_intents.as_slice(),
+            [Intent::Classified {
+                intent,
+                intent_class: IntentClass::Entry
+            }] if matches!(intent.as_ref(), Intent::Market { side: OrderSide::Buy, .. })
+        ));
+        assert_eq!(
+            strategy.pending_entry.expect("pending BO entry").owner,
+            Owner::IntradayBreakout
+        );
+        assert_eq!(strategy.risk_gate_shadow_trade_count, 1);
+    }
+
+    #[test]
     fn high180_variant_uses_resolved_mr_entry_cutoff_for_live_and_shadow_engines() {
         let mut cfg = risk_gate_test_config();
         cfg.mr_config.session_end_time =
@@ -2742,6 +2849,7 @@ mod tests {
     fn high180_live_variant_forces_exit_after_max_hold() {
         let mut cfg = test_config();
         cfg.mr_variant = MeanReversionVariant::High180;
+        cfg.live_mr_entries_enabled = false;
         let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
         let entry_ts = ts_local(2026, 1, 6, 9, 0, 0);
         let cycle_id = strategy.next_cycle_id(entry_ts);
@@ -5575,6 +5683,8 @@ impl Strategy for HybridIntradayRuntimeStrategy {
             };
             let mr_entry_signal =
                 self.filter_near_zero_mr_bracket_entry(dt_local, bar.close, mr_entry_signal);
+            let mr_entry_signal =
+                self.apply_live_mr_entry_policy(dt_local, &bar.origin, mr_entry_signal);
             let mr_exit_reason = if self.uses_high180_mr() {
                 self.high180_exit_reason(dt_local)
             } else {

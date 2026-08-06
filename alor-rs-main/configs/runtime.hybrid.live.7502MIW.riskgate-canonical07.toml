@@ -85,6 +85,9 @@ timezone_offset_hours = 3
 [strategy.hybrid_intraday]
 profile = "imoexf_primary_riskgate_high180_lb120"
 mr_variant = "high180"
+# Temporary live BO-only observation. High180 shadow accounting and the lb120
+# ledger remain active; only new broker-facing MR entries are suppressed.
+live_mr_entries_enabled = false
 mr_gate_policy = "shadow_pnl_lb120_positive"
 risk_gate_mode = "normal_append"
 risk_gate_seed_file = "/configs/riskgate_high180_lb120_seed_2026-04-26.csv"

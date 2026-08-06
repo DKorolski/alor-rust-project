@@ -564,6 +564,7 @@ struct HybridIntradayConfigFile {
     marketable_limit_offset_ticks: Option<i64>,
     profile: Option<String>,
     mr_variant: Option<String>,
+    live_mr_entries_enabled: Option<bool>,
     mr_gate_policy: Option<String>,
     risk_gate_mode: Option<String>,
     risk_gate_seed_file: Option<String>,
@@ -1193,6 +1194,9 @@ fn apply_hybrid_intraday_config_file(
         }
         if let Some(value) = &hybrid_file.mr_variant {
             strategy.mr_variant = value.clone();
+        }
+        if let Some(value) = hybrid_file.live_mr_entries_enabled {
+            strategy.live_mr_entries_enabled = value;
         }
         if let Some(value) = &hybrid_file.mr_gate_policy {
             strategy.mr_gate_policy = value.clone();

@@ -200,6 +200,7 @@ impl HybridIntradayAdapter {
             symbol: config.symbol.clone(),
             profile,
             mr_variant,
+            live_mr_entries_enabled: runtime_settings.live_mr_entries_enabled,
             mr_gate_policy,
             risk_gate_mode,
             risk_gate_seed_file: runtime_settings.risk_gate_seed_file.clone(),
