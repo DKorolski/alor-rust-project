@@ -756,10 +756,7 @@ impl RiAuthor4142LiveStrategy {
         let Some(transition) = self.anchor_transition_rule else {
             return false;
         };
-        matches!(
-            self.config.mode,
-            RiAuthor4142RuntimeMode::Shadow | RiAuthor4142RuntimeMode::ProspectiveShadow
-        ) && dt_local.date() < transition.starts_on
+        dt_local.date() < transition.starts_on
             && dt_local.time() < NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN)
     }
 
@@ -3886,6 +3883,19 @@ mod tests {
             assert!(prospective.update_bar_state(&event).is_empty());
         }
         assert_eq!(prospective.model_bars, strategy.model_bars);
+
+        let mut live_config = canonical07_transition_config();
+        live_config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        live_config.allow_order_emission = true;
+        let mut live = RiAuthor4142LiveStrategy::new(live_config).expect("live transition");
+        for event in [
+            bar(dt(2026, 7, 13, 8, 50, 0), DataOrigin::History),
+            bar(dt(2026, 7, 13, 9, 0, 0), DataOrigin::History),
+            bar(dt(2026, 7, 14, 7, 0, 0), DataOrigin::History),
+        ] {
+            assert!(live.update_bar_state(&event).is_empty());
+        }
+        assert_eq!(live.model_bars, strategy.model_bars);
     }
 
     #[test]

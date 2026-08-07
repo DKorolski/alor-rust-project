@@ -354,7 +354,8 @@ Verify all of the following in code/tests:
 06:50 bars are ignored by RI model state and signals.
 07:00 is accepted as the first model bar.
 Previous-session anchor uses 07:00..23:49 after 2026-07-14.
-Pre-transition history keeps 09:00 anchor guard.
+Pre-transition history keeps 09:00 anchor guard and ignores early/service bars
+before 09:00 in all runtime modes, including live warmup.
 Author41 entry window ends at 10:00.
 Open Author41 positions are not forced out at 10:00.
 Author42 BO observation uses the 07:00 session clock.
