@@ -31,7 +31,7 @@ positions = "broker.positions.7502MIW"
 commands = "cmd.orders.7502MIW.ri_author41_42.micro"
 acks = "cmd.acks.7502MIW.ri_author41_42.micro"
 snapshots = "broker.snapshots.7502MIW"
-health = "events.health.ri_author41_42.live07.7502MIW"
+health = "events.health.ri_author41_42.7502MIW"
 dlq_prefix = "dlq"
 runtime_state = "runtime.state.ri_author41_42.micro.live07.7502MIW"
 

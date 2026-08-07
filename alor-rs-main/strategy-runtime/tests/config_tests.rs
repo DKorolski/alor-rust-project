@@ -494,6 +494,10 @@ fn loads_ri_author41_42_7502miw_live07_candidate() {
         "runtime.state.ri_author41_42.micro.live07.7502MIW"
     );
     assert_eq!(
+        resolved.config.streams.health.as_deref(),
+        Some("events.health.ri_author41_42.7502MIW")
+    );
+    assert_eq!(
         resolved.config.strategy.strategy_id,
         "ri_author41_42.micro.live07.7502MIW"
     );

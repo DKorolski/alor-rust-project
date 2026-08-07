@@ -340,11 +340,12 @@ required runtime image:
   manual-20260807-ri-bo-observation-b386ba5 or newer
 ```
 
-The live07 candidate intentionally uses a separate `consumer_group`, `health`,
+The live07 candidate intentionally uses a separate `consumer_group`,
 `runtime_state`, and decision journal namespace, while keeping the same
-`commands`/`acks` streams used by the existing RI gateway. Rollout should
-therefore stop the legacy09 runtime first, then start only the live07 generation
-from broker-flat state. Do not run legacy09 and live07 simultaneously.
+gateway `health` stream and the same `commands`/`acks` streams used by the
+existing RI gateway. Rollout should therefore stop the legacy09 runtime first,
+then start only the live07 generation from broker-flat state. Do not run
+legacy09 and live07 simultaneously.
 
 ### Task C. Runtime Logic Verification
 
