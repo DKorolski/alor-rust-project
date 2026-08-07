@@ -464,6 +464,94 @@ fn loads_ri_author41_42_riu6_roll_candidates() {
 }
 
 #[test]
+fn loads_ri_author41_42_7502miw_live07_candidate() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let path = repo_root.join("configs/runtime.ri_author41_42.micro.7502MIW.RIU6.live07.toml");
+
+    let resolved = load_runtime_config(path, false).expect("load RIU6 live07 candidate");
+
+    assert_eq!(resolved.config.portfolio, "7502MIW");
+    assert_eq!(
+        resolved.config.consumer_group,
+        "strategy-runtime-ri-author41-42-micro-live07-7502MIW"
+    );
+    assert_eq!(resolved.config.streams.bars, "md.bars.7502MIW.RIU6.10m");
+    assert_eq!(
+        resolved.config.streams.commands,
+        "cmd.orders.7502MIW.ri_author41_42.micro"
+    );
+    assert_eq!(
+        resolved.config.streams.acks,
+        "cmd.acks.7502MIW.ri_author41_42.micro"
+    );
+    assert_eq!(
+        resolved.config.streams.runtime_state,
+        "runtime.state.ri_author41_42.micro.live07.7502MIW"
+    );
+    assert_eq!(
+        resolved.config.strategy.strategy_id,
+        "ri_author41_42.micro.live07.7502MIW"
+    );
+    assert_eq!(resolved.config.strategy.symbol, "RIU6");
+    assert_eq!(resolved.config.strategy.qty, 1.0);
+    assert_eq!(resolved.config.strategy.session_open_hour, 7);
+    assert_eq!(resolved.config.strategy.session_open_minute, 0);
+    assert_eq!(
+        resolved.config.trade_mode,
+        strategy_runtime::TradeMode::Live
+    );
+    assert!(resolved.config.allow_live_orders);
+    assert!(resolved.config.reset_state_on_start);
+
+    let settings = resolved
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("ri settings");
+    assert_eq!(settings.mode, "micro_live");
+    assert!(settings.allow_order_emission);
+    assert_eq!(settings.execution_path, "action_scoped_only");
+    assert_eq!(settings.order_symbol.as_deref(), Some("RTS-9.26"));
+    assert_eq!(settings.session_start_time, "07:00:00");
+    assert_eq!(settings.session_end_time, "23:49:59");
+    assert_eq!(settings.author41_entry_end_time, "10:00:00");
+    assert_eq!(settings.author41_time_exit, "20:00:00");
+    assert_eq!(settings.author42_exit_time, "23:00:00");
+    assert_eq!(
+        settings.excluded_model_dates,
+        ["2026-06-12".to_string(), "2026-11-04".to_string()]
+    );
+    assert_eq!(settings.min_anchor_bars, 92);
+    assert_eq!(settings.anchor_first_bar_at_or_before, "07:10:00");
+    assert_eq!(settings.anchor_last_bar_at_or_after, "23:30:00");
+    assert_eq!(
+        settings.anchor_transition_date.as_deref(),
+        Some("2026-07-14")
+    );
+    assert_eq!(settings.pre_transition_min_anchor_bars, Some(80));
+    assert_eq!(
+        settings
+            .pre_transition_anchor_first_bar_at_or_before
+            .as_deref(),
+        Some("09:10:00")
+    );
+    assert_eq!(
+        settings
+            .pre_transition_anchor_last_bar_at_or_after
+            .as_deref(),
+        Some("23:30:00")
+    );
+    assert_eq!(settings.actual_expiry_date.as_deref(), Some("2026-09-17"));
+    assert_eq!(settings.roll_target_sessions_before, 1);
+    assert_eq!(settings.roll_fallback_sessions_before, 2);
+}
+
+#[test]
 fn loads_moex_early_session_shadow_configs_as_diagnostics_only() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
