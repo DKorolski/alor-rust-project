@@ -321,6 +321,27 @@ RIU6 10m bars include 07:00..23:49 regular bars
 Gateway must not start a second live RI runtime generation at the same time as
 the old live09 runtime.
 
+The paired live gateway admission window must also use the live07 regular
+session. Otherwise the runtime can correctly emit a canonical07 intent while the
+gateway rejects it locally as `trading_window_closed`.
+
+Required gateway `trading_periods` for `7502MIW` live07:
+
+```text
+GATEWAY_CONFIG=/configs/gateway.ri_author41_42.micro.7502MIW.RIU6.roll-2026-06-12.toml
+
+session_start = "07:00:00"
+session_end   = "23:49:59"
+break_start_1 = "14:00:00"
+break_end_1   = "14:04:59"
+break_start_2 = "18:50:00"
+break_end_2   = "19:04:59"
+```
+
+Do not point the active VPS service at an untracked deployment alias such as
+`gateway.ri_author41_42.micro.7502MIW.toml` unless the alias is explicitly kept
+in sync with the tracked config above.
+
 Engineering prep status on `2026-08-07`:
 
 ```text
@@ -334,7 +355,7 @@ live stream checked on VPS:
   md.bars.7502MIW.RIU6.10m includes 07:00, 07:10, ... regular bars
 
 gateway config change:
-  not required for 7502MIW unless the upstream RIU6 stream wiring changes
+  required for 7502MIW live07: gateway trading_periods.session_start must be 07:00
 
 required runtime image:
   manual-20260807-ri-bo-observation-b386ba5 or newer
@@ -476,6 +497,7 @@ no BO entry can be emitted at/after 23:00
 strict no-overlap remains active
 rollout is done from broker-flat state
 first live07 session ends broker-flat or with controlled/open documented state
+early RI intents after 07:00 are not rejected by gateway-local trading_periods
 no orphan/residual orders remain after terminal exits
 ```
 

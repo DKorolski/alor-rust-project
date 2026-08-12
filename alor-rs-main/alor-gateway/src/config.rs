@@ -1926,6 +1926,21 @@ refresh_token = "   "
                     .config
                     .action_scope_force_token_refresh_before_authorize
             );
+            let trading_periods = resolved
+                .config
+                .trading_periods
+                .as_ref()
+                .expect("trading periods");
+            let expected_session_start = if portfolio == "7502MIW" {
+                chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap()
+            } else {
+                chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+            };
+            assert_eq!(trading_periods.session_start, expected_session_start);
+            assert_eq!(
+                trading_periods.session_end,
+                chrono::NaiveTime::from_hms_opt(23, 49, 59).unwrap()
+            );
         }
 
         unsafe {

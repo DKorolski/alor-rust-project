@@ -69,7 +69,7 @@ action_scope_max_session_lifetime_ms = 15000
 action_scope_close_timeout_ms = 2000
 
 [trading_periods]
-session_start = "09:00:00"
+session_start = "07:00:00"
 session_end = "23:49:59"
 break_start_1 = "14:00:00"
 break_end_1 = "14:04:59"
