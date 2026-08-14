@@ -1,22 +1,9 @@
-# RI Author41/42 RIU6 roll candidate for portfolio 7502MIW.
-#
-# Activate only through the controlled between-session roll runbook after
-# broker-flat, no-working-order, and RIU6-liquidity checks pass.
-#
-# Required transport runner stream overrides for the micro contour:
-#
-#   STREAM_BARS=md.bars.7502MIW.RIU6.10m
-#   STREAM_HEALTH=events.health.ri_author41_42.7502MIW
-#   STREAM_COMMANDS=cmd.orders.7502MIW.ri_author41_42.micro
-#   STREAM_ACKS=cmd.acks.7502MIW.ri_author41_42.micro
-#   CONSUMER_GROUP=gateway-commands-ri-author41-42-micro-7502MIW
-#
-# The paired runtime config must use action-scoped execution only.
-BAR_DUMP_PATH="./bars.ri_author41_42.7502MIW.RIU6.csv"
+# Gateway config for alor_usdrubf_hybrid_v1 on portfolio 7502MIW.
+BAR_DUMP_PATH="./bars.7502MIW.usdrubf.csv"
 portfolio = "7502MIW"
 exchange = "MOEX"
 instrument_group = "RFUD"
-symbols = ["RIU6"]
+symbols = ["USDRUBF"]
 
 tf_sec = 600
 from_ts = 0
@@ -25,7 +12,7 @@ ws_url = "wss://api.alor.ru/ws"
 cws_url = "wss://api.alor.ru/cws"
 oauth_url = "https://oauth.alor.ru/refresh"
 
-log_positions_filter = ["RIU6"]
+log_positions_filter = ["USDRUBF"]
 log_cash_positions = false
 cash_symbols = ["RUB", "SUR"]
 log_existing_snapshot_orders = false
@@ -43,18 +30,14 @@ backoff_multiplier = 2
 
 max_silence_bars_sec = 1200
 
-history_sessions = 6
-history_days_back = 6
+history_sessions = 4
+history_days_back = 4
 session_rollover_hour_utc = 6
-health_listen_addr = "127.0.0.1:8084"
+health_listen_addr = "127.0.0.1:8081"
 control_path_stale_after_sec = 900
 control_path_pre_entry_recycle_enabled = true
-control_path_pre_exit_recycle_enabled = true
 control_path_recycle_timeout_ms = 5000
-control_path_recycle_timeout_ms_exit = 10000
-control_path_post_recycle_exit_send_window_ms = 5000
 control_path_hardening_log_only = false
-
 control_cws_mode = "action_scoped"
 action_scope_enable_create_limit = true
 action_scope_enable_market = true
@@ -70,7 +53,7 @@ action_scope_close_timeout_ms = 2000
 
 [trading_periods]
 session_start = "07:00:00"
-session_end = "23:49:59"
+session_end = "23:49:00"
 # MOEX FORTS schedule as of 2026-08-14 is continuous during weekday trading
 # blocks; keep required break fields outside the live session.
 break_start_1 = "00:00:00"
@@ -90,9 +73,9 @@ subscribe_ack_retries = 3
 [reconnect]
 warm_reconnect_max_gap_sec = 21600
 gap_backfill_padding_bars = 2
-cold_start_history_days_back = 6
+cold_start_history_days_back = 4
 bar_silence_resync_min_sec = 1200
 
 [general]
-price_step = 10
+price_step = 0.01
 volume_step = 1

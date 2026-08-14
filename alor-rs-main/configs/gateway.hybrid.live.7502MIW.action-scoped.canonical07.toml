@@ -57,10 +57,12 @@ action_scope_close_timeout_ms = 2000
 [trading_periods]
 session_start = "07:00:00"
 session_end = "23:49:00"
-break_start_1 = "14:00:00"
-break_end_1 = "14:04:59"
-break_start_2 = "18:50:00"
-break_end_2 = "19:04:59"
+# MOEX FORTS schedule as of 2026-08-14 is continuous during weekday trading
+# blocks; keep required break fields outside the live session.
+break_start_1 = "00:00:00"
+break_end_1 = "00:00:00"
+break_start_2 = "00:00:00"
+break_end_2 = "00:00:00"
 weekends_off = false
 timezone_offset_hours = 3
 
