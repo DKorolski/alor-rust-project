@@ -96,6 +96,8 @@ pub struct RiAuthor4142LiveConfig {
     pub author41_entry_end_time: String,
     pub author41_time_exit: String,
     pub author42_exit_time: String,
+    pub author42_last_entry_time: Option<String>,
+    pub author42_max_entries_per_day: Option<u32>,
     pub excluded_model_dates: Vec<String>,
     pub min_anchor_bars: usize,
     pub anchor_first_bar_at_or_before: String,
@@ -346,6 +348,7 @@ struct RiAuthor4142LiveBoState {
     trade_allowed: bool,
     was_long_today: bool,
     was_short_today: bool,
+    entries_today: u32,
     day_hh: f64,
     day_ll: f64,
     position: Option<RiAuthor4142LiveBoPosition>,
@@ -364,6 +367,7 @@ impl Default for RiAuthor4142LiveBoState {
             trade_allowed: true,
             was_long_today: false,
             was_short_today: false,
+            entries_today: 0,
             day_hh: f64::NEG_INFINITY,
             day_ll: f64::INFINITY,
             position: None,
@@ -450,6 +454,9 @@ impl RiAuthor4142LiveConfig {
         parse_ri_time("author41_entry_end_time", &self.author41_entry_end_time)?;
         parse_ri_time("author41_time_exit", &self.author41_time_exit)?;
         parse_ri_time("author42_exit_time", &self.author42_exit_time)?;
+        if let Some(raw) = &self.author42_last_entry_time {
+            parse_ri_time("author42_last_entry_time", raw)?;
+        }
         NaiveTime::parse_from_str(&self.anchor_first_bar_at_or_before, "%H:%M:%S").map_err(
             |err| {
                 anyhow::anyhow!(
@@ -603,6 +610,8 @@ impl RiAuthor4142LiveStrategy {
             author41_entry_end = %config.author41_entry_end_time,
             author41_time_exit = %config.author41_time_exit,
             author42_exit_time = %config.author42_exit_time,
+            author42_last_entry_time = ?config.author42_last_entry_time,
+            author42_max_entries_per_day = ?config.author42_max_entries_per_day,
             actual_expiry_date = ?config.actual_expiry_date,
             roll_target_sessions_before = config.roll_target_sessions_before,
             roll_fallback_sessions_before = config.roll_fallback_sessions_before,
@@ -1551,6 +1560,29 @@ impl RiAuthor4142LiveStrategy {
                             mode = self.config.mode.as_str(),
                             live_adapter_enabled = self.can_emit_orders(),
                         );
+                    } else if !Self::author42_entry_time_allowed(bar.ts_local.time(), config) {
+                        info!(
+                            target: "strategy_runtime::ri_author41_42_live",
+                            action = "ri_bo_entry_suppressed",
+                            reason = "entry_after_last_entry_time",
+                            side = side.as_str(),
+                            bar_ts_local = %bar.ts_local,
+                            last_entry_time = ?config.last_entry_time,
+                            mode = self.config.mode.as_str(),
+                            live_adapter_enabled = self.can_emit_orders(),
+                        );
+                    } else if !self.author42_entry_count_allowed(config) {
+                        info!(
+                            target: "strategy_runtime::ri_author41_42_live",
+                            action = "ri_bo_entry_suppressed",
+                            reason = "max_entries_per_day_reached",
+                            side = side.as_str(),
+                            bar_ts_local = %bar.ts_local,
+                            entries_today = self.live_bo.entries_today,
+                            max_entries_per_day = ?config.max_entries_per_day,
+                            mode = self.config.mode.as_str(),
+                            live_adapter_enabled = self.can_emit_orders(),
+                        );
                     } else if self.live_mr.position.is_none() && self.live_bo.position.is_none() {
                         let decision_key = format!(
                             "{}|author42_bo|{}|Some({:?})|live_prospective",
@@ -1583,6 +1615,7 @@ impl RiAuthor4142LiveStrategy {
                             RiAuthor4142Side::Long => self.live_bo.was_long_today = true,
                             RiAuthor4142Side::Short => self.live_bo.was_short_today = true,
                         }
+                        self.live_bo.entries_today = self.live_bo.entries_today.saturating_add(1);
                         intents.push(self.emit_live_candidate(candidate, &decision));
                         self.transition_live_pending_entry(&decision, "live_bo_entry_emitted");
                     }
@@ -1752,6 +1785,12 @@ impl RiAuthor4142LiveStrategy {
             return;
         };
         if bar.ts_local.time() >= config.exit_time {
+            return;
+        }
+        if !Self::author42_entry_signal_time_allowed(bar.ts_local.time(), config) {
+            return;
+        }
+        if !self.author42_entry_count_allowed(config) {
             return;
         }
 
@@ -2301,7 +2340,36 @@ impl RiAuthor4142LiveStrategy {
     fn author42_config(&self) -> Author42Config {
         let mut config = Author42Config::ri_grid_k042_both();
         config.exit_time = self.author42_exit_time;
+        config.last_entry_time = self
+            .config
+            .author42_last_entry_time
+            .as_deref()
+            .map(|raw| parse_ri_time("author42_last_entry_time", raw))
+            .transpose()
+            .expect("validated author42_last_entry_time");
+        config.max_entries_per_day = self.config.author42_max_entries_per_day;
         config
+    }
+
+    fn author42_entry_time_allowed(entry_time: NaiveTime, config: Author42Config) -> bool {
+        config
+            .last_entry_time
+            .map(|last_entry_time| entry_time <= last_entry_time)
+            .unwrap_or(true)
+    }
+
+    fn author42_entry_signal_time_allowed(signal_time: NaiveTime, config: Author42Config) -> bool {
+        config
+            .last_entry_time
+            .map(|last_entry_time| signal_time < last_entry_time)
+            .unwrap_or(true)
+    }
+
+    fn author42_entry_count_allowed(&self, config: Author42Config) -> bool {
+        config
+            .max_entries_per_day
+            .map(|max_entries| self.live_bo.entries_today < max_entries)
+            .unwrap_or(true)
     }
 
     fn points_for_side(side: RiAuthor4142Side, entry_price: f64, exit_price: f64) -> f64 {
@@ -3001,6 +3069,8 @@ mod tests {
             author41_entry_end_time: "12:00:00".to_string(),
             author41_time_exit: "20:00:00".to_string(),
             author42_exit_time: "23:00:00".to_string(),
+            author42_last_entry_time: None,
+            author42_max_entries_per_day: None,
             excluded_model_dates: Vec::new(),
             min_anchor_bars: 0,
             anchor_first_bar_at_or_before: "23:59:59".to_string(),
@@ -4155,6 +4225,83 @@ mod tests {
             .journal_records_for_test()
             .iter()
             .all(|row| row.adapter_decision != RiAuthor4142JournalDecision::IntentEmitted));
+    }
+
+    #[test]
+    fn author42_pending_entry_respects_configured_last_entry_time() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        config.author42_last_entry_time = Some("17:00:00".to_string());
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+        let first_bar = model_bar(dt(2026, 8, 5, 7, 0, 0), 89_620.0, 89_670.0, 89_580.0);
+        strategy.live_bo = super::RiAuthor4142LiveBoState {
+            current_date: Some(first_bar.ts_local.date()),
+            context: Some(super::RiAuthor4142LiveBoContext {
+                prev_close: 89_150.0,
+                prev2_close: 88_900.0,
+                prev_range: 2_300.0,
+                prev_hl_ratio: 1.026,
+                prev_ret: 0.0028,
+            }),
+            first_bar: Some(first_bar),
+            bar_index: 62,
+            long_level: Some(90_120.0),
+            short_level: Some(88_184.0),
+            trade_allowed: true,
+            pending: Some(super::RiAuthor4142LiveBoPending::Entry(
+                RiAuthor4142Side::Long,
+            )),
+            ..super::RiAuthor4142LiveBoState::default()
+        };
+
+        let late_entry_bar = model_bar(dt(2026, 8, 5, 17, 10, 0), 90_140.0, 90_170.0, 90_090.0);
+        let intents = strategy.live_bo_intents_for_bar(late_entry_bar);
+
+        assert!(intents.is_empty());
+        assert!(strategy.live_bo.pending.is_none());
+        assert!(strategy.live_bo.position.is_none());
+        assert_eq!(strategy.live_bo.entries_today, 0);
+        assert_eq!(strategy.phase_for_test().as_deref(), Some("flat"));
+    }
+
+    #[test]
+    fn author42_pending_entry_respects_configured_daily_entry_limit() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        config.author42_max_entries_per_day = Some(2);
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).expect("strategy");
+        let first_bar = model_bar(dt(2026, 8, 5, 7, 0, 0), 89_620.0, 89_670.0, 89_580.0);
+        strategy.live_bo = super::RiAuthor4142LiveBoState {
+            current_date: Some(first_bar.ts_local.date()),
+            context: Some(super::RiAuthor4142LiveBoContext {
+                prev_close: 89_150.0,
+                prev2_close: 88_900.0,
+                prev_range: 2_300.0,
+                prev_hl_ratio: 1.026,
+                prev_ret: 0.0028,
+            }),
+            first_bar: Some(first_bar),
+            bar_index: 55,
+            long_level: Some(90_120.0),
+            short_level: Some(88_184.0),
+            trade_allowed: true,
+            entries_today: 2,
+            pending: Some(super::RiAuthor4142LiveBoPending::Entry(
+                RiAuthor4142Side::Long,
+            )),
+            ..super::RiAuthor4142LiveBoState::default()
+        };
+
+        let entry_bar = model_bar(dt(2026, 8, 5, 16, 20, 0), 90_140.0, 90_170.0, 90_090.0);
+        let intents = strategy.live_bo_intents_for_bar(entry_bar);
+
+        assert!(intents.is_empty());
+        assert!(strategy.live_bo.pending.is_none());
+        assert!(strategy.live_bo.position.is_none());
+        assert_eq!(strategy.live_bo.entries_today, 2);
+        assert_eq!(strategy.phase_for_test().as_deref(), Some("flat"));
     }
 
     #[test]

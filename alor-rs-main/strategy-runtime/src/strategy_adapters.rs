@@ -305,6 +305,8 @@ impl RiAuthor4142Adapter {
             author41_entry_end_time: settings.author41_entry_end_time.clone(),
             author41_time_exit: settings.author41_time_exit.clone(),
             author42_exit_time: settings.author42_exit_time.clone(),
+            author42_last_entry_time: settings.author42_last_entry_time.clone(),
+            author42_max_entries_per_day: settings.author42_max_entries_per_day,
             excluded_model_dates: settings.excluded_model_dates.clone(),
             min_anchor_bars: settings.min_anchor_bars,
             anchor_first_bar_at_or_before: settings.anchor_first_bar_at_or_before.clone(),

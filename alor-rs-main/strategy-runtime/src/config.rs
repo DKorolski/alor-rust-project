@@ -672,6 +672,8 @@ struct RiAuthor4142ConfigFile {
     author41_entry_end_time: Option<String>,
     author41_time_exit: Option<String>,
     author42_exit_time: Option<String>,
+    author42_last_entry_time: Option<String>,
+    author42_max_entries_per_day: Option<u32>,
     excluded_model_dates: Option<Vec<String>>,
     min_anchor_bars: Option<usize>,
     anchor_first_bar_at_or_before: Option<String>,
@@ -1432,6 +1434,12 @@ fn apply_ri_author41_42_config_file(
         }
         if let Some(value) = &ri_file.author42_exit_time {
             settings.author42_exit_time = value.clone();
+        }
+        if let Some(value) = &ri_file.author42_last_entry_time {
+            settings.author42_last_entry_time = Some(value.clone());
+        }
+        if let Some(value) = ri_file.author42_max_entries_per_day {
+            settings.author42_max_entries_per_day = Some(value);
         }
         if let Some(value) = &ri_file.excluded_model_dates {
             settings.excluded_model_dates = value.clone();

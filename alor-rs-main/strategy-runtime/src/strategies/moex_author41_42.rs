@@ -348,6 +348,8 @@ pub struct Author42Config {
     pub allow_reentry_on_day_extreme: bool,
     pub roundtrip_cost_points: f64,
     pub exit_time: NaiveTime,
+    pub last_entry_time: Option<NaiveTime>,
+    pub max_entries_per_day: Option<u32>,
 }
 
 impl Author42Config {
@@ -366,6 +368,8 @@ impl Author42Config {
             allow_reentry_on_day_extreme: true,
             roundtrip_cost_points: 0.0,
             exit_time: NaiveTime::from_hms_opt(23, 0, 0).unwrap_or(NaiveTime::MIN),
+            last_entry_time: None,
+            max_entries_per_day: None,
         }
     }
 }
@@ -833,6 +837,7 @@ fn run_author42_day(
     let mut trade_allowed = true;
     let mut was_long_today = false;
     let mut was_short_today = false;
+    let mut entries_today = 0_u32;
     let mut pos: Option<OpenAuthor42Position> = None;
     let mut pending: Option<Author42Pending> = None;
     let mut day_hh = f64::NEG_INFINITY;
@@ -868,6 +873,7 @@ fn run_author42_day(
                             ShadowSide::Long => was_long_today = true,
                             ShadowSide::Short => was_short_today = true,
                         }
+                        entries_today = entries_today.saturating_add(1);
                     }
                 }
             }
@@ -942,19 +948,29 @@ fn run_author42_day(
         if bar.ts_local.time() >= config.exit_time || i + 1 >= day.len() {
             continue;
         }
+        if let Some(max_entries) = config.max_entries_per_day {
+            if entries_today >= max_entries {
+                continue;
+            }
+        }
 
-        if config.allow_reentry_on_day_extreme {
-            if was_long_today && bar.high >= day_hh && bar.ts_local.time() < config.exit_time {
+        let next_entry_allowed = config
+            .last_entry_time
+            .map(|last_entry_time| day[i + 1].ts_local.time() <= last_entry_time)
+            .unwrap_or(true);
+
+        if config.allow_reentry_on_day_extreme && next_entry_allowed {
+            if was_long_today && bar.high >= day_hh {
                 pending = Some(Author42Pending::Entry(ShadowSide::Long));
                 continue;
             }
-            if was_short_today && bar.low <= day_ll && bar.ts_local.time() < config.exit_time {
+            if was_short_today && bar.low <= day_ll {
                 pending = Some(Author42Pending::Entry(ShadowSide::Short));
                 continue;
             }
         }
 
-        if is_author42_hour_check(bar.ts_local, start_ts) {
+        if is_author42_hour_check(bar.ts_local, start_ts) && next_entry_allowed {
             if buy_trig && bar.close > long_level {
                 pending = Some(Author42Pending::Entry(ShadowSide::Long));
             } else if short_trig && bar.close < short_level {
@@ -1955,6 +1971,17 @@ mod tests {
             .unwrap_or(NaiveDateTime::MIN)
     }
 
+    fn mb(ts_local: NaiveDateTime, open: f64, high: f64, low: f64, close: f64) -> ModelBar {
+        ModelBar {
+            ts_local,
+            open,
+            high,
+            low,
+            close,
+            volume: 1.0,
+        }
+    }
+
     #[test]
     fn frozen_profiles_match_handoff_ids() {
         let ri = ModelProfile::ri_shadow_10m();
@@ -1986,6 +2013,77 @@ mod tests {
         assert!(!guard.is_model_bar(dt((2026, 4, 28), (8, 59, 0))));
         assert!(!guard.is_model_bar(dt((2026, 4, 28), (23, 50, 0))));
         assert!(!guard.is_model_bar(dt((2026, 5, 2), (10, 0, 0))));
+    }
+
+    #[test]
+    fn author42_last_entry_time_filters_next_bar_entries() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let mut day = Vec::new();
+        for idx in 0..=66 {
+            let ts = dt((2026, 8, 17), (7, 0, 0)) + chrono::Duration::minutes(idx * 10);
+            let close = if ts.time() == NaiveTime::from_hms_opt(17, 50, 0).unwrap() {
+                950.0
+            } else {
+                970.0
+            };
+            day.push(mb(ts, close, 990.0, close - 5.0, close));
+        }
+        let ctx = Author42DailyContext {
+            prev_close: 1000.0,
+            prev2_close: 990.0,
+            prev_range: 100.0,
+            prev_hl_ratio: 1.02,
+            prev_ret: 0.01,
+        };
+        let mut baseline = Author42Config::ri_grid_k042_both();
+        baseline.allow_reentry_on_day_extreme = false;
+        let mut cutoff = baseline;
+        cutoff.last_entry_time = Some(NaiveTime::from_hms_opt(17, 0, 0).unwrap());
+
+        let (baseline_trades, _) = run_author42_day(date, &day, ctx, baseline);
+        let (cutoff_trades, _) = run_author42_day(date, &day, ctx, cutoff);
+
+        assert_eq!(baseline_trades.len(), 1);
+        assert_eq!(
+            baseline_trades[0].entry_ts.time(),
+            NaiveTime::from_hms_opt(18, 0, 0).unwrap()
+        );
+        assert!(cutoff_trades.is_empty());
+    }
+
+    #[test]
+    fn author42_max_entries_per_day_limits_repeated_bo_entries() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let mut day = Vec::new();
+        for idx in 0..=25 {
+            let ts = dt((2026, 8, 17), (7, 0, 0)) + chrono::Duration::minutes(idx * 10);
+            let close = match (ts.hour(), ts.minute()) {
+                (8, 50) | (9, 50) | (10, 50) => 950.0,
+                (9, 0) | (10, 0) | (11, 0) => 990.0,
+                _ => 970.0,
+            };
+            day.push(mb(ts, close, 995.0, close - 5.0, close));
+        }
+        let ctx = Author42DailyContext {
+            prev_close: 1000.0,
+            prev2_close: 990.0,
+            prev_range: 100.0,
+            prev_hl_ratio: 1.02,
+            prev_ret: 0.01,
+        };
+        let mut baseline = Author42Config::ri_grid_k042_both();
+        baseline.allow_reentry_on_day_extreme = false;
+        let mut max2 = baseline;
+        max2.max_entries_per_day = Some(2);
+
+        let (baseline_trades, _) = run_author42_day(date, &day, ctx, baseline);
+        let (max2_trades, _) = run_author42_day(date, &day, ctx, max2);
+
+        assert_eq!(baseline_trades.len(), 3);
+        assert_eq!(max2_trades.len(), 2);
+        assert!(max2_trades
+            .iter()
+            .all(|trade| trade.entry_ts.time() <= NaiveTime::from_hms_opt(10, 0, 0).unwrap()));
     }
 
     #[test]

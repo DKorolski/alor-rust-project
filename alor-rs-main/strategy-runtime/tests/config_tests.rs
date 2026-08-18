@@ -572,6 +572,16 @@ fn loads_moex_early_session_shadow_configs_as_diagnostics_only() {
             "runtime.state.ri_author41_42.shadow07.prospective_v1.7502MIW",
         ),
         (
+            "configs/runtime.ri_author41_42.shadow07.bo_last_entry17.7502MIW.toml",
+            strategy_runtime::StrategyKind::RiAuthor4142,
+            "runtime.state.ri_author41_42.shadow07.bo_last_entry17_v1.7502MIW",
+        ),
+        (
+            "configs/runtime.ri_author41_42.shadow07.bo_max2.7502MIW.toml",
+            strategy_runtime::StrategyKind::RiAuthor4142,
+            "runtime.state.ri_author41_42.shadow07.bo_max2_v1.7502MIW",
+        ),
+        (
             "configs/runtime.alor_usdrubf.shadow09.7502MIW.toml",
             strategy_runtime::StrategyKind::AlorUsdrubfHybrid,
             "runtime.state.alor_usdrubf_hybrid_v1.shadow09.usdrubf.7502MIW",
@@ -671,6 +681,53 @@ fn loads_moex_early_session_ri_shadow_policies() {
     assert_eq!(canonical_settings.min_anchor_bars, 92);
     assert_eq!(canonical_settings.anchor_first_bar_at_or_before, "07:10:00");
     assert_eq!(canonical_settings.anchor_last_bar_at_or_after, "23:30:00");
+    assert_eq!(canonical_settings.author42_last_entry_time, None);
+    assert_eq!(canonical_settings.author42_max_entries_per_day, None);
+}
+
+#[test]
+fn loads_ri_author42_shadow07_risk_filter_challengers() {
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&["STRATEGY_KIND", "STRATEGY_ID"]);
+
+    let last_entry = load_runtime_config(
+        repo_config_path("configs/runtime.ri_author41_42.shadow07.bo_last_entry17.7502MIW.toml"),
+        false,
+    )
+    .expect("load last-entry challenger");
+    let max2 = load_runtime_config(
+        repo_config_path("configs/runtime.ri_author41_42.shadow07.bo_max2.7502MIW.toml"),
+        false,
+    )
+    .expect("load max2 challenger");
+
+    let last_entry_settings = last_entry
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("last-entry ri settings");
+    let max2_settings = max2
+        .config
+        .strategy
+        .ri_author41_42()
+        .expect("max2 ri settings");
+
+    assert_eq!(last_entry_settings.mode, "prospective_shadow");
+    assert_eq!(max2_settings.mode, "prospective_shadow");
+    assert!(!last_entry_settings.allow_order_emission);
+    assert!(!max2_settings.allow_order_emission);
+    assert_eq!(
+        last_entry_settings.author42_last_entry_time.as_deref(),
+        Some("17:00:00")
+    );
+    assert_eq!(last_entry_settings.author42_max_entries_per_day, None);
+    assert_eq!(max2_settings.author42_last_entry_time, None);
+    assert_eq!(max2_settings.author42_max_entries_per_day, Some(2));
+    assert_ne!(
+        last_entry.config.streams.runtime_state,
+        max2.config.streams.runtime_state
+    );
+    assert_ne!(last_entry.config.streams.health, max2.config.streams.health);
 }
 
 #[test]
