@@ -381,6 +381,8 @@ pub struct HybridIntradaySettings {
     #[serde(default)]
     pub risk_gate_session_policy_transition_date: Option<String>,
     #[serde(default)]
+    pub weekend_state_policy: String,
+    #[serde(default)]
     pub model_session_start_time: String,
     #[serde(default)]
     pub model_session_end_time: String,
@@ -430,6 +432,7 @@ impl Default for HybridIntradaySettings {
             risk_gate_legacy_session_start_time: None,
             risk_gate_legacy_session_end_time: None,
             risk_gate_session_policy_transition_date: None,
+            weekend_state_policy: "skip".to_string(),
             model_session_start_time: String::new(),
             model_session_end_time: String::new(),
             mr_min_range_long: 0.013,

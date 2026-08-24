@@ -1,0 +1,142 @@
+redis_url = "redis://127.0.0.1/"
+portfolio = "7502MIW"
+exchange = "MOEX"
+source = "strategy-runtime-hybrid-imoexf-shadow-weekend-state-legacy09-author41"
+consumer_group = "strategy-runtime-hybrid-imoexf-shadow-weekend-state-legacy09-author41-7502MIW"
+consumer_name = "auto"
+reset_state_on_start = false
+
+[runtime]
+trade_mode = "paper"
+allow_live_orders = false
+allow_paper_orders = false
+guard_log_interval_ms = 5000
+bootstrap_dump = false
+still_blocked_log_period_sec = 60
+gateway_health_stale_sec = 20
+require_gateway_ready = false
+
+[runtime.health]
+enabled = true
+listen_addr = "127.0.0.1:8206"
+expose_metrics = false
+
+[streams]
+bars = "md.bars.7502MIW.10m.moex_early_session"
+orders = "broker.orders.7502MIW"
+trades = "broker.trades.7502MIW"
+positions = "broker.positions.7502MIW"
+commands = "cmd.orders.7502MIW.shadow.hybrid_imoexf.weekend_state.legacy09_author41"
+acks = "cmd.acks.7502MIW.shadow.hybrid_imoexf.weekend_state.legacy09_author41"
+snapshots = "broker.snapshots.7502MIW"
+health = "events.health.hybrid_imoexf.weekend_state.legacy09_author41.7502MIW"
+dlq_prefix = "dlq"
+runtime_state = "runtime.state.hybrid_intraday.weekend_state.legacy09_author41.imoexf.7502MIW"
+
+[read]
+block_ms = 500
+claim_idle_ms = 5000
+claim_batch = 50
+poll_interval_ms = 100
+
+[trim]
+bars = 10000
+orders = 5000
+trades = 5000
+positions = 20000
+commands = 100
+acks = 100
+health = 2000
+runtime_state = 500
+
+[strategy]
+strategy_id = "hybrid_imoexf_weekend_state_legacy09_author41"
+strategy_kind = "hybrid_intraday"
+symbol = "IMOEXF"
+qty = 6.0
+side = "buy"
+live_order_style = "market"
+place_offset_ticks = 0
+tick_size = 0.5
+max_wait_bars_for_ack = 1
+close_trigger = "next_bar"
+session_open_hour = 7
+session_open_minute = 0
+session_close_hour = 23
+session_close_minute = 49
+entry_after_open_min = 0
+exit_before_close_min = 0
+timezone_offset_hours = 3
+max_silence_bars_sec = 1200
+
+[trading_periods]
+session_start = "07:00:00"
+session_end = "23:49:00"
+break_start_1 = "00:00:00"
+break_end_1 = "00:00:00"
+break_start_2 = "00:00:00"
+break_end_2 = "00:00:00"
+weekends_off = true
+timezone_offset_hours = 3
+
+[strategy.hybrid_intraday]
+profile = "baseline_runtime_hybrid"
+mr_variant = "author41_boundary_short"
+mr_gate_policy = "disabled"
+risk_gate_mode = "disabled"
+weekend_state_policy = "state_only"
+model_session_start_time = "09:00:00"
+model_session_end_time = "23:49:59"
+mr_min_range_long = 0.013
+mr_max_range_long = 0.035
+mr_k_long = 0.032
+mr_take_k_long = 0.11
+mr_stop_k_long = 0.44
+mr_min_range_short = 0.010
+mr_max_range_short = 0.045
+mr_k_short = 0.055
+mr_take_k_short = 0.16
+mr_stop_k_short = 0.43
+mr_session_end_time = "11:59:00"
+mr_exit_offset_min = 10
+bo_k = 0.53
+bo_stop1_range = 0.51
+bo_stop2_range = 0.35
+bo_big_move_threshold = 0.025
+bo_min_range = 1.01
+bo_min_range_mode = "absolute"
+bo_exclude_weekends = false
+bo_wait_hours = 3.0
+orchestrator_breakout_eod_mode = "same_day"
+orchestrator_breakout_overnight_exit_time = "09:30:00"
+repair_deadline_sec = 180
+sl_escalate_timeout_sec = 30
+max_repair_retries = 3
+repair_backoff_base_sec = 5
+repair_backoff_max_sec = 60
+pending_timeout_sec = 60
+partial_entry_fill_timeout_ms = 3000
+stop_end_buffer_sec = 60
+
+[paper]
+enabled = false
+output = "stdout"
+file_path = "/reports/moex_early_session_imoexf_paper_weekend_state_legacy09_author41.jsonl"
+trades_csv = "/reports/moex_early_session_imoexf_trades_weekend_state_legacy09_author41.csv"
+summary_json = "/reports/moex_early_session_imoexf_summary_weekend_state_legacy09_author41.json"
+append = true
+
+[backtest]
+enabled = false
+trade_log = "./strategy-runtime/backtest_trades.log"
+trades_csv = "./strategy-runtime/backtest_trades.csv"
+summary_json = "./strategy-runtime/backtest_summary.json"
+append = false
+
+[replay]
+enabled = false
+bars_csv_path = "./paper_bars_2.csv"
+reference_trades_csv_path = "./paper_trades_2.csv"
+output_dir = "./strategy-runtime/replay_out"
+price_tolerance = 1e-8
+strict_dedup = true

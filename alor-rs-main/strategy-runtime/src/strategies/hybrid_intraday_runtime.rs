@@ -33,6 +33,7 @@ pub struct HybridIntradayRuntimeConfig {
     pub risk_gate_seed_file: Option<String>,
     pub risk_gate_ledger_key: Option<String>,
     pub risk_gate_persist_in_shadow: bool,
+    pub weekend_state_policy: WeekendStatePolicy,
     pub model_session_start_time: Option<NaiveTime>,
     pub model_session_end_time: Option<NaiveTime>,
     pub qty: f64,
@@ -83,6 +84,12 @@ pub enum RiskGateMode {
     RebuildFromHistory,
     ShadowOnly,
     Enforced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeekendStatePolicy {
+    Skip,
+    StateOnly,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -353,8 +360,20 @@ impl HybridIntradayRuntimeStrategy {
         }
     }
 
+    fn is_weekend_bar(dt_local: NaiveDateTime) -> bool {
+        matches!(dt_local.weekday(), Weekday::Sat | Weekday::Sun)
+    }
+
     fn suppress_weekend_signal_generation(&self, dt_local: NaiveDateTime) -> bool {
-        self.config.weekends_off && matches!(dt_local.weekday(), Weekday::Sat | Weekday::Sun)
+        self.config.weekends_off
+            && self.config.weekend_state_policy == WeekendStatePolicy::Skip
+            && Self::is_weekend_bar(dt_local)
+    }
+
+    fn weekend_state_only_bar(&self, dt_local: NaiveDateTime) -> bool {
+        self.config.weekends_off
+            && self.config.weekend_state_policy == WeekendStatePolicy::StateOnly
+            && Self::is_weekend_bar(dt_local)
     }
 
     fn suppress_non_model_session_bar(&self, dt_local: NaiveDateTime) -> Option<&'static str> {
@@ -2438,6 +2457,7 @@ mod tests {
             risk_gate_seed_file: None,
             risk_gate_ledger_key: None,
             risk_gate_persist_in_shadow: false,
+            weekend_state_policy: WeekendStatePolicy::Skip,
             model_session_start_time: None,
             model_session_end_time: None,
             live_mr_entries_enabled: true,
@@ -4224,6 +4244,46 @@ mod tests {
     }
 
     #[test]
+    fn weekend_state_only_updates_model_state_without_emitting_intents() {
+        let mut cfg = test_config();
+        cfg.weekend_state_policy = WeekendStatePolicy::StateOnly;
+        cfg.breakout_config.exclude_weekends = false;
+        let mut strategy = HybridIntradayRuntimeStrategy::new(cfg);
+        let ctx = test_ctx(Some(0.0));
+
+        let friday = test_bar_ohlc(
+            ts_local(2026, 4, 17, 23, 40, 0),
+            100.0,
+            110.0,
+            90.0,
+            100.0,
+            DataOrigin::History,
+        );
+        let saturday = test_bar_ohlc(
+            ts_local(2026, 4, 18, 10, 0, 0),
+            200.0,
+            220.0,
+            180.0,
+            200.0,
+            DataOrigin::Live,
+        );
+
+        let _ = strategy.on_bar(&ctx, &friday);
+        let intents = strategy.on_bar(&ctx, &saturday);
+
+        assert!(intents.is_empty());
+        assert!(strategy.pending_entry.is_none());
+        assert!(!strategy.orchestrator.snapshot().has_pending_entry);
+        assert_eq!(strategy.last_bar_close, Some(200.0));
+        assert_eq!(
+            strategy.last_day_local,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 18).unwrap())
+        );
+        assert_eq!(strategy.prev_day_close, Some(100.0));
+        assert_eq!(strategy.prev_day_range, Some(20.0));
+    }
+
+    #[test]
     fn stop_end_uses_same_day_session_close_plus_buffer() {
         let strategy = HybridIntradayRuntimeStrategy::new(test_config());
         let created_ts_utc = chrono::NaiveDate::from_ymd_opt(2025, 1, 7)
@@ -5639,6 +5699,19 @@ impl Strategy for HybridIntradayRuntimeStrategy {
         let reference_price = self.live_reference_price();
         let bar_input =
             self.bar_input(dt_local, bar, close_prev, day_range_prev, has_open_position);
+        if self.weekend_state_only_bar(dt_local) {
+            self.orchestrator.warm_bar(bar_input);
+            debug!(
+                target: "strategy_runtime::hybrid_intraday_runtime",
+                ts_utc = bar.close_time_utc,
+                dt_local = %dt_local,
+                origin = ?bar.origin,
+                profile = ?self.config.profile,
+                "hybrid_weekend_state_only_bar_observed"
+            );
+            self.sync_state();
+            return Vec::new();
+        }
         if self.deferred_exit.is_some() {
             self.orchestrator.warm_bar(bar_input);
             if let Some(intents) = self.maybe_reissue_deferred_exit(

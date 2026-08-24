@@ -573,6 +573,7 @@ struct HybridIntradayConfigFile {
     risk_gate_legacy_session_start_time: Option<String>,
     risk_gate_legacy_session_end_time: Option<String>,
     risk_gate_session_policy_transition_date: Option<String>,
+    weekend_state_policy: Option<String>,
     model_session_start_time: Option<String>,
     model_session_end_time: Option<String>,
     mr_min_range_long: Option<f64>,
@@ -1223,6 +1224,9 @@ fn apply_hybrid_intraday_config_file(
         }
         if let Some(value) = &hybrid_file.risk_gate_session_policy_transition_date {
             strategy.risk_gate_session_policy_transition_date = Some(value.clone());
+        }
+        if let Some(value) = &hybrid_file.weekend_state_policy {
+            strategy.weekend_state_policy = value.clone();
         }
         if let Some(value) = &hybrid_file.model_session_start_time {
             strategy.model_session_start_time = value.clone();

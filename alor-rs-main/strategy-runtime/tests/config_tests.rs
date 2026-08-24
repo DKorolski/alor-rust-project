@@ -592,6 +592,16 @@ fn loads_moex_early_session_shadow_configs_as_diagnostics_only() {
             "runtime.state.alor_usdrubf_hybrid_v1.shadow07.usdrubf.7502MIW",
         ),
         (
+            "configs/runtime.alor_usdrubf.shadow07.mr1040_bo2.7502MIW.toml",
+            strategy_runtime::StrategyKind::AlorUsdrubfHybrid,
+            "runtime.state.alor_usdrubf_hybrid_v1.shadow07.mr1040_bo2.usdrubf.7502MIW",
+        ),
+        (
+            "configs/runtime.alor_usdrubf.shadow07.mr1140_bo2.7502MIW.toml",
+            strategy_runtime::StrategyKind::AlorUsdrubfHybrid,
+            "runtime.state.alor_usdrubf_hybrid_v1.shadow07.mr1140_bo2.usdrubf.7502MIW",
+        ),
+        (
             "configs/runtime.hybrid_imoexf.shadow09.7502MIW.toml",
             strategy_runtime::StrategyKind::HybridIntraday,
             "runtime.state.hybrid_intraday.shadow09.imoexf.7502MIW",
@@ -600,6 +610,21 @@ fn loads_moex_early_session_shadow_configs_as_diagnostics_only() {
             "configs/runtime.hybrid_imoexf.shadow07.7502MIW.toml",
             strategy_runtime::StrategyKind::HybridIntraday,
             "runtime.state.hybrid_intraday.shadow07.imoexf.7502MIW",
+        ),
+        (
+            "configs/runtime.hybrid_imoexf.shadow_weekend_state.live07_phase.7502MIW.toml",
+            strategy_runtime::StrategyKind::HybridIntraday,
+            "runtime.state.hybrid_intraday.weekend_state.live07_phase.imoexf.7502MIW",
+        ),
+        (
+            "configs/runtime.hybrid_imoexf.shadow_weekend_state.legacy09_author41.7502MIW.toml",
+            strategy_runtime::StrategyKind::HybridIntraday,
+            "runtime.state.hybrid_intraday.weekend_state.legacy09_author41.imoexf.7502MIW",
+        ),
+        (
+            "configs/runtime.hybrid_imoexf.shadow_weekend_state.compromise_mr1059_bo4.7502MIW.toml",
+            strategy_runtime::StrategyKind::HybridIntraday,
+            "runtime.state.hybrid_intraday.weekend_state.compromise_mr1059_bo4.imoexf.7502MIW",
         ),
     ] {
         let resolved = load_runtime_config(repo_config_path(relative_path), false)
@@ -745,6 +770,16 @@ fn loads_moex_early_session_usdrubf_shadow_policies() {
         false,
     )
     .expect("load canonical07 usdrubf shadow config");
+    let mr1040 = load_runtime_config(
+        repo_config_path("configs/runtime.alor_usdrubf.shadow07.mr1040_bo2.7502MIW.toml"),
+        false,
+    )
+    .expect("load mr1040 usdrubf shadow config");
+    let mr1140 = load_runtime_config(
+        repo_config_path("configs/runtime.alor_usdrubf.shadow07.mr1140_bo2.7502MIW.toml"),
+        false,
+    )
+    .expect("load mr1140 usdrubf shadow config");
 
     let legacy_settings = legacy
         .config
@@ -756,6 +791,16 @@ fn loads_moex_early_session_usdrubf_shadow_policies() {
         .strategy
         .alor_usdrubf_hybrid()
         .expect("canonical usdrubf settings");
+    let mr1040_settings = mr1040
+        .config
+        .strategy
+        .alor_usdrubf_hybrid()
+        .expect("mr1040 usdrubf settings");
+    let mr1140_settings = mr1140
+        .config
+        .strategy
+        .alor_usdrubf_hybrid()
+        .expect("mr1140 usdrubf settings");
 
     assert_eq!(legacy_settings.mr_last_entry_time, "11:40:00");
     assert_eq!(legacy_settings.mr_force_exit_time, "11:50:00");
@@ -767,6 +812,18 @@ fn loads_moex_early_session_usdrubf_shadow_policies() {
     assert_eq!(canonical_settings.bo_wait_hours, 2.0);
     assert_eq!(canonical_settings.bo_eod_exit_time, "23:30:00");
     assert!(!canonical_settings.enable_live_execution);
+
+    assert_eq!(mr1040_settings.model_session_start_time, "07:00:00");
+    assert_eq!(mr1040_settings.mr_last_entry_time, "10:40:00");
+    assert_eq!(mr1040_settings.mr_force_exit_time, "10:50:00");
+    assert_eq!(mr1040_settings.bo_wait_hours, 2.0);
+    assert!(!mr1040_settings.enable_live_execution);
+
+    assert_eq!(mr1140_settings.model_session_start_time, "07:00:00");
+    assert_eq!(mr1140_settings.mr_last_entry_time, "11:40:00");
+    assert_eq!(mr1140_settings.mr_force_exit_time, "11:50:00");
+    assert_eq!(mr1140_settings.bo_wait_hours, 2.0);
+    assert!(!mr1140_settings.enable_live_execution);
 }
 
 #[test]
@@ -784,6 +841,27 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
         false,
     )
     .expect("load canonical07 imoexf shadow config");
+    let weekend_live07 = load_runtime_config(
+        repo_config_path(
+            "configs/runtime.hybrid_imoexf.shadow_weekend_state.live07_phase.7502MIW.toml",
+        ),
+        false,
+    )
+    .expect("load weekend-state live07 imoexf shadow config");
+    let weekend_legacy09 = load_runtime_config(
+        repo_config_path(
+            "configs/runtime.hybrid_imoexf.shadow_weekend_state.legacy09_author41.7502MIW.toml",
+        ),
+        false,
+    )
+    .expect("load weekend-state legacy09 imoexf shadow config");
+    let weekend_compromise = load_runtime_config(
+        repo_config_path(
+            "configs/runtime.hybrid_imoexf.shadow_weekend_state.compromise_mr1059_bo4.7502MIW.toml",
+        ),
+        false,
+    )
+    .expect("load weekend-state compromise imoexf shadow config");
 
     let legacy_strategy = &legacy
         .config
@@ -796,6 +874,24 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
         .strategy
         .hybrid_intraday()
         .expect("canonical imoexf settings")
+        .strategy;
+    let weekend_live07_strategy = &weekend_live07
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("weekend-state live07 imoexf settings")
+        .strategy;
+    let weekend_legacy09_strategy = &weekend_legacy09
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("weekend-state legacy09 imoexf settings")
+        .strategy;
+    let weekend_compromise_strategy = &weekend_compromise
+        .config
+        .strategy
+        .hybrid_intraday()
+        .expect("weekend-state compromise imoexf settings")
         .strategy;
 
     assert_eq!(legacy_strategy.model_session_start_time, "09:00:00");
@@ -823,6 +919,45 @@ fn loads_moex_early_session_imoexf_shadow_policies() {
         canonical_strategy.orchestrator_breakout_eod_mode,
         "same_day"
     );
+
+    assert_eq!(
+        weekend_live07_strategy.mr_variant,
+        "author41_boundary_short"
+    );
+    assert_eq!(weekend_live07_strategy.weekend_state_policy, "state_only");
+    assert_eq!(weekend_live07_strategy.model_session_start_time, "07:00:00");
+    assert_eq!(weekend_live07_strategy.mr_session_end_time, "09:59:00");
+    assert_eq!(weekend_live07_strategy.bo_wait_hours, 3.0);
+    assert!(!weekend_live07_strategy.bo_exclude_weekends);
+
+    assert_eq!(
+        weekend_legacy09_strategy.mr_variant,
+        "author41_boundary_short"
+    );
+    assert_eq!(weekend_legacy09_strategy.weekend_state_policy, "state_only");
+    assert_eq!(
+        weekend_legacy09_strategy.model_session_start_time,
+        "09:00:00"
+    );
+    assert_eq!(weekend_legacy09_strategy.mr_session_end_time, "11:59:00");
+    assert_eq!(weekend_legacy09_strategy.bo_wait_hours, 3.0);
+    assert!(!weekend_legacy09_strategy.bo_exclude_weekends);
+
+    assert_eq!(
+        weekend_compromise_strategy.mr_variant,
+        "author41_boundary_short"
+    );
+    assert_eq!(
+        weekend_compromise_strategy.weekend_state_policy,
+        "state_only"
+    );
+    assert_eq!(
+        weekend_compromise_strategy.model_session_start_time,
+        "07:00:00"
+    );
+    assert_eq!(weekend_compromise_strategy.mr_session_end_time, "10:59:00");
+    assert_eq!(weekend_compromise_strategy.bo_wait_hours, 4.0);
+    assert!(!weekend_compromise_strategy.bo_exclude_weekends);
 }
 
 #[test]

@@ -8,7 +8,7 @@ use crate::strategies::hybrid_intraday::{
 };
 use crate::strategies::hybrid_intraday_runtime::{
     HybridIntradayProfile, HybridIntradayRuntimeConfig, HybridIntradayRuntimeStrategy,
-    MeanReversionVariant, MrGatePolicy, RiskGateMode,
+    MeanReversionVariant, MrGatePolicy, RiskGateMode, WeekendStatePolicy,
 };
 use crate::strategies::ri_author41_42_live::{
     RiAuthor4142ExecutionPath, RiAuthor4142LiveConfig, RiAuthor4142LiveStrategy,
@@ -127,6 +127,16 @@ impl HybridIntradayAdapter {
         }
     }
 
+    fn parse_weekend_state_policy(raw: &str) -> Result<WeekendStatePolicy> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "skip" | "baseline_skip" => Ok(WeekendStatePolicy::Skip),
+            "state_only" | "no_trade_but_update" | "weekend_state_trade_weekdays" => {
+                Ok(WeekendStatePolicy::StateOnly)
+            }
+            other => bail!("unsupported hybrid_intraday weekend_state_policy: {other}"),
+        }
+    }
+
     fn parse_optional_time(raw: &str, field: &str) -> Result<Option<NaiveTime>> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -155,6 +165,8 @@ impl HybridIntradayAdapter {
         let mr_variant = Self::parse_mr_variant(&runtime_settings.mr_variant)?;
         let mr_gate_policy = Self::parse_mr_gate_policy(&runtime_settings.mr_gate_policy)?;
         let risk_gate_mode = Self::parse_risk_gate_mode(&runtime_settings.risk_gate_mode)?;
+        let weekend_state_policy =
+            Self::parse_weekend_state_policy(&runtime_settings.weekend_state_policy)?;
         if mr_gate_policy == MrGatePolicy::Disabled && risk_gate_mode != RiskGateMode::Disabled {
             bail!(
                 "hybrid_intraday risk_gate_mode {:?} requires non-disabled mr_gate_policy",
@@ -206,6 +218,7 @@ impl HybridIntradayAdapter {
             risk_gate_seed_file: runtime_settings.risk_gate_seed_file.clone(),
             risk_gate_ledger_key: runtime_settings.risk_gate_ledger_key.clone(),
             risk_gate_persist_in_shadow: runtime_settings.risk_gate_persist_in_shadow,
+            weekend_state_policy,
             model_session_start_time: Self::parse_optional_time(
                 &runtime_settings.model_session_start_time,
                 "model_session_start_time",
