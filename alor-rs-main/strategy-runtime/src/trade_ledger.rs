@@ -19,6 +19,7 @@ pub struct TradeRecord {
     pub price: f64,
     pub commission: f64,
     pub owned: bool,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +40,8 @@ pub struct ClosedTradeRecord {
     pub entry_ts_utc: i64,
     pub exit_ts_utc: i64,
     pub symbol: String,
+    #[serde(default)]
+    pub strategy_component: Option<String>,
     pub side: String,
     pub qty: f64,
     pub entry_price: f64,
@@ -46,6 +49,14 @@ pub struct ClosedTradeRecord {
     pub commission_total: f64,
     pub pnl_gross: f64,
     pub pnl_net: f64,
+    #[serde(default)]
+    pub entry_role: Option<String>,
+    #[serde(default)]
+    pub exit_role: Option<String>,
+    #[serde(default)]
+    pub entry_comment: Option<String>,
+    #[serde(default)]
+    pub exit_comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -107,6 +118,7 @@ pub struct TradeLedger {
     entry_price: f64,
     entry_side: Option<String>,
     entry_symbol: Option<String>,
+    entry_comment: Option<String>,
     open_commission_total: f64,
 }
 
@@ -250,26 +262,11 @@ impl TradeLedger {
     fn write_trades_csv(path: &str, trades: &[ClosedTradeRecord]) -> Result<()> {
         ensure_parent_dir(path)?;
         replace_file_atomically(path, |file| {
-            writeln!(
-                file,
-                "entry_ts_utc,exit_ts_utc,symbol,side,qty,entry_price,exit_price,commission_total,pnl_gross,pnl_net"
-            )?;
+            let mut writer = csv::Writer::from_writer(file);
             for trade in trades {
-                writeln!(
-                    file,
-                    "{},{},{},{},{},{},{},{},{},{}",
-                    trade.entry_ts_utc,
-                    trade.exit_ts_utc,
-                    trade.symbol,
-                    trade.side,
-                    trade.qty,
-                    trade.entry_price,
-                    trade.exit_price,
-                    trade.commission_total,
-                    trade.pnl_gross,
-                    trade.pnl_net
-                )?;
+                writer.serialize(trade)?;
             }
+            writer.flush()?;
             Ok(())
         })
     }
@@ -374,11 +371,20 @@ impl TradeLedger {
                 self.open_commission_total + trade_commission
             };
             let pnl_net = pnl_gross - commission_total;
+            let entry_comment = self.entry_comment.clone();
+            let exit_comment = trade.comment.clone();
+            let entry_tag = HybridTradeTag::parse(entry_comment.as_deref());
+            let exit_tag = HybridTradeTag::parse(exit_comment.as_deref());
+            let strategy_component = entry_tag
+                .as_ref()
+                .and_then(|tag| tag.owner.clone())
+                .or_else(|| exit_tag.as_ref().and_then(|tag| tag.owner.clone()));
             if entry_price > 0.0 {
                 self.closed_trades.push(ClosedTradeRecord {
                     entry_ts_utc: self.entry_ts_utc.unwrap_or(trade.ts_utc),
                     exit_ts_utc: trade.ts_utc,
                     symbol,
+                    strategy_component,
                     side: entry_side,
                     qty: close_qty,
                     entry_price,
@@ -386,11 +392,16 @@ impl TradeLedger {
                     commission_total,
                     pnl_gross,
                     pnl_net,
+                    entry_role: entry_tag.and_then(|tag| tag.role),
+                    exit_role: exit_tag.and_then(|tag| tag.role),
+                    entry_comment,
+                    exit_comment,
                 });
             }
             self.entry_ts_utc = None;
             self.entry_side = None;
             self.entry_symbol = None;
+            self.entry_comment = None;
             self.entry_price = 0.0;
             self.open_commission_total = 0.0;
 
@@ -402,6 +413,7 @@ impl TradeLedger {
                     "sell".to_string()
                 });
                 self.entry_symbol = Some(trade.symbol.clone());
+                self.entry_comment = trade.comment.clone();
                 self.entry_price = self.average_price().abs();
                 self.open_commission_total = trade_commission * (1.0 - close_ratio);
             }
@@ -409,6 +421,7 @@ impl TradeLedger {
             self.entry_ts_utc = Some(trade.ts_utc);
             self.entry_side = Some(trade.side.clone());
             self.entry_symbol = Some(trade.symbol.clone());
+            self.entry_comment = trade.comment.clone();
             self.entry_price = self.average_price().abs();
             self.open_commission_total = trade_commission;
         } else if !is_flat {
@@ -423,6 +436,42 @@ impl TradeLedger {
         } else {
             self.position_cost / self.position_qty
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HybridTradeTag {
+    owner: Option<String>,
+    role: Option<String>,
+}
+
+impl HybridTradeTag {
+    fn parse(comment: Option<&str>) -> Option<Self> {
+        let comment = comment?;
+        if !comment.is_ascii() || !comment.starts_with("HYB|") {
+            return None;
+        }
+        let mut owner = None;
+        let mut role = None;
+        for part in comment.split('|').skip(1) {
+            let Some((key, value)) = part.split_once('=') else {
+                continue;
+            };
+            match key {
+                "o" => match value {
+                    "MR" | "BO" => owner = Some(value.to_string()),
+                    _ => {}
+                },
+                "r" => match value {
+                    "ENTRY" | "EXIT" | "TP" | "SL" | "CANCEL" | "REPAIR" => {
+                        role = Some(value.to_string())
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        Some(Self { owner, role })
     }
 }
 
@@ -475,6 +524,7 @@ mod tests {
             price: 100.0,
             commission: 0.0,
             owned: true,
+            comment: None,
         });
         ledger.record_fill(TradeRecord {
             ts_utc: 2,
@@ -485,6 +535,7 @@ mod tests {
             price: 110.0,
             commission: 0.0,
             owned: true,
+            comment: None,
         });
         assert_eq!(ledger.closed_trades().len(), 1);
         assert!(ledger.closed_trades()[0].pnl_gross > 0.0);
@@ -502,6 +553,7 @@ mod tests {
             price: 100.0,
             commission: 0.0,
             owned: true,
+            comment: None,
         });
         ledger.record_fill(TradeRecord {
             ts_utc: 2,
@@ -512,6 +564,7 @@ mod tests {
             price: 101.0,
             commission: 0.0,
             owned: true,
+            comment: None,
         });
         let dir = tempdir().expect("tempdir");
         let trades = dir.path().join("nested/reports/trades.csv");

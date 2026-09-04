@@ -255,6 +255,7 @@ struct SimOrder {
     order_type: SimOrderType,
     qty: f64,
     price: Option<f64>,
+    comment: Option<String>,
     created_bar_ts: i64,
 }
 
@@ -2212,6 +2213,7 @@ impl StrategyRuntime {
                     price: trade.price,
                     commission: trade.commission,
                     owned: true,
+                    comment: None,
                 };
                 self.ledger.record_fill(trade_record);
                 pending.filled_qty += exec_qty;
@@ -2514,6 +2516,7 @@ impl StrategyRuntime {
                     price: order.price,
                     commission: 0.0,
                     owned: true,
+                    comment: order.comment.clone(),
                 };
                 self.ledger.record_fill(trade);
                 info!(
@@ -2590,7 +2593,10 @@ impl StrategyRuntime {
             }
             match intent {
                 Intent::Place {
-                    price, qty, side, ..
+                    price,
+                    qty,
+                    side,
+                    comment,
                 } => {
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
@@ -2603,6 +2609,7 @@ impl StrategyRuntime {
                         order_type: SimOrderType::Limit,
                         qty,
                         price: Some(price),
+                        comment,
                         created_bar_ts: bar.close_time_utc,
                     });
                     self.ledger.record_order(OrderRecord {
@@ -2621,7 +2628,7 @@ impl StrategyRuntime {
                     qty,
                     side,
                     fill_price,
-                    ..
+                    comment,
                 } => {
                     let symbol = bar.symbol.clone();
                     let current_pos_qty = self
@@ -2739,6 +2746,7 @@ impl StrategyRuntime {
                             price,
                             commission: 0.0,
                             owned: true,
+                            comment: comment.clone(),
                         });
                         self.ledger.record_order(OrderRecord {
                             order_id,
@@ -2761,6 +2769,7 @@ impl StrategyRuntime {
                             order_type: SimOrderType::Market,
                             qty: effective_qty,
                             price: None,
+                            comment,
                             created_bar_ts: bar.close_time_utc,
                         });
                         self.ledger.record_order(OrderRecord {
@@ -2996,6 +3005,7 @@ impl StrategyRuntime {
                     price,
                     commission: 0.0,
                     owned: true,
+                    comment: order.comment.clone(),
                 };
                 self.ledger.record_fill(trade);
                 self.ledger.record_order(OrderRecord {
@@ -3410,6 +3420,7 @@ impl StrategyRuntime {
             price: trade.price,
             commission: trade.commission,
             owned: false,
+            comment: None,
         };
         self.ledger.record_fill(record);
     }
@@ -6146,6 +6157,7 @@ mod tests {
             price: 110.0,
             commission: 0.0,
             owned: true,
+            comment: None,
         });
         assert_eq!(runtime.ledger.trades()[0].price, 110.0);
     }
@@ -6247,6 +6259,7 @@ mod tests {
             entry_ts_utc: 100,
             exit_ts_utc: 160,
             symbol: "SBER".to_string(),
+            strategy_component: None,
             side: "buy".to_string(),
             qty: 1.0,
             entry_price: 10.0,
@@ -6254,6 +6267,10 @@ mod tests {
             commission_total: 0.0,
             pnl_gross: 1.0,
             pnl_net: 1.0,
+            entry_role: None,
+            exit_role: None,
+            entry_comment: None,
+            exit_comment: None,
         }];
         let reference_rows = vec![ReplayReferenceTradeRow {
             entry_time: chrono::DateTime::from_timestamp(100, 0)
@@ -6514,6 +6531,7 @@ mod tests {
             order_type: SimOrderType::Market,
             qty: 1.0,
             price: None,
+            comment: None,
             created_bar_ts: 100,
         });
         runtime.sim_orders.push(SimOrder {
@@ -6524,6 +6542,7 @@ mod tests {
             order_type: SimOrderType::Market,
             qty: 1.0,
             price: None,
+            comment: None,
             created_bar_ts: 100,
         });
         let bar = BarEvent {
@@ -6576,6 +6595,7 @@ mod tests {
             order_type: SimOrderType::Market,
             qty: 1.0,
             price: None,
+            comment: None,
             created_bar_ts: 100,
         });
         runtime.sim_orders.push(SimOrder {
@@ -6586,6 +6606,7 @@ mod tests {
             order_type: SimOrderType::Market,
             qty: 1.0,
             price: None,
+            comment: None,
             created_bar_ts: 100,
         });
         let bar = BarEvent {

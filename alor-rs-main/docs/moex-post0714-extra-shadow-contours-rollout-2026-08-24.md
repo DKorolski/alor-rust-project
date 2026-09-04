@@ -171,3 +171,49 @@ Daily comparison should include:
 - weekend-state impact for IMOEXF.
 
 Current live micro contracts are unchanged by this rollout.
+
+## 2026-09-04 Observation Hardening
+
+Status: `READY_FOR_NEXT_SHADOW_OBSERVATION_WINDOW`
+
+The IMOEXF weekend-state comparison needs component-level attribution before any
+promotion decision. The raw closed-trades CSV remains the canonical paper report,
+but new runtime builds enrich it with hybrid comment context:
+
+- `strategy_component`: `MR`, `BO` or `UNKNOWN`;
+- `entry_role` / `exit_role`: derived from the `HYB|...|r=...` comment tag;
+- `entry_comment` / `exit_comment`: retained for audit and later replay joins.
+
+Rows generated before this change remain valid and are read in append mode with
+empty component fields. Treat `UNKNOWN` as historical/reporting gap, not as a
+strategy signal problem.
+
+Weekly IMOEXF shadow review helper:
+
+```bash
+python3 scripts/imoexf_shadow_observation_summary.py \
+  --input /reports/moex_early_session_imoexf_trades_weekend_state_live07_phase.csv \
+  --input /reports/moex_early_session_imoexf_trades_weekend_state_legacy09_author41.csv \
+  --input /reports/moex_early_session_imoexf_trades_weekend_state_compromise_mr1059_bo4.csv \
+  --since 2026-09-07 \
+  --output-md /reports/imoexf_shadow_observation_summary_2026-09-07.md \
+  --output-json /reports/imoexf_shadow_observation_summary_2026-09-07.json
+```
+
+The helper also labels cross-day exits:
+
+- `same_day`: normal same-session close;
+- `next_session_07xx_gap_exit`: bar-driven next-session `07:00..07:20`
+  observation close;
+- `next_session_0930_legacy_exit`: legacy next-session `09:20..09:40`
+  observation close;
+- `cross_day_other`: requires manual review.
+
+Decision hygiene for the next `1-2` weeks:
+
+- keep live IMOEXF MR disabled;
+- keep all weekend-state services paper/shadow-only;
+- compare `weekend_state_live07_phase` against `legacy09_author41` and
+  `compromise_mr1059_bo4` by total PnL, MR PnL, BO PnL and gap labels;
+- do not promote on total PnL alone if new `MR` attribution remains weak;
+- require no `cross_day_other` gap labels before any live-MR promotion review.
