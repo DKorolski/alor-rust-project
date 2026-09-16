@@ -1,5 +1,12 @@
 # RI Author41/42 RIM6 To RIU6 Roll Runbook - 2026-06-12
 
+Historical note:
+
+This document records the June 2026 RIM6 -> RIU6 roll preparation. Do not reuse
+its early-switch timing as the default policy for future RI expiries. The
+current operational policy is manual last-day rollover with a from-zero restart;
+see `docs/ri-futures-expiration-rollover-policy-2026-09-11.md`.
+
 ## Decision
 
 Prepare both VPS RI micro-live contours for a controlled futures roll:

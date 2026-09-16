@@ -93,6 +93,8 @@ excluded_model_dates = ["2026-06-12", "2026-11-04"]
 min_anchor_bars = 80
 anchor_first_bar_at_or_before = "09:10:00"
 anchor_last_bar_at_or_after = "23:30:00"
+# Rollover fields are diagnostic metadata only. Live operational policy is
+# final-flat-window manual roll; see docs/ri-futures-expiration-rollover-policy-2026-09-11.md.
 actual_expiry_date = "2026-09-17"
 roll_target_sessions_before = 1
 roll_fallback_sessions_before = 2

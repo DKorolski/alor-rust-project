@@ -150,15 +150,29 @@ No-overnight rule:
 
 Contract roll rule:
 
-- roll to the next RI futures contract 7 calendar days before current contract
-  expiry;
-- perform roll only between trading sessions;
+- current operational policy is manual final-flat-window rollover, not early
+  `T-7` rollover;
+- perform the switch after the current contract's final intended live session,
+  once the contour is broker-flat, or immediately before the next session only
+  if that evening maintenance window is not operationally available;
+- for RIU6, the planned operational window is the evening of `2026-09-16`,
+  ahead of the `2026-09-17` expiry / last circulation date;
+- do not switch early by default only because the next contract exists or the
+  current contract is inside the final week;
+- treat any earlier switch as an explicit operator exception requiring a
+  recorded liquidity/operational-risk reason;
+- perform roll only between trading sessions / in a flat maintenance window;
 - confirm broker-flat and no working orders before roll;
 - change `symbol` / feed config to the next contract;
 - restart the RI contour from zero for runtime/live state;
 - warmup/history must be loaded from the new contract, not from the expired
   contract;
 - do not run an intraday cross-contract transfer or hedge.
+
+See `docs/ri-futures-expiration-rollover-policy-2026-09-11.md` for the
+current roll policy. The `roll_target_sessions_before` and
+`roll_fallback_sessions_before` config fields are diagnostics/logged policy
+metadata only; the runtime does not switch instruments automatically.
 
 Closed-window rule:
 

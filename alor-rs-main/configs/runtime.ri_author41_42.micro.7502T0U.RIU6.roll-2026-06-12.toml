@@ -94,6 +94,9 @@ anchor_first_bar_at_or_before = "09:10:00"
 anchor_last_bar_at_or_after = "23:30:00"
 # Manual between-session roll contract. Runtime validates and logs this policy;
 # it does not switch instruments automatically.
+# Operational policy: final-flat-window manual roll, not early T-7 switch.
+# For RIU6, roll after the 2026-09-16 evening flat before 2026-09-17 expiry.
+# See docs/ri-futures-expiration-rollover-policy-2026-09-11.md.
 actual_expiry_date = "2026-09-17"
 roll_target_sessions_before = 1
 roll_fallback_sessions_before = 2
