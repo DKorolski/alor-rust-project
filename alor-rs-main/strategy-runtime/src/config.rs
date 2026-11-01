@@ -665,6 +665,7 @@ struct RiAuthor4142ConfigFile {
     profile_id: Option<String>,
     timeframe: Option<String>,
     mode: Option<String>,
+    model_feed_policy: Option<crate::strategies::ri_author41_42_live::RiAuthor4142ModelFeedPolicy>,
     allow_order_emission: Option<bool>,
     execution_path: Option<String>,
     order_symbol: Option<String>,
@@ -1414,6 +1415,9 @@ fn apply_ri_author41_42_config_file(
         }
         if let Some(value) = &ri_file.mode {
             settings.mode = value.clone();
+        }
+        if let Some(value) = ri_file.model_feed_policy {
+            settings.model_feed_policy = Some(value);
         }
         if let Some(value) = ri_file.allow_order_emission {
             settings.allow_order_emission = value;
@@ -2489,6 +2493,44 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ri_model_feed_policy_is_optional_and_reaches_the_adapter() {
+        use crate::strategies::ri_author41_42_live::RiAuthor4142ModelFeedPolicy;
+        use crate::strategy_adapters::RiAuthor4142Adapter;
+
+        for (raw, expected) in [
+            ("", None),
+            (
+                "model_feed_policy = 'micro_regular_v1'",
+                Some(RiAuthor4142ModelFeedPolicy::MicroRegularV1),
+            ),
+            (
+                "model_feed_policy = 'legacy_shadow_breaks_v1'",
+                Some(RiAuthor4142ModelFeedPolicy::LegacyShadowBreaksV1),
+            ),
+        ] {
+            let file: RiAuthor4142ConfigFile = toml::from_str(raw).unwrap();
+            let mut strategy = StrategyConfig::defaults_for_kind(StrategyKind::RiAuthor4142);
+            apply_ri_author41_42_config_file(&mut strategy, &file);
+            assert_eq!(
+                strategy.ri_author41_42().unwrap().model_feed_policy,
+                expected
+            );
+            let resolved = RiAuthor4142Adapter::from_strategy_config(&strategy).unwrap();
+            assert_eq!(resolved.model_feed_policy, expected);
+            assert!(!resolved.can_emit_orders());
+            assert!(resolved.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn ri_model_feed_policy_rejects_unknown_or_empty_values() {
+        for value in ["", "micro_regular", "weekend_context", "typo"] {
+            let raw = format!("model_feed_policy = '{value}'");
+            assert!(toml::from_str::<RiAuthor4142ConfigFile>(&raw).is_err());
+        }
+    }
 
     fn write_temp_config(name: &str, body: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(

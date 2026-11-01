@@ -305,6 +305,7 @@ impl RiAuthor4142Adapter {
             profile_id: settings.profile_id.clone(),
             timeframe: settings.timeframe.clone(),
             mode: RiAuthor4142RuntimeMode::parse(&settings.mode)?,
+            model_feed_policy: settings.model_feed_policy,
             allow_order_emission: settings.allow_order_emission,
             execution_path: RiAuthor4142ExecutionPath::parse(&settings.execution_path)?,
             order_symbol: settings

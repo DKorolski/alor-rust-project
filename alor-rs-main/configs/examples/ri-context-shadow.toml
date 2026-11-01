@@ -1,0 +1,38 @@
+# Explicit paired context collector, NOT a live runtime configuration.
+# No historical bootstrap: old receipt times must never be fabricated.
+# 2026-11-02/03 are prospective context warmup; 11-04 is a holiday session.
+# Readiness on 11-05 still requires two complete, timely weekday anchors.
+source_stream = "REPLACE_WITH_APPROVED_RIZ6_M10_SOURCE"
+receipt_stream = "shadow:ri:context:vps-20261031-v1"
+
+[generation]
+id = "vps-ri-context-20261031-v1"
+first_decision_session = "2026-11-05"
+
+[strategy]
+symbol = "RIZ6"
+profile_id = "ri_author41_42_primary_combo_cost2"
+timeframe = "10m"
+mode = "prospective_shadow"
+model_feed_policy = "micro_regular_v1"
+allow_order_emission = false
+execution_path = "action_scoped_only"
+session_start_time = "07:00:00"
+session_end_time = "23:49:59"
+author41_entry_end_time = "10:00:00"
+author41_time_exit = "20:00:00"
+author42_exit_time = "23:00:00"
+# Omitted optional BO max-entry / last-entry filters mean None, not MR limits.
+excluded_model_dates = ["2026-11-04"]
+min_anchor_bars = 92
+anchor_first_bar_at_or_before = "07:10:00"
+anchor_last_bar_at_or_after = "23:30:00"
+anchor_transition_date = "2026-07-14"
+pre_transition_min_anchor_bars = 80
+pre_transition_anchor_first_bar_at_or_before = "09:10:00"
+pre_transition_anchor_last_bar_at_or_after = "23:30:00"
+actual_expiry_date = "2026-12-17"
+roll_target_sessions_before = 1
+roll_fallback_sessions_before = 2
+qty = 1.0
+timezone_offset_hours = 3

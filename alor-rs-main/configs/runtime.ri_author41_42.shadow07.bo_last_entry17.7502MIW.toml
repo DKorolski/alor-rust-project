@@ -1,8 +1,8 @@
 redis_url = "redis://127.0.0.1/"
 portfolio = "7502MIW"
 exchange = "MOEX"
-source = "strategy-runtime-ri-author41-42-shadow07-bo-last-entry17-v1"
-consumer_group = "strategy-runtime-ri-author41-42-shadow07-bo-last-entry17-v1-7502MIW"
+source = "strategy-runtime-ri-author41-42-shadow07-bo-last-entry17-v1-riz6"
+consumer_group = "strategy-runtime-ri-author41-42-shadow07-bo-last-entry17-v1-riz6-7502MIW"
 consumer_name = "auto"
 reset_state_on_start = false
 
@@ -22,7 +22,7 @@ listen_addr = "127.0.0.1:8201"
 expose_metrics = false
 
 [streams]
-bars = "md.bars.7502MIW.RIU6.10m.moex_early_session"
+bars = "md.bars.7502MIW.RIZ6.10m.moex_early_session"
 orders = "broker.orders.7502MIW"
 trades = "broker.trades.7502MIW"
 positions = "broker.positions.7502MIW"
@@ -31,7 +31,7 @@ acks = "cmd.acks.7502MIW.shadow.ri_author41_42.shadow07.bo_last_entry17_v1"
 snapshots = "broker.snapshots.7502MIW"
 health = "events.health.ri_author41_42.shadow07.bo_last_entry17.7502MIW"
 dlq_prefix = "dlq"
-runtime_state = "runtime.state.ri_author41_42.shadow07.bo_last_entry17_v1.7502MIW"
+runtime_state = "runtime.state.ri_author41_42.shadow07.bo_last_entry17_v1.RIZ6.7502MIW"
 
 [read]
 block_ms = 500
@@ -52,7 +52,7 @@ runtime_state = 500
 [strategy]
 strategy_id = "ri_author41_42.shadow07.bo_last_entry17_v1.7502MIW"
 strategy_kind = "ri_author41_42"
-symbol = "RIU6"
+symbol = "RIZ6"
 qty = 1.0
 side = "buy"
 tick_size = 10.0
@@ -83,7 +83,7 @@ timeframe = "10m"
 mode = "prospective_shadow"
 allow_order_emission = false
 execution_path = "action_scoped_only"
-order_symbol = "RTS-9.26"
+order_symbol = "RTS-12.26"
 session_start_time = "07:00:00"
 session_end_time = "23:49:59"
 author41_entry_end_time = "10:00:00"
@@ -102,18 +102,18 @@ pre_transition_anchor_first_bar_at_or_before = "09:10:00"
 pre_transition_anchor_last_bar_at_or_after = "23:30:00"
 # Rollover fields are diagnostic metadata only. Live operational policy is
 # final-flat-window manual roll; see docs/ri-futures-expiration-rollover-policy-2026-09-11.md.
-actual_expiry_date = "2026-09-17"
+actual_expiry_date = "2026-12-17"
 roll_target_sessions_before = 1
 roll_fallback_sessions_before = 2
-decision_journal_path = "/reports/moex_early_session_ri_decisions_canonical07_bo_last_entry17_v1.jsonl"
+decision_journal_path = "/reports/moex_early_session_ri_decisions_RIZ6_canonical07_bo_last_entry17_v1.jsonl"
 decision_journal_append = true
 
 [paper]
 enabled = false
 output = "stdout"
-file_path = "/reports/moex_early_session_ri_paper_canonical07_bo_last_entry17.jsonl"
-trades_csv = "/reports/moex_early_session_ri_trades_canonical07_bo_last_entry17.csv"
-summary_json = "/reports/moex_early_session_ri_summary_canonical07_bo_last_entry17.json"
+file_path = "/reports/moex_early_session_ri_paper_RIZ6_canonical07_bo_last_entry17.jsonl"
+trades_csv = "/reports/moex_early_session_ri_trades_RIZ6_canonical07_bo_last_entry17.csv"
+summary_json = "/reports/moex_early_session_ri_summary_RIZ6_canonical07_bo_last_entry17.json"
 append = false
 
 [backtest]

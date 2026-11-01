@@ -564,22 +564,22 @@ fn loads_moex_early_session_shadow_configs_as_diagnostics_only() {
         (
             "configs/runtime.ri_author41_42.shadow09.7502MIW.toml",
             strategy_runtime::StrategyKind::RiAuthor4142,
-            "runtime.state.ri_author41_42.shadow09.7502MIW",
+            "runtime.state.ri_author41_42.shadow09.RIZ6.7502MIW",
         ),
         (
             "configs/runtime.ri_author41_42.shadow07.7502MIW.toml",
             strategy_runtime::StrategyKind::RiAuthor4142,
-            "runtime.state.ri_author41_42.shadow07.prospective_v1.7502MIW",
+            "runtime.state.ri_author41_42.shadow07.prospective_v1.RIZ6.7502MIW",
         ),
         (
             "configs/runtime.ri_author41_42.shadow07.bo_last_entry17.7502MIW.toml",
             strategy_runtime::StrategyKind::RiAuthor4142,
-            "runtime.state.ri_author41_42.shadow07.bo_last_entry17_v1.7502MIW",
+            "runtime.state.ri_author41_42.shadow07.bo_last_entry17_v1.RIZ6.7502MIW",
         ),
         (
             "configs/runtime.ri_author41_42.shadow07.bo_max2.7502MIW.toml",
             strategy_runtime::StrategyKind::RiAuthor4142,
-            "runtime.state.ri_author41_42.shadow07.bo_max2_v1.7502MIW",
+            "runtime.state.ri_author41_42.shadow07.bo_max2_v1.RIZ6.7502MIW",
         ),
         (
             "configs/runtime.alor_usdrubf.shadow09.7502MIW.toml",
@@ -691,8 +691,11 @@ fn loads_moex_early_session_ri_shadow_policies() {
     assert_eq!(canonical_settings.mode, "prospective_shadow");
     assert!(!legacy_settings.allow_order_emission);
     assert!(!canonical_settings.allow_order_emission);
-    assert_eq!(legacy_settings.order_symbol.as_deref(), Some("RTS-9.26"));
-    assert_eq!(canonical_settings.order_symbol.as_deref(), Some("RTS-9.26"));
+    assert_eq!(legacy_settings.order_symbol.as_deref(), Some("RTS-12.26"));
+    assert_eq!(
+        canonical_settings.order_symbol.as_deref(),
+        Some("RTS-12.26")
+    );
 
     assert_eq!(legacy_settings.session_start_time, "09:00:00");
     assert_eq!(legacy_settings.author41_entry_end_time, "12:00:00");

@@ -84,6 +84,9 @@ timezone_offset_hours = 3
 
 ## Документация
 
+- [Shadow observation, retirement and safe live promotion](docs/shadow-observation-and-live-promotion.md)
+- [Isolated shadow service runbook](docs/reaction-shadow-supervisor-runbook-2026-10-31.md)
+- [Closed M10 source and terminal candle contract](docs/shadow-closed-m10-source-2026-11-01.md)
 - [Strategy Runtime Runbook](docs/strategy-runtime-runbook.md)
 - [Alor Gateway Runbook](docs/alor-gateway-runbook.md)
 - [Session Gap B2 Runbook](docs/session-gap-b2-runbook.md)

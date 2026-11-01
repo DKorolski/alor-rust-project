@@ -1,5 +1,6 @@
 # Rust
-Cargo.lock
+# Pin workspace dependency resolution for scoped review/release builds.
+!/Cargo.lock
 /target
 
 # IDE

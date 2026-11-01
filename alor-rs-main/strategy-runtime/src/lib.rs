@@ -2,8 +2,11 @@ pub mod config;
 pub mod health_server;
 pub mod live_guard;
 pub mod redis_transport;
+pub mod ri_context;
 pub mod risk_gate_store;
 pub mod runtime;
+pub mod shadow_reaction;
+pub mod shadow_session_context;
 pub mod state;
 pub mod strategies;
 pub mod strategy_adapters;
@@ -258,6 +261,8 @@ pub struct RiAuthor4142Settings {
     pub profile_id: String,
     pub timeframe: String,
     pub mode: String,
+    #[serde(default)]
+    pub model_feed_policy: Option<strategies::ri_author41_42_live::RiAuthor4142ModelFeedPolicy>,
     pub allow_order_emission: bool,
     pub execution_path: String,
     pub order_symbol: Option<String>,
@@ -317,6 +322,7 @@ impl Default for RiAuthor4142Settings {
             profile_id: "ri_author41_42_primary_combo_cost2".to_string(),
             timeframe: "10m".to_string(),
             mode: "shadow".to_string(),
+            model_feed_policy: None,
             allow_order_emission: false,
             execution_path: "action_scoped_only".to_string(),
             order_symbol: None,

@@ -32,6 +32,10 @@ target/
 # these rules prevent new live-soak and broker artifacts from being added by accident.
 private/
 private_docs/
+# New operational journals stay private; existing tracked history is unchanged.
+alor-rs-main/docs/weekly-retrospective-*.md
+alor-rs-main/docs/vps-observation-*.md
+alor-rs-main/docs/shadow-context-vps-*.md
 **/runtime_artifacts/
 **/review_artifacts/
 **/reports/

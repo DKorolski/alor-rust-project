@@ -1,0 +1,31 @@
+# Template only; approve source, calendar and activation before use.
+[runner]
+first_decision_session = "2026-11-02"
+excluded_dates = []
+
+[runner.ingress]
+generation = "review-usdrubf-h4-w4-pair-v1"
+symbol = "USDRUBF"
+source_stream = "REPLACE_WITH_APPROVED_USDRUBF_M10_SOURCE"
+receipt_stream = "shadow:reaction:usdrubf:h4-w4:review-v1"
+
+[runner.config]
+engine = "usdrubf"
+
+[runner.config.settings]
+model_id = "previous_day07_h4_w4"
+family = "previous_day"
+context_hour = 7
+clock_hour = 7
+mr_horizon = 4
+bo_wait = 4
+mr_start_delay = 0
+
+[policy]
+startup_timeout_seconds = 600
+poll_timeout_seconds = 60
+poll_interval_seconds = 5
+shutdown_timeout_seconds = 15
+max_queue_age_seconds = 30
+max_model_lateness_seconds = 120
+max_sessions = 20

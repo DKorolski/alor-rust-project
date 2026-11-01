@@ -18,6 +18,8 @@ use crate::strategy_host::{
 use alor_protocol::{AckStatus, IntentClass, Side as OrderSide};
 use uuid::Uuid;
 
+pub mod frozen_shadow;
+
 fn parse_ri_time(field: &'static str, raw: &str) -> Result<NaiveTime> {
     NaiveTime::parse_from_str(raw, "%H:%M:%S")
         .map_err(|err| anyhow::anyhow!("invalid ri_author41_42 {field} {raw}: {err}"))
@@ -63,6 +65,22 @@ impl RiAuthor4142RuntimeMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RiAuthor4142ModelFeedPolicy {
+    MicroRegularV1,
+    LegacyShadowBreaksV1,
+}
+
+impl RiAuthor4142ModelFeedPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MicroRegularV1 => "micro_regular_v1",
+            Self::LegacyShadowBreaksV1 => "legacy_shadow_breaks_v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RiAuthor4142ExecutionPath {
     ActionScopedOnly,
 }
@@ -88,6 +106,8 @@ pub struct RiAuthor4142LiveConfig {
     pub profile_id: String,
     pub timeframe: String,
     pub mode: RiAuthor4142RuntimeMode,
+    #[serde(default)]
+    pub model_feed_policy: Option<RiAuthor4142ModelFeedPolicy>,
     pub allow_order_emission: bool,
     pub execution_path: RiAuthor4142ExecutionPath,
     pub order_symbol: Option<String>,
@@ -414,6 +434,18 @@ pub struct RiAuthor4142JournalRecord {
 }
 
 impl RiAuthor4142LiveConfig {
+    pub fn effective_model_feed_policy(&self) -> RiAuthor4142ModelFeedPolicy {
+        // Missing policy preserves existing deployments, including legacy shadows.
+        self.model_feed_policy.unwrap_or(match self.mode {
+            RiAuthor4142RuntimeMode::Shadow | RiAuthor4142RuntimeMode::ProspectiveShadow => {
+                RiAuthor4142ModelFeedPolicy::LegacyShadowBreaksV1
+            }
+            RiAuthor4142RuntimeMode::DryRun | RiAuthor4142RuntimeMode::MicroLive => {
+                RiAuthor4142ModelFeedPolicy::MicroRegularV1
+            }
+        })
+    }
+
     pub fn can_emit_orders(&self) -> bool {
         self.mode.can_emit_orders() && self.allow_order_emission
     }
@@ -423,6 +455,11 @@ impl RiAuthor4142LiveConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.mode.can_emit_orders()
+            && self.effective_model_feed_policy() != RiAuthor4142ModelFeedPolicy::MicroRegularV1
+        {
+            bail!("ri_author41_42 micro_live requires model_feed_policy=micro_regular_v1");
+        }
         if self.execution_path != RiAuthor4142ExecutionPath::ActionScopedOnly {
             bail!("ri_author41_42 requires action_scoped_only execution");
         }
@@ -543,6 +580,9 @@ pub struct RiAuthor4142LiveStrategy {
     journal_records: Vec<RiAuthor4142JournalRecord>,
     live_mr: RiAuthor4142LiveMrState,
     live_bo: RiAuthor4142LiveBoState,
+    // Only the isolated frozen-shadow facade installs this view.
+    shadow_context: Option<frozen_shadow::FrozenSession>,
+    shadow_branches: Option<Vec<String>>,
     state: StrategyState,
 }
 
@@ -624,6 +664,8 @@ impl RiAuthor4142LiveStrategy {
             pre_transition_anchor_first_bar_at_or_before = ?config.pre_transition_anchor_first_bar_at_or_before,
             pre_transition_anchor_last_bar_at_or_after = ?config.pre_transition_anchor_last_bar_at_or_after,
             mode = config.mode.as_str(),
+            model_feed_policy = config.effective_model_feed_policy().as_str(),
+            model_feed_policy_explicit = config.model_feed_policy.is_some(),
             allow_order_emission = config.allow_order_emission,
             prospective_adapter_enabled = config.runs_prospective_adapter(),
         );
@@ -668,6 +710,8 @@ impl RiAuthor4142LiveStrategy {
             journal_records: Vec::new(),
             live_mr: RiAuthor4142LiveMrState::default(),
             live_bo: RiAuthor4142LiveBoState::default(),
+            shadow_context: None,
+            shadow_branches: None,
         })
     }
 
@@ -683,7 +727,7 @@ impl RiAuthor4142LiveStrategy {
         };
         let excluded_date = self.excluded_model_dates.contains(&dt_local.date());
         let is_model_bar = self.session_policy.is_model_bar(dt_local)
-            && !self.is_operational_shadow_break_bar(dt_local)
+            && !self.is_excluded_by_model_feed_policy(dt_local)
             && !self.is_pre_transition_service_bar(dt_local)
             && !excluded_date
             && bar.origin != DataOrigin::HistoryGap;
@@ -746,11 +790,9 @@ impl RiAuthor4142LiveStrategy {
         self.collect_new_decisions(dt_local)
     }
 
-    fn is_operational_shadow_break_bar(&self, dt_local: NaiveDateTime) -> bool {
-        if !matches!(
-            self.config.mode,
-            RiAuthor4142RuntimeMode::Shadow | RiAuthor4142RuntimeMode::ProspectiveShadow
-        ) {
+    fn is_excluded_by_model_feed_policy(&self, dt_local: NaiveDateTime) -> bool {
+        if self.config.effective_model_feed_policy() == RiAuthor4142ModelFeedPolicy::MicroRegularV1
+        {
             return false;
         }
 
@@ -779,15 +821,18 @@ impl RiAuthor4142LiveStrategy {
             .into_iter()
             .map(|(date, _)| date)
             .collect::<HashSet<_>>();
-        let eligible_model_bars = self
-            .model_bars
-            .iter()
-            .copied()
-            .filter(|bar| {
-                bar.ts_local.date() == current_dt_local.date()
-                    || eligible_dates.contains(&bar.ts_local.date())
-            })
-            .collect::<Vec<_>>();
+        let eligible_model_bars = if let Some(frozen) = &self.shadow_context {
+            frozen.diagnostic_bars(current_dt_local.date(), &self.model_bars)
+        } else {
+            self.model_bars
+                .iter()
+                .copied()
+                .filter(|bar| {
+                    bar.ts_local.date() == current_dt_local.date()
+                        || eligible_dates.contains(&bar.ts_local.date())
+                })
+                .collect::<Vec<_>>()
+        };
         let records = build_ri_author41_42_combo_shadow_journal_with_configs(
             &eligible_model_bars,
             self.session_policy,
@@ -795,7 +840,11 @@ impl RiAuthor4142LiveStrategy {
             self.author41_long_config(),
             self.author42_config(),
         );
-        let finalized = finalized_decisions_from_records(records, current_dt_local);
+        let mut finalized = finalized_decisions_from_records(records, current_dt_local);
+        if self.shadow_context.is_some() {
+            // Frozen anchor bars are context, never historical trading callbacks.
+            finalized.retain(|d| decision_entry_date(d) == current_dt_local.date());
+        }
         if !self.can_emit_orders() {
             return self.collect_shadow_decisions(finalized, current_dt_local);
         }
@@ -1375,7 +1424,7 @@ impl RiAuthor4142LiveStrategy {
         }
         let dt_local = self.local_dt(bar.close_time_utc)?;
         if !self.session_policy.is_model_bar(dt_local)
-            || self.is_operational_shadow_break_bar(dt_local)
+            || self.is_excluded_by_model_feed_policy(dt_local)
             || self.excluded_model_dates.contains(&dt_local.date())
         {
             return None;
@@ -1417,6 +1466,12 @@ impl RiAuthor4142LiveStrategy {
         }
     }
 
+    fn record_shadow_branch(&mut self, branch: &str) {
+        if let Some(trace) = &mut self.shadow_branches {
+            trace.push(branch.to_owned());
+        }
+    }
+
     fn live_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
         let mut intents = Vec::new();
         intents.extend(self.live_mr_intents_for_bar(bar));
@@ -1427,12 +1482,15 @@ impl RiAuthor4142LiveStrategy {
     fn live_mr_intents_for_bar(&mut self, bar: ModelBar) -> Vec<Intent> {
         let mut intents = Vec::new();
         if self.phase_is("live_pending_entry") {
+            self.record_shadow_branch("mr:pending_entry");
             return intents;
         }
         if self.phase_is("live_pending_exit") {
+            self.record_shadow_branch("mr:pending_exit");
             return intents;
         }
         if self.phase_is("live_deferred_exit") {
+            self.record_shadow_branch("mr:deferred_exit");
             if let Some(position) = self.live_mr.position.clone() {
                 intents.push(self.emit_mr_exit_intent(
                     &position,
@@ -1445,6 +1503,7 @@ impl RiAuthor4142LiveStrategy {
             return intents;
         }
         if self.phase_blocks_fresh_entries() {
+            self.record_shadow_branch("mr:lifecycle_blocked");
             return intents;
         }
         if self.live_mr.current_date != Some(bar.ts_local.date()) {
@@ -1458,6 +1517,7 @@ impl RiAuthor4142LiveStrategy {
         if let Some(mut position) = self.live_mr.position.take() {
             position.bars_held = position.bars_held.saturating_add(1);
             if let Some((exit_price, reason)) = Self::mr_exit_signal(&position, bar) {
+                self.record_shadow_branch(&format!("mr:exit:{reason}"));
                 intents.push(self.emit_mr_exit_intent(
                     &position,
                     bar,
@@ -1468,20 +1528,25 @@ impl RiAuthor4142LiveStrategy {
                 self.live_mr.position = Some(position);
                 return intents;
             } else {
+                self.record_shadow_branch("mr:hold");
                 self.live_mr.position = Some(position);
                 return intents;
             }
         }
 
         if self.live_mr.entries_today >= 2 {
+            self.record_shadow_branch("mr:entry_quota");
             return intents;
         }
         if self.live_bo.position.is_some() {
+            self.record_shadow_branch("mr:bo_owns_slot");
             return intents;
         }
         let Some((anchor, side, config)) = self.mr_entry_signal(bar) else {
+            self.record_shadow_branch("mr:no_entry_signal");
             return intents;
         };
+        self.record_shadow_branch("mr:entry");
         self.live_mr.entries_today = self.live_mr.entries_today.saturating_add(1);
         let decision_key = format!(
             "{}|author41_mr|{}|Some({:?})|live_prospective",
@@ -1522,14 +1587,18 @@ impl RiAuthor4142LiveStrategy {
         let mut intents = Vec::new();
         let config = self.author42_config();
         self.observe_bo_bar(bar, config);
+        self.record_shadow_branch("bo:observed");
 
         if self.phase_is("live_pending_entry") {
+            self.record_shadow_branch("bo:pending_entry");
             return intents;
         }
         if self.phase_is("live_pending_exit") {
+            self.record_shadow_branch("bo:pending_exit");
             return intents;
         }
         if self.phase_is("live_deferred_exit") {
+            self.record_shadow_branch("bo:deferred_exit");
             if let Some(position) = self.live_bo.position.clone() {
                 intents.push(self.emit_bo_exit_intent(
                     &position,
@@ -1543,6 +1612,7 @@ impl RiAuthor4142LiveStrategy {
             return intents;
         }
         if self.phase_blocks_fresh_entries() {
+            self.record_shadow_branch("bo:lifecycle_blocked");
             return intents;
         }
 
@@ -1550,6 +1620,7 @@ impl RiAuthor4142LiveStrategy {
             match pending {
                 RiAuthor4142LiveBoPending::Entry(side) => {
                     if bar.ts_local.time() >= config.exit_time {
+                        self.record_shadow_branch("bo:pending_entry_terminal");
                         info!(
                             target: "strategy_runtime::ri_author41_42_live",
                             action = "ri_bo_entry_suppressed",
@@ -1561,6 +1632,7 @@ impl RiAuthor4142LiveStrategy {
                             live_adapter_enabled = self.can_emit_orders(),
                         );
                     } else if !Self::author42_entry_time_allowed(bar.ts_local.time(), config) {
+                        self.record_shadow_branch("bo:pending_entry_last_time");
                         info!(
                             target: "strategy_runtime::ri_author41_42_live",
                             action = "ri_bo_entry_suppressed",
@@ -1572,6 +1644,7 @@ impl RiAuthor4142LiveStrategy {
                             live_adapter_enabled = self.can_emit_orders(),
                         );
                     } else if !self.author42_entry_count_allowed(config) {
+                        self.record_shadow_branch("bo:pending_entry_quota");
                         info!(
                             target: "strategy_runtime::ri_author41_42_live",
                             action = "ri_bo_entry_suppressed",
@@ -1584,6 +1657,7 @@ impl RiAuthor4142LiveStrategy {
                             live_adapter_enabled = self.can_emit_orders(),
                         );
                     } else if self.live_mr.position.is_none() && self.live_bo.position.is_none() {
+                        self.record_shadow_branch("bo:entry");
                         let decision_key = format!(
                             "{}|author42_bo|{}|Some({:?})|live_prospective",
                             self.config.profile_id, bar.ts_local, side
@@ -1618,10 +1692,13 @@ impl RiAuthor4142LiveStrategy {
                         self.live_bo.entries_today = self.live_bo.entries_today.saturating_add(1);
                         intents.push(self.emit_live_candidate(candidate, &decision));
                         self.transition_live_pending_entry(&decision, "live_bo_entry_emitted");
+                    } else {
+                        self.record_shadow_branch("bo:pending_entry_occupied");
                     }
                 }
                 RiAuthor4142LiveBoPending::Exit(reason) => {
                     if let Some(position) = self.live_bo.position.clone() {
+                        self.record_shadow_branch("bo:exit_pending");
                         let exit_price = non_zero_or_close(bar.open, bar.close);
                         intents.push(self.emit_bo_exit_intent(
                             &position,
@@ -1633,6 +1710,7 @@ impl RiAuthor4142LiveStrategy {
                         ));
                         return intents;
                     }
+                    self.record_shadow_branch("bo:pending_exit_without_position");
                 }
             }
         }
@@ -1640,6 +1718,7 @@ impl RiAuthor4142LiveStrategy {
         if let Some(mut position) = self.live_bo.position.take() {
             position.bars_held = position.bars_held.saturating_add(1);
             if bar.ts_local.time() >= config.exit_time {
+                self.record_shadow_branch("bo:exit_eod");
                 intents.push(self.emit_bo_exit_intent(
                     &position,
                     bar,
@@ -1650,6 +1729,7 @@ impl RiAuthor4142LiveStrategy {
                 ));
                 self.live_bo.position = Some(position);
             } else {
+                self.record_shadow_branch("bo:hold");
                 if let Some(context) = self.live_bo.context {
                     match position.side {
                         RiAuthor4142Side::Long => {
@@ -1770,6 +1850,7 @@ impl RiAuthor4142LiveStrategy {
 
     fn update_bo_pending_entry(&mut self, bar: ModelBar, config: Author42Config) {
         let Some(context) = self.live_bo.context else {
+            self.record_shadow_branch("bo_entry:context_unavailable");
             return;
         };
         if self.live_bo.pending.is_some()
@@ -1777,20 +1858,33 @@ impl RiAuthor4142LiveStrategy {
             || self.live_mr.position.is_some()
             || !self.live_bo.trade_allowed
         {
+            self.record_shadow_branch(if self.live_bo.pending.is_some() {
+                "bo_entry:pending_exists"
+            } else if self.live_bo.position.is_some() {
+                "bo_entry:bo_owns_slot"
+            } else if self.live_mr.position.is_some() {
+                "bo_entry:mr_owns_slot"
+            } else {
+                "bo_entry:session_disallowed"
+            });
             return;
         }
         let (Some(long_level), Some(short_level)) =
             (self.live_bo.long_level, self.live_bo.short_level)
         else {
+            self.record_shadow_branch("bo_entry:levels_unavailable");
             return;
         };
         if bar.ts_local.time() >= config.exit_time {
+            self.record_shadow_branch("bo_entry:terminal_time");
             return;
         }
         if !Self::author42_entry_signal_time_allowed(bar.ts_local.time(), config) {
+            self.record_shadow_branch("bo_entry:last_entry_time");
             return;
         }
         if !self.author42_entry_count_allowed(config) {
+            self.record_shadow_branch("bo_entry:entry_quota");
             return;
         }
 
@@ -1808,6 +1902,7 @@ impl RiAuthor4142LiveStrategy {
                 && bar.high >= self.live_bo.day_hh
                 && bar.ts_local.time() < config.exit_time
             {
+                self.record_shadow_branch("bo_entry:reentry_long");
                 self.live_bo.pending =
                     Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Long));
                 return;
@@ -1816,6 +1911,7 @@ impl RiAuthor4142LiveStrategy {
                 && bar.low <= self.live_bo.day_ll
                 && bar.ts_local.time() < config.exit_time
             {
+                self.record_shadow_branch("bo_entry:reentry_short");
                 self.live_bo.pending =
                     Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Short));
                 return;
@@ -1827,12 +1923,17 @@ impl RiAuthor4142LiveStrategy {
             self.live_bo.first_bar.map(|bar| bar.ts_local),
         ) {
             if buy_trig && bar.close > long_level {
+                self.record_shadow_branch("bo_entry:hour_long");
                 self.live_bo.pending =
                     Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Long));
             } else if short_trig && bar.close < short_level {
+                self.record_shadow_branch("bo_entry:hour_short");
                 self.live_bo.pending =
                     Some(RiAuthor4142LiveBoPending::Entry(RiAuthor4142Side::Short));
             }
+        }
+        if self.live_bo.pending.is_none() {
+            self.record_shadow_branch("bo_entry:no_entry_signal");
         }
     }
 
@@ -2239,6 +2340,9 @@ impl RiAuthor4142LiveStrategy {
     }
 
     fn daily_stats_before(&self, date: NaiveDate) -> Vec<(NaiveDate, RiDailyStats)> {
+        if let Some(frozen) = &self.shadow_context {
+            return frozen.daily_stats(date);
+        }
         let mut by_day: BTreeMap<NaiveDate, RiDailyStats> = BTreeMap::new();
         for bar in &self.model_bars {
             if bar.ts_local.date() >= date
@@ -3040,7 +3144,8 @@ mod tests {
     use super::{
         is_finalized_record, RiAuthor4142CandidateRole, RiAuthor4142DecisionAction,
         RiAuthor4142ExecutionPath, RiAuthor4142JournalDecision, RiAuthor4142LiveConfig,
-        RiAuthor4142LiveStrategy, RiAuthor4142Phase, RiAuthor4142RuntimeMode, RiAuthor4142Side,
+        RiAuthor4142LiveStrategy, RiAuthor4142ModelFeedPolicy, RiAuthor4142Phase,
+        RiAuthor4142RuntimeMode, RiAuthor4142Side,
     };
     use crate::strategies::moex_author41_42::{
         Component, Instrument, ModelBar, OverlapDecision, ProfileId, ShadowJournalRecord,
@@ -3061,6 +3166,7 @@ mod tests {
             profile_id: "ri_author41_42_primary_combo_cost2".to_string(),
             timeframe: "10m".to_string(),
             mode: RiAuthor4142RuntimeMode::Shadow,
+            model_feed_policy: None,
             allow_order_emission: false,
             execution_path: RiAuthor4142ExecutionPath::ActionScopedOnly,
             order_symbol: None,
@@ -3087,7 +3193,7 @@ mod tests {
         }
     }
 
-    fn canonical07_transition_config() -> RiAuthor4142LiveConfig {
+    pub(super) fn canonical07_transition_config() -> RiAuthor4142LiveConfig {
         let mut config = default_config();
         config.session_start_time = "07:00:00".to_string();
         config.author41_entry_end_time = "10:00:00".to_string();
@@ -3125,6 +3231,176 @@ mod tests {
     fn shadow_mode_scaffold_cannot_emit_orders() {
         let strategy = RiAuthor4142LiveStrategy::new(default_config()).expect("strategy");
         assert!(!strategy.can_emit_orders());
+    }
+
+    #[test]
+    fn model_feed_policy_defaults_preserve_existing_modes_and_old_config_payloads() {
+        for mode in [
+            RiAuthor4142RuntimeMode::Shadow,
+            RiAuthor4142RuntimeMode::ProspectiveShadow,
+            RiAuthor4142RuntimeMode::DryRun,
+            RiAuthor4142RuntimeMode::MicroLive,
+        ] {
+            let mut config = default_config();
+            config.mode = mode;
+            config.allow_order_emission = mode.can_emit_orders();
+            let expected = match mode {
+                RiAuthor4142RuntimeMode::Shadow | RiAuthor4142RuntimeMode::ProspectiveShadow => {
+                    RiAuthor4142ModelFeedPolicy::LegacyShadowBreaksV1
+                }
+                _ => RiAuthor4142ModelFeedPolicy::MicroRegularV1,
+            };
+            let mut old_json = serde_json::to_value(&config).unwrap();
+            old_json
+                .as_object_mut()
+                .unwrap()
+                .remove("model_feed_policy");
+            let restored: RiAuthor4142LiveConfig = serde_json::from_value(old_json).unwrap();
+            assert_eq!(restored.model_feed_policy, None);
+            assert_eq!(restored.effective_model_feed_policy(), expected);
+            assert!(restored.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn model_feed_policy_cannot_apply_legacy_break_filter_to_micro_live() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        config.allow_order_emission = true;
+        config.model_feed_policy = Some(RiAuthor4142ModelFeedPolicy::LegacyShadowBreaksV1);
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("model_feed_policy"));
+        config.model_feed_policy = Some(RiAuthor4142ModelFeedPolicy::MicroRegularV1);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn explicit_micro_feed_policy_matches_live_bar_set_without_relaxing_other_guards() {
+        let events = [
+            bar(dt(2026, 7, 13, 8, 50, 0), DataOrigin::History),
+            bar(dt(2026, 10, 25, 10, 0, 0), DataOrigin::Live),
+            bar(dt(2026, 10, 26, 6, 50, 0), DataOrigin::Live),
+            bar(dt(2026, 10, 26, 7, 0, 0), DataOrigin::HistoryGap),
+            bar(dt(2026, 10, 26, 14, 0, 0), DataOrigin::Live),
+            bar(dt(2026, 10, 26, 18, 50, 0), DataOrigin::Live),
+            bar(dt(2026, 10, 26, 19, 0, 0), DataOrigin::Live),
+            bar(dt(2026, 10, 26, 23, 40, 0), DataOrigin::HistoryGap),
+            bar(dt(2026, 10, 27, 14, 0, 0), DataOrigin::Live),
+        ];
+        let mut live_config = canonical07_transition_config();
+        live_config.mode = RiAuthor4142RuntimeMode::MicroLive;
+        live_config.allow_order_emission = true;
+        live_config.excluded_model_dates = vec!["2026-10-27".to_string()];
+        let mut live = RiAuthor4142LiveStrategy::new(live_config.clone()).unwrap();
+        for event in &events {
+            live.update_bar_state(event);
+        }
+        assert_eq!(live.model_bars.len(), 3);
+
+        for mode in [
+            RiAuthor4142RuntimeMode::Shadow,
+            RiAuthor4142RuntimeMode::ProspectiveShadow,
+        ] {
+            let mut config = live_config.clone();
+            config.mode = mode;
+            config.allow_order_emission = false;
+            config.model_feed_policy = Some(RiAuthor4142ModelFeedPolicy::MicroRegularV1);
+            let mut shadow = RiAuthor4142LiveStrategy::new(config).unwrap();
+            for event in &events {
+                assert!(shadow.on_bar(&test_ctx(), event).is_empty());
+            }
+            assert_eq!(shadow.model_bars, live.model_bars);
+            assert!(!shadow.can_emit_orders());
+            if mode == RiAuthor4142RuntimeMode::ProspectiveShadow {
+                for event in &events[4..7] {
+                    assert_eq!(
+                        shadow.runtime_adapter_model_bar(&test_ctx(), event),
+                        live.runtime_adapter_model_bar(&live_ctx(), event)
+                    );
+                    assert!(shadow
+                        .runtime_adapter_model_bar(&test_ctx(), event)
+                        .is_some());
+                }
+                assert!(shadow
+                    .runtime_adapter_model_bar(&test_ctx(), &events[7])
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_micro_feed_policy_keeps_break_labels_in_history_warmup() {
+        let events = [
+            bar(dt(2026, 10, 26, 14, 0, 0), DataOrigin::History),
+            bar(dt(2026, 10, 26, 18, 50, 0), DataOrigin::History),
+            bar(dt(2026, 10, 26, 19, 0, 0), DataOrigin::History),
+        ];
+        let mut config = canonical07_transition_config();
+        config.mode = RiAuthor4142RuntimeMode::ProspectiveShadow;
+        config.model_feed_policy = Some(RiAuthor4142ModelFeedPolicy::MicroRegularV1);
+        let mut shadow = RiAuthor4142LiveStrategy::new(config).unwrap();
+        shadow.warmup_from_history(&test_ctx(), &events);
+        assert_eq!(shadow.model_bars.len(), 3);
+        assert!(shadow.journal_records_for_test().iter().all(|row| {
+            row.adapter_decision != RiAuthor4142JournalDecision::ProspectiveIntentSuppressed
+                && row.adapter_decision != RiAuthor4142JournalDecision::IntentEmitted
+        }));
+    }
+
+    #[test]
+    fn explicit_micro_feed_policy_preserves_shared_mr_two_entry_limit() {
+        let mut config = default_config();
+        config.mode = RiAuthor4142RuntimeMode::ProspectiveShadow;
+        config.model_feed_policy = Some(RiAuthor4142ModelFeedPolicy::MicroRegularV1);
+        assert_eq!(config.author42_max_entries_per_day, None);
+        assert_eq!(config.author42_last_entry_time, None);
+        let mut strategy = RiAuthor4142LiveStrategy::new(config).unwrap();
+        strategy.warmup_from_history(
+            &test_ctx(),
+            &[bar_with_ohlc(
+                dt(2026, 5, 1, 23, 40, 0),
+                DataOrigin::History,
+                100_000.0,
+                101_000.0,
+                99_000.0,
+                100_000.0,
+            )],
+        );
+        // Short + long use the same MR quota; removing a BO cap must not reset it.
+        for (minute, close) in [
+            (0, 100_100.0),
+            (10, 99_900.0),
+            (20, 99_900.0),
+            (30, 100_100.0),
+            (40, 100_100.0),
+        ] {
+            let event = bar_with_ohlc(
+                dt(2026, 5, 4, 9, minute, 0),
+                DataOrigin::Live,
+                close,
+                close + 20.0,
+                close - 20.0,
+                close,
+            );
+            assert!(strategy.on_bar(&test_ctx(), &event).is_empty());
+        }
+        let entries = strategy
+            .journal_records_for_test()
+            .iter()
+            .filter(|row| {
+                row.adapter_decision == RiAuthor4142JournalDecision::ProspectiveIntentSuppressed
+                    && row.role.as_deref() == Some("entry")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].side.as_deref(), Some("short"));
+        assert_eq!(entries[1].side.as_deref(), Some("long"));
+        assert_eq!(strategy.live_mr.entries_today, 2);
+        assert!(strategy.live_mr.position.is_none());
+        assert_eq!(strategy.phase_for_test().as_deref(), Some("flat"));
     }
 
     #[test]
@@ -3972,10 +4248,12 @@ mod tests {
     fn operational_shadow_excludes_moex_break_bars_without_changing_live_contract() {
         let break_one = bar(dt(2026, 7, 15, 14, 0, 0), DataOrigin::Live);
         let break_two = bar(dt(2026, 7, 15, 18, 50, 0), DataOrigin::Live);
+        let break_three = bar(dt(2026, 7, 15, 19, 0, 0), DataOrigin::Live);
 
         let mut shadow = RiAuthor4142LiveStrategy::new(default_config()).expect("shadow");
         assert!(shadow.update_bar_state(&break_one).is_empty());
         assert!(shadow.update_bar_state(&break_two).is_empty());
+        assert!(shadow.update_bar_state(&break_three).is_empty());
         assert!(shadow.model_bars.is_empty());
 
         let mut prospective_config = default_config();
@@ -3984,6 +4262,7 @@ mod tests {
             RiAuthor4142LiveStrategy::new(prospective_config).expect("prospective");
         assert!(prospective.on_bar(&test_ctx(), &break_one).is_empty());
         assert!(prospective.on_bar(&test_ctx(), &break_two).is_empty());
+        assert!(prospective.on_bar(&test_ctx(), &break_three).is_empty());
         assert!(prospective.model_bars.is_empty());
         assert!(prospective.journal_records_for_test().iter().all(|row| {
             row.adapter_decision != RiAuthor4142JournalDecision::ProspectiveIntentSuppressed
@@ -3995,7 +4274,8 @@ mod tests {
         let mut live = RiAuthor4142LiveStrategy::new(live_config).expect("live");
         assert!(live.update_bar_state(&break_one).is_empty());
         assert!(live.update_bar_state(&break_two).is_empty());
-        assert_eq!(live.model_bars.len(), 2);
+        assert!(live.update_bar_state(&break_three).is_empty());
+        assert_eq!(live.model_bars.len(), 3);
     }
 
     #[test]

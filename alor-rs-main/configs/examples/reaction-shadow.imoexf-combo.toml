@@ -1,0 +1,32 @@
+# Template only. No live strategy config, Redis URL or automatic deployment.
+# Choose activation date/calendar and stream together with the operator.
+[runner]
+first_decision_session = "2026-11-02"
+excluded_dates = []
+
+[runner.ingress]
+generation = "review-imoexf-combo-pair-v1"
+symbol = "IMOEXF"
+source_stream = "REPLACE_WITH_APPROVED_IMOEXF_M10_SOURCE"
+receipt_stream = "shadow:reaction:imoexf:combo:review-v1"
+
+[runner.config]
+engine = "imoexf"
+sleeve = "combo"
+
+[runner.config.costs]
+point_value_rub = 10.0
+tick_value_rub = 5.0
+# Frozen cost_policy.json: two fee components per side, no fixed cost2 overlay.
+rate_per_component_per_side = 0.00006575119054451348
+components = 2
+
+[policy]
+# Local starting budgets, NOT Linux/VPS capacity certification.
+startup_timeout_seconds = 600
+poll_timeout_seconds = 60
+poll_interval_seconds = 5
+shutdown_timeout_seconds = 15
+max_queue_age_seconds = 30
+max_model_lateness_seconds = 120
+max_sessions = 20
