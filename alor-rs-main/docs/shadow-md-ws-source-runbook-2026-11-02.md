@@ -79,6 +79,12 @@ requires ready/history-complete/ACK/connection. Runtime reconnect is tolerated
 only within the bounded WS-receipt budget; stale source or invalid generation
 terminates/latches the worker. Process existence alone is not readiness.
 
+Native observation showed requested history arriving before the final subscription
+ACK 200 (396 data frames, then one response). The MD-only transport preserves
+these frames under the requested guid without activating it. It still requires
+the explicit 200 response; data alone, missing status or a rejection never counts
+as confirmed readiness. The default Trading ACK path is unchanged.
+
 ## Stop And Resume
 
 SIGTERM/SIGINT closes the MD transport and records an explicit clean stop.

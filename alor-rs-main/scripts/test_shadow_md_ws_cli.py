@@ -168,8 +168,10 @@ class OwnedWs:
                     if name != 'BarsGetAndSubscribe' or 'portfolio' in message:
                         raise ValueError('forbidden account/order opcode')
                     guid = message['guid']
-                    self.send(conn, 1, json.dumps(dict(guid=guid, httpCode=200)).encode())
-                    self.send(conn, 1, json.dumps(dict(guid=guid, data=self.bars())).encode())
+                    # Observed native order: historical bars precede ACK 200.
+                    for bar in self.bars():
+                        self.send(conn, 1, json.dumps(dict(guid=guid, data=bar)).encode())
+                    self.send(conn, 1, json.dumps(dict(requestGuid=guid, httpCode=200)).encode())
         except (EOFError, OSError):
             pass
         except Exception as error:

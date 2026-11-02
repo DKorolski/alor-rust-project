@@ -884,6 +884,7 @@ async fn send_and_ack(
         subscription_manager,
         last_ws_rx_ts,
         generation,
+        scope,
     )
     .await?;
     if scope == SubscriptionScope::MarketDataOnly
@@ -932,6 +933,7 @@ async fn read_until_guid(
     subscription_manager: &SubscriptionManager,
     last_ws_rx_ts: &Arc<AtomicI64>,
     generation: u64,
+    scope: SubscriptionScope,
 ) -> anyhow::Result<Value> {
     let fut = async move {
         while let Some(msg) = stream.next().await {
@@ -949,6 +951,20 @@ async fn read_until_guid(
                 match serde_json::from_str::<Value>(&txt) {
                     Ok(val) => {
                         if guid_of(&val).as_deref() == Some(guid) {
+                            // ALOR may stream requested history before its 200
+                            // response. Preserve it without activating the guid.
+                            if scope == SubscriptionScope::MarketDataOnly
+                                && val.get("httpCode").is_none()
+                                && val.get("data").is_some()
+                            {
+                                let _ = event_tx
+                                    .send(WsEvent::Raw {
+                                        value: attach_symbol(val, bars_guid_map),
+                                        generation,
+                                    })
+                                    .await;
+                                continue;
+                            }
                             return Ok(val);
                         }
                         let val = attach_symbol(val, bars_guid_map);

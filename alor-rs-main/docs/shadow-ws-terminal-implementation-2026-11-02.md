@@ -60,7 +60,7 @@ for the distinct observation/model activation dates, ACLs and recovery bounds.
 
 ## Verification Boundary
 
-Local gateway library tests after the composed-source change: 95 passed.
+Local gateway library tests after the composed-source/ACK-order change: 96 passed.
 The MD-only tests include an owned loopback WebSocket server with a cached dummy
 token, ACKs/raw bars and unsubscribe/close; no real OAuth, broker or Redis calls.
 They verify that default Trading subscriptions are preserved and the MD path
@@ -106,8 +106,13 @@ passed. No full-workspace/independent-model-parity claim follows from these runs
 3. Only then admit new model generations before cutoff. The active RI collector,
    14 retained shadows, live gateway/runtime and failed REST evidence stay intact.
 
-At this implementation checkpoint no new WS gateway service or model generation
-has been started. Prospective gateway/model-pair clean-session counters remain
-zero for this new source. Record a later source admission separately with exact
-artifact, health and terminal evidence. The obsolete REST admission timer was already cancelled;
+An initial source-only canary rejected its admission without publishing bars:
+native ALOR delivered history before its successful subscription response.
+It was stopped, evidence preserved, and no model worker was admitted. The scoped
+MD fix now preserves that history while waiting for the real ACK 200; it does
+not activate on data alone. Default Trading handling remains unchanged. This
+requires a newly verified artifact and fresh canary generation, not a silent
+restart or readiness bypass. Gateway/model-pair clean-session counters remain
+zero. Record later admission separately with exact artifact/health/terminal
+evidence. The obsolete REST admission timer was already cancelled;
 its cancellation is not a successful replacement rollout.

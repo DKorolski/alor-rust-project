@@ -168,6 +168,68 @@ async fn md_only_initial_and_resubscribe_never_emit_account_opcodes() {
 }
 
 #[tokio::test]
+async fn md_history_before_status_is_preserved_but_does_not_confirm_subscription() {
+    for code in [Some(200), Some(401), None] {
+        let (events, mut rx) = mpsc::channel(32);
+        let mut manager = SubscriptionManager::default();
+        manager.add_subscription(Subscription {
+            guid: "owned".into(),
+            symbol: "IMOEXF".into(),
+            subscription_type: "bars".into(),
+            is_active: false,
+        });
+        let map = HashMap::from([("owned".into(), "IMOEXF".into())]);
+        let mut frames = vec![];
+        for label in [600, 1200] {
+            frames.push(Ok(Message::Text(
+                serde_json::json!({"guid":"owned","data":{
+                    "time":label,"open":100.,"high":102.,"low":98.,"close":101.,"volume":1.
+                }})
+                .to_string()
+                .into(),
+            )));
+        }
+        if let Some(code) = code {
+            frames.push(Ok(Message::Text(
+                serde_json::json!({"requestGuid":"owned","httpCode":code})
+                    .to_string()
+                    .into(),
+            )));
+        }
+        let mut stream = futures_util::stream::iter(frames);
+        let last = Arc::new(AtomicI64::new(0));
+        let result = read_until_guid(
+            &mut stream,
+            "owned",
+            Duration::from_millis(100),
+            &events,
+            &map,
+            &manager,
+            &last,
+            1,
+            SubscriptionScope::MarketDataOnly,
+        )
+        .await;
+        if let Some(code) = code {
+            assert_eq!(result.unwrap()["httpCode"], code)
+        } else {
+            assert!(result.is_err())
+        }
+        assert_eq!(manager.active_count(), 0);
+        let mut labels = vec![];
+        while let Ok(event) = rx.try_recv() {
+            if let WsEvent::Raw { value, .. } = event {
+                assert_eq!(value["data"]["symbol"], "IMOEXF");
+                labels.push(value["data"]["time"].as_i64().unwrap());
+            } else {
+                assert!(!matches!(event, WsEvent::SubscriptionAck { .. }));
+            }
+        }
+        assert_eq!(labels, vec![600, 1200]);
+    }
+}
+
+#[tokio::test]
 async fn default_trading_scope_preserves_all_existing_subscriptions() {
     assert_eq!(
         scoped_subscribe(SubscriptionScope::Trading, false).await,
