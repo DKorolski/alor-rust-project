@@ -64,16 +64,19 @@ class SupervisorTests(unittest.TestCase):
     def attempt(self, mode="create"):
         return service.Attempt(self.root, mode, self.manifest)
 
-    def run_worker(self, mode, attempt, stop_on_status=True):
+    def run_worker(self, mode, attempt, stop_on_status=True, source_guard=None, on_event=None):
         stop = service.StopRequest()
         events = []
         def emit(line):
             events.append(json.loads(line))
+            if on_event:
+                on_event(events[-1])
             if stop_on_status and events[-1]["event"] == "reaction_shadow_status":
                 stop.request()
         try:
             result = service.supervise([sys.executable, "-u", "-c", WORKER, mode, str(self.root)],
-                                      POLICY, time.time() + 10, attempt, {}, "fixture", stop, emit)
+                                      POLICY, time.time() + 10, attempt, {}, "fixture", stop, emit,
+                                      source_guard=source_guard)
         finally:
             pid_path = self.root.with_suffix(".pid")
             if pid_path.exists():
@@ -95,6 +98,132 @@ class SupervisorTests(unittest.TestCase):
             self.run_worker("ok", again)
         finally:
             again.close()
+
+    def source(self):
+        root = self.root.parent / "source"
+        root.mkdir()
+        cfg = dict(symbol="IMOEXF", stream="shadow.source.closed10m.IMOEXF.fixture",
+                   bootstrap_start="2026-10-28", first_live_session="2026-11-02",
+                   excluded_dates=[], revision_policy="imoexf_author41_short_bo053_volume_audit")
+        manifest = dict(version="shadow_authenticated_rest_closed_m10_v3", config=cfg)
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        lock = (root / "writer.lock").open("a+b")
+        self.addCleanup(lock.close)
+        service.fcntl.flock(lock, service.fcntl.LOCK_EX | service.fcntl.LOCK_NB)
+        spec = b'''[runner]
+first_decision_session = "2026-11-02"
+excluded_dates = []
+[runner.ingress]
+symbol = "IMOEXF"
+source_stream = "shadow.source.closed10m.IMOEXF.fixture"
+[runner.config]
+engine = "imoexf"
+'''
+        return root, lock, spec
+
+    def test_source_guard_requires_running_writer_and_unchanged_identity(self):
+        root, lock, spec = self.source()
+        guard = service.ClosedSourceGuard(root, spec)
+        guard.check()
+        with (root / "FAILED.json").open("w") as handle:
+            json.dump(dict(reason="price_revision"), handle)
+        with self.assertRaises(service.SourceUnavailable):
+            guard.check()
+        (root / "FAILED.json").unlink()
+        service.fcntl.flock(lock, service.fcntl.LOCK_UN)
+        with self.assertRaisesRegex(service.SourceUnavailable, "not running"):
+            guard.check()
+
+    def test_source_guard_rejects_unreadable_or_changed_manifest(self):
+        root, _, spec = self.source()
+        guard = service.ClosedSourceGuard(root, spec)
+        (root / "manifest.json").write_text('{}')
+        with self.assertRaises(service.SourceUnavailable):
+            guard.check()
+        (root / "manifest.json").unlink()
+        with self.assertRaises(service.SourceUnavailable):
+            guard.check()
+
+    def test_source_guard_binds_calendar_stream_and_model_volume_policy(self):
+        root, _, spec = self.source()
+        for old, new in ((b'2026-11-02', b'2026-11-03'),
+                         (b'IMOEXF.fixture', b'IMOEXF.other'),
+                         (b'excluded_dates = []', b'excluded_dates = ["2026-11-04"]'),
+                         (b'engine = "imoexf"', b'engine = "usdrubf"')):
+            with self.subTest(new=new), self.assertRaises(ValueError):
+                service.ClosedSourceGuard(root, spec.replace(old, new))
+
+    def test_source_failure_after_open_latches_attempt_and_reaps_worker(self):
+        root, _, spec = self.source()
+        guard = service.ClosedSourceGuard(root, spec)
+        attempt = self.attempt()
+        events = []
+        def failed_after_open(event):
+            events.append(event)
+            if event['event'] == 'reaction_shadow_opened':
+                (root / "FAILED.json").write_text('{"reason":"price_revision"}')
+        try:
+            with self.assertRaises(service.SourceUnavailable):
+                self.run_worker('ok', attempt, source_guard=guard, on_event=failed_after_open)
+            self.assertEqual([e['event'] for e in events], ['reaction_shadow_opened'])
+            self.assertFalse((attempt.control / '0001.stopped.json').exists())
+        finally:
+            attempt.close()
+        with self.assertRaisesRegex(ValueError, 'incomplete/failed'):
+            self.attempt('resume')
+
+    def test_source_failure_before_spawn_does_not_start_attempt(self):
+        root, _, spec = self.source()
+        guard = service.ClosedSourceGuard(root, spec)
+        (root / 'FAILED.json').write_text('{}')
+        attempt = self.attempt()
+        try:
+            with mock.patch.object(service.subprocess, 'Popen') as spawn:
+                with self.assertRaises(service.SourceUnavailable):
+                    self.run_worker('ok', attempt, source_guard=guard)
+                spawn.assert_not_called()
+            self.assertFalse((attempt.control / '0001.started.json').exists())
+        finally:
+            attempt.close()
+
+    def test_guard_interrupts_wait_for_unresponsive_worker(self):
+        attempt = self.attempt()
+        guard = mock.Mock()
+        # Startup check + first receive check pass; the next periodic receive
+        # check fails while the worker is silent, before the worker timeout.
+        guard.check.side_effect = [None, None, service.SourceUnavailable('source stopped')]
+        try:
+            with self.assertRaises(service.SourceUnavailable):
+                self.run_worker('opening_hang', attempt, source_guard=guard)
+            self.assertFalse((attempt.control / '0001.stopped.json').exists())
+        finally:
+            attempt.close()
+
+    def test_symlinked_or_missing_source_lock_is_not_readiness(self):
+        root, lock, spec = self.source()
+        guard = service.ClosedSourceGuard(root, spec)
+        lock.close()
+        (root / 'writer.lock').unlink()
+        with self.assertRaises(service.SourceUnavailable):
+            guard.check()
+        (root / 'writer.lock').symlink_to(root / 'manifest.json')
+        with self.assertRaises(service.SourceUnavailable):
+            guard.check()
+
+    def test_closed_source_cli_cannot_omit_dependency_guard(self):
+        _, _, raw = self.source()
+        raw += b'\n[policy]\n' + '\n'.join(f'{k} = {v}' for k, v in POLICY.items()).encode()
+        spec = self.root.parent / 'spec.toml'
+        spec.write_bytes(raw)
+        ready = service.dt.datetime.fromtimestamp(time.time() + 60, service.dt.timezone.utc).replace(microsecond=0).isoformat()
+        argv = ['service', 'create', '--worker', sys.executable, '--spec', str(spec),
+                '--generation', str(self.root), '--ready-by', ready]
+        with mock.patch.object(sys, 'argv', argv), mock.patch.object(service.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(ValueError, '--source-state'):
+                service.main()
+            spawn.assert_not_called()
+        self.assertFalse(self.root.exists())
+        self.assertFalse(self.root.with_name(self.root.name + '.supervisor').exists())
 
     def test_faults_latch_and_reap_worker(self):
         for mode in ("opening_hang", "poll_hang", "stop_hang", "crash", "orders", "bad_spec", "overflow", "never_ready"):

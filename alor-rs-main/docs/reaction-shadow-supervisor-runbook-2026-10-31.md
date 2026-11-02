@@ -85,6 +85,17 @@ python3 scripts/reaction_shadow_service.py create \
   --ready-by "$APPROVED_READY_BY"
 ```
 
+For the isolated closed-M10 source (`shadow.source.closed10m.*`), also pass
+`--source-state /var/lib/reaction-source/approved-generation`. This is mandatory
+for that source namespace; generic legacy-source workers do not acquire this
+dependency automatically. See the [source revision/readmission plan](shadow-source-revision-hardening-2026-11-02.md).
+The source must already be running, with a matching v3 manifest, no FAILED marker
+and an exclusive writer lock. The supervisor reads this evidence without broker
+credentials, pins it in its own v2 manifest and monitors it during operation.
+Loss of the source terminates only the owned worker with
+`closed_source_unavailable`, retaining the failed attempt for review. Keep
+independent missing-bar deadlines; a running source is not proof of fresh data.
+
 `APPROVED_READY_BY` is an explicit future offset-aware ISO time no later than the
 next model-open cutoff. `resume` uses the same syntax, exact binary/spec and
 existing generation. It is permitted only after an acknowledged operator STOP
@@ -96,6 +107,10 @@ The adjacent `<generation>.supervisor` directory is part of recovery evidence:
 pinned manifest, exclusive lock and fsynced numbered started/stopped attempts.
 Crash, failed stop, missing acknowledgment or incomplete attempt blocks relaunch.
 No `--force`, marker deletion, automatic fresh generation or hidden cursor skip.
+The v2 supervisor manifest is not an in-place upgrade of a v1 generation. An
+old clean or failed generation is preserved; admit a new source/worker generation
+under the new contract. When stopping a healthy pair for maintenance, stop the
+worker first, then its source; source-first shutdown correctly latches failure.
 
 RI uses `RI_SHADOW_REDIS_URL` and its own state directory:
 

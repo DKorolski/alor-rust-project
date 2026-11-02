@@ -5,6 +5,10 @@ source for the new IMOEXF/USD reaction shadows. It does not modify the shared
 gateway router, legacy streams, live models or order paths. See the
 [service runbook](reaction-shadow-supervisor-runbook-2026-10-31.md) and
 [live-promotion gates](shadow-observation-and-live-promotion.md#last-candle-and-eod-responsibilities).
+Current source identity is `shadow_authenticated_rest_closed_m10_v3`; the
+[revision-hardening/readmission plan](shadow-source-revision-hardening-2026-11-02.md)
+supersedes v2's blanket revision failure. Existing v2 deployments are not changed
+by editing this document or upgrading a local checkout.
 
 ## Problem and Boundary
 
@@ -29,7 +33,9 @@ This source is not itself a live EOD watchdog or permission to switch live input
 - Require two identical OHLCV responses at least five seconds apart after close.
   A changed candidate restarts confirmation. This stability assumption is not
   an exchange finality certificate. Later revisions to the two most recently
-  published bars fail the generation, never rewrite already-frozen evidence.
+  published bars are classified and durably audited. Default policy still fails
+  on any revision; the narrowly scoped volume exception is described below.
+  Neither policy rewrites already-published/frozen evidence.
 - REST `to` covers the full last requested interval (`label+599`); filter payload
   labels to the requested closed range. Do not accidentally omit the final
   interval by querying only through its starting label.
@@ -52,6 +58,40 @@ weekend/holiday label needs two responses after close+90s and is recorded in
 `context-gaps.jsonl`, not emitted as a synthetic candle. A later appearance of
 that absent bar fails for review. This does not relax regular-session completeness
 or the worker's expected-live/EOD deadlines.
+
+## Published Revision Policy
+
+`revision_policy` is immutable generation configuration. Omission means
+`strict_ohlcv`, not implicit permission to ignore volume.
+
+| Policy / change | Outcome |
+| --- | --- |
+| `strict_ohlcv`: volume-only revision | Audit + fail closed |
+| `imoexf_author41_short_bo053_volume_audit`: volume-only revision | Audit separately; retain original OHLCV and continue |
+| Any policy: OHLC revision | Audit `price_revision` + fail closed |
+| Any policy: published bar absent in REST response | Audit `missing_published_bar` + fail closed |
+| Invalid timestamp, negative/nonfinite volume, invalid geometry | Fail closed |
+
+The exception is opt-in, restricted to symbol IMOEXF and the independent
+Author41-short/BO053 price-only reaction model. Supervisor admission additionally
+binds the source to the IMOEXF worker engine. It is not permitted for USDRUBF,
+VWAP strategies, RI, shared live feeds or an arbitrary downstream consumer.
+Tests compare complete numerical MR/BO state at every step, including both
+weekday/weekend-context arms. Raw input hashes still differ: this is a declared
+source policy, NOT a claim of identical raw-volume/reference provenance.
+
+`revisions.jsonl` records original and observed OHLCV, symbol, policy, class,
+receipt time, resolution and checksum. Identical revisions are deduplicated
+across clean restart. A later distinct volume revision gets another record.
+The canonical Redis prefix, source proofs and frozen model state stay unchanged;
+both arms keep consuming the original first-published candle. No new model bar
+is manufactured for a revision. Both upward and downward valid volume changes
+are audited; invalid volumes are never tolerated.
+
+Audit bounds: 1 MiB / 1,024 distinct revisions. Exhaustion, write/fsync failure,
+torn/checksum-invalid audit or source/audit mismatch blocks operation. A fatal
+audit also blocks resume if the process crashed before writing `FAILED.json`.
+Do not delete audit records to reclaim capacity or permit restart.
 
 ## Identity and Persistence
 
@@ -78,13 +118,31 @@ Example shape, not a launch instruction:
   "stream": "shadow.source.closed10m.IMOEXF.REVIEWED_GENERATION",
   "bootstrap_start": "2026-10-28",
   "first_live_session": "2026-11-02",
-  "excluded_dates": ["2026-11-04"]
+  "excluded_dates": ["2026-11-04"],
+  "revision_policy": "strict_ohlcv"
 }
 ```
 
 Provide `SHADOW_ALOR_REFRESH_TOKEN` and `SHADOW_SOURCE_REDIS_URL` through an
 approved secret mechanism, never CLI values, Git, journals or worker environment.
 Review dates rather than reusing this historical example blindly.
+For the specifically reviewed IMOEXF reaction pair, explicitly substitute
+`imoexf_author41_short_bo053_volume_audit`. Do not do this for the USD source.
+
+The matching reaction supervisor requires `--source-state` for a
+`shadow.source.closed10m.*` stream. Its v2 manifest pins the source directory and
+manifest hash; stream, symbol, activation date, excluded dates and engine/policy
+must agree. It checks FAILED, manifest integrity and the held writer lock before
+spawn, before/after polling and during waits (at most one-second check interval).
+Failure stops the owned worker and leaves an incomplete attempt requiring audit.
+It never restarts the source, repairs a generation or grants broker access.
+
+Give the supervisor read/traverse-only access to the source state directory,
+manifest, FAILED marker and writer lock. Use an approved shared read group/ACL
+(for example directory 0750 and files 0640 with appropriate ownership), not
+world-writable state or sharing source credentials. Verify these permissions
+under the actual worker OS user. A held lock is liveness evidence, not proof
+of feed progress: model-bar/queue/freshness deadlines remain mandatory.
 
 Bounds: 4,500 rows; 40 calendar days from bootstrap start; HTTP 2 MiB/8 seconds;
 Redis socket timeout five seconds. No automatic trim, reconnect loop or generation
@@ -114,7 +172,8 @@ python3 -W error::ResourceWarning -m unittest discover -s scripts \
 
 Tests cover terminal publication without a next tick, incomplete/revised/late
 bars, receipt clocks, calendar, sparse context, HTTP bounds, duplicate-free resume
-and missing state. Broker deadlines/finality still need prospective observation.
+and missing state, volume-only policy/deduplication, fatal audit recovery and
+source dependency loss. Broker deadlines/finality still need prospective observation.
 Rollback stops only the owned source/worker, preserving generations and failed
 markers. A gateway finalizer or live runtime watchdog is separate reviewed work,
 not a silent replacement of this evidence contract.

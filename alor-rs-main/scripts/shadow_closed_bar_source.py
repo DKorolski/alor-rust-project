@@ -29,7 +29,11 @@ GRACE = 5
 CONFIRM = 5
 MAX_AGE = 90  # Leave 30 seconds for the existing 120-second consumer deadline.
 MAX_ROWS = 4500
-VERSION = "shadow_authenticated_rest_closed_m10_v2"
+VERSION = "shadow_authenticated_rest_closed_m10_v3"
+STRICT_REVISIONS = "strict_ohlcv"
+IMOEXF_VOLUME_AUDIT = "imoexf_author41_short_bo053_volume_audit"
+MAX_REVISION_BYTES = 1024 * 1024
+MAX_REVISION_ROWS = 1024
 
 
 class SourceFault(Exception):
@@ -258,8 +262,94 @@ def stored_row(entry, symbol):
     return row
 
 
+def revision_policy(config):
+    policy = config.get("revision_policy", STRICT_REVISIONS)
+    require(policy in (STRICT_REVISIONS, IMOEXF_VOLUME_AUDIT), "unapproved revision policy")
+    require(policy == STRICT_REVISIONS or config["symbol"] == "IMOEXF",
+            "volume revision exception requires IMOEXF price-only consumer")
+    return policy
+
+
+class RevisionAudit:
+    """Preserve first-published OHLCV; revisions are separate, bounded evidence."""
+    def __init__(self, root, config, published):
+        self.path = root / "revisions.jsonl"
+        self.policy = revision_policy(config)
+        self.symbol = config["symbol"]
+        self.seen = set()
+        self.size = 0
+        require(not self.path.is_symlink(), "invalid revision audit file")
+        if self.path.exists():
+            require(self.path.is_file() and self.path.stat().st_size <= MAX_REVISION_BYTES,
+                    "revision audit budget/type")
+            with self.path.open("rb") as handle:
+                for raw in handle:
+                    require(raw.endswith(b"\n") and len(raw) <= 4096, "torn revision audit")
+                    record = json.loads(raw)
+                    require(set(record) == {"event", "sha256"}, "invalid revision audit record")
+                    event = record["event"]
+                    require(record["sha256"] == self.digest(event), "revision audit checksum")
+                    require(set(event) == {"symbol", "policy", "kind", "action", "published",
+                                           "observed", "observed_at_utc"}, "invalid revision fields")
+                    old = event["published"]
+                    require(published.get(old["time"]) == old, "revision audit source mismatch")
+                    expected = self.event(old, event["observed"], event["observed_at_utc"])
+                    require(event == expected, "revision audit policy/classification mismatch")
+                    require(event["action"] == "preserve_published", "failed revision audit requires review")
+                    identity = self.identity(event)
+                    require(identity not in self.seen, "duplicate revision audit")
+                    self.seen.add(identity)
+                    self.size += len(raw)
+                    require(len(self.seen) <= MAX_REVISION_ROWS, "revision audit row budget")
+
+    @staticmethod
+    def digest(value):
+        return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+    def identity(self, event):
+        return self.digest({k: v for k, v in event.items() if k != "observed_at_utc"})
+
+    def event(self, old, new, observed):
+        require(type(observed) is int and observed >= old["time"] + TF, "invalid revision receipt")
+        if new is None:
+            kind = "missing_published_bar"
+        else:
+            new = check_bar(new)
+            require(new["time"] == old["time"] and new != old, "invalid revision label/value")
+            kind = ("price_revision" if any(new[k] != old[k] for k in ("open", "high", "low", "close"))
+                    else "volume_only_revision")
+        tolerate = kind == "volume_only_revision" and self.policy == IMOEXF_VOLUME_AUDIT
+        return dict(symbol=self.symbol, policy=self.policy, kind=kind,
+                    action="preserve_published" if tolerate else "fail_closed",
+                    published=old, observed=new, observed_at_utc=observed)
+
+    def check(self, old, new, observed):
+        if old == new:
+            return
+        event = self.event(old, new, observed)
+        identity = self.identity(event)
+        if identity not in self.seen:
+            raw = (canonical(dict(event=event, sha256=self.digest(event))) + "\n").encode()
+            require(len(self.seen) < MAX_REVISION_ROWS and self.size + len(raw) <= MAX_REVISION_BYTES,
+                    "revision audit capacity exhausted")
+            with self.path.open("ab") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            directory = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            self.size += len(raw)
+            self.seen.add(identity)
+            log("published_bar_revision", **{k: v for k, v in event.items() if k not in ("action", "observed_at_utc")},
+                resolution=event["action"])
+        require(event["action"] == "preserve_published", event["kind"])
+
+
 def validate_config(config):
-    require(set(config) == {"symbol", "stream", "bootstrap_start", "first_live_session", "excluded_dates"},
+    require(set(config) - {"revision_policy"} == {"symbol", "stream", "bootstrap_start", "first_live_session", "excluded_dates"},
             "unexpected source config fields")
     require(config["symbol"] in ("IMOEXF", "USDRUBF"), "source symbol not approved")
     require(config["stream"].startswith("shadow.source.closed10m." + config["symbol"] + ".") and
@@ -270,6 +360,7 @@ def validate_config(config):
     require(live.weekday() < 5 and live.isoformat() not in config["excluded_dates"], "invalid activation date")
     for day in config["excluded_dates"]:
         dt.date.fromisoformat(day)
+    revision_policy(config)
     return start, live
 
 
@@ -317,6 +408,7 @@ def run_locked(config, root, resources):
     require(len(entries) == count, "source changed during resume")
     published = {row["time"]: row for row in (stored_row(e, config["symbol"]) for e in entries)}
     require(len(published) == count, "duplicate source labels")
+    revisions = RevisionAudit(root, config, published)
     gaps_path = root / "context-gaps.jsonl"
     gaps = {}
     if gaps_path.exists():
@@ -333,7 +425,8 @@ def run_locked(config, root, resources):
     api = MarketData()
     clock, mono = time.time(), time.monotonic()
     log("closed_source_started", symbol=config["symbol"], stream=config["stream"], rows=count,
-        first_live_session=live.isoformat(), finality="two_authenticated_rest_observations")
+        first_live_session=live.isoformat(), finality="two_authenticated_rest_observations",
+        revision_policy=revision_policy(config))
     try:
         while not stopped:
             now = int(time.time())
@@ -365,7 +458,7 @@ def run_locked(config, root, resources):
             observed = int(time.time())
             for ts, old in published.items():
                 if request_from <= ts <= request_to:
-                    require(rows.get(ts) == old, "published REST candle revised/missing")
+                    revisions.check(old, rows.get(ts), observed)
             for ts in gaps:
                 if request_from <= ts <= request_to:
                     require(ts not in rows, "previously absent context candle arrived; explicit review required")

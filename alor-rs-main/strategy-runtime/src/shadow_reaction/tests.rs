@@ -66,6 +66,9 @@ fn bar(identity: &Identity, day: NaiveDate, slot: usize, price: f64) -> BarEvent
     }
 }
 fn store(cfg: &Config, policy: Policy) -> Store {
+    store_with_volume(cfg, policy, 1.0)
+}
+fn store_with_volume(cfg: &Config, policy: Policy, volume: f64) -> Store {
     let id = identity(cfg, policy);
     let mut s = Store::new(id.clone()).unwrap();
     for d in ["2026-10-22", "2026-10-23", "2026-10-24", "2026-10-25"] {
@@ -95,6 +98,7 @@ fn store(cfg: &Config, policy: Policy) -> Store {
             b.h += 2.0;
             b.l -= 2.0;
             b.origin = DataOrigin::History;
+            b.v = volume;
             let sequence = s.last_sequence() + 1;
             let receipt = Receipt {
                 sequence,
@@ -129,6 +133,48 @@ fn step(session: &mut NumericalSession, slot: usize, price: f64) {
 }
 fn model(session: &NumericalSession) -> Value {
     session.state().unwrap()["model"]["state"].clone()
+}
+
+#[test]
+fn imoexf_volume_revisions_preserve_numerical_context_and_decisions_in_both_arms() {
+    let cfg = configs().remove(0);
+    for policy in [Policy::WeekdayOnly, Policy::WeekendContextNoTrades] {
+        let original = store_with_volume(&cfg, policy, 589.0);
+        let revised = store_with_volume(&cfg, policy, 590.0);
+        assert_ne!(
+            original.ingress_sha256().unwrap(),
+            revised.ingress_sha256().unwrap()
+        ); // Raw provenance is NOT claimed equivalent.
+        let anchor = original
+            .frozen(monday())
+            .unwrap()
+            .previous
+            .as_ref()
+            .unwrap()
+            .close;
+        let mut a = NumericalSession::new(&original, monday(), cfg.clone()).unwrap();
+        let mut b = NumericalSession::new(&revised, monday(), cfg.clone()).unwrap();
+        assert_eq!(model(&a), model(&b));
+        for slot in 0..=100 {
+            let delta = match slot {
+                0 => 0.10,
+                1 => 0.12,
+                2 => -0.60,
+                3 => -0.40,
+                4..=17 => 0.0,
+                _ => 4.0,
+            };
+            let input = bar(&a.identity, monday(), slot, anchor + delta);
+            let mut changed = input.clone();
+            changed.v = [0.0, 589.0, 590.0, 1_000_000.0][slot % 4];
+            let now = input.close_time_utc + 600;
+            a.observe(input, now).unwrap();
+            b.observe(changed, now).unwrap();
+            assert_eq!(model(&a), model(&b));
+        }
+        assert!(model(&a)["trades"].as_array().unwrap().len() >= 2);
+        assert_eq!(a.state().unwrap()["order_emission_allowed"], false);
+    }
 }
 fn restart(s: NumericalSession) -> NumericalSession {
     let dir = tempfile::tempdir().unwrap();

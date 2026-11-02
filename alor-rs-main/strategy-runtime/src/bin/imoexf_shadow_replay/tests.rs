@@ -214,6 +214,33 @@ fn bo_observations_continue_through_mr_and_bo_wait_uses_first_bar() {
 }
 
 #[test]
+fn volume_only_changes_preserve_every_model_state_and_mr_bo_trade() {
+    let mut bars = data();
+    price(&mut bars[1], 104.5);
+    for b in &mut bars[2..] {
+        price(b, 108.0);
+    }
+    let mut revised = bars.clone();
+    for (index, b) in revised.iter_mut().enumerate() {
+        b.volume = [0.0, 589.0, 590.0, 1_000_000.0][index % 4];
+    }
+    for sleeve in ["mr", "bo", "combo"] {
+        let states = |input: &[Bar]| {
+            let mut e = engine(sleeve);
+            let mut trace = Vec::new();
+            e.replay(input, |phase, state, _| {
+                trace.push((phase.to_owned(), serde_json::to_value(state)?));
+                Ok(())
+            })
+            .unwrap();
+            assert!(!e.trades.is_empty());
+            (trace, serde_json::to_value(e).unwrap())
+        };
+        assert_eq!(states(&bars), states(&revised));
+    }
+}
+
+#[test]
 fn bo_stops_are_close_based_and_eod_precedes_stop_checks() {
     let mut bars = data();
     for b in &mut bars[19..] {

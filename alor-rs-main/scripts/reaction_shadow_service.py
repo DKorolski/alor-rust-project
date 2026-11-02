@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -79,6 +80,54 @@ def policy_from_spec(raw):
     if not policy["poll_interval_seconds"] < policy["max_queue_age_seconds"] <= policy["max_model_lateness_seconds"]:
         raise ValueError("inconsistent poll/queue/model age budgets")
     return policy
+
+
+class SourceUnavailable(RuntimeError):
+    reason = "closed_source_unavailable"
+
+
+class ClosedSourceGuard:
+    """Read-only dependency check, not a source restart or repair mechanism."""
+    def __init__(self, root, spec):
+        self.root = Path(root).absolute()
+        if self.root.resolve(strict=True) != self.root or not self.root.is_dir():
+            raise ValueError("canonical source state directory required")
+        self.manifest = read_small(self.root / "manifest.json")
+        source = json.loads(self.manifest)
+        runner = tomllib.loads(spec.decode())["runner"]
+        cfg = source["config"]
+        if (source["version"] != "shadow_authenticated_rest_closed_m10_v3"
+                or cfg["stream"] != runner["ingress"]["source_stream"]
+                or cfg["symbol"] != runner["ingress"]["symbol"]
+                or cfg["first_live_session"] != runner["first_decision_session"]
+                or cfg["excluded_dates"] != runner["excluded_dates"]):
+            raise ValueError("source/worker identity or calendar mismatch")
+        policy = cfg.get("revision_policy", "strict_ohlcv")
+        if policy != "strict_ohlcv" and not (
+                policy == "imoexf_author41_short_bo053_volume_audit"
+                and cfg["symbol"] == "IMOEXF" and runner["config"]["engine"] == "imoexf"):
+            raise ValueError("source volume policy not approved for worker model")
+        self.identity = dict(path=str(self.root), manifest_sha256=hashlib.sha256(self.manifest).hexdigest())
+        self.check()
+
+    def check(self):
+        try:
+            failed = self.root / "FAILED.json"
+            if failed.exists() or failed.is_symlink() or read_small(self.root / "manifest.json") != self.manifest:
+                raise SourceUnavailable("source failed or manifest changed")
+            fd = os.open(self.root / "writer.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise SourceUnavailable("invalid source writer lock")
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return  # Exclusive lock remains held by the source writer.
+                raise SourceUnavailable("source writer is not running")
+        except SourceUnavailable:
+            raise
+        except (OSError, ValueError) as exc:
+            raise SourceUnavailable("source state unreadable or invalid") from exc
 
 
 class Attempt:
@@ -152,15 +201,20 @@ class StopRequest:
 
 
 class Channel:
-    def __init__(self, process):
+    def __init__(self, process, source_guard=None):
         self.process = process
         self.buffer = b""
         self.selector = selectors.DefaultSelector()
         self.selector.register(process.stdout, selectors.EVENT_READ)
+        self.source_guard = source_guard
+        self.next_source_check = 0.0
 
     def receive(self, deadline, stop, shutdown_seconds):
         while True:
             now = time.monotonic()
+            if self.source_guard is not None and now >= self.next_source_check:
+                self.source_guard.check()
+                self.next_source_check = now + 1
             if stop.at is not None:
                 deadline = min(deadline, stop.at + shutdown_seconds)
             if now >= deadline:
@@ -230,30 +284,38 @@ def terminate_owned(process):
             process.wait()
 
 
-def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit=print):
+def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit=print, source_guard=None):
     stop = stop or StopRequest()
     started = time.monotonic()
     remaining = ready_by - time.time()
     if not math.isfinite(remaining) or remaining <= 0:
         raise ValueError("readiness deadline expired before spawn")
+    if source_guard is not None:
+        source_guard.check()
     startup_deadline = started + min(policy["startup_timeout_seconds"], remaining)
     attempt.start(ready_by)  # survives timeout, crash, supervisor SIGKILL or host reboot
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, env=env, start_new_session=True)
-    channel = Channel(process)
+    channel = Channel(process, source_guard)
     try:
         opened = channel.receive(startup_deadline, stop, policy["shutdown_timeout_seconds"])
         status = status_of(opened, "opened")
         if opened.get("spec_sha256") != spec_sha:
             raise ValueError("worker read different launch spec")
+        if source_guard is not None:
+            source_guard.check()
         emit(json.dumps(dict(event="reaction_shadow_opened", status=status)))
         last_log = time.monotonic()
         last_progress = None
         while stop.at is None and not status["completed"]:
+            if source_guard is not None:
+                source_guard.check()
             deadline = (time.monotonic() + policy["poll_timeout_seconds"]
                         if status["armed"] else startup_deadline)
             channel.send("poll")
             status = status_of(channel.receive(deadline, stop, policy["shutdown_timeout_seconds"]), "polled")
+            if source_guard is not None:
+                source_guard.check()
             progress = (status["runner"].get("committed_transactions"),
                         status["runner"].get("source_caught_up"), status["armed"],
                         status.get("resource_state"))
@@ -265,7 +327,11 @@ def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit
             # Catch up without poll sleeps; prospective normal polling is paced.
             delay = policy["poll_interval_seconds"] if status["armed"] else 0
             until = time.monotonic() + delay
+            next_source_check = time.monotonic()
             while stop.at is None and not status["completed"] and time.monotonic() < until:
+                if source_guard is not None and time.monotonic() >= next_source_check:
+                    source_guard.check()
+                    next_source_check = time.monotonic() + 1
                 time.sleep(min(.1, max(0, until - time.monotonic())))
         reason = "session_budget_complete" if status["completed"] else "operator_stop"
         if stop.at is None:
@@ -275,6 +341,8 @@ def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit
                                          stop, policy["shutdown_timeout_seconds"]), "stopped")
         if process.wait(timeout=max(.001, stop.at + policy["shutdown_timeout_seconds"] - time.monotonic())) != 0:
             raise RuntimeError("worker exit was not clean")
+        if source_guard is not None:
+            source_guard.check()
         attempt.stopped(reason, final)
         emit(json.dumps(dict(event="reaction_shadow_stopped", reason=reason, status=final)))
         return final
@@ -294,6 +362,8 @@ def main():
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--generation", type=Path, required=True)
     parser.add_argument("--ready-by", required=True, help="explicit timezone-aware ISO timestamp before next cutoff")
+    parser.add_argument("--source-state", type=Path,
+                        help="required for closed-M10 sources; read-only source manifest/failure/lock directory")
     args = parser.parse_args()
     ready = dt.datetime.fromisoformat(args.ready_by)
     if ready.tzinfo is None or ready.microsecond:
@@ -304,21 +374,27 @@ def main():
     raw = read_small(spec)
     policy = policy_from_spec(raw)
     spec_sha = hashlib.sha256(raw).hexdigest()
+    source_stream = tomllib.loads(raw.decode())["runner"]["ingress"]["source_stream"]
+    if source_stream.startswith("shadow.source.closed10m.") and args.source_state is None:
+        raise ValueError("closed-M10 source requires --source-state dependency guard")
+    source_guard = ClosedSourceGuard(args.source_state, raw) if args.source_state else None
     if not os.environ.get("REACTION_SHADOW_REDIS_URL"):
         raise ValueError("dedicated read-only REACTION_SHADOW_REDIS_URL required")
     if ready_by <= time.time():
         raise ValueError("readiness deadline must be future")
     # Do not pass broker tokens, live config or generic REDIS_URL to the worker.
     env = {"REACTION_SHADOW_REDIS_URL": os.environ["REACTION_SHADOW_REDIS_URL"], "TZ": "UTC"}
-    manifest = dict(version="reaction_shadow_supervisor_v1", generation=str(root),
+    manifest = dict(version="reaction_shadow_supervisor_v2", generation=str(root),
                     binary_sha256=file_hash(worker), spec_sha256=spec_sha)
+    if source_guard is not None:
+        manifest["closed_source"] = source_guard.identity
     attempt = Attempt(root, args.mode, manifest)
     stop = StopRequest()
     old = {sig: signal.signal(sig, stop.request) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         supervise([str(worker), args.mode, str(spec), str(root), str(ready_by)],
                   policy, ready_by, attempt, env, spec_sha, stop,
-                  emit=lambda value: print(value, flush=True))
+                  emit=lambda value: print(value, flush=True), source_guard=source_guard)
     finally:
         for sig, handler in old.items():
             signal.signal(sig, handler)

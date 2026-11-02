@@ -75,6 +75,15 @@ class FinalizerTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
+    def test_volume_exception_is_explicit_and_not_available_to_usdrubf(self):
+        self.assertEqual(s.revision_policy(config()), s.STRICT_REVISIONS)
+        s.validate_config(dict(config(), revision_policy=s.IMOEXF_VOLUME_AUDIT))
+        for change in (dict(revision_policy="ignore"), dict(revision_policy=None),
+                       dict(symbol="USDRUBF", stream="shadow.source.closed10m.USDRUBF.test",
+                            revision_policy=s.IMOEXF_VOLUME_AUDIT)):
+            with self.subTest(change=change), self.assertRaises(s.SourceFault):
+                s.validate_config(dict(config(), **change))
+
     def test_next_session_rechecks_previous_terminal_candle(self):
         prior = [s.label(DAY, 23, 30), s.label(DAY, 23, 40)]
         self.assertEqual(s.request_start(s.label(DAY + dt.timedelta(days=1), 7), prior), prior[0])
@@ -161,6 +170,88 @@ class ContractTests(unittest.TestCase):
             self.assertNotIn("secret", str(error.exception))
 
 
+class RevisionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.row = dict(bar(s.label(dt.date(2026, 11, 1), 17, 40)), volume=589.0)
+        self.published = {self.row["time"]: self.row}
+        self.now = self.row["time"] + 1206
+        self.cfg = dict(config(), revision_policy=s.IMOEXF_VOLUME_AUDIT)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_volume_only_revision_preserves_original_and_deduplicates_on_resume(self):
+        revised = dict(self.row, volume=590.0)
+        with patch.object(s, "log") as log:
+            audit = s.RevisionAudit(self.root, self.cfg, self.published)
+            audit.check(self.row, revised, self.now)
+            before = audit.path.read_bytes()
+            audit.check(self.row, revised, self.now + 5)
+            resumed = s.RevisionAudit(self.root, self.cfg, self.published)
+            resumed.check(self.row, revised, self.now + 10)
+            self.assertEqual(before, audit.path.read_bytes())
+            self.assertEqual(log.call_count, 1)
+        event = json.loads(before)["event"]
+        self.assertEqual(event["kind"], "volume_only_revision")
+        self.assertEqual(event["action"], "preserve_published")
+        self.assertEqual(event["observed"]["volume"], 590.0)
+        self.assertEqual(self.published[self.row["time"]]["volume"], 589.0)
+
+    def test_valid_volume_decrease_is_audited_too_not_replaced(self):
+        audit = s.RevisionAudit(self.root, self.cfg, self.published)
+        with patch.object(s, "log"):
+            audit.check(self.row, dict(self.row, volume=588.0), self.now)
+        self.assertEqual(self.row["volume"], 589.0)
+        self.assertEqual(len(audit.seen), 1)
+
+    def test_default_volume_revision_fails_and_records_evidence(self):
+        audit = s.RevisionAudit(self.root, config(), self.published)
+        with patch.object(s, "log"), self.assertRaisesRegex(s.SourceFault, "volume_only_revision"):
+            audit.check(self.row, dict(self.row, volume=590.0), self.now)
+        self.assertEqual(json.loads(audit.path.read_bytes())["event"]["action"], "fail_closed")
+        # Even a crash before FAILED.json cannot turn fatal audit into clean resume.
+        with self.assertRaisesRegex(s.SourceFault, "requires review"):
+            s.RevisionAudit(self.root, config(), self.published)
+
+    def test_price_and_missing_remain_fatal_with_separate_classes(self):
+        for revised, reason in ((dict(self.row, close=100.0), "price_revision"),
+                                (None, "missing_published_bar")):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                audit = s.RevisionAudit(Path(directory), self.cfg, self.published)
+                with patch.object(s, "log"), self.assertRaisesRegex(s.SourceFault, reason):
+                    audit.check(self.row, revised, self.now)
+                self.assertEqual(json.loads(audit.path.read_bytes())["event"]["kind"], reason)
+
+    def test_invalid_volume_is_not_an_allowed_revision(self):
+        for value in (-1, float("nan"), True):
+            audit = s.RevisionAudit(self.root, self.cfg, self.published)
+            with self.subTest(value=value), self.assertRaises(s.SourceFault):
+                audit.check(self.row, dict(self.row, volume=value), self.now)
+            self.assertFalse(audit.path.exists())
+
+    def test_audit_capacity_and_write_failure_do_not_silently_allow_revision(self):
+        audit = s.RevisionAudit(self.root, self.cfg, self.published)
+        revised = dict(self.row, volume=590.0)
+        for limit in ("MAX_REVISION_ROWS", "MAX_REVISION_BYTES"):
+            with patch.object(s, limit, 0), self.assertRaisesRegex(s.SourceFault, "capacity"):
+                audit.check(self.row, revised, self.now)
+        with patch.object(Path, "open", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            audit.check(self.row, revised, self.now)
+        self.assertFalse(audit.seen)
+
+    def test_torn_or_modified_audit_blocks_resume(self):
+        audit = s.RevisionAudit(self.root, self.cfg, self.published)
+        with patch.object(s, "log"):
+            audit.check(self.row, dict(self.row, volume=590.0), self.now)
+        raw = audit.path.read_bytes()
+        for broken in (raw[:-1], raw.replace(b'590.0', b'591.0')):
+            audit.path.write_bytes(broken)
+            with self.assertRaises(s.SourceFault):
+                s.RevisionAudit(self.root, self.cfg, self.published)
+
+
 class SourceIntegrationTests(unittest.TestCase):
     """No network/localhost Redis: drive the real loop with owned fake transports."""
     def test_bootstrap_then_final_terminal_publication_and_resume(self):
@@ -236,6 +327,82 @@ class SourceIntegrationTests(unittest.TestCase):
             with patch.object(s, "Redis", EmptyRedis), patch.object(s.signal, "signal"), \
                     self.assertRaisesRegex(s.SourceFault, "missing/empty"):
                 s.run(cfg, root)
+
+    def test_revision_policy_runs_through_real_loop_without_rewriting_source(self):
+        for policy, change, failure in (
+                (s.IMOEXF_VOLUME_AUDIT, dict(volume=21.0), None),
+                (s.STRICT_REVISIONS, dict(volume=21.0), "volume_only_revision"),
+                (s.IMOEXF_VOLUME_AUDIT, dict(close=100.0), "price_revision"),
+                (s.IMOEXF_VOLUME_AUDIT, None, "missing_published_bar")):
+            with self.subTest(policy=policy, change=change), tempfile.TemporaryDirectory() as directory:
+                cfg = dict(config(), revision_policy=policy)
+                root = Path(directory)
+                terminal = s.label(DAY, 23, 40)
+                entries = []
+                day = dt.date.fromisoformat(cfg["bootstrap_start"])
+                while day <= DAY:
+                    for ts in s.slots(day, cfg["excluded_dates"]):
+                        if ts >= terminal:
+                            break
+                        row = bar(ts)
+                        finalizer = s.Finalizer(DAY)
+                        finalizer.observe(row, ts + 605)
+                        proof = finalizer.observe(row, ts + 610)
+                        entries.append([f"{ts * 1000}-0", ["payload", s.canonical(s.envelope("IMOEXF", row, proof))]])
+                    day += dt.timedelta(days=1)
+                before = json.dumps(entries)
+                count = len(entries)
+                handlers, clock = {}, [terminal + 605]
+                class FakeRedis:
+                    def close(self):
+                        pass
+                    def command(self, cmd, *args):
+                        if cmd == "XLEN":
+                            return len(entries)
+                        if cmd == "XRANGE":
+                            return entries[:]
+                        if cmd == "XADD":
+                            entries.append([args[1], [args[2], args[3]]])
+                            handlers[s.signal.SIGTERM](None, None)
+                            return args[1]
+                        raise AssertionError(cmd)
+                class FakeApi:
+                    def bars(self, symbol, start, end):
+                        rows = {ts: bar(ts) for ts in range(start, end + 1, 600)}
+                        if change is None:
+                            del rows[terminal - 600]
+                        else:
+                            rows[terminal - 600].update(change)
+                        return rows
+                (root / "manifest.json").write_text(s.canonical(dict(version=s.VERSION, config=cfg)))
+                with patch.object(s, "Redis", FakeRedis), patch.object(s, "MarketData", FakeApi), \
+                        patch.object(s.signal, "signal", lambda sig, f: handlers.update({sig: f})), \
+                        patch.object(s.time, "time", lambda: clock[0]), \
+                        patch.object(s.time, "monotonic", lambda: clock[0]), \
+                        patch.object(s.time, "sleep", lambda n: clock.__setitem__(0, clock[0] + n)), \
+                        patch.object(s, "log"):
+                    if failure:
+                        with self.assertRaisesRegex(s.SourceFault, failure):
+                            s.run(cfg, root)
+                        self.assertEqual(json.loads((root / "FAILED.json").read_text())["reason"], failure)
+                        self.assertEqual(len(entries), count)
+                        with self.assertRaisesRegex(s.SourceFault, "failed source generation"):
+                            s.run(cfg, root)
+                    else:
+                        s.run(cfg, root)
+                        self.assertEqual(len(entries), count + 1)
+                        self.assertEqual(s.stored_row(entries[-1], "IMOEXF")["time"], terminal)
+                        self.assertFalse((root / "FAILED.json").exists())
+                self.assertEqual(json.dumps(entries[:count]), before)
+                self.assertEqual(len((root / "revisions.jsonl").read_text().splitlines()), 1)
+
+    def test_v2_generation_cannot_be_resumed_by_new_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.json").write_text(s.canonical(dict(
+                version="shadow_authenticated_rest_closed_m10_v2", config=config())))
+            with self.assertRaisesRegex(s.SourceFault, "manifest changed"):
+                s.run(config(), root)
 
 
 if __name__ == "__main__":
