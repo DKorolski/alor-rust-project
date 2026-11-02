@@ -11,6 +11,7 @@ pub mod router;
 pub mod services;
 pub mod strategy_adapter;
 pub mod supervisor;
+pub mod terminal_bar;
 pub mod transport;
 pub mod transport_redis;
 pub mod ws_hub;

@@ -1,9 +1,10 @@
 # Shadow WS Gateway and Terminal-Bar Validation Plan
 
 Date: 2026-11-02.
-Status: implementation plan; isolated smoke and prospective shadow soak are
-authorized. No implementation, completed smoke, deployed WS gateway, clean
-session or future live promotion is claimed by this document.
+Status: implementation in progress; isolated smoke and prospective shadow soak
+are authorized. The [component progress note](shadow-ws-terminal-implementation-2026-11-02.md)
+records the first core/transport slice and its verification boundary. No deployed
+WS source, clean prospective session or future live promotion is claimed here.
 
 ## Decision and Scope
 

@@ -167,10 +167,33 @@ impl SubscriptionManager {
 
 pub struct WsHub;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubscriptionScope {
+    Trading,
+    MarketDataOnly,
+}
+
 impl WsHub {
     pub fn start(
         cfg: AlorGatewayConfig,
         token_provider: TokenProvider,
+    ) -> (WsHubHandle, mpsc::Receiver<WsEvent>) {
+        Self::start_scoped(cfg, token_provider, SubscriptionScope::Trading)
+    }
+
+    /// Bars/auth/reconnect only. No account subscriptions or CWS are started.
+    /// This is a transport building block, not a complete durable MD source.
+    pub fn start_market_data_only(
+        cfg: AlorGatewayConfig,
+        token_provider: TokenProvider,
+    ) -> (WsHubHandle, mpsc::Receiver<WsEvent>) {
+        Self::start_scoped(cfg, token_provider, SubscriptionScope::MarketDataOnly)
+    }
+
+    fn start_scoped(
+        cfg: AlorGatewayConfig,
+        token_provider: TokenProvider,
+        scope: SubscriptionScope,
     ) -> (WsHubHandle, mpsc::Receiver<WsEvent>) {
         let (event_tx, event_rx) = mpsc::channel(1024);
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
@@ -203,6 +226,7 @@ impl WsHub {
                     &mut cmd_rx,
                     backfill_plan_task.clone(),
                     current_generation,
+                    scope,
                 )
                 .await
                 {
@@ -293,6 +317,7 @@ async fn connect_and_run(
     cmd_rx: &mut mpsc::Receiver<HubCommand>,
     backfill_plan: Arc<RwLock<BackfillPlan>>,
     generation: u64,
+    scope: SubscriptionScope,
 ) -> anyhow::Result<()> {
     let token = token_provider
         .access_token_with_context("ws_hub_connect")
@@ -357,6 +382,7 @@ async fn connect_and_run(
         cfg.subscribe_ack_timeout_ms,
         cfg.subscribe_ack_retries,
         generation,
+        scope,
     )
     .await?;
 
@@ -414,6 +440,7 @@ async fn connect_and_run(
                             cfg.subscribe_ack_timeout_ms,
                             cfg.subscribe_ack_retries,
                             generation,
+                            scope,
                         )
                         .await?;
                         log_event(GatewayEvent::ResyncDone {
@@ -436,6 +463,15 @@ async fn connect_and_run(
                         .await
                         {
                             warn!(?error, "best-effort unsubscribe failed during shutdown");
+                        }
+                        if scope == SubscriptionScope::MarketDataOnly {
+                            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                                ws_sink.send(Message::Close(None)).await?;
+                                while let Some(frame) = ws_stream.next().await {
+                                    if matches!(frame?, Message::Close(_)) { break; }
+                                }
+                                Ok::<(), tokio_tungstenite::tungstenite::Error>(())
+                            }).await;
                         }
                         return Ok(());
                     }
@@ -568,6 +604,7 @@ async fn subscribe_all(
     subscribe_ack_timeout_ms: u64,
     subscribe_ack_retries: u8,
     generation: u64,
+    scope: SubscriptionScope,
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut bars_guid_map = HashMap::new();
     debug!(
@@ -607,6 +644,7 @@ async fn subscribe_all(
                 last_ws_rx_ts,
                 subscribe_ack_timeout_ms,
                 generation,
+                scope,
             )
             .await
             .is_ok()
@@ -618,6 +656,10 @@ async fn subscribe_all(
                 return Err(anyhow::anyhow!("ws subscribe retry exceeded"));
             }
         }
+    }
+
+    if scope == SubscriptionScope::MarketDataOnly {
+        return Ok(bars_guid_map);
     }
 
     let positions_skip_history = if from_ts.is_some() {
@@ -654,6 +696,7 @@ async fn subscribe_all(
             last_ws_rx_ts,
             subscribe_ack_timeout_ms,
             generation,
+            scope,
         )
         .await
         .is_ok()
@@ -700,6 +743,7 @@ async fn subscribe_all(
             last_ws_rx_ts,
             subscribe_ack_timeout_ms,
             generation,
+            scope,
         )
         .await
         .is_ok()
@@ -741,6 +785,7 @@ async fn subscribe_all(
             last_ws_rx_ts,
             subscribe_ack_timeout_ms,
             generation,
+            scope,
         )
         .await
         .is_ok()
@@ -787,6 +832,7 @@ async fn subscribe_all(
             last_ws_rx_ts,
             subscribe_ack_timeout_ms,
             generation,
+            scope,
         )
         .await
         .is_ok()
@@ -822,6 +868,7 @@ async fn send_and_ack(
     last_ws_rx_ts: &Arc<AtomicI64>,
     subscribe_ack_timeout_ms: u64,
     generation: u64,
+    scope: SubscriptionScope,
 ) -> anyhow::Result<()> {
     info!(guid, label, "ws subscribe send");
     let redacted_payload = redact_token(msg);
@@ -839,6 +886,13 @@ async fn send_and_ack(
         generation,
     )
     .await?;
+    if scope == SubscriptionScope::MarketDataOnly
+        && ack.get("httpCode").and_then(Value::as_i64) != Some(200)
+    {
+        return Err(anyhow::anyhow!(
+            "market-data subscription ACK not confirmed"
+        ));
+    }
     if let Some(subscription) = subscription_manager.activate_subscription(guid) {
         let subscription_type = subscription.subscription_type.clone();
         log_event(GatewayEvent::Subscribed {
@@ -1028,6 +1082,7 @@ fn jittered(duration: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod market_data_only;
 
     fn subscription(
         guid: &str,
