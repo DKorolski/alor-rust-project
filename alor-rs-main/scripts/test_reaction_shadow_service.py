@@ -129,9 +129,55 @@ engine = "imoexf"
             json.dump(dict(reason="price_revision"), handle)
         with self.assertRaises(service.SourceUnavailable):
             guard.check()
+
         (root / "FAILED.json").unlink()
         service.fcntl.flock(lock, service.fcntl.LOCK_UN)
         with self.assertRaisesRegex(service.SourceUnavailable, "not running"):
+            guard.check()
+
+    def ws_source(self):
+        root, lock, spec = self.source()
+        cfg = json.loads((root / "manifest.json").read_text())["config"]
+        del cfg["revision_policy"]
+        cfg.update(gateway_config="/fixture/gateway.toml", gateway_config_sha256="a" * 64,
+                   terminal=dict(enabled=True, symbols=dict(IMOEXF={}), max_heartbeat_age_seconds=45))
+        sha = service.hashlib.sha256(json.dumps(cfg, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        version = "shadow_gateway_ws_closed_m10_v1"
+        (root / "manifest.json").write_text(json.dumps(dict(version=version, config=cfg, config_sha256=sha)))
+        health = dict(version=version, config_sha256=sha, status="ready", generation=1,
+                      heartbeat_utc=int(time.time()), last_ws_rx_utc=int(time.time()),
+                      connected=True, subscribed=True, history_complete=True, order_emission_allowed=False)
+        (root / "HEALTH.json").write_text(json.dumps(health))
+        return root, lock, spec, health
+
+    def test_ws_guard_rejects_stale_health_identity_and_unready_admission(self):
+        root, _, spec, health = self.ws_source()
+        guard = service.ClosedSourceGuard(root, spec)
+        for key, value in (("heartbeat_utc", int(time.time()) - 20),
+                           ("last_ws_rx_utc", int(time.time()) - 46),
+                           ("config_sha256", "b" * 64), ("generation", 0),
+                           ("order_emission_allowed", True), ("status", "failed"),
+                           ("connected", False), ("subscribed", False), ("history_complete", False)):
+            with self.subTest(key=key):
+                (root / "HEALTH.json").write_text(json.dumps({**health, key: value}))
+                with self.assertRaises(service.SourceUnavailable):
+                    guard.check()
+        reconnect = {**health, "status": "reconnecting", "history_complete": False, "connected": False}
+        (root / "HEALTH.json").write_text(json.dumps(reconnect))
+        guard.check()
+        with self.assertRaises(service.SourceUnavailable):
+            service.ClosedSourceGuard(root, spec)
+
+    def test_ws_guard_rejects_generation_rollback_and_missing_health(self):
+        root, _, spec, health = self.ws_source()
+        guard = service.ClosedSourceGuard(root, spec)
+        (root / "HEALTH.json").write_text(json.dumps({**health, "generation": 2}))
+        guard.check()
+        (root / "HEALTH.json").write_text(json.dumps(health))
+        with self.assertRaises(service.SourceUnavailable):
+            guard.check()
+        (root / "HEALTH.json").unlink()
+        with self.assertRaises(service.SourceUnavailable):
             guard.check()
 
     def test_source_guard_rejects_unreadable_or_changed_manifest(self):

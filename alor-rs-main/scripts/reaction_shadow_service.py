@@ -96,21 +96,59 @@ class ClosedSourceGuard:
         source = json.loads(self.manifest)
         runner = tomllib.loads(spec.decode())["runner"]
         cfg = source["config"]
-        if (source["version"] != "shadow_authenticated_rest_closed_m10_v3"
+        self.version = source["version"]
+        if (self.version not in ("shadow_authenticated_rest_closed_m10_v3", "shadow_gateway_ws_closed_m10_v1")
                 or cfg["stream"] != runner["ingress"]["source_stream"]
                 or cfg["symbol"] != runner["ingress"]["symbol"]
                 or cfg["first_live_session"] != runner["first_decision_session"]
                 or cfg["excluded_dates"] != runner["excluded_dates"]):
             raise ValueError("source/worker identity or calendar mismatch")
-        policy = cfg.get("revision_policy", "strict_ohlcv")
-        if policy != "strict_ohlcv" and not (
-                policy == "imoexf_author41_short_bo053_volume_audit"
-                and cfg["symbol"] == "IMOEXF" and runner["config"]["engine"] == "imoexf"):
-            raise ValueError("source volume policy not approved for worker model")
+        if self.version == "shadow_gateway_ws_closed_m10_v1":
+            if set(cfg) != {"symbol", "stream", "bootstrap_start", "first_live_session", "excluded_dates",
+                            "gateway_config", "gateway_config_sha256", "terminal"}:
+                raise ValueError("unexpected WS source schema")
+            terminal = cfg["terminal"]
+            if (terminal["enabled"] is not True or set(terminal["symbols"]) != {cfg["symbol"]}
+                    or type(terminal["max_heartbeat_age_seconds"]) is not int
+                    or not 1 <= terminal["max_heartbeat_age_seconds"] <= 60
+                    or cfg["symbol"] not in ("IMOEXF", "USDRUBF")
+                    or runner["config"]["engine"] != {"IMOEXF": "imoexf", "USDRUBF": "usdrubf"}[cfg["symbol"]]):
+                raise ValueError("WS terminal policy/model binding invalid")
+            self.config_sha = hashlib.sha256(json.dumps(cfg, sort_keys=True, separators=(",", ":"),
+                                                       ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+            if source.get("config_sha256") != self.config_sha:
+                raise ValueError("WS source config digest mismatch")
+            self.heartbeat_budget = terminal["max_heartbeat_age_seconds"]
+            self.generation = 0
+        else:
+            policy = cfg.get("revision_policy", "strict_ohlcv")
+            if policy != "strict_ohlcv" and not (
+                    policy == "imoexf_author41_short_bo053_volume_audit"
+                    and cfg["symbol"] == "IMOEXF" and runner["config"]["engine"] == "imoexf"):
+                raise ValueError("source volume policy not approved for worker model")
         self.identity = dict(path=str(self.root), manifest_sha256=hashlib.sha256(self.manifest).hexdigest())
-        self.check()
+        self.check(require_ready=True)
 
-    def check(self):
+    def _ws_health(self, require_ready):
+        health = json.loads(read_small(self.root / "HEALTH.json"))
+        now = time.time()
+        if (health.get("version") != self.version or health.get("config_sha256") != self.config_sha
+                or health.get("order_emission_allowed") is not False
+                or type(health.get("heartbeat_utc")) is not int
+                or not -5 <= now - health["heartbeat_utc"] <= 15
+                or type(health.get("last_ws_rx_utc")) is not int
+                or not -5 <= now - health["last_ws_rx_utc"] <= self.heartbeat_budget
+                or type(health.get("generation")) is not int
+                or health["generation"] < max(1, self.generation)
+                or health.get("status") not in ("ready", "reconnecting")):
+            raise SourceUnavailable("WS source health stale/failed/mismatched")
+        if ((require_ready and health["status"] != "ready")
+                or (health["status"] == "ready" and (health.get("history_complete") is not True
+                    or health.get("connected") is not True or health.get("subscribed") is not True))):
+            raise SourceUnavailable("WS source not ready for admission")
+        self.generation = health["generation"]
+
+    def check(self, require_ready=False):
         try:
             failed = self.root / "FAILED.json"
             if failed.exists() or failed.is_symlink() or read_small(self.root / "manifest.json") != self.manifest:
@@ -122,6 +160,8 @@ class ClosedSourceGuard:
                 try:
                     fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
+                    if self.version == "shadow_gateway_ws_closed_m10_v1":
+                        self._ws_health(require_ready)
                     return  # Exclusive lock remains held by the source writer.
                 raise SourceUnavailable("source writer is not running")
         except SourceUnavailable:

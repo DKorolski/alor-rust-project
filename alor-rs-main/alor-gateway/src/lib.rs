@@ -6,6 +6,7 @@ pub mod data_quality;
 pub mod gateway_events;
 pub mod health;
 pub mod health_server;
+pub mod md_source;
 pub mod models;
 pub mod router;
 pub mod services;

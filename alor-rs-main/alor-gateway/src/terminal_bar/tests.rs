@@ -73,6 +73,27 @@ fn terminal(f: &mut TerminalFinalizer) -> Release {
 }
 
 #[test]
+fn queued_ws_receipt_is_not_relabelled_as_processing_time() {
+    let mut f = TerminalFinalizer::new(policy(true)).unwrap();
+    healthy(&mut f, "2026-11-02T23:50:10+03:00");
+    f.observe_received(
+        bar("2026-11-02T23:40:00+03:00"),
+        ts("2026-11-02T23:49:58+03:00"),
+        clock("2026-11-02T23:50:10+03:00"),
+    )
+    .unwrap();
+    let release = terminal(&mut f);
+    assert_eq!(
+        release.proof.first_received_at_utc,
+        ts("2026-11-02T23:49:58+03:00")
+    );
+    assert_eq!(
+        release.proof.observation_cutoff_utc,
+        ts("2026-11-02T23:50:10+03:00")
+    );
+}
+
+#[test]
 fn opt_in_is_disabled_when_field_omitted() {
     let mut json = serde_json::to_value(policy(true)).unwrap();
     json.as_object_mut().unwrap().remove("enabled");

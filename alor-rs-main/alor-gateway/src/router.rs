@@ -148,7 +148,7 @@ impl Router {
     }
 }
 
-fn parse_bars(
+pub(crate) fn parse_bars(
     value: &Value,
     live_cutoff_ts: Option<i64>,
     history_origin: DataOrigin,

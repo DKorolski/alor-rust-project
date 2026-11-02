@@ -383,15 +383,34 @@ impl TerminalFinalizer {
     }
 
     pub fn observe(&mut self, bar: BarEvent, now: Clock) -> Result<Observation> {
+        self.observe_received(bar, now.utc, now)
+    }
+
+    /// Preserve the real WsRx receipt, not the later queue-processing clock.
+    pub fn observe_received(
+        &mut self,
+        bar: BarEvent,
+        received_at: i64,
+        now: Clock,
+    ) -> Result<Observation> {
         let mut staged = self.clone();
-        let result = staged.observe_inner(bar, now)?;
+        let result = staged.observe_inner(bar, received_at, now)?;
         *self = staged;
         Ok(result)
     }
 
-    fn observe_inner(&mut self, bar: BarEvent, now: Clock) -> Result<Observation> {
+    fn observe_inner(
+        &mut self,
+        bar: BarEvent,
+        received_at: i64,
+        now: Clock,
+    ) -> Result<Observation> {
         self.check_clock(now)?;
         self.validate_bar(&bar, now.utc)?;
+        ensure!(
+            bar.close_time_utc <= received_at && received_at <= now.utc,
+            "invalid original WS receipt"
+        );
         let feed = self.healthy_feed(now)?;
         if let Some(rows) = self.committed.get(&bar.symbol)
             && rows
@@ -408,8 +427,8 @@ impl TerminalFinalizer {
         let new = Buffered {
             bar: bar.clone(),
             generation: feed.generation,
-            first_received: now.utc,
-            last_received: now.utc,
+            first_received: received_at,
+            last_received: received_at,
         };
         let Some(slot) = self.buffers.get(&bar.symbol) else {
             self.buffers.insert(
@@ -449,6 +468,10 @@ impl TerminalFinalizer {
             return Ok(Self::revision(None, bar));
         }
         if bar.close_time_utc == slot.current.bar.close_time_utc {
+            ensure!(
+                received_at >= slot.current.last_received,
+                "WS receipt clock reversed"
+            );
             let slot = self.buffers.get_mut(&bar.symbol).unwrap();
             slot.current = Buffered {
                 first_received: slot.current.first_received,

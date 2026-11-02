@@ -1,0 +1,9 @@
+# Template only: no broker portfolio, no CWS/account subscriptions.
+# ALOR_REFRESH_TOKEN must be supplied separately by the service environment.
+portfolio = "__market_data_only__"
+symbols = ["IMOEXF"]
+tf_sec = 600
+from_ts = 1793246400 # 2026-10-29 07:00 MSK; pin to source bootstrap_start.
+skip_history_bars = false
+ws_url = "wss://api.alor.ru/ws"
+oauth_url = "https://oauth.alor.ru/refresh"

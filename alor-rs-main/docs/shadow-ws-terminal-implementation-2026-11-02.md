@@ -1,6 +1,6 @@
 # WS Terminal Components: Implementation Progress
 
-Status: first implementation slice, not a deployable WS source or live approval.
+Status: composed MD source implemented; native source admission still gated.
 See the [approved work plan](shadow-ws-terminal-gateway-plan-2026-11-02.md).
 
 ## Implemented Components
@@ -42,13 +42,25 @@ built. Rejected/missing-status ACKs cannot activate MD subscriptions. MD-only
 shutdown attempts unsubscribe and a bounded close handshake. `WsHub::start`
 still selects the existing Trading scope; its ACK/shutdown behavior is unchanged.
 
-This API still takes the existing transport configuration type. It is a reusable
-transport building block, NOT a market-data-only CLI/config runner or proof that
-launching the ordinary trading supervisor would be broker-free.
+The transport API still takes the existing configuration type. The new dedicated
+`alor_shadow_md_ws` entrypoint enforces a market-data-only sentinel, one symbol,
+M10, pinned history start/config hash and approved endpoints. Launching the
+ordinary trading supervisor is NOT an equivalent broker-free deployment.
+
+The `md_source` adapter adds bounded canonical publication, exact-ID readback for
+uncertain XADD results, fsynced hash-chained journal and full Redis-prefix checks.
+Late revisions persist separately with canonical binding; price changes mark
+review dates without rewriting the stream. Reconnect discards uncommitted staging,
+not published evidence. It never restores an old current candle as Live.
+
+The reaction supervisor binds this source's manifest, writer lock and atomic
+WS-health, requires ready/history-complete at admission, and rejects stale health
+or generation rollback. See the [source runbook](shadow-md-ws-source-runbook-2026-11-02.md)
+for the distinct observation/model activation dates, ACLs and recovery bounds.
 
 ## Verification Boundary
 
-Local gateway library tests: 91 passed (68 existing, 19 finalizer, 4 MD-only).
+Local gateway library tests after the composed-source change: 95 passed.
 The MD-only tests include an owned loopback WebSocket server with a cached dummy
 token, ACKs/raw bars and unsubscribe/close; no real OAuth, broker or Redis calls.
 They verify that default Trading subscriptions are preserved and the MD path
@@ -61,7 +73,7 @@ independent frozen-model parity, target resource certification or prospective so
 Native Linux evidence below pins the exact clean code commit, toolchain,
 owned network/filesystem boundaries and test results separately.
 
-### Verified Component Smoke
+### Historical Verified Component Smoke
 
 Code commit `2037c1b2a5f497d3fc3013f9683a16538a1aad8e` passed all 91 gateway
 library tests on native Linux x86_64 with Rust/Cargo 1.96.1. A manifest-pinned
@@ -84,22 +96,18 @@ passed. No full-workspace/independent-model-parity claim follows from these runs
 
 ## Remaining Before Source Admission
 
-1. Implement the MD-only source runner/config and connect maintained WS events,
-   per-symbol ACK/gap/queue evidence, History handling and this release core.
-   Do not wire the live supervisor or change default `Router::start` during that
-   shadow stage. The same finalizer API can later serve reviewed live wiring.
-2. Implement bounded canonical Redis publication and exact-payload reconciliation,
-   durable source identity/watermark/readback, audit persistence and capacity
-   gates. A core `commit` test does not establish end-to-end exactly-once delivery.
-3. Integrate WS source health/identity into worker supervision; add deny-by-default
-   source/reader ACL tests and bootstrap inspection with actual worker binaries.
-4. Prove the composed path with an owned fake WS/Redis harness, disconnect/
-   publication-timeout/restart tests, then a native source-only canary and a real
-   terminal cycle. Source-as-observed drift stays separate from model drift.
-5. Only then admit new model generations before cutoff. The active RI collector,
+1. Re-run the final composed source/worker harness and native Linux checks from
+   the new clean scoped commit. Local component checks include 20 supervisor
+   tests and owned WS/Redis smoke with bootstrap using the actual worker,
+   stop/resume, changed-prefix failure and uncertain-ACK reconciliation.
+2. Run a source-only native canary and observe a real terminal cycle. Synthetic
+   terminal proofs are not evidence of a successful exchange-session boundary.
+   Source-as-observed drift stays separate from model drift.
+3. Only then admit new model generations before cutoff. The active RI collector,
    14 retained shadows, live gateway/runtime and failed REST evidence stay intact.
 
-No new WS gateway service or model generation has been started by this component
-slice. Prospective gateway/model-pair clean-session counters remain zero for this
-new source. The separate obsolete REST admission timer was already cancelled;
+At this implementation checkpoint no new WS gateway service or model generation
+has been started. Prospective gateway/model-pair clean-session counters remain
+zero for this new source. Record a later source admission separately with exact
+artifact, health and terminal evidence. The obsolete REST admission timer was already cancelled;
 its cancellation is not a successful replacement rollout.
