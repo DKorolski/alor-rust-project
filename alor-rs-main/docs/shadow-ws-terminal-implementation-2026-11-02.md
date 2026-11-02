@@ -58,8 +58,29 @@ and buffers, including restart/tampered witness, timer races and publish failure
 Gateway all-target clippy with `-D warnings`, formatting and diff checks are part
 of the scoped verification. These checks are not whole-workspace certification,
 independent frozen-model parity, target resource certification or prospective soak.
-Native Linux evidence, if subsequently collected, must pin the exact clean commit,
-toolchain, owned network/filesystem boundaries and test results separately.
+Native Linux evidence below pins the exact clean code commit, toolchain,
+owned network/filesystem boundaries and test results separately.
+
+### Verified Component Smoke
+
+Code commit `2037c1b2a5f497d3fc3013f9683a16538a1aad8e` passed all 91 gateway
+library tests on native Linux x86_64 with Rust/Cargo 1.96.1. A manifest-pinned
+source snapshot was built/tested under a transient cgroup: private network
+namespace (owned loopback WS only), private tmp, read-only system/home, owned
+Cargo/target paths, 2 GiB memory cap and 50% CPU quota. No service Redis, broker
+credentials or real market-data socket was used by the tests. Existing Docker
+container identities, restart counts and health state were unchanged.
+
+Dependency preparation was a separate locked public-registry fetch in an owned
+Cargo cache; Cargo.lock/source hashes remained pinned. Test execution was offline.
+Build plus tests took approximately 392 seconds; child peak RSS was approximately
+663 MiB. These are component-probe measurements, not a gateway runtime sizing or
+steady-state capacity guarantee. Operational logs/manifests stay private.
+
+Local legacy WS integration also passed 4 tests, with 1 existing timing-dependent
+stress case ignored. Reaction-engine tests passed 11, with 2 explicit artifact
+exporters ignored. Gateway all-target clippy `-D warnings`, fmt and diff checks
+passed. No full-workspace/independent-model-parity claim follows from these runs.
 
 ## Remaining Before Source Admission
 
