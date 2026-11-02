@@ -1,6 +1,7 @@
 # WS Terminal Components: Implementation Progress
 
-Status: composed MD source implemented; native source admission still gated.
+Status: composed MD source verified; source-only canary admitted, real terminal
+cycle and model admission still gated.
 See the [approved work plan](shadow-ws-terminal-gateway-plan-2026-11-02.md).
 
 ## Implemented Components
@@ -94,16 +95,29 @@ stress case ignored. Reaction-engine tests passed 11, with 2 explicit artifact
 exporters ignored. Gateway all-target clippy `-D warnings`, fmt and diff checks
 passed. No full-workspace/independent-model-parity claim follows from these runs.
 
-## Remaining Before Source Admission
+### Composed Native Verification
 
-1. Re-run the final composed source/worker harness and native Linux checks from
-   the new clean scoped commit. Local component checks include 20 supervisor
-   tests and owned WS/Redis smoke with bootstrap using the actual worker,
-   stop/resume, changed-prefix failure and uncertain-ACK reconciliation.
-2. Run a source-only native canary and observe a real terminal cycle. Synthetic
-   terminal proofs are not evidence of a successful exchange-session boundary.
-   Source-as-observed drift stays separate from model drift.
-3. Only then admit new model generations before cutoff. The active RI collector,
+Clean code commit `91c6aa2bda7e7797b7369b4f8503e5d951a2146d` passed native
+Linux x86_64 verification: 96 gateway unit tests, 20 supervisor tests and two
+composed WS/Redis/actual-worker smoke scenarios, including history-before-ACK.
+The private-network probe used a PID-verified owned Redis on a random loopback
+port, explicit source/reader ACL denial, no broker credentials or service keys.
+Gateway artifacts were forcibly rebuilt in an owned copied target to avoid stale
+Cargo test binaries. Original manifests/source and earlier probe logs were kept.
+Build plus tests took approximately 102 seconds with 50% CPU / 2 GiB limits;
+peak child RSS was approximately 712 MiB. Existing containers were unchanged.
+
+Local gateway all-target clippy `-D warnings`, fmt and diff checks passed. The
+native binary and canonical config hashes are pinned separately in private
+deployment evidence. This is not a full-workspace or frozen-model parity claim.
+
+## Remaining Before Model Admission
+
+1. Observe a real terminal cycle on the admitted source-only canary. Synthetic
+   terminal proofs and bootstrap readiness are not evidence of a successful
+   exchange-session boundary. Source-as-observed drift stays separate from model
+   drift; a partial collection day does not count as a clean model session.
+2. Only then admit new model generations before cutoff. The active RI collector,
    14 retained shadows, live gateway/runtime and failed REST evidence stay intact.
 
 An initial source-only canary rejected its admission without publishing bars:
@@ -111,8 +125,9 @@ native ALOR delivered history before its successful subscription response.
 It was stopped, evidence preserved, and no model worker was admitted. The scoped
 MD fix now preserves that history while waiting for the real ACK 200; it does
 not activate on data alone. Default Trading handling remains unchanged. This
-requires a newly verified artifact and fresh canary generation, not a silent
-restart or readiness bypass. Gateway/model-pair clean-session counters remain
-zero. Record later admission separately with exact artifact/health/terminal
-evidence. The obsolete REST admission timer was already cancelled;
+required the newly verified artifact and a fresh canary generation, not a silent
+restart or readiness bypass. The replacement source-only canary passed ready /
+history-complete / real ACK / read-only supervisor guard checks. No model worker
+was admitted. Gateway/model-pair clean-session counters remain zero until the
+respective complete prospective evidence exists. The obsolete REST admission timer was already cancelled;
 its cancellation is not a successful replacement rollout.
