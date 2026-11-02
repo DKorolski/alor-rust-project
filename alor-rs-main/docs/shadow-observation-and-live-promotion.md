@@ -220,3 +220,20 @@ The repository's main-branch CI can publish gateway/runtime images to GHCR after
 tests. Publication is not deployment or live promotion: no VPS restart step is
 included. Keep approved deployments pinned to reviewed image tags/digests; do not
 auto-pull `latest` as a substitute for the flat/order-clean rollout gates above.
+
+## WS Source Follow-Up: November 2
+
+The next authorized shadow work line is the
+[isolated WS gateway/terminal-bar plan](shadow-ws-terminal-gateway-plan-2026-11-02.md).
+It reuses maintained WS mechanics, adds an opt-in terminal observation cutoff
+and separates late broker corrections from immutable as-observed model input.
+Routine REST candle polling is not the selected forward path for that line.
+The REST source documentation above remains the historical/diagnostic contract,
+not permission to resume a failed generation or a claim that a WS replacement
+has already been implemented or deployed.
+
+The terminal observation cutoff is not exchange-certified immutable finality.
+Keep its real WS/clock/session/connection evidence and the distinction from
+restated history explicit. Do not weaken missing-data, canonical-integrity or
+live position-safety gates. The new plan defines separate gateway/model-pair
+clean-session counters and a later, independently approved live gateway release.

@@ -4,6 +4,11 @@ Engineering instructions for the standalone paired reaction worker and RI
 context collector. Examples are NOT approved deployment configurations. This
 publication does not change or deploy live runtimes, gateways or existing shadows.
 See [observation and promotion gates](shadow-observation-and-live-promotion.md).
+For the next source implementation, follow the
+[WS gateway/terminal-bar work plan](shadow-ws-terminal-gateway-plan-2026-11-02.md).
+Existing REST-specific source guards/configuration below do not automatically
+admit that new source version; explicit guard/schema/bootstrap integration and
+fresh worker generations are required.
 
 ## Scope and Isolation
 

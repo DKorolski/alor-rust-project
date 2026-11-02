@@ -10,6 +10,13 @@ Current source identity is `shadow_authenticated_rest_closed_m10_v3`; the
 supersedes v2's blanket revision failure. Existing v2 deployments are not changed
 by editing this document or upgrading a local checkout.
 
+The next authorized source work line is the
+[WS terminal gateway plan](shadow-ws-terminal-gateway-plan-2026-11-02.md).
+This REST contract is retained for diagnosis and historical provenance, not as
+the selected long-term forward source. Repeated matching REST responses do not
+prevent later OHLC revisions. Do not resume failed REST state or transfer its
+observation counts into a new WS generation.
+
 ## Problem and Boundary
 
 The current gateway router buffers a Live candle until a greater timestamp
