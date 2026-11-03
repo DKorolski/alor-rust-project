@@ -101,3 +101,14 @@ test is excluded from the default suite and passed by explicit invocation.
 The 22 supervisor tests, 7 read-only audit tests and 4 composed CLI smoke cases
 passed. Gateway all-target clippy with warnings denied, fmt and diff checks passed.
 Native verification and real-forward evidence are separate gates.
+
+Native checkpoint: clean `cab13485d97f25894058d5d63f322b42f231d260`
+(including the post-durability cutoff check) repeated the same 105 + explicit
+pipeline + 7 + 22 + 4 checks successfully on Linux. Offline forced current-crate
+rebuild, owned Redis/WS, private network, CPU 50% and memory 2 GiB limits;
+approximately 138 seconds. Running-container identity/health/restart metadata
+was unchanged. No service deployment, credentials or broker access were used.
+Pinned native source binary SHA256:
+`74ed138da32468fd1b3572acde680758de1fd70e768a7c222aa4b9de512062f4`.
+This is an artifact-verification pass, not a v2 real-terminal/weekend acceptance
+or permission to rebind the existing source/RI/model generations.
