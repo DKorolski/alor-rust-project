@@ -131,3 +131,26 @@ history-complete / real ACK / read-only supervisor guard checks. No model worker
 was admitted. Gateway/model-pair clean-session counters remain zero until the
 respective complete prospective evidence exists. The obsolete REST admission timer was already cancelled;
 its cancellation is not a successful replacement rollout.
+
+## November 3 Recovery Follow-Up
+
+The real terminal path passed: one session-boundary release, full regular M10
+grid, and canonical Redis/journal agreement. This did not certify recovery: a
+later WS reset exposed a process-age startup deadline being reused as an outage
+deadline. The failed generation is preserved and was not restarted or repaired.
+
+See [readiness recovery hardening](shadow-ws-reconnect-readiness-hardening-2026-11-03.md).
+Code commit `f522572a9cb11e8727978f5a6dd86d4adfe32d5f` passed 98 gateway unit
+tests, 20 supervisor tests and both composed WS/Redis/actual-worker scenarios on
+native Linux. The composed cases now inject a reset on their owned fake WS,
+require new-generation readiness and verify unchanged prefix/XADD count. Mature
+ten-hour uptime and non-extending flapping deadlines are deterministic unit cases.
+Local all-target clippy, fmt and diff checks passed. Native container identities
+and health remained unchanged; no real socket fault injection was performed.
+
+A fresh source-only post-fix canary passed startup readiness. Its collection
+started after the session open, so it is explicitly partial, with no clean-day
+credit or model-worker admission. The pinned future model activation/calendar
+was not advanced to fit maintenance. Terminal-path evidence remains valid for
+the unchanged finalizer, but post-fix prospective recovery/terminal observation
+and complete bootstrap remain gates before new model admission.
