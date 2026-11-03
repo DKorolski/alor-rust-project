@@ -330,9 +330,17 @@ impl Runner {
                 published,
             )?;
             let proof = json!({"kind":"historical_ws_import","received_at_utc":input.received,
-                "generation":input.generation,"import_mode":import_mode,"imported_at_utc":published});
+                "generation":input.generation,"import_mode":import_mode,"publication_started_at_utc":published});
             let row = Record::new(&self.cfg, &input.bar, proof, None, published)?;
             self.store.append(&self.cfg, row, &mut self.conn).await?;
+            // An append begun before cutoff may complete after it. Preserve evidence,
+            // but fail this source; the consumer also checks its own durable receipt.
+            self.cfg.check_history_completion(
+                input.bar.close_time_utc,
+                input.received,
+                published,
+                self.clock().utc,
+            )?;
         }
         self.history_complete = true;
         self.readiness_deadline.ready();

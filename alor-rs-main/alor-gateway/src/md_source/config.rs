@@ -136,6 +136,22 @@ impl SourceConfig {
         Ok("context_recovery_before_cutoff")
     }
 
+    pub fn check_history_completion(
+        &self,
+        label: i64,
+        received: i64,
+        started: i64,
+        completed: i64,
+    ) -> Result<()> {
+        ensure!(completed >= started, "history completion clock rollback");
+        ensure!(
+            self.history_import_mode(label, received, started)?
+                == self.history_import_mode(label, received, completed)?,
+            "history import crossed activation/cutoff"
+        );
+        Ok(())
+    }
+
     pub fn eligible(&self, ts: i64) -> Result<bool> {
         let d = super::local(ts)?;
         if d.date() < self.bootstrap_start || ts % 600 != 0 {

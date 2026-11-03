@@ -40,7 +40,7 @@ cannot discard an uncertain publication, and restart never restores old buffers.
 
 ## History Is Not Timely Live
 
-Historical import records bind `received_at_utc`, `imported_at_utc`, generation
+Historical import records bind `received_at_utc`, `publication_started_at_utc`, generation
 and one explicit `import_mode`:
 
 - `bootstrap`: label precedes model activation and actual import precedes its
@@ -54,6 +54,14 @@ unknown active-weekday history is still rejected. Unknown history behind the
 canonical prefix is rejected even before cutoff; this is not sorted insertion
 or silent recovery. At/after cutoff no new historical context can rewrite the
 frozen context. Already-known frames remain revision-audit input only.
+
+The source rechecks cutoff/activation after durable append as well as before it.
+If an append crosses cutoff, it fails the generation, retaining canonical data
+and failure evidence rather than deleting/retrying it. The envelope timestamp
+and `publication_started_at_utc` are attempt clocks, not fabricated completion
+receipts. Consumer-side actual receipt/durability checks remain mandatory;
+neither a pre-cutoff source timestamp nor a retained row proves timely consumer
+availability. A source failure prevents clean admission/resume.
 
 ## Verification And Admission
 

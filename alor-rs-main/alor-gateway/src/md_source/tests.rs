@@ -206,6 +206,19 @@ fn history_context_import_is_bounded_by_actual_receipt_and_next_regular_cutoff()
     );
     let cutoff = ts("2026-11-09T07:00:00+03:00");
     assert!(config.history_import_mode(label, cutoff, cutoff).is_err());
+    config
+        .check_history_completion(label, before, before, before)
+        .unwrap();
+    assert!(
+        config
+            .check_history_completion(label, before, before, cutoff)
+            .is_err()
+    );
+    assert!(
+        config
+            .check_history_completion(label, before, before, before - 1)
+            .is_err()
+    );
     assert!(
         config
             .history_import_mode(label, label + 599, label + 610)
@@ -247,7 +260,7 @@ fn historical_provenance_cannot_be_forged_or_reimported_after_freeze() {
         let root = temp.path().canonicalize().unwrap().join("source");
         let store = storage::Store::open(&root, &config, "create", published).unwrap();
         let mut proof = json!({"kind":"historical_ws_import","received_at_utc":published,
-            "imported_at_utc":published,"import_mode":"context_recovery_before_cutoff","generation":1});
+            "publication_started_at_utc":published,"import_mode":"context_recovery_before_cutoff","generation":1});
         let mut clock = published;
         match invalid {
             "mode" => proof["import_mode"] = json!("bootstrap"),
@@ -256,7 +269,7 @@ fn historical_provenance_cannot_be_forged_or_reimported_after_freeze() {
             "late" => {
                 clock = ts("2026-11-09T07:00:00+03:00");
                 proof["received_at_utc"] = json!(clock);
-                proof["imported_at_utc"] = json!(clock);
+                proof["publication_started_at_utc"] = json!(clock);
             }
             _ => unreachable!(),
         }

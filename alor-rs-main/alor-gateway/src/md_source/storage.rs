@@ -328,7 +328,7 @@ impl Store {
                 historical
                     && proof["kind"] == "historical_ws_import"
                     && proof["import_mode"] == mode
-                    && proof["imported_at_utc"] == published
+                    && proof["publication_started_at_utc"] == published
                     && proof["generation"].as_u64().is_some_and(|g| g > 0),
                 "invalid historical receipt"
             );
