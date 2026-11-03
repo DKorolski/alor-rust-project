@@ -1,7 +1,7 @@
 //! As-observed WS candle release core. No clock, network, publisher or broker.
 //! Proposals do not advance watermarks: the owner must reconcile durable writes
 //! before commit/restore. Existing Router::start does not enable this policy.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime};
@@ -118,6 +118,7 @@ pub struct FeedEvidence {
 pub enum ReleaseReason {
     NextTimestamp,
     SessionBoundaryWs,
+    ContextIntervalWs,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -183,6 +184,7 @@ pub struct TerminalFinalizer {
     feed: Option<FeedEvidence>,
     buffers: BTreeMap<String, Slot>,
     committed: BTreeMap<String, VecDeque<Release>>,
+    context_dates: Option<BTreeSet<NaiveDate>>,
 }
 
 fn hash(value: &impl Serialize) -> Result<String> {
@@ -206,15 +208,56 @@ fn same_bar(a: &BarEvent, b: &BarEvent) -> bool {
 
 impl TerminalFinalizer {
     pub fn new(policy: TerminalPolicy) -> Result<Self> {
+        Self::construct(policy, None)
+    }
+
+    /// Opt-in non-tradable weekends/exclusions. Default Trading callers stay unchanged.
+    pub fn new_with_context(policy: TerminalPolicy, dates: Vec<NaiveDate>) -> Result<Self> {
+        ensure!(
+            dates.len() <= 16 && dates.iter().collect::<BTreeSet<_>>().len() == dates.len(),
+            "context date budget/duplicates"
+        );
+        Self::construct(policy, Some(dates.into_iter().collect()))
+    }
+
+    fn construct(
+        policy: TerminalPolicy,
+        context_dates: Option<BTreeSet<NaiveDate>>,
+    ) -> Result<Self> {
         policy.validate()?;
+        let policy_sha256 = match &context_dates {
+            None => hash(&policy)?,
+            Some(dates) => hash(&("context_interval_ws_v1", &policy, dates))?,
+        };
         Ok(Self {
-            policy_sha256: hash(&policy)?,
+            policy_sha256,
             policy,
             clock: None,
             feed: None,
             buffers: BTreeMap::new(),
             committed: BTreeMap::new(),
+            context_dates,
         })
+    }
+
+    fn context_day(&self, day: NaiveDate) -> bool {
+        self.context_dates
+            .as_ref()
+            .is_some_and(|dates| day.weekday().num_days_from_monday() >= 5 || dates.contains(&day))
+    }
+
+    fn context_label(&self, bar: &BarEvent) -> Result<bool> {
+        let day = date(bar.close_time_utc)?;
+        let start = day
+            .and_time(NaiveTime::from_hms_opt(9, 50, 0).unwrap())
+            .and_utc()
+            .timestamp()
+            - 10800;
+        Ok(self.context_day(day)
+            && bar.close_time_utc >= start
+            && self.policy.symbols[&bar.symbol]
+                .terminal_label(day)
+                .is_some_and(|last| bar.close_time_utc <= last))
     }
 
     fn check_clock(&mut self, now: Clock) -> Result<()> {
@@ -252,6 +295,9 @@ impl TerminalFinalizer {
             date(bar.close_time_utc)? >= self.policy.first_live_session,
             "pre-activation data must remain History"
         );
+        if self.context_day(date(bar.close_time_utc)?) {
+            ensure!(self.context_label(bar)?, "non-eligible context observation");
+        }
         ensure!(
             [bar.o, bar.h, bar.l, bar.c, bar.v]
                 .iter()
@@ -499,6 +545,35 @@ impl TerminalFinalizer {
         let mut ready = vec![];
         let today = date(now.utc)?;
         if staged.policy.enabled && today >= staged.policy.first_live_session {
+            // No slot means no quote: sparse context gaps never create candles.
+            for (symbol, slot) in &staged.buffers {
+                if date(slot.current.bar.close_time_utc)? != today
+                    || !staged.context_label(&slot.current.bar)?
+                {
+                    continue;
+                }
+                let terminal = staged.policy.symbols[symbol].terminal_label(today);
+                if terminal == Some(slot.current.bar.close_time_utc) {
+                    continue;
+                }
+                let close = slot.current.bar.close_time_utc + TF;
+                if now.utc < close + staged.policy.grace_seconds {
+                    continue;
+                }
+                if !queue_drained || slot.proposal.is_some() {
+                    ensure!(
+                        now.utc <= close + staged.policy.max_lateness_seconds,
+                        "context queue/publication unresolved past deadline: {symbol}"
+                    );
+                    continue;
+                }
+                ready.push(staged.proposal(
+                    &slot.current,
+                    now,
+                    ReleaseReason::ContextIntervalWs,
+                    None,
+                )?);
+            }
             for (symbol, calendar) in &staged.policy.symbols {
                 let Some(label) = calendar.terminal_label(today) else {
                     continue;
@@ -661,6 +736,17 @@ impl TerminalFinalizer {
                         && p.observation_cutoff_utc
                             >= p.closed_at_utc + staged.policy.grace_seconds,
                     "invalid restored terminal proof"
+                ),
+                ReleaseReason::ContextIntervalWs => ensure!(
+                    staged.policy.enabled
+                        && staged.context_label(&row.bar)?
+                        && staged.policy.symbols[&row.bar.symbol]
+                            .terminal_label(date(row.bar.close_time_utc)?)
+                            .is_some_and(|last| row.bar.close_time_utc < last)
+                        && p.next_label_utc.is_none()
+                        && p.observation_cutoff_utc
+                            >= p.closed_at_utc + staged.policy.grace_seconds,
+                    "invalid restored context interval proof"
                 ),
             }
             let cache = staged.committed.entry(row.bar.symbol.clone()).or_default();

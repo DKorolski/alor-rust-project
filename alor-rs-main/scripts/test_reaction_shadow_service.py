@@ -135,20 +135,48 @@ engine = "imoexf"
         with self.assertRaisesRegex(service.SourceUnavailable, "not running"):
             guard.check()
 
-    def ws_source(self):
+    def ws_source(self, v2=False):
         root, lock, spec = self.source()
         cfg = json.loads((root / "manifest.json").read_text())["config"]
         del cfg["revision_policy"]
         cfg.update(gateway_config="/fixture/gateway.toml", gateway_config_sha256="a" * 64,
                    terminal=dict(enabled=True, symbols=dict(IMOEXF={}), max_heartbeat_age_seconds=45))
+        if v2:
+            cfg["context_finalization"] = True
         sha = service.hashlib.sha256(json.dumps(cfg, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        version = "shadow_gateway_ws_closed_m10_v1"
+        version = "shadow_gateway_ws_closed_m10_v2" if v2 else "shadow_gateway_ws_closed_m10_v1"
         (root / "manifest.json").write_text(json.dumps(dict(version=version, config=cfg, config_sha256=sha)))
         health = dict(version=version, config_sha256=sha, status="ready", generation=1,
                       heartbeat_utc=int(time.time()), last_ws_rx_utc=int(time.time()),
                       connected=True, subscribed=True, history_complete=True, order_emission_allowed=False)
         (root / "HEALTH.json").write_text(json.dumps(health))
         return root, lock, spec, health
+
+    def test_ws_v2_requires_opt_in_and_preserves_health_guard(self):
+        root, _, spec, health = self.ws_source(v2=True)
+        guard = service.ClosedSourceGuard(root, spec)
+        (root / "HEALTH.json").write_text(json.dumps({**health, "generation": 0}))
+        with self.assertRaises(service.SourceUnavailable):
+            guard.check()
+        (root / "HEALTH.json").write_text(json.dumps(health))
+        manifest = json.loads((root / "manifest.json").read_text())
+        for value in (False, None, 1):
+            manifest["config"]["context_finalization"] = value
+            (root / "manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "explicit context"):
+                service.ClosedSourceGuard(root, spec)
+        del manifest["config"]["context_finalization"]
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "explicit context"):
+            service.ClosedSourceGuard(root, spec)
+
+    def test_ws_v1_does_not_accept_v2_context_policy(self):
+        root, _, spec, _ = self.ws_source()
+        manifest = json.loads((root / "manifest.json").read_text())
+        manifest["config"]["context_finalization"] = True
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "unexpected WS source schema"):
+            service.ClosedSourceGuard(root, spec)
 
     def test_ws_guard_rejects_stale_health_identity_and_unready_admission(self):
         root, _, spec, health = self.ws_source()

@@ -28,6 +28,10 @@ struct Received {
     generation: u64,
 }
 
+#[cfg(test)]
+#[path = "context_pipeline_tests.rs"]
+mod context_pipeline_tests;
+
 struct ReadinessDeadline {
     unready_since: Option<Duration>,
 }
@@ -72,10 +76,16 @@ struct Runner {
     sequence: u64,
     history: BTreeMap<i64, Received>,
     current: Option<Received>,
+    #[cfg(test)]
+    test_clock: Option<Clock>,
 }
 
 impl Runner {
     fn clock(&self) -> Clock {
+        #[cfg(test)]
+        if let Some(clock) = self.test_clock {
+            return clock;
+        }
         Clock {
             utc: Utc::now().timestamp(),
             monotonic_ms: self.started.elapsed().as_millis() as u64,
@@ -192,10 +202,8 @@ impl Runner {
             if closed_at_subscribe
                 || local(bar.close_time_utc)?.date() < self.cfg.terminal.first_live_session
             {
-                ensure!(
-                    local(bar.close_time_utc)?.date() < self.cfg.first_live_session,
-                    "unobserved active history cannot become timely Live"
-                );
+                self.cfg
+                    .history_import_mode(bar.close_time_utc, self.last_rx, self.clock().utc)?;
                 ensure!(
                     self.store
                         .records
@@ -315,9 +323,15 @@ impl Runner {
         let inputs = std::mem::take(&mut self.history);
         for (_, mut input) in inputs {
             input.bar.origin = DataOrigin::History;
+            let published = self.clock().utc;
+            let import_mode = self.cfg.history_import_mode(
+                input.bar.close_time_utc,
+                input.received,
+                published,
+            )?;
             let proof = json!({"kind":"historical_ws_import","received_at_utc":input.received,
-                "generation":input.generation,"imported_at_utc":self.clock().utc});
-            let row = Record::new(&self.cfg, &input.bar, proof, None, self.clock().utc)?;
+                "generation":input.generation,"import_mode":import_mode,"imported_at_utc":published});
+            let row = Record::new(&self.cfg, &input.bar, proof, None, published)?;
             self.store.append(&self.cfg, row, &mut self.conn).await?;
         }
         self.history_complete = true;
@@ -384,7 +398,7 @@ pub async fn run(config: SourceConfig, root: &Path, mode: &str, fixture: bool) -
             return Err(error);
         }
     };
-    let mut core = TerminalFinalizer::new(config.terminal.clone())?;
+    let mut core = config.finalizer()?;
     let recent: Vec<_> = store
         .records
         .values()
@@ -416,6 +430,8 @@ pub async fn run(config: SourceConfig, root: &Path, mode: &str, fixture: bool) -
         core,
         conn,
         started,
+        #[cfg(test)]
+        test_clock: None,
         generation: 0,
         connected: false,
         acked: false,

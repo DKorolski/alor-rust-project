@@ -6,9 +6,11 @@ account subscriptions, strategy execution or broker command publisher is started
 Live and retained shadow deployments remain unchanged.
 
 See [parallel preparation and gates](shadow-parallel-preparation-and-gates-2026-11-03.md)
-for the read-only RI closing audit, USD symbol-specific preflight and the still
-unresolved sparse forward-context admission blocker. Passing startup/history
-smoke is not permission to admit these new model pairs.
+for the read-only RI closing audit and USD symbol-specific preflight. The v1
+canary has a known sparse forward-context limitation. The separately versioned
+[v2 context patch](shadow-ws-context-interval-hardening-2026-11-03.md) addresses
+that path without changing a running source. Passing startup/history smoke is
+not permission to admit these new model pairs.
 
 ## Configuration And Origin
 
@@ -62,7 +64,11 @@ be reused, restarted, deleted, trimmed or rewired during this launch.
 
 ## Publication And Health
 
-Ordinary candles release on a greater real WS timestamp. Terminal fallback
+Ordinary tradable candles release on a greater real WS timestamp. V2 requires
+explicit `context_finalization=true`: a real non-tradable context buffer may
+release at its own interval end plus grace as `context_interval_ws`/History.
+No absent candle is created; ordinary Live deadlines are not enlarged.
+Templates now describe v2; do not use them to resume v1. Terminal fallback
 requires the actual buffered candle, healthy acknowledged generation/heartbeat,
 resolved history and a drained event queue after session end plus grace.
 Proofs retain real receipt time separately from processing/cutoff time. No timer

@@ -61,9 +61,9 @@ XADD/prefix, stop/resume, changed-prefix refusal and uncertain-ACK readback.
 This proves symbol-specific transport/reader/bootstrap behavior, not future
 weekend-forward correctness or numerical model selection.
 
-## Blocker: Sparse Forward Context
+## V1 Blocker: Sparse Forward Context
 
-The current WS adapter sends context-day observations through the same pure
+The admitted v1 WS adapter sends context-day observations through the same pure
 finalizer as timely tradable Live bars. If no 10:00/10:10 candle exists and the
 next real timestamp after 09:50 is 10:20, the earlier candle is already outside
 the 90-second publication deadline. This is a legitimate sparse context case,
@@ -83,7 +83,9 @@ heartbeat and drained-prefix evidence. No buffer means no candle. This avoids
 waiting for a next context timestamp that may legitimately be absent, without
 increasing regular Live lateness limits. Introduce an explicit context-only
 release reason/provenance and test its restoration. This is a proposed next
-patch, not a behavior already present in the admitted artifact.
+patch relative to v1, not a behavior present in the admitted artifact.
+The separate [v2 implementation](shadow-ws-context-interval-hardening-2026-11-03.md)
+now implements this opt-in policy; deployment/real-forward gates remain distinct.
 
 1. Keep weekday tradable freshness/late-history/failure limits unchanged.
 2. Give eligible non-tradable context observations explicit receipt/cutoff

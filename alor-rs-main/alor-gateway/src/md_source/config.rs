@@ -19,11 +19,17 @@ pub struct SourceConfig {
     pub gateway_config: PathBuf,
     pub gateway_config_sha256: String,
     pub terminal: TerminalPolicy,
+    #[serde(default)]
+    pub context_finalization: bool,
 }
 
 impl SourceConfig {
     pub fn validate(&self, now: i64) -> Result<()> {
         self.terminal.validate()?;
+        ensure!(
+            self.context_finalization,
+            "explicit context finalization required for WS source v2"
+        );
         ensure!(
             self.terminal.enabled
                 && self.terminal.symbols.len() == 1
@@ -88,6 +94,46 @@ impl SourceConfig {
 
     pub fn context_day(&self, day: NaiveDate) -> bool {
         day.weekday().num_days_from_monday() >= 5 || self.excluded_dates.contains(&day)
+    }
+
+    pub fn finalizer(&self) -> Result<crate::terminal_bar::TerminalFinalizer> {
+        ensure!(self.context_finalization, "context policy not enabled");
+        crate::terminal_bar::TerminalFinalizer::new_with_context(
+            self.terminal.clone(),
+            self.excluded_dates.clone(),
+        )
+    }
+
+    pub fn context_cutoff(&self, day: NaiveDate) -> Result<i64> {
+        let mut next = day.succ_opt().context("context date overflow")?;
+        for _ in 0..32 {
+            if !self.context_day(next) {
+                return Ok(next.and_hms_opt(7, 0, 0).unwrap().and_utc().timestamp() - 10800);
+            }
+            next = next.succ_opt().context("context date overflow")?;
+        }
+        anyhow::bail!("context cutoff calendar budget")
+    }
+
+    pub fn history_import_mode(
+        &self,
+        label: i64,
+        received: i64,
+        published: i64,
+    ) -> Result<&'static str> {
+        ensure!(
+            self.eligible(label)? && received >= label + 600 && received <= published,
+            "invalid historical receipt"
+        );
+        let day = super::local(label)?.date();
+        if day < self.first_live_session && published < self.model_cutoff() {
+            return Ok("bootstrap");
+        }
+        ensure!(
+            self.context_day(day) && published < self.context_cutoff(day)?,
+            "unobserved active history cannot become timely Live or rewrite frozen context"
+        );
+        Ok("context_recovery_before_cutoff")
     }
 
     pub fn eligible(&self, ts: i64) -> Result<bool> {

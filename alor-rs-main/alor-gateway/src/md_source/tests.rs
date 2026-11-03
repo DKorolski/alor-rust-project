@@ -10,7 +10,7 @@ fn ts(s: &str) -> i64 {
 }
 fn cfg() -> config::SourceConfig {
     serde_json::from_value(json!({"symbol":"IMOEXF","stream":"shadow.source.closed10m.IMOEXF.test",
-        "bootstrap_start":"2026-10-29","first_live_session":"2026-11-03","excluded_dates":[],
+        "bootstrap_start":"2026-10-29","first_live_session":"2026-11-03","excluded_dates":[],"context_finalization":true,
         "gateway_config":"/fixture/gateway.toml","gateway_config_sha256":"a".repeat(64),
         "terminal":{"enabled":true,"first_live_session":"2026-11-02","grace_seconds":10,
             "max_lateness_seconds":90,"max_heartbeat_age_seconds":45,"max_clock_step_seconds":5,
@@ -57,7 +57,7 @@ fn source_config_rejects_nonisolated_identity_dates_and_public_redis() {
 #[test]
 fn terminal_release_survives_canonical_journal_roundtrip_and_audit() {
     let config = cfg();
-    let mut core = TerminalFinalizer::new(config.terminal.clone()).unwrap();
+    let mut core = config.finalizer().unwrap();
     let receive = ts("2026-11-02T23:49:59+03:00");
     let cutoff = ts("2026-11-02T23:50:10+03:00");
     let clock = Clock {
@@ -189,8 +189,89 @@ fn sparse_context_forward_is_not_certified_by_history_bootstrap() {
     )
     .unwrap();
     quote.close_time_utc = later;
-    // Diagnostic blocker: sparse context still uses the timely-Live path.
+    // The default finalizer remains strict; context support requires opt-in.
     let error = core.observe_received(quote, later, clock).unwrap_err();
     assert!(error.to_string().contains("outside publication deadline"));
     assert_eq!(core.last_committed_label("USDRUBF"), None);
+}
+
+#[test]
+fn history_context_import_is_bounded_by_actual_receipt_and_next_regular_cutoff() {
+    let mut config = cfg();
+    let label = ts("2026-11-07T10:20:00+03:00");
+    let before = ts("2026-11-09T06:59:59+03:00");
+    assert_eq!(
+        config.history_import_mode(label, before, before).unwrap(),
+        "context_recovery_before_cutoff"
+    );
+    let cutoff = ts("2026-11-09T07:00:00+03:00");
+    assert!(config.history_import_mode(label, cutoff, cutoff).is_err());
+    assert!(
+        config
+            .history_import_mode(label, label + 599, label + 610)
+            .is_err()
+    );
+    assert!(
+        config
+            .history_import_mode(label, before + 1, before)
+            .is_err()
+    );
+    let active = ts("2026-11-06T10:20:00+03:00");
+    assert!(config.history_import_mode(active, before, before).is_err());
+    let boot = ts("2026-10-30T23:40:00+03:00");
+    let receipt = ts("2026-11-02T06:00:00+03:00");
+    assert_eq!(
+        config.history_import_mode(boot, receipt, receipt).unwrap(),
+        "bootstrap"
+    );
+    assert!(config.history_import_mode(boot, before, before).is_err());
+    config.excluded_dates = vec![chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap()];
+    assert_eq!(
+        config.context_cutoff(config.excluded_dates[0]).unwrap(),
+        ts("2026-11-05T07:00:00+03:00")
+    );
+    config.context_finalization = false;
+    assert!(config.validate(receipt).is_err());
+    assert!(config.finalizer().is_err());
+}
+
+#[test]
+fn historical_provenance_cannot_be_forged_or_reimported_after_freeze() {
+    let config = cfg();
+    let published = ts("2026-11-07T10:31:00+03:00");
+    let mut quote = bar();
+    quote.close_time_utc = ts("2026-11-07T10:20:00+03:00");
+    quote.origin = DataOrigin::History;
+    for invalid in ["mode", "receipt", "generation", "late"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("source");
+        let store = storage::Store::open(&root, &config, "create", published).unwrap();
+        let mut proof = json!({"kind":"historical_ws_import","received_at_utc":published,
+            "imported_at_utc":published,"import_mode":"context_recovery_before_cutoff","generation":1});
+        let mut clock = published;
+        match invalid {
+            "mode" => proof["import_mode"] = json!("bootstrap"),
+            "receipt" => proof["received_at_utc"] = json!(published + 1),
+            "generation" => proof["generation"] = json!(0),
+            "late" => {
+                clock = ts("2026-11-09T07:00:00+03:00");
+                proof["received_at_utc"] = json!(clock);
+                proof["imported_at_utc"] = json!(clock);
+            }
+            _ => unreachable!(),
+        }
+        let row = storage::Record::new(&config, &quote, proof, None, clock).unwrap();
+        storage::publish_new(
+            &root.join("committed.jsonl"),
+            &json!({"previous":"genesis","record":row,
+            "sha256":digest(&("genesis",&row)).unwrap()}),
+        )
+        .unwrap();
+        store.stopped(clock).unwrap();
+        drop(store);
+        assert!(
+            storage::Store::open(&root, &config, "resume", clock).is_err(),
+            "{invalid}"
+        );
+    }
 }

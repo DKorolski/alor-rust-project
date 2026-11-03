@@ -97,15 +97,21 @@ class ClosedSourceGuard:
         runner = tomllib.loads(spec.decode())["runner"]
         cfg = source["config"]
         self.version = source["version"]
-        if (self.version not in ("shadow_authenticated_rest_closed_m10_v3", "shadow_gateway_ws_closed_m10_v1")
+        self.is_ws = self.version in ("shadow_gateway_ws_closed_m10_v1", "shadow_gateway_ws_closed_m10_v2")
+        if (self.version != "shadow_authenticated_rest_closed_m10_v3" and not self.is_ws
                 or cfg["stream"] != runner["ingress"]["source_stream"]
                 or cfg["symbol"] != runner["ingress"]["symbol"]
                 or cfg["first_live_session"] != runner["first_decision_session"]
                 or cfg["excluded_dates"] != runner["excluded_dates"]):
             raise ValueError("source/worker identity or calendar mismatch")
-        if self.version == "shadow_gateway_ws_closed_m10_v1":
-            if set(cfg) != {"symbol", "stream", "bootstrap_start", "first_live_session", "excluded_dates",
-                            "gateway_config", "gateway_config_sha256", "terminal"}:
+        if self.is_ws:
+            fields = {"symbol", "stream", "bootstrap_start", "first_live_session", "excluded_dates",
+                      "gateway_config", "gateway_config_sha256", "terminal"}
+            if self.version == "shadow_gateway_ws_closed_m10_v2":
+                fields.add("context_finalization")
+                if cfg.get("context_finalization") is not True:
+                    raise ValueError("WS v2 requires explicit context finalization")
+            if set(cfg) != fields:
                 raise ValueError("unexpected WS source schema")
             terminal = cfg["terminal"]
             if (terminal["enabled"] is not True or set(terminal["symbols"]) != {cfg["symbol"]}
@@ -160,7 +166,7 @@ class ClosedSourceGuard:
                 try:
                     fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    if self.version == "shadow_gateway_ws_closed_m10_v1":
+                    if self.is_ws:
                         self._ws_health(require_ready)
                     return  # Exclusive lock remains held by the source writer.
                 raise SourceUnavailable("source writer is not running")

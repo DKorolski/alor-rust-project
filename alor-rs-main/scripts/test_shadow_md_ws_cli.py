@@ -276,7 +276,7 @@ ws_url = "ws://127.0.0.1:{ws.port}"
 oauth_url = "http://127.0.0.1:1/unused-oauth"
 skip_history_bars = false
 ''')
-                cfg=dict(symbol=symbol,stream=source_key,bootstrap_start=str(begin),first_live_session=str(first),
+                cfg=dict(symbol=symbol,stream=source_key,bootstrap_start=str(begin),first_live_session=str(first),context_finalization=True,
                     excluded_dates=[str(d) for d in excluded],gateway_config=str(gateway),
                     gateway_config_sha256=hashlib.sha256(gateway.read_bytes()).hexdigest(),terminal=dict(
                         enabled=True,first_live_session=str(today),grace_seconds=10,max_lateness_seconds=90,

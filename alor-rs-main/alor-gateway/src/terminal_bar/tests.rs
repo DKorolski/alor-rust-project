@@ -1,5 +1,205 @@
 use super::*;
 
+fn context_buffer(label: &str, received: &str) -> TerminalFinalizer {
+    let mut f = TerminalFinalizer::new_with_context(policy(true), vec![]).unwrap();
+    healthy(&mut f, received);
+    f.observe_received(bar(label), ts(received), clock(received))
+        .unwrap();
+    f
+}
+
+#[test]
+fn sparse_context_interval_releases_only_observed_quote_and_preserves_holes() {
+    let mut f = context_buffer("2026-11-07T09:50:00+03:00", "2026-11-07T09:51:00+03:00");
+    for s in ["2026-11-07T10:00:00+03:00", "2026-11-07T10:00:09+03:00"] {
+        healthy(&mut f, s);
+        assert!(f.tick(clock(s), true).unwrap().is_empty());
+    }
+    let cutoff = "2026-11-07T10:00:10+03:00";
+    healthy(&mut f, cutoff);
+    assert!(f.tick(clock(cutoff), false).unwrap().is_empty());
+    let release = f.tick(clock(cutoff), true).unwrap().pop().unwrap();
+    assert_eq!(release.proof.reason, ReleaseReason::ContextIntervalWs);
+    assert_eq!(release.proof.next_label_utc, None);
+    assert_eq!(
+        release.proof.first_received_at_utc,
+        ts("2026-11-07T09:51:00+03:00")
+    );
+    assert_eq!(release.bar.v, 589.);
+    assert!(f.tick(clock(cutoff), true).unwrap().is_empty());
+    assert!(
+        f.observe(
+            bar("2026-11-07T10:20:00+03:00"),
+            clock("2026-11-07T10:20:00+03:00")
+        )
+        .is_err()
+    );
+    f.commit(&release, clock(cutoff)).unwrap();
+    assert!(f.commit(&release, clock(cutoff)).is_err());
+    healthy(&mut f, "2026-11-07T10:20:00+03:00");
+    assert!(matches!(
+        f.observe(
+            bar("2026-11-07T10:20:00+03:00"),
+            clock("2026-11-07T10:20:00+03:00")
+        )
+        .unwrap(),
+        Observation::Buffered
+    ));
+    assert_eq!(
+        f.last_committed_label("IMOEXF"),
+        Some(release.bar.close_time_utc)
+    );
+    assert_eq!(f.buffers.len(), 1);
+    assert_eq!(f.committed["IMOEXF"].len(), 1);
+}
+
+#[test]
+fn context_timer_keeps_missing_terminal_and_feed_deadlines_strict() {
+    for (received, cutoff, drained, stale) in [
+        (
+            "2026-11-07T09:51:00+03:00",
+            "2026-11-07T10:01:31+03:00",
+            true,
+            false,
+        ),
+        (
+            "2026-11-07T09:51:00+03:00",
+            "2026-11-07T10:01:31+03:00",
+            false,
+            false,
+        ),
+        (
+            "2026-11-07T09:51:00+03:00",
+            "2026-11-07T10:00:10+03:00",
+            true,
+            true,
+        ),
+        (
+            "2026-11-07T18:41:00+03:00",
+            "2026-11-07T19:01:31+03:00",
+            true,
+            false,
+        ),
+    ] {
+        let label = if received.contains("18:41") {
+            "2026-11-07T18:40:00+03:00"
+        } else {
+            "2026-11-07T09:50:00+03:00"
+        };
+        let mut f = context_buffer(label, received);
+        if !stale {
+            healthy(&mut f, cutoff);
+        }
+        assert!(f.tick(clock(cutoff), drained).is_err());
+        assert!(f.pending_releases().is_empty());
+        assert_eq!(f.last_committed_label("IMOEXF"), None);
+    }
+    let mut f = context_buffer("2026-11-07T18:50:00+03:00", "2026-11-07T18:59:59+03:00");
+    healthy(&mut f, "2026-11-07T19:00:10+03:00");
+    let r = f
+        .tick(clock("2026-11-07T19:00:10+03:00"), true)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(r.proof.reason, ReleaseReason::SessionBoundaryWs);
+}
+
+#[test]
+fn context_policy_does_not_change_weekday_next_timestamp_path() {
+    for opt_in in [false, true] {
+        let mut f = if opt_in {
+            TerminalFinalizer::new_with_context(policy(true), vec![]).unwrap()
+        } else {
+            TerminalFinalizer::new(policy(true)).unwrap()
+        };
+        healthy(&mut f, "2026-11-06T09:51:00+03:00");
+        f.observe(
+            bar("2026-11-06T09:50:00+03:00"),
+            clock("2026-11-06T09:51:00+03:00"),
+        )
+        .unwrap();
+        healthy(&mut f, "2026-11-06T10:00:10+03:00");
+        assert!(
+            f.tick(clock("2026-11-06T10:00:10+03:00"), true)
+                .unwrap()
+                .is_empty()
+        );
+        let Observation::Ready(r) = f
+            .observe(
+                bar("2026-11-06T10:00:00+03:00"),
+                clock("2026-11-06T10:00:10+03:00"),
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(r.proof.reason, ReleaseReason::NextTimestamp);
+        assert_eq!(r.bar.c, 103.);
+    }
+}
+
+#[test]
+fn context_policy_scope_restore_and_revisions_are_explicit() {
+    let mut f = context_buffer("2026-11-07T09:50:00+03:00", "2026-11-07T09:51:00+03:00");
+    let cutoff = "2026-11-07T10:00:10+03:00";
+    healthy(&mut f, cutoff);
+    let r = f.tick(clock(cutoff), true).unwrap().pop().unwrap();
+    let mut restored = TerminalFinalizer::new_with_context(policy(true), vec![]).unwrap();
+    restored
+        .restore_committed(std::slice::from_ref(&r), clock(cutoff))
+        .unwrap();
+    assert!(restored.buffers.is_empty());
+    assert!(
+        TerminalFinalizer::new(policy(true))
+            .unwrap()
+            .restore_committed(std::slice::from_ref(&r), clock(cutoff))
+            .is_err()
+    );
+    let mut forged = r.clone();
+    forged.proof.policy_sha256 = TerminalFinalizer::new(policy(true)).unwrap().policy_sha256;
+    forged.id = hash(&(&forged.bar, &forged.proof)).unwrap();
+    assert!(
+        TerminalFinalizer::new(policy(true))
+            .unwrap()
+            .restore_committed(&[forged], clock(cutoff))
+            .is_err()
+    );
+    f.commit(&r, clock(cutoff)).unwrap();
+    let mut changed = r.bar.clone();
+    changed.c += 1.;
+    assert!(matches!(
+        f.observe(changed, clock(cutoff)).unwrap(),
+        Observation::Revision { .. }
+    ));
+    assert_eq!(f.last_committed_label("IMOEXF"), Some(r.bar.close_time_utc));
+    let day = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+    let mut excluded = TerminalFinalizer::new_with_context(policy(true), vec![day]).unwrap();
+    healthy(&mut excluded, "2026-11-04T09:51:00+03:00");
+    assert!(
+        excluded
+            .observe(
+                bar("2026-11-04T09:40:00+03:00"),
+                clock("2026-11-04T09:51:00+03:00")
+            )
+            .is_err()
+    );
+    excluded
+        .observe(
+            bar("2026-11-04T09:50:00+03:00"),
+            clock("2026-11-04T09:51:00+03:00"),
+        )
+        .unwrap();
+    healthy(&mut excluded, "2026-11-04T10:00:10+03:00");
+    assert_eq!(
+        excluded
+            .tick(clock("2026-11-04T10:00:10+03:00"), true)
+            .unwrap()[0]
+            .proof
+            .reason,
+        ReleaseReason::ContextIntervalWs
+    );
+}
+
 fn ts(s: &str) -> i64 {
     DateTime::parse_from_rfc3339(s).unwrap().timestamp()
 }

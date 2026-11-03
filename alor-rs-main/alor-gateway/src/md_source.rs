@@ -5,7 +5,7 @@ pub mod storage;
 
 pub use runner::run;
 
-pub const VERSION: &str = "shadow_gateway_ws_closed_m10_v1";
+pub const VERSION: &str = "shadow_gateway_ws_closed_m10_v2";
 pub const MAX_ROWS: usize = 4500;
 pub const MAX_AUDIT_ROWS: usize = 1024;
 

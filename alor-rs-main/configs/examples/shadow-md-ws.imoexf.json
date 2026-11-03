@@ -4,6 +4,7 @@
   "bootstrap_start": "2026-10-29",
   "first_live_session": "2026-11-05",
   "excluded_dates": ["2026-11-04"],
+  "context_finalization": true,
   "gateway_config": "/REPLACE/shadow-md-ws.gateway.toml",
   "gateway_config_sha256": "REPLACE_WITH_ACTUAL_64_CHARACTER_SHA256",
   "terminal": {

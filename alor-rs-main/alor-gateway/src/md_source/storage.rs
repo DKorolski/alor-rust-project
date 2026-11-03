@@ -311,22 +311,25 @@ impl Store {
                         == serde_json::to_value(&release.proof)?,
                 "release proof mismatch"
             );
-            crate::terminal_bar::TerminalFinalizer::new(config.terminal.clone())?
-                .restore_committed(
-                    std::slice::from_ref(release),
-                    crate::terminal_bar::Clock {
-                        utc: published,
-                        monotonic_ms: 0,
-                    },
-                )?;
+            config.finalizer()?.restore_committed(
+                std::slice::from_ref(release),
+                crate::terminal_bar::Clock {
+                    utc: published,
+                    monotonic_ms: 0,
+                },
+            )?;
         } else {
+            let proof = &row.envelope["payload"]["source_proof"];
+            let received = proof["received_at_utc"]
+                .as_i64()
+                .context("historical receipt missing")?;
+            let mode = config.history_import_mode(bar.close_time_utc, received, published)?;
             ensure!(
                 historical
-                    && row.envelope["payload"]["source_proof"]["kind"] == "historical_ws_import"
-                    && row.envelope["payload"]["source_proof"]["received_at_utc"]
-                        .as_i64()
-                        .is_some_and(|received| received >= bar.close_time_utc + 600
-                            && received <= published),
+                    && proof["kind"] == "historical_ws_import"
+                    && proof["import_mode"] == mode
+                    && proof["imported_at_utc"] == published
+                    && proof["generation"].as_u64().is_some_and(|g| g > 0),
                 "invalid historical receipt"
             );
         }
