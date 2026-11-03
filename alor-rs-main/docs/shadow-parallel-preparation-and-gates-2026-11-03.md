@@ -77,6 +77,14 @@ Historical sparse-context bootstrap passing does not close this blocker.
 
 Before new source/model-pair admission, prepare a narrow context-only path:
 
+Preferred bounded design: opt-in finalization of an already observed NON-TRADABLE
+context buffer at its own interval end plus grace, with healthy ACK/generation /
+heartbeat and drained-prefix evidence. No buffer means no candle. This avoids
+waiting for a next context timestamp that may legitimately be absent, without
+increasing regular Live lateness limits. Introduce an explicit context-only
+release reason/provenance and test its restoration. This is a proposed next
+patch, not a behavior already present in the admitted artifact.
+
 1. Keep weekday tradable freshness/late-history/failure limits unchanged.
 2. Give eligible non-tradable context observations explicit receipt/cutoff
    provenance and bounded publication semantics. Do not relabel them timely Live.
@@ -85,6 +93,9 @@ Before new source/model-pair admission, prepare a narrow context-only path:
 4. Reconnect cannot resurrect an old forming buffer or silently insert a quote
    behind the committed prefix. Context arriving after the model cutoff cannot
    rewrite a frozen anchor.
+   Specify bounded actual-history context import separately from active weekday
+   Live history: preserve real arrival/origin, ordering and strict next-model
+   cutoff. Do not globally bypass the existing active-history rejection.
 5. Keep terminal close separate: a healthy clock/WS without the expected real
    terminal candle must not synthesize one or certify a complete session.
 6. Test sparse ordinary context, last context label, duplicate/correction,
@@ -98,3 +109,25 @@ The isolated IMOEXF weekday canary may continue collecting under its existing
 contract, but no weekend-forward or full model-pair acceptance is inferred.
 Live gateway changes remain a later separately reviewed integration/flat rollout.
 Activation dates are conditional; never force admission to meet a calendar date.
+
+## Verification Checkpoint
+
+Clean preparation commit `e7f475578a285c73b7960e6007a0c653c5f48a5d` passed local
+and native Linux scoped checks: 99 gateway library tests, 7 audit tests,
+20 supervisor tests and 4 composed symbol-specific smoke cases. The 99 include
+the explicit known-limitation diagnostic; that count does NOT close the sparse
+forward-context blocker. Local gateway all-target clippy, fmt and diff checks
+passed. No whole-workspace or independent numerical parity claim is made.
+
+Native checks used offline Cargo with forced current-crate rebuild, owned fake
+WS/RESP and PID-verified random-port Redis in a private network namespace, CPU
+50% / memory 2 GiB limits, no credentials or service Redis. Original deployed
+container identities and health were unchanged. This preparation changes no
+production Rust path; the rebuilt source binary matched the already approved
+recovery artifact byte-for-byte. It was not redeployed or rebound to collectors.
+
+The read-only RI report was additionally exercised on an active collector's
+captured committed HEAD under a private-network, read-only-system cgroup. Real
+receipts/results remain private; no source cursor, writer lock, file or service
+was modified by that audit. Future audits can capture a later HEAD without
+relabeling earlier observations or supplying synthetic original receipts.
