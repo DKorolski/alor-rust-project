@@ -27,6 +27,35 @@ struct Received {
     received: i64,
     generation: u64,
 }
+
+struct ReadinessDeadline {
+    unready_since: Option<Duration>,
+}
+impl ReadinessDeadline {
+    fn initial() -> Self {
+        Self {
+            unready_since: Some(Duration::ZERO),
+        }
+    }
+    fn invalidate(&mut self, elapsed: Duration) {
+        // Flapping attempts share one outage budget, not a fresh budget each time.
+        self.unready_since.get_or_insert(elapsed);
+    }
+    fn ready(&mut self) {
+        self.unready_since = None;
+    }
+    fn check(&self, elapsed: Duration) -> Result<()> {
+        if let Some(since) = self.unready_since {
+            ensure!(
+                elapsed
+                    .checked_sub(since)
+                    .is_some_and(|age| age < Duration::from_secs(600)),
+                "WS history readiness deadline"
+            );
+        }
+        Ok(())
+    }
+}
 struct Runner {
     cfg: SourceConfig,
     store: Store,
@@ -37,6 +66,7 @@ struct Runner {
     connected: bool,
     acked: bool,
     history_complete: bool,
+    readiness_deadline: ReadinessDeadline,
     subscribed_at: Option<i64>,
     last_rx: i64,
     sequence: u64,
@@ -73,6 +103,7 @@ impl Runner {
             "queue_drained":drained,"published_rows":self.store.records.len(),
             "last_published_bar_ts":self.store.records.last_key_value().map(|(ts,_)|*ts),
             "audit_rows":self.store.audit_rows,"review_dates":self.store.review_dates,
+            "readiness_wait_seconds":self.readiness_deadline.unready_since.map(|since|self.started.elapsed().saturating_sub(since).as_secs()),
             "order_emission_allowed":false,"config_sha256":digest(&serde_json::to_value(&self.cfg)?)?}))
     }
     fn validate_raw(&self, bar: &BarEvent, received: i64) -> Result<()> {
@@ -213,6 +244,7 @@ impl Runner {
                 self.connected = matches!(event, ConnEvent::Connected);
                 self.acked = false;
                 self.history_complete = false;
+                self.readiness_deadline.invalidate(self.started.elapsed());
                 self.current = None;
                 self.history.clear();
                 self.subscribed_at = None;
@@ -289,6 +321,7 @@ impl Runner {
             self.store.append(&self.cfg, row, &mut self.conn).await?;
         }
         self.history_complete = true;
+        self.readiness_deadline.ready();
         self.feed()?;
         if let Some(current) = self.current.take() {
             self.live(current).await?;
@@ -387,6 +420,7 @@ pub async fn run(config: SourceConfig, root: &Path, mode: &str, fixture: bool) -
         connected: false,
         acked: false,
         history_complete: false,
+        readiness_deadline: ReadinessDeadline::initial(),
         subscribed_at: None,
         last_rx: now,
         sequence: 0,
@@ -417,7 +451,7 @@ pub async fn run(config: SourceConfig, root: &Path, mode: &str, fixture: bool) -
                             for release in runner.core.tick(runner.clock(),true)? {runner.release(release).await?;}
                         }
                     }
-                    ensure!(runner.history_complete||runner.started.elapsed()<Duration::from_secs(600),"WS history startup deadline");
+                    runner.readiness_deadline.check(runner.started.elapsed())?;
                     runner.health(if runner.history_complete&&runner.connected&&runner.acked{"ready"}else{"reconnecting"},events.is_empty())?;
                 }
             }
@@ -443,5 +477,37 @@ pub async fn run(config: SourceConfig, root: &Path, mode: &str, fixture: bool) -
             let _ = runner.health("failed", false);
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn mature_source_gets_a_new_bounded_recovery_period_not_process_age() {
+        let mut deadline = ReadinessDeadline::initial();
+        assert!(deadline.check(Duration::from_secs(599)).is_ok());
+        assert!(deadline.check(Duration::from_secs(600)).is_err());
+        deadline.ready();
+        let mature = Duration::from_secs(10 * 3600);
+        deadline.check(mature).unwrap();
+        deadline.invalidate(mature);
+        deadline.check(mature + Duration::from_secs(1)).unwrap();
+        deadline.check(mature + Duration::from_secs(599)).unwrap();
+        assert!(deadline.check(mature + Duration::from_secs(600)).is_err());
+        deadline.ready();
+        deadline.check(mature + Duration::from_secs(3600)).unwrap();
+    }
+
+    #[test]
+    fn reconnect_flapping_cannot_postpone_readiness_deadline() {
+        let mut deadline = ReadinessDeadline::initial();
+        deadline.invalidate(Duration::from_secs(599));
+        assert!(deadline.check(Duration::from_secs(600)).is_err());
+        deadline.ready();
+        deadline.invalidate(Duration::from_secs(3600));
+        deadline.invalidate(Duration::from_secs(4199));
+        assert!(deadline.check(Duration::from_secs(4200)).is_err());
     }
 }

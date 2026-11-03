@@ -79,6 +79,11 @@ requires ready/history-complete/ACK/connection. Runtime reconnect is tolerated
 only within the bounded WS-receipt budget; stale source or invalid generation
 terminates/latches the worker. Process existence alone is not readiness.
 
+Initial startup and each subsequent unready period have a bounded 600-second
+source history-readiness budget. Process age is not reconnect age, and repeated
+flapping does not reset an ongoing outage budget. Worker freshness limits remain
+stricter and unchanged. See [recovery hardening](shadow-ws-reconnect-readiness-hardening-2026-11-03.md).
+
 Native observation showed requested history arriving before the final subscription
 ACK 200 (396 data frames, then one response). The MD-only transport preserves
 these frames under the requested guid without activating it. It still requires

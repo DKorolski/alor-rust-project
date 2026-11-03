@@ -101,6 +101,8 @@ class OwnedWs:
     def __init__(self, bars):
         self.bars = bars
         self.opcodes, self.errors = [], []
+        self.connections = []
+        self.connection_lock = threading.Lock()
         self.stop = threading.Event()
         self.sock = socket.socket()
         self.sock.bind(('127.0.0.1', 0)); self.sock.listen(); self.sock.settimeout(.2)
@@ -131,6 +133,8 @@ class OwnedWs:
         conn.sendall(header + payload)
 
     def serve(self, conn):
+        with self.connection_lock:
+            self.connections.append(conn)
         try:
             with conn, conn.makefile('rb') as stream:
                 request = b''
@@ -176,6 +180,15 @@ class OwnedWs:
             pass
         except Exception as error:
             self.errors.append(type(error).__name__ + ':' + str(error))
+        finally:
+            with self.connection_lock:
+                self.connections.remove(conn)
+
+    def force_protocol_reset(self):
+        with self.connection_lock:
+            if len(self.connections) != 1:
+                raise AssertionError('expected one owned source socket')
+            self.send(self.connections[0], 3, b'owned-invalid-opcode')
 
     def close(self):
         self.stop.set(); self.sock.close(); self.thread.join(timeout=2)
@@ -285,6 +298,17 @@ skip_history_bars = false
                 count=int(redis('XLEN',source_key));self.assertGreaterEqual(count,202)
                 self.assertEqual(proxy.xadds,count)
                 self.assertEqual(proxy.lost,int(drop_ack))
+                old_generation=json.loads((state/'HEALTH.json').read_text())['generation']
+                ws.force_protocol_reset()
+                for _ in range(400):
+                    self.assertIsNone(p.poll(), 'source stopped during owned reconnect')
+                    health=json.loads((state/'HEALTH.json').read_text())
+                    if health['status']=='ready' and health['generation']>old_generation:
+                        break
+                    time.sleep(.025)
+                else:self.fail('owned WS reconnect readiness timeout')
+                self.assertEqual(redis('XRANGE',source_key,'-','+'),before)
+                self.assertEqual(proxy.xadds,count)
                 template=(Path(__file__).resolve().parents[1]/'configs/examples/reaction-shadow.imoexf-combo.toml').read_text()
                 raw=template.replace('"2026-11-02"',json.dumps(str(first))).replace('REPLACE_WITH_APPROVED_IMOEXF_M10_SOURCE',source_key)
                 raw=raw.replace('excluded_dates = []','excluded_dates = '+json.dumps(cfg['excluded_dates']))
