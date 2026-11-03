@@ -137,3 +137,60 @@ fn source_resume_rejects_incomplete_attempt_and_pending_publication() {
     storage::publish_new(&root.join("pending.json"), &json!({"unknown_ack":true})).unwrap();
     assert!(storage::Store::open(&root, &config, "resume", now).is_err());
 }
+
+#[test]
+fn sparse_context_forward_is_not_certified_by_history_bootstrap() {
+    let mut config = cfg();
+    let calendar = config.terminal.symbols.remove("IMOEXF").unwrap();
+    config.symbol = "USDRUBF".into();
+    config.stream = "shadow.source.closed10m.USDRUBF.test".into();
+    config
+        .terminal
+        .symbols
+        .insert(config.symbol.clone(), calendar);
+    let first = ts("2026-11-07T09:51:00+03:00");
+    let later = ts("2026-11-07T10:20:00+03:00");
+    config.validate(first).unwrap();
+    let mut quote = bar();
+    quote.symbol = config.symbol.clone();
+    quote.close_time_utc = ts("2026-11-07T09:50:00+03:00");
+    assert!(config.context_day(local(first).unwrap().date()));
+    assert!(config.eligible(quote.close_time_utc).unwrap());
+    let mut core = TerminalFinalizer::new(config.terminal.clone()).unwrap();
+    let clock = Clock {
+        utc: first,
+        monotonic_ms: 0,
+    };
+    core.update_feed(
+        FeedEvidence {
+            generation: 1,
+            connected: true,
+            subscribed: true,
+            gap_resolved: true,
+            last_rx_utc: first,
+        },
+        clock,
+    )
+    .unwrap();
+    core.observe_received(quote.clone(), first, clock).unwrap();
+    let clock = Clock {
+        utc: later,
+        monotonic_ms: ((later - first) * 1000) as u64,
+    };
+    core.update_feed(
+        FeedEvidence {
+            generation: 1,
+            connected: true,
+            subscribed: true,
+            gap_resolved: true,
+            last_rx_utc: later,
+        },
+        clock,
+    )
+    .unwrap();
+    quote.close_time_utc = later;
+    // Diagnostic blocker: sparse context still uses the timely-Live path.
+    let error = core.observe_received(quote, later, clock).unwrap_err();
+    assert!(error.to_string().contains("outside publication deadline"));
+    assert_eq!(core.last_committed_label("USDRUBF"), None);
+}

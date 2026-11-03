@@ -201,7 +201,13 @@ class WsSourceSmoke(unittest.TestCase):
     def test_uncertain_xadd_ack_reconciles_without_duplicate_append(self):
         self.smoke(True, tamper=False)
 
-    def smoke(self, drop_ack, tamper):
+    def test_usdrubf_sparse_history_bootstrap_and_resume(self):
+        self.smoke(False, tamper=True, symbol='USDRUBF')
+
+    def test_usdrubf_uncertain_ack_and_reconnect(self):
+        self.smoke(True, tamper=False, symbol='USDRUBF')
+
+    def smoke(self, drop_ack, tamper, symbol='IMOEXF'):
         binary = Path(os.environ['SHADOW_MD_WS_BIN']).resolve(strict=True)
         server_bin = os.environ.get('REDIS_SERVER_BIN') or shutil.which('redis-server')
         cli_bin = os.environ.get('REDIS_CLI_BIN') or shutil.which('redis-cli')
@@ -236,7 +242,7 @@ class WsSourceSmoke(unittest.TestCase):
                     if day.weekday() < 5: prior.append(day)
                     day -= dt.timedelta(days=1)
                 begin = min(prior)
-                source_key = 'shadow.source.closed10m.IMOEXF.owned_fixture'
+                source_key = f'shadow.source.closed10m.{symbol}.owned_fixture'
                 redis('ACL','SETUSER','source','on','>fixture','~'+source_key,'-@all','+xadd','+xrange','+xlen','+ping')
                 redis('ACL','SETUSER','reader','on','>fixture','~'+source_key,'-@all','+xrange','+multi','+exec','+ping')
                 self.assertIn('NOPERM',redis('XADD','cmd.orders.fixture','*','payload','forbidden',reader=True))
@@ -250,6 +256,8 @@ class WsSourceSmoke(unittest.TestCase):
                         total = 55 if day.weekday()>=5 else 101
                         base = int(dt.datetime.combine(day,start,MSK).timestamp())
                         for slot in range(total):
+                            if symbol=='USDRUBF' and day.weekday()>=5 and slot in (8,15,27,40):
+                                continue  # Real history may have absent non-tradable context slots.
                             label=base+slot*600
                             if label<=now:
                                 result.append(dict(time=label,open=100.,high=102.,low=98.,close=101.,volume=1.))
@@ -261,19 +269,19 @@ class WsSourceSmoke(unittest.TestCase):
                 from_ts=int(dt.datetime.combine(begin,dt.time(7),MSK).timestamp())
                 gateway.write_text(f'''portfolio = "__market_data_only__"
 refresh_token = "fixture-not-a-real-token"
-symbols = ["IMOEXF"]
+symbols = ["{symbol}"]
 tf_sec = 600
 from_ts = {from_ts}
 ws_url = "ws://127.0.0.1:{ws.port}"
 oauth_url = "http://127.0.0.1:1/unused-oauth"
 skip_history_bars = false
 ''')
-                cfg=dict(symbol='IMOEXF',stream=source_key,bootstrap_start=str(begin),first_live_session=str(first),
+                cfg=dict(symbol=symbol,stream=source_key,bootstrap_start=str(begin),first_live_session=str(first),
                     excluded_dates=[str(d) for d in excluded],gateway_config=str(gateway),
                     gateway_config_sha256=hashlib.sha256(gateway.read_bytes()).hexdigest(),terminal=dict(
                         enabled=True,first_live_session=str(today),grace_seconds=10,max_lateness_seconds=90,
-                        max_heartbeat_age_seconds=45,max_clock_step_seconds=5,symbols=dict(IMOEXF=dict(
-                            weekday_end='23:50:00',weekend_end='19:00:00',overrides={str(d):None for d in excluded}))))
+                        max_heartbeat_age_seconds=45,max_clock_step_seconds=5,symbols={symbol:dict(
+                            weekday_end='23:50:00',weekend_end='19:00:00',overrides={str(d):None for d in excluded})}))
                 config=root/'source.json';config.write_text(json.dumps(cfg))
                 state=root/'source'
                 env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),'SHADOW_SOURCE_REDIS_URL':f'redis://source:fixture@127.0.0.1:{proxy.port}/0',
@@ -309,8 +317,9 @@ skip_history_bars = false
                 else:self.fail('owned WS reconnect readiness timeout')
                 self.assertEqual(redis('XRANGE',source_key,'-','+'),before)
                 self.assertEqual(proxy.xadds,count)
-                template=(Path(__file__).resolve().parents[1]/'configs/examples/reaction-shadow.imoexf-combo.toml').read_text()
-                raw=template.replace('"2026-11-02"',json.dumps(str(first))).replace('REPLACE_WITH_APPROVED_IMOEXF_M10_SOURCE',source_key)
+                template_name='reaction-shadow.imoexf-combo.toml' if symbol=='IMOEXF' else 'reaction-shadow.usdrubf-h4-w4.toml'
+                template=(Path(__file__).resolve().parents[1]/'configs/examples'/template_name).read_text()
+                raw=template.replace('"2026-11-02"',json.dumps(str(first))).replace(f'REPLACE_WITH_APPROVED_{symbol}_M10_SOURCE',source_key)
                 raw=raw.replace('excluded_dates = []','excluded_dates = '+json.dumps(cfg['excluded_dates']))
                 guard=supervisor.ClosedSourceGuard(state,raw.encode());guard.check()
                 worker=os.environ.get('REACTION_WORKER_BIN')

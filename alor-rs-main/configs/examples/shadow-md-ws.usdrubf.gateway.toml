@@ -1,0 +1,9 @@
+# Preparation template, NOT launch approval. Review forward sparse-context gate.
+# Credentials only through protected ALOR_REFRESH_TOKEN service environment.
+portfolio = "__market_data_only__"
+symbols = ["USDRUBF"]
+tf_sec = 600
+from_ts = 1793246400 # 2026-10-29 07:00 MSK; match source bootstrap_start.
+skip_history_bars = false
+ws_url = "wss://api.alor.ru/ws"
+oauth_url = "https://oauth.alor.ru/refresh"

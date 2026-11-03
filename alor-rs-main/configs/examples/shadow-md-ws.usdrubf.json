@@ -1,0 +1,24 @@
+{
+  "symbol": "USDRUBF",
+  "stream": "shadow.source.closed10m.USDRUBF.REPLACE_GENERATION",
+  "bootstrap_start": "2026-10-29",
+  "first_live_session": "2026-11-05",
+  "excluded_dates": ["2026-11-04"],
+  "gateway_config": "/REPLACE/shadow-md-ws.usdrubf.gateway.toml",
+  "gateway_config_sha256": "REPLACE_WITH_ACTUAL_64_CHARACTER_SHA256",
+  "terminal": {
+    "enabled": true,
+    "first_live_session": "2026-11-03",
+    "grace_seconds": 10,
+    "max_lateness_seconds": 90,
+    "max_heartbeat_age_seconds": 45,
+    "max_clock_step_seconds": 5,
+    "symbols": {
+      "USDRUBF": {
+        "weekday_end": "23:50:00",
+        "weekend_end": "19:00:00",
+        "overrides": {"2026-11-04": null}
+      }
+    }
+  }
+}

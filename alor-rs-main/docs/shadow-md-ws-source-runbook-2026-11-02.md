@@ -5,6 +5,11 @@ It only constructs `WsHub::start_market_data_only`. No CWS, order consumer,
 account subscriptions, strategy execution or broker command publisher is started.
 Live and retained shadow deployments remain unchanged.
 
+See [parallel preparation and gates](shadow-parallel-preparation-and-gates-2026-11-03.md)
+for the read-only RI closing audit, USD symbol-specific preflight and the still
+unresolved sparse forward-context admission blocker. Passing startup/history
+smoke is not permission to admit these new model pairs.
+
 ## Configuration And Origin
 
 Templates: `configs/examples/shadow-md-ws.gateway.toml` and
