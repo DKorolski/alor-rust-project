@@ -664,12 +664,19 @@ Docker cleanup:
 
 ```bash
 docker system df
-docker image prune -f
-docker builder prune -f
+docker image ls --no-trunc --filter dangling=true
 ```
 
-Use `docker system prune -a` only with explicit approval, because it can remove
-images needed for rollback.
+Inventory first; do not run blanket pruning as a routine job. Review exact
+untagged image IDs, age, references from ALL running/stopped containers and
+ongoing builds. Preserve current/rollback tags, offline build bases, data and
+volumes. Approved dangling IDs can be removed with `docker image rm --no-prune`
+without force; a refused removal remains a skip, not permission to escalate.
+
+See [safe build-cache maintenance](safe-build-cache-maintenance.md) for target,
+venv, Docker and before/after checks. Do not assume a Rust target or idle Python
+environment is disposable: a service or scheduled job can execute from it.
+Keep host cache maintenance separate from Redis data retention and state resets.
 
 ## Monitoring Recommendations
 

@@ -26,6 +26,22 @@ omitted to avoid operational confusion.
 - `live-runtime-service-patterns-anti-regression-checklist-2026-05-07.md` -
   shared live service patterns and anti-regression checklist.
 - `failure-test-matrix.md` - failure scenarios and expected behavior.
+- `safe-build-cache-maintenance.md` - reviewed target/venv/Docker cache cleanup,
+  rollback protection and before/after guards; separate from Redis retention.
+
+## Isolated Shadow Preparation
+
+These documents describe opt-in engineering/validation, not automatic promotion
+or a replacement for the production live gateway:
+
+- `shadow-observation-and-live-promotion.md` - isolated observation and promotion
+  boundaries, including legacy contour retention.
+- `shadow-md-ws-source-runbook-2026-11-02.md` - MD-only WS source and terminal
+  collection, with separate source/model readiness.
+- `shadow-ordinary-model-budget-2026-11-04.md` - ordinary collection/processing,
+  queue and unchanged terminal budgets.
+- `reaction-shadow-inactive-worker-preflight-2026-11-04.md` - inactive worker,
+  read-only preparation, reviewed bootstrap and explicit future admission.
 
 ## Strategy And Deployment Contracts
 
