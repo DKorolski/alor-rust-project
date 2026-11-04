@@ -260,6 +260,7 @@ class PreflightTests(unittest.TestCase):
         self.assertIn('ReadOnlyPaths=@SOURCE_STATE@ @CONFIG@', text)
         self.assertIn('IPAddressAllow=@REDIS_IP@/32', text)
         self.assertIn('Restart=no', text)
+        self.assertIn('KillMode=mixed', text)
         for forbidden in ('\n[Install]', '\nWants=', '\nRequires=', 'Restart=always'):
             self.assertNotIn(forbidden, text)
 

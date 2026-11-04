@@ -70,6 +70,10 @@ runs the pinned admission preflight before the supervisor can create anything.
 Missing Conditions skip the unit; invalid or stale approval fails preflight.
 `Restart=no`, cgroup/process limits, read-only source/config, and network access
 only to the dedicated Redis IP apply. Do not add automatic restart as a repair.
+Use `KillMode=mixed`: the initial SIGTERM goes to the supervisor only, so it can
+complete the worker's acknowledged STOP protocol. Only a shutdown timeout kills
+the entire cgroup. `control-group` would signal the child prematurely and can
+turn an otherwise clean operator stop into a failed attempt.
 
 ## Admission After Natural Evidence
 
