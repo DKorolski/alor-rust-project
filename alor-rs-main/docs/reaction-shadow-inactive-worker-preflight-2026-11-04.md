@@ -96,6 +96,8 @@ startup budget; this is an example, not approval of a calendar date.
 4. Stage reviewed, bounded reports under the config's `evidence/` directory,
    readable but not writable by the model user. Create the admission record only
    after human review, and bind each report by SHA256.
+   Repeat the privileged Redis ACL DRYRUN audit if ACLs were reprovisioned; never
+   test write denial by actually sending XADD/DEL/XTRIM with the reader.
 5. Run admission preflight with the same OS user, supplementary source group,
    reader secret and readiness environment as the unit. This still does not
    create a generation or start a worker. Only then explicitly start the unit.
@@ -159,3 +161,25 @@ actual source group and Redis ACL. Also run the negative admission path with
 approval absent; prove no generation/attempt exists and no source/live process
 was restarted. Actual positive admission remains blocked until natural future
 terminal/recovery data and a reviewed final bootstrap exist.
+
+## Staging Checkpoint
+
+Core preflight commit `bc258972fc9efbf5050b7aa4fe0e4519f01efe75` and the
+`KillMode=mixed` follow-up `f6823b742e40c77fe9978c6d28669183554d3385` passed
+18 local preflight tests and 25 existing supervisor tests. The installed scripts/
+unit artifact is pinned to the latter clean commit; Rust source and the previously
+verified source/worker binaries were not changed or rebuilt.
+
+Linux repeated all 43 Python tests in a private network under a dedicated
+non-root OS user. A separate actual preparation probe used that user, read-only
+source group, protected reader EnvironmentFile, and network access only to the
+approved Redis IP. PING/exact-stream XRANGE, source identity/health, hashes and OS
+permissions passed. It selected no bootstrap and created no generation/attempt.
+
+The real negative admission probe failed on missing explicit approval, before
+inspection or generation creation. The installed model unit remains
+inactive/static, PID0, with no admission/spec/env gate files and an empty model
+parent. Existing source processes, failed evidence and all running Docker
+identity/health/restart metadata were unchanged. These are preparation and
+negative-admission results, not real positive admission, model warmup, natural
+terminal/recovery proof, prospective model output or clean-session credit.
