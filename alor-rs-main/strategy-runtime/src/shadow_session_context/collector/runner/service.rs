@@ -11,6 +11,8 @@ pub struct ServicePolicy {
     pub shutdown_timeout_seconds: u64,
     pub max_queue_age_seconds: u64,
     pub max_model_lateness_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ordinary_model_lateness_seconds: Option<u64>,
     pub max_sessions: usize,
 }
 impl ServicePolicy {
@@ -30,7 +32,28 @@ impl ServicePolicy {
                 && self.max_queue_age_seconds <= self.max_model_lateness_seconds,
             "poll/queue/model age budgets are inconsistent"
         );
+        if let Some(limit) = self.max_ordinary_model_lateness_seconds {
+            ensure!(
+                (self.max_model_lateness_seconds..=360).contains(&limit),
+                "invalid bounded ordinary model lateness"
+            );
+        }
         Ok(())
+    }
+
+    fn ordinary_lateness_seconds(&self) -> u64 {
+        self.max_ordinary_model_lateness_seconds
+            .unwrap_or(self.max_model_lateness_seconds)
+    }
+
+    pub(super) fn lateness_for_label(&self, label: i64) -> Result<u64> {
+        Ok(
+            if local(label)?.time() == chrono::NaiveTime::from_hms_opt(23, 40, 0).unwrap() {
+                self.max_model_lateness_seconds
+            } else {
+                self.ordinary_lateness_seconds()
+            },
+        )
     }
 }
 
@@ -61,6 +84,10 @@ pub struct ServiceStatus {
     pub resource_state: &'static str,
     pub max_unobserved_queue_age_seconds: i64,
     pub max_unobserved_model_lateness_seconds: i64,
+    pub max_unobserved_ordinary_lateness_seconds: i64,
+    pub max_unobserved_terminal_lateness_seconds: i64,
+    pub ordinary_model_lateness_limit_seconds: u64,
+    pub terminal_model_lateness_limit_seconds: u64,
     pub order_emission_allowed: bool,
 }
 
@@ -103,12 +130,12 @@ impl ServiceGuard {
         })
     }
 
-    fn queue_ages(&self, runner: &ReactionShadowRunner, now: i64) -> Result<(i64, i64)> {
+    fn queue_ages(&self, runner: &ReactionShadowRunner, now: i64) -> Result<(i64, i64, i64)> {
         if runner.state.observed == runner.collector.journal.last_sequence() {
-            return Ok((0, 0));
+            return Ok((0, 0, 0));
         }
         let identity = &runner.header.identities[0];
-        let mut ages = (0, 0);
+        let mut ages = (0, 0, 0);
         for receipt in runner
             .collector
             .prefix(runner.collector.journal.last_sequence())?
@@ -134,7 +161,12 @@ impl ServiceGuard {
                 .received_at_utc
                 .context("missing original receipt time")?;
             ages.0 = ages.0.max(now - received);
-            ages.1 = ages.1.max(now - bar.close_time_utc - 600);
+            let model_age = now - bar.close_time_utc - 600;
+            if dt.time() == chrono::NaiveTime::from_hms_opt(23, 40, 0).unwrap() {
+                ages.2 = ages.2.max(model_age);
+            } else {
+                ages.1 = ages.1.max(model_age);
+            }
         }
         Ok(ages)
     }
@@ -164,8 +196,10 @@ impl ServiceGuard {
             "model receipt queue age exceeded; no retrospective observations"
         );
         ensure!(
-            status.max_unobserved_model_lateness_seconds
-                <= self.policy.max_model_lateness_seconds as i64,
+            status.max_unobserved_ordinary_lateness_seconds
+                <= self.policy.ordinary_lateness_seconds() as i64
+                && status.max_unobserved_terminal_lateness_seconds
+                    <= self.policy.max_model_lateness_seconds as i64,
             "closed-bar source lateness exceeded; no retrospective observations"
         );
         Ok(())
@@ -185,7 +219,7 @@ impl ServiceGuard {
                     .last_key_value()
                     .map_or(identity.cutoff(day), |(ts, _)| ts + 600);
                 ensure!(
-                    now <= next_label + 600 + self.policy.max_model_lateness_seconds as i64,
+                    now <= next_label + 600 + self.policy.lateness_for_label(next_label)? as i64,
                     "expected live M10/EOD bar missing past deadline"
                 );
             } else {
@@ -208,7 +242,8 @@ impl ServiceGuard {
     pub fn status(&self, runner: &ReactionShadowRunner) -> Result<ServiceStatus> {
         let status = runner.status();
         let ingress = runner.collector.journal.usage();
-        let (queue_age, model_age) = self.queue_ages(runner, runner.collector.journal.now()?)?;
+        let (queue_age, ordinary_age, terminal_age) =
+            self.queue_ages(runner, runner.collector.journal.now()?)?;
         let started = runner.state.stores[0].frozen.len();
         let last_complete = if status.session_complete {
             status.session_date
@@ -239,7 +274,11 @@ impl ServiceGuard {
             completed,
             resource_state: resource_state(&usage),
             max_unobserved_queue_age_seconds: queue_age,
-            max_unobserved_model_lateness_seconds: model_age,
+            max_unobserved_model_lateness_seconds: ordinary_age.max(terminal_age),
+            max_unobserved_ordinary_lateness_seconds: ordinary_age,
+            max_unobserved_terminal_lateness_seconds: terminal_age,
+            ordinary_model_lateness_limit_seconds: self.policy.ordinary_lateness_seconds(),
+            terminal_model_lateness_limit_seconds: self.policy.max_model_lateness_seconds,
             order_emission_allowed: false,
         })
     }

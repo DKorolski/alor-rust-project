@@ -146,6 +146,8 @@ engine = "imoexf"
         if v3:
             cfg["ordinary_observation_max_lateness_seconds"] = 90
             cfg["terminal"]["max_lateness_seconds"] = 90
+            policy = {**POLICY, "max_model_lateness_seconds": 120, "max_queue_age_seconds": 30}
+            spec += ("[policy]\n" + "\n".join(f"{k} = {v}" for k, v in policy.items()) + "\n").encode()
         sha = service.hashlib.sha256(json.dumps(cfg, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         version = "shadow_gateway_ws_closed_m10_v3" if v3 else "shadow_gateway_ws_closed_m10_v2" if v2 else "shadow_gateway_ws_closed_m10_v1"
         (root / "manifest.json").write_text(json.dumps(dict(version=version, config=cfg, config_sha256=sha)))
@@ -192,6 +194,37 @@ engine = "imoexf"
         (root / "manifest.json").write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, "explicit context"):
             service.ClosedSourceGuard(root, spec)
+
+    def test_ws_v3_rejects_collection_model_budget_mismatch_before_admission(self):
+        root, _, spec, _ = self.ws_source(v3=True)
+        manifest = json.loads((root / "manifest.json").read_text())
+        cfg = manifest["config"]
+        cfg["ordinary_observation_max_lateness_seconds"] = 300
+        manifest["config_sha256"] = service.hashlib.sha256(json.dumps(
+            cfg, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        health = json.loads((root / "HEALTH.json").read_text())
+        health["config_sha256"] = manifest["config_sha256"]
+        (root / "HEALTH.json").write_text(json.dumps(health))
+        with self.assertRaisesRegex(ValueError, "headroom"):
+            service.ClosedSourceGuard(root, spec)
+        # Widen only ordinary processing, never the EOD/cutoff or queue limits.
+        widened = spec + b"max_ordinary_model_lateness_seconds = 360\n"
+        guard = service.ClosedSourceGuard(root, widened)
+        guard.check()
+        with self.assertRaisesRegex(ValueError, "headroom"):
+            service.ClosedSourceGuard(root, widened.replace(
+                b"max_model_lateness_seconds = 120", b"max_model_lateness_seconds = 119"))
+
+    def test_ordinary_model_policy_is_explicit_and_bounded(self):
+        base = ("[runner]\n[policy]\n" + "\n".join(f"{k} = {v}" for k, v in POLICY.items()) + "\n").encode()
+        self.assertNotIn(service.ORDINARY_LIMIT, service.policy_from_spec(base))
+        self.assertEqual(service.policy_from_spec(base + b"max_ordinary_model_lateness_seconds = 360\n")[service.ORDINARY_LIMIT], 360)
+        for invalid in (b"0", b"59", b"361", b"true", b"360.0"):
+            with self.assertRaises(ValueError):
+                service.policy_from_spec(base + b"max_ordinary_model_lateness_seconds = " + invalid + b"\n")
+        with self.assertRaises(ValueError):
+            service.policy_from_spec(base + b"unknown_ordinary_model_limit = 360\n")
 
     def test_ws_v1_does_not_accept_v2_context_policy(self):
         root, _, spec, _ = self.ws_source()

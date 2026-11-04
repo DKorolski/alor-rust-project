@@ -11,6 +11,12 @@ This is NOT a model freshness waiver. V1/v2 states and failed generations cannot
 be upgraded/resumed with the new binary; source-only admission requires a fresh
 generation and explicitly reviewed dates.
 
+For a new USD model pair, also review the separate
+[ordinary model budget](shadow-ordinary-model-budget-2026-11-04.md): source 300,
+ordinary processing 360, queue 30, terminal processing 120. The supervisor checks
+collection/processing headroom before admission. No existing live/IMOEXF/RI
+policy or failed generation is changed by that opt-in shadow launch contract.
+
 See [parallel preparation and gates](shadow-parallel-preparation-and-gates-2026-11-03.md)
 for the read-only RI closing audit and USD symbol-specific preflight. The v1
 canary has a known sparse forward-context limitation. The separately versioned

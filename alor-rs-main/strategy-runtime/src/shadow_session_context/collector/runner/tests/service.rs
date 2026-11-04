@@ -11,6 +11,7 @@ fn policy() -> ServicePolicy {
         shutdown_timeout_seconds: 15,
         max_queue_age_seconds: 30,
         max_model_lateness_seconds: 120,
+        max_ordinary_model_lateness_seconds: None,
         max_sessions: 20,
     }
 }
@@ -143,6 +144,75 @@ fn ordinary_125s_evidence_does_not_waive_model_120s_freshness() {
 }
 
 #[test]
+fn ordinary_model_budget_is_opt_in_bounded_and_keeps_legacy_serialization() {
+    let legacy = toml::to_string(&policy()).unwrap();
+    assert!(!legacy.contains("max_ordinary_model_lateness_seconds"));
+    let restored: ServicePolicy = toml::from_str(&legacy).unwrap();
+    assert_eq!(restored.max_ordinary_model_lateness_seconds, None);
+    for limit in [0, 119, 361] {
+        let mut limits = policy();
+        limits.max_ordinary_model_lateness_seconds = Some(limit);
+        assert!(limits.validate().is_err());
+    }
+    let mut limits = policy();
+    limits.max_ordinary_model_lateness_seconds = Some(360);
+    limits.validate().unwrap();
+    assert_eq!(
+        limits
+            .lateness_for_label(epoch("2026-10-26 07:00"))
+            .unwrap(),
+        360
+    );
+    assert_eq!(
+        limits
+            .lateness_for_label(epoch("2026-10-26 23:40"))
+            .unwrap(),
+        120
+    );
+    let usd: LaunchSpec = toml::from_str(include_str!(
+        "../../../../../../configs/examples/reaction-shadow.usdrubf-h4-w4.toml"
+    ))
+    .unwrap();
+    assert_eq!(usd.policy.max_ordinary_model_lateness_seconds, Some(360));
+}
+
+#[test]
+fn ordinary_model_budget_checks_age_queue_and_terminal_independently() {
+    for (label, age, queue_age, accepted) in [
+        ("07:00", 125, 0, true),
+        ("07:00", 291, 0, true),
+        ("07:00", 330, 30, true),
+        ("07:00", 360, 0, true),
+        ("07:00", 361, 0, false),
+        ("07:00", 200, 31, false),
+        ("23:40", 120, 0, true),
+        ("23:40", 121, 0, false),
+    ] {
+        let (_temp, mut r) = create("USDRUBF");
+        let mut limits = policy();
+        limits.max_ordinary_model_lateness_seconds = Some(360);
+        let guard = ServiceGuard::new(&r, limits, epoch("2026-10-26 06:59")).unwrap();
+        let input = bar("USDRUBF", epoch(&format!("2026-10-26 {label}")), 100.);
+        now(input.close_time_utc + 600 + age - queue_age);
+        append(&mut r, &input);
+        now(input.close_time_utc + 600 + age);
+        let before = r.state.model_hash().unwrap();
+        let status = guard.status(&r).unwrap();
+        assert_eq!(status.max_unobserved_model_lateness_seconds, age);
+        assert_eq!(status.max_unobserved_queue_age_seconds, queue_age);
+        assert_eq!(status.ordinary_model_lateness_limit_seconds, 360);
+        assert_eq!(status.terminal_model_lateness_limit_seconds, 120);
+        assert_eq!(
+            guard.check_model_ages(&status).is_ok(),
+            accepted,
+            "{label} {age}/{queue_age}"
+        );
+        assert_eq!(r.state.model_hash().unwrap(), before);
+        assert!(!status.order_emission_allowed);
+    }
+}
+
+#[test]
 fn reaction_service_complete_generation_is_not_restartable() {
     let (_temp, mut r) = create("IMOEXF");
     let mut limits = policy();
@@ -193,11 +263,20 @@ async fn reaction_service_readonly_redis_enforces_age_before_model_and_missing_b
         "queue_delay",
         "missing_bar",
         "startup_deadline",
+        "ordinary_delayed_eod",
+        "ordinary_missing",
+        "terminal_missing",
     ] {
         let (_temp, mut r) = create("USDRUBF");
         let mut limits = policy();
-        if fault == "clean_eod" {
+        if fault == "clean_eod" || fault == "ordinary_delayed_eod" {
             limits.max_sessions = 1;
+        }
+        if matches!(
+            fault,
+            "ordinary_delayed_eod" | "ordinary_missing" | "terminal_missing"
+        ) {
+            limits.max_ordinary_model_lateness_seconds = Some(360);
         }
         let mut guard = ServiceGuard::new(&r, limits, epoch("2026-10-26 06:59")).unwrap();
         if fault == "startup_deadline" {
@@ -237,9 +316,17 @@ async fn reaction_service_readonly_redis_enforces_age_before_model_and_missing_b
         );
         let before = r.log.count();
         let b = bar("USDRUBF", epoch("2026-10-26 07:00"), 100.);
-        if fault == "clean_eod" {
+        if matches!(
+            fault,
+            "clean_eod" | "ordinary_delayed_eod" | "terminal_missing"
+        ) {
             let mut completed = false;
-            for slot in 0..101 {
+            let slots = if fault == "terminal_missing" {
+                100
+            } else {
+                101
+            };
+            for slot in 0..slots {
                 let price = [100.1, 100.12, 99.4, 99.6]
                     .get(slot)
                     .copied()
@@ -261,13 +348,33 @@ async fn reaction_service_readonly_redis_enforces_age_before_model_and_missing_b
                     .query_async(&mut admin)
                     .await
                     .unwrap();
-                now(input.close_time_utc + 600);
+                let delay = if fault != "clean_eod" && slot < 100 {
+                    [125, 291, 300][slot % 3]
+                } else {
+                    0
+                };
+                now(input.close_time_utc + 600 + delay);
                 let status = guard.poll_once(&mut r, &mut reader).await.unwrap();
-                assert_eq!(status.completed, slot == 100);
+                assert_eq!(status.completed, slot == 100 && fault != "terminal_missing");
                 assert!(!status.order_emission_allowed);
                 completed = status.completed;
             }
-            assert!(completed && r.status().session_complete);
+            if fault == "terminal_missing" {
+                let terminal_close = epoch("2026-10-26 23:40") + 600;
+                now(terminal_close + 120);
+                guard.poll_once(&mut r, &mut reader).await.unwrap();
+                let hash = r.state.model_hash().unwrap();
+                now(terminal_close + 121);
+                let error = guard.poll_once(&mut r, &mut reader).await.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("live M10/EOD bar missing"),
+                    "{error:#}"
+                );
+                assert_eq!(r.state.model_hash().unwrap(), hash);
+                assert!(r.status().failed);
+            } else {
+                assert!(completed && r.status().session_complete);
+            }
             assert!(
                 !r.state.states().unwrap().unwrap()[0]["model"]["state"]["trades"]
                     .as_array()
@@ -307,6 +414,11 @@ async fn reaction_service_readonly_redis_enforces_age_before_model_and_missing_b
                 now(b.close_time_utc + 600);
                 append(&mut r, &b);
                 now(b.close_time_utc + 631);
+            }
+            "ordinary_missing" => {
+                now(b.close_time_utc + 960);
+                guard.poll_once(&mut r, &mut reader).await.unwrap();
+                now(b.close_time_utc + 961);
             }
             _ => now(b.close_time_utc + 721),
         }

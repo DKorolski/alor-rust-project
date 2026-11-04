@@ -318,6 +318,7 @@ async fn reaction_bootstrap_readonly_redis_skips_10k_backlog_and_checks_boundari
         shutdown_timeout_seconds: 15,
         max_queue_age_seconds: 30,
         max_model_lateness_seconds: 120,
+        max_ordinary_model_lateness_seconds: None,
         max_sessions: 20,
     };
     let mut guard = ServiceGuard::new(&r, policy, epoch("2026-10-26 06:59")).unwrap();

@@ -28,4 +28,5 @@ poll_interval_seconds = 5
 shutdown_timeout_seconds = 15
 max_queue_age_seconds = 30
 max_model_lateness_seconds = 120
+max_ordinary_model_lateness_seconds = 360
 max_sessions = 20

@@ -49,7 +49,7 @@ Delayed-ordinary proofs cannot be used to relax either contract.
 
 ## Model Safety Is Unchanged
 
-The supplied reaction service policy still has queue age 30 seconds and model
+The initial source-v3 checkpoint's reaction service policy has queue age 30 seconds and model
 lateness 120 seconds. At 125 seconds an active model fails closed BEFORE numerical
 advancement; it may already have failed the missing-bar deadline before the
 source receives that candle. The source can retain evidence independently.
@@ -60,6 +60,12 @@ latency. Changing a model freshness budget would require separate controlled
 review/evidence. Do not describe successful collection as a clean model session.
 When evaluating delays, distinguish bootstrap/context dates from active model
 dates and use the consumer's own receipt and durability clocks.
+
+The separately approved [ordinary model budget follow-up](shadow-ordinary-model-budget-2026-11-04.md)
+now provides an explicit USD-only 360-second ordinary processing allowance.
+The old absent-field behavior, 120-second terminal/cutoff checks and 30-second
+queue bound are preserved. This is a new immutable launch policy, not a waiver
+or automatic admission for any existing source/model generation.
 
 The model-side code change only extracts the existing unchanged age checks for
 a direct regression test. Neither limits nor failure semantics are retuned.

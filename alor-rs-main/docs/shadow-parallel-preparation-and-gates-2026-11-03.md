@@ -11,6 +11,11 @@ ordinary-bar failure and a source price revision prevent treating initial v2
 readiness/terminal proof as unconditional model GO. Preserve existing generations
 and review new activation/source/revision evidence explicitly.
 
+The [ordinary model budget follow-up](shadow-ordinary-model-budget-2026-11-04.md)
+adds an opt-in USD 360-second ordinary processing limit with unchanged terminal,
+queue and cutoff checks. Native artifact verification and natural source/model
+admission gates remain separate; existing generations are not migrated in place.
+
 ## RI Closing Receipt Audit
 
 `scripts/audit_ri_closing_receipts.py` reads an explicit generation directory.

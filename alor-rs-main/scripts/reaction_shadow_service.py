@@ -21,6 +21,7 @@ LIMITS = dict(startup_timeout_seconds=900, poll_timeout_seconds=120,
               poll_interval_seconds=30, shutdown_timeout_seconds=30,
               max_queue_age_seconds=120, max_model_lateness_seconds=300,
               max_sessions=20)
+ORDINARY_LIMIT = "max_ordinary_model_lateness_seconds"
 WORKER_REASONS = {"queue_age", "source_lateness", "missing_model_bar", "readiness_deadline",
                   "incomplete_session_resume", "anchors_not_ready", "storage_maintenance",
                   "source_cursor_missing", "source_cursor_changed", "supervisor_lost", "worker_error"}
@@ -71,7 +72,8 @@ def publish(path, value):
 
 def policy_from_spec(raw):
     spec = tomllib.loads(raw.decode())
-    if set(spec) != {"runner", "policy"} or set(spec["policy"]) != set(LIMITS):
+    if (set(spec) != {"runner", "policy"}
+            or set(spec["policy"]) not in (set(LIMITS), set(LIMITS) | {ORDINARY_LIMIT})):
         raise ValueError("explicit runner and complete bounded service policy required")
     policy = spec["policy"]
     for key, maximum in LIMITS.items():
@@ -79,6 +81,9 @@ def policy_from_spec(raw):
             raise ValueError("invalid bounded service policy")
     if not policy["poll_interval_seconds"] < policy["max_queue_age_seconds"] <= policy["max_model_lateness_seconds"]:
         raise ValueError("inconsistent poll/queue/model age budgets")
+    ordinary = policy.get(ORDINARY_LIMIT, policy["max_model_lateness_seconds"])
+    if type(ordinary) is not int or not policy["max_model_lateness_seconds"] <= ordinary <= 360:
+        raise ValueError("invalid bounded ordinary model lateness")
     return policy
 
 
@@ -116,6 +121,11 @@ class ClosedSourceGuard:
                 limit = cfg.get("ordinary_observation_max_lateness_seconds")
                 if (type(limit) is not int or not cfg["terminal"]["max_lateness_seconds"] <= limit <= 300):
                     raise ValueError("WS v3 requires bounded ordinary collection policy")
+                policy = policy_from_spec(spec)
+                ordinary = policy.get(ORDINARY_LIMIT, policy["max_model_lateness_seconds"])
+                if (ordinary < limit + policy["max_queue_age_seconds"]
+                        or policy["max_model_lateness_seconds"] < cfg["terminal"]["max_lateness_seconds"] + policy["max_queue_age_seconds"]):
+                    raise ValueError("source/model budgets require collection plus queue headroom")
             if set(cfg) != fields:
                 raise ValueError("unexpected WS source schema")
             terminal = cfg["terminal"]
