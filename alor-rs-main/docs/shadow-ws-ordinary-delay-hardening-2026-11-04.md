@@ -110,3 +110,17 @@ separate historical sensitivity export passed on 12 cases / six paired traces.
 Supervisor 23 tests, audit 7 tests and four composed CLI smoke cases passed.
 Both changed crates passed all-target clippy with warnings denied, fmt and diff
 checks. Linux artifact verification and operational rollout remain separate.
+
+Native checkpoint: clean `5e59027ede881e257eaef45e1acb793398f827c4` passed 107
+gateway library tests, both explicitly invoked owned-Redis pipelines, the runtime
+125/120-second model gate test, seven audit tests, 23 supervisor tests and four
+CLI smoke cases. Offline rebuilt source, private network, CPU 50% / memory 2 GiB;
+about 334 seconds. Running-container identity/health/restart metadata was unchanged.
+Source binary SHA256:
+`5a97e11fc9227e2c16802f7b595b60d526957952364004500cbe5b6809d8ee67`.
+
+The historical price-sensitivity export was independently repeated on the native
+runtime test binary in another private-network cgroup (CPU 50%, memory 1 GiB).
+All six paired traces again had zero differing engine/per-bar outputs. This
+repeats the narrowly scoped numerical result, not original receipt or live parity.
+No v3 service was installed, no failed generation resumed, and no model admitted.

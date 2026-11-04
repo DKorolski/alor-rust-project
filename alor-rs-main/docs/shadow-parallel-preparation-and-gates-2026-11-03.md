@@ -5,6 +5,12 @@ specific smoke, while the reconnect-hardened IMOEXF source-only canary runs.
 No live, legacy shadow, active collector source, model parameter or broker route
 is changed. Template/preflight completion is not admission or promotion.
 
+Follow-up: [v3 ordinary delay hardening](shadow-ws-ordinary-delay-hardening-2026-11-04.md)
+separates bounded collection from the unchanged model freshness gate. The v2
+ordinary-bar failure and a source price revision prevent treating initial v2
+readiness/terminal proof as unconditional model GO. Preserve existing generations
+and review new activation/source/revision evidence explicitly.
+
 ## RI Closing Receipt Audit
 
 `scripts/audit_ri_closing_receipts.py` reads an explicit generation directory.
