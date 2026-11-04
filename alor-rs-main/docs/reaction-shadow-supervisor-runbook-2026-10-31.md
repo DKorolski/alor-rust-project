@@ -49,6 +49,11 @@ calendar/source review. Keep frozen costs: IMOEXF rate per component per side
 
 ## Bootstrap and Readiness
 
+For the prepared USD WS v3 pair, use the
+[inactive unit / read-only preflight](reaction-shadow-inactive-worker-preflight-2026-11-04.md).
+Preparation creates no bootstrap or model generation; explicit same-morning
+admission and fresh Rust bootstrap inspection remain required before activation.
+
 Reaction modes: prospective context warmup, or explicit bounded history import.
 The model needs previous/previous2, not an arbitrary 10,000-bar replay. Choose
 2-4 complete eligible regular sessions, normally three, plus intervening context.
