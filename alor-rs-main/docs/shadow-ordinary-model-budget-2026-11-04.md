@@ -33,6 +33,9 @@ Health reports ordinary/terminal ages and effective limits separately, retaining
 the aggregate model age for compatibility. Actual receipts and publication
 timestamps are never backdated; late rows remain identifiable source evidence.
 Changing this allowance cannot repair past failed or incomplete sessions.
+Source health's `consumer_owned_unchanged` means the source does not waive the
+consumer's configured checks; the separately pinned worker policy, not that
+source-health string, supplies its effective numerical age limits.
 
 For a v3 source the supervisor rejects admission unless ordinary model budget
 covers source collection plus queue budget, and terminal model budget covers
@@ -85,3 +88,27 @@ default suite (run explicitly in native verification). Supervisor: 25 passed;
 closing audit: seven passed; composed actual-worker WS/Redis CLI: four passed.
 Runtime all-target clippy with warnings denied, fmt and diff checks passed.
 Native artifact verification and natural operational admission are separate gates.
+
+## Native Checkpoint
+
+Clean artifact `67ef210913a9518277814f00e0401ef52d8febc6` passed on Linux:
+107 gateway library tests, both separately invoked owned source pipelines,
+eight service unit tests, the full owned-Redis service integration, seven audit,
+25 supervisor and four composed WS/Redis CLI smoke cases. The CLI cases used
+the newly rebuilt worker. This native scope is not a rerun of all 502 runtime
+library tests; those passed locally.
+
+The probe used a private network, owned PID-verified Redis, CPU 50%, memory 2 GiB,
+no broker credentials or service Redis. It completed in about 710 seconds and
+left existing Docker identity/start/restart/health metadata unchanged.
+Source SHA256:
+`5a97e11fc9227e2c16802f7b595b60d526957952364004500cbe5b6809d8ee67`.
+Rebuilt worker SHA256:
+`74446c54f45705fbc56c1e553634929d6607bb13b09e5a349a3657994b75f02b`.
+
+A fresh USD-only source canary was installed after that gate. Its captured
+bootstrap prefix matched Redis objects with unique IDs; source health was ready,
+with no pending publication or automatic restart. Old sources, failed evidence,
+RI and live deployments were preserved. The model spec is prepared, NOT admitted.
+Bootstrap/source readiness is not a natural terminal/recovery proof, prospective
+model output, clean-session credit or permission for automatic promotion.
