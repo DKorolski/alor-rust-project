@@ -1,5 +1,143 @@
 use super::*;
 
+#[test]
+fn ordinary_collection_delay_is_opt_in_and_never_a_timely_terminal_proof() {
+    for (limit, accepted) in [(90, false), (125, true), (300, true)] {
+        let mut f = TerminalFinalizer::new_with_observation(policy(true), vec![], limit).unwrap();
+        healthy(&mut f, "2026-11-03T19:50:03+03:00");
+        f.observe(
+            bar("2026-11-03T19:50:00+03:00"),
+            clock("2026-11-03T19:50:03+03:00"),
+        )
+        .unwrap();
+        healthy(&mut f, "2026-11-03T20:02:05+03:00");
+        let result = f.observe(
+            bar("2026-11-03T20:00:00+03:00"),
+            clock("2026-11-03T20:02:05+03:00"),
+        );
+        if !accepted {
+            assert!(result.is_err());
+            continue;
+        }
+        let Observation::Ready(r) = result.unwrap() else {
+            panic!()
+        };
+        assert_eq!(r.proof.reason, ReleaseReason::NextTimestampDelayed);
+        assert_eq!(r.proof.observation_cutoff_utc - r.proof.closed_at_utc, 125);
+        assert_eq!(
+            r.proof.first_received_at_utc,
+            ts("2026-11-03T19:50:03+03:00")
+        );
+        assert_eq!(f.last_committed_label("IMOEXF"), None);
+        let mut restored =
+            TerminalFinalizer::new_with_observation(policy(true), vec![], limit).unwrap();
+        restored
+            .restore_committed(std::slice::from_ref(&r), clock("2026-11-03T20:02:05+03:00"))
+            .unwrap();
+        assert!(
+            TerminalFinalizer::new_with_context(policy(true), vec![])
+                .unwrap()
+                .restore_committed(std::slice::from_ref(&r), clock("2026-11-03T20:02:05+03:00"))
+                .is_err()
+        );
+        let mut forged = r.clone();
+        forged.proof.reason = ReleaseReason::NextTimestamp;
+        forged.id = hash(&(&forged.bar, &forged.proof)).unwrap();
+        assert!(
+            TerminalFinalizer::new_with_observation(policy(true), vec![], limit)
+                .unwrap()
+                .restore_committed(&[forged], clock("2026-11-03T20:02:05+03:00"))
+                .is_err()
+        );
+        f.commit(&r, clock("2026-11-03T20:02:05+03:00")).unwrap();
+        healthy(&mut f, "2026-11-03T20:10:01+03:00");
+        let Observation::Ready(next) = f
+            .observe(
+                bar("2026-11-03T20:10:00+03:00"),
+                clock("2026-11-03T20:10:01+03:00"),
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(next.proof.reason, ReleaseReason::NextTimestamp);
+    }
+}
+
+#[test]
+fn ordinary_delay_budget_never_relaxes_context_terminal_or_feed_limits() {
+    for (label, receipt, next) in [
+        (
+            "2026-11-03T19:50:00+03:00",
+            "2026-11-03T19:50:03+03:00",
+            "2026-11-03T20:05:01+03:00",
+        ),
+        (
+            "2026-11-03T23:40:00+03:00",
+            "2026-11-03T23:49:59+03:00",
+            "2026-11-03T23:52:05+03:00",
+        ),
+        (
+            "2026-11-07T10:00:00+03:00",
+            "2026-11-07T10:00:03+03:00",
+            "2026-11-07T10:12:05+03:00",
+        ),
+    ] {
+        let mut f = TerminalFinalizer::new_with_observation(policy(true), vec![], 300).unwrap();
+        healthy(&mut f, receipt);
+        f.observe(bar(label), clock(receipt)).unwrap();
+        healthy(&mut f, next);
+        let next_label = if label.contains("23:40") {
+            "2026-11-03T23:50:00+03:00"
+        } else if label.contains("11-07") {
+            "2026-11-07T10:10:00+03:00"
+        } else {
+            "2026-11-03T20:00:00+03:00"
+        };
+        assert!(f.observe(bar(next_label), clock(next)).is_err());
+        assert_eq!(f.last_committed_label("IMOEXF"), None);
+    }
+    for limit in [0, 89, 301] {
+        assert!(TerminalFinalizer::new_with_observation(policy(true), vec![], limit).is_err());
+    }
+    let mut boundary = TerminalFinalizer::new_with_observation(policy(true), vec![], 300).unwrap();
+    healthy(&mut boundary, "2026-11-03T19:50:03+03:00");
+    boundary
+        .observe(
+            bar("2026-11-03T19:50:00+03:00"),
+            clock("2026-11-03T19:50:03+03:00"),
+        )
+        .unwrap();
+    healthy(&mut boundary, "2026-11-03T20:05:00+03:00");
+    let Observation::Ready(last) = boundary
+        .observe(
+            bar("2026-11-03T20:00:00+03:00"),
+            clock("2026-11-03T20:05:00+03:00"),
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        last.proof.observation_cutoff_utc - last.proof.closed_at_utc,
+        300
+    );
+    let mut f = TerminalFinalizer::new_with_observation(policy(true), vec![], 300).unwrap();
+    healthy(&mut f, "2026-11-03T19:50:03+03:00");
+    f.observe(
+        bar("2026-11-03T19:50:00+03:00"),
+        clock("2026-11-03T19:50:03+03:00"),
+    )
+    .unwrap();
+    assert!(
+        f.observe(
+            bar("2026-11-03T20:00:00+03:00"),
+            clock("2026-11-03T20:02:05+03:00")
+        )
+        .is_err()
+    );
+}
+
 fn context_buffer(label: &str, received: &str) -> TerminalFinalizer {
     let mut f = TerminalFinalizer::new_with_context(policy(true), vec![]).unwrap();
     healthy(&mut f, received);

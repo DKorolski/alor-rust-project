@@ -1,4 +1,4 @@
-# Preparation template, NOT launch approval. Review forward sparse-context gate.
+# Preparation template, NOT launch approval. Review v3 collection/model freshness gates.
 # Credentials only through protected ALOR_REFRESH_TOKEN service environment.
 portfolio = "__market_data_only__"
 symbols = ["USDRUBF"]

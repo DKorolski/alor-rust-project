@@ -117,6 +117,7 @@ pub struct FeedEvidence {
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseReason {
     NextTimestamp,
+    NextTimestampDelayed,
     SessionBoundaryWs,
     ContextIntervalWs,
 }
@@ -185,6 +186,7 @@ pub struct TerminalFinalizer {
     buffers: BTreeMap<String, Slot>,
     committed: BTreeMap<String, VecDeque<Release>>,
     context_dates: Option<BTreeSet<NaiveDate>>,
+    ordinary_lateness_seconds: Option<i64>,
 }
 
 fn hash(value: &impl Serialize) -> Result<String> {
@@ -208,7 +210,7 @@ fn same_bar(a: &BarEvent, b: &BarEvent) -> bool {
 
 impl TerminalFinalizer {
     pub fn new(policy: TerminalPolicy) -> Result<Self> {
-        Self::construct(policy, None)
+        Self::construct(policy, None, None)
     }
 
     /// Opt-in non-tradable weekends/exclusions. Default Trading callers stay unchanged.
@@ -217,17 +219,43 @@ impl TerminalFinalizer {
             dates.len() <= 16 && dates.iter().collect::<BTreeSet<_>>().len() == dates.len(),
             "context date budget/duplicates"
         );
-        Self::construct(policy, Some(dates.into_iter().collect()))
+        Self::construct(policy, Some(dates.into_iter().collect()), None)
+    }
+
+    /// Collection evidence only. This does not change consumer/model freshness.
+    pub fn new_with_observation(
+        policy: TerminalPolicy,
+        dates: Vec<NaiveDate>,
+        ordinary_lateness_seconds: i64,
+    ) -> Result<Self> {
+        ensure!(
+            (policy.max_lateness_seconds..=300).contains(&ordinary_lateness_seconds),
+            "ordinary observation lateness budget"
+        );
+        ensure!(
+            dates.len() <= 16 && dates.iter().collect::<BTreeSet<_>>().len() == dates.len(),
+            "context date budget/duplicates"
+        );
+        Self::construct(
+            policy,
+            Some(dates.into_iter().collect()),
+            Some(ordinary_lateness_seconds),
+        )
     }
 
     fn construct(
         policy: TerminalPolicy,
         context_dates: Option<BTreeSet<NaiveDate>>,
+        ordinary_lateness_seconds: Option<i64>,
     ) -> Result<Self> {
         policy.validate()?;
-        let policy_sha256 = match &context_dates {
-            None => hash(&policy)?,
-            Some(dates) => hash(&("context_interval_ws_v1", &policy, dates))?,
+        let policy_sha256 = match (&context_dates, ordinary_lateness_seconds) {
+            (None, None) => hash(&policy)?,
+            (Some(dates), None) => hash(&("context_interval_ws_v1", &policy, dates))?,
+            (Some(dates), Some(limit)) => {
+                hash(&("ordinary_observation_lateness_v1", &policy, dates, limit))?
+            }
+            _ => anyhow::bail!("ordinary observations require explicit context policy"),
         };
         Ok(Self {
             policy_sha256,
@@ -237,7 +265,22 @@ impl TerminalFinalizer {
             buffers: BTreeMap::new(),
             committed: BTreeMap::new(),
             context_dates,
+            ordinary_lateness_seconds,
         })
+    }
+
+    fn ordinary_budget(&self, bar: &BarEvent) -> Result<i64> {
+        let day = date(bar.close_time_utc)?;
+        if !self.context_day(day)
+            && self.policy.symbols[&bar.symbol]
+                .terminal_label(day)
+                .is_some_and(|last| bar.close_time_utc < last)
+        {
+            return Ok(self
+                .ordinary_lateness_seconds
+                .unwrap_or(self.policy.max_lateness_seconds));
+        }
+        Ok(self.policy.max_lateness_seconds)
     }
 
     fn context_day(&self, day: NaiveDate) -> bool {
@@ -403,10 +446,22 @@ impl TerminalFinalizer {
             .close_time_utc
             .checked_add(TF)
             .context("close timestamp overflow")?;
+        let budget = if reason == ReleaseReason::NextTimestamp {
+            self.ordinary_budget(&b.bar)?
+        } else {
+            self.policy.max_lateness_seconds
+        };
         ensure!(
-            now.utc >= closed && now.utc - closed <= self.policy.max_lateness_seconds,
+            now.utc >= closed && now.utc - closed <= budget,
             "closed candle outside publication deadline"
         );
+        let reason = if reason == ReleaseReason::NextTimestamp
+            && now.utc - closed > self.policy.max_lateness_seconds
+        {
+            ReleaseReason::NextTimestampDelayed
+        } else {
+            reason
+        };
         ensure!(
             date(b.bar.close_time_utc)? == date(now.utc)?,
             "prior-day candle is not timely Live"
@@ -714,18 +769,32 @@ impl TerminalFinalizer {
                     && p.closed_at_utc == row.bar.close_time_utc + TF
                     && p.closed_at_utc <= p.observation_cutoff_utc
                     && p.observation_cutoff_utc - p.closed_at_utc
-                        <= staged.policy.max_lateness_seconds
+                        <= if p.reason == ReleaseReason::NextTimestampDelayed {
+                            staged.ordinary_budget(&row.bar)?
+                        } else {
+                            staged.policy.max_lateness_seconds
+                        }
                     && p.observation_cutoff_utc <= now.utc
                     && date(p.observation_cutoff_utc)? == date(row.bar.close_time_utc)?,
                 "invalid restored receipt/close proof"
             );
             match p.reason {
-                ReleaseReason::NextTimestamp => ensure!(
-                    p.next_label_utc.is_some_and(|t| t > row.bar.close_time_utc
-                        && t % TF == 0
-                        && t <= p.observation_cutoff_utc),
-                    "missing/invalid next timestamp proof"
-                ),
+                ReleaseReason::NextTimestamp | ReleaseReason::NextTimestampDelayed => {
+                    if p.reason == ReleaseReason::NextTimestampDelayed {
+                        ensure!(
+                            staged.ordinary_lateness_seconds.is_some()
+                                && p.observation_cutoff_utc - p.closed_at_utc
+                                    > staged.policy.max_lateness_seconds,
+                            "invalid delayed ordinary proof"
+                        );
+                    }
+                    ensure!(
+                        p.next_label_utc.is_some_and(|t| t > row.bar.close_time_utc
+                            && t % TF == 0
+                            && t <= p.observation_cutoff_utc),
+                        "missing/invalid next timestamp proof"
+                    );
+                }
                 ReleaseReason::SessionBoundaryWs => ensure!(
                     staged.policy.enabled
                         && p.next_label_utc.is_none()

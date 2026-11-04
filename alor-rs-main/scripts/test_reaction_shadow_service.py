@@ -135,22 +135,45 @@ engine = "imoexf"
         with self.assertRaisesRegex(service.SourceUnavailable, "not running"):
             guard.check()
 
-    def ws_source(self, v2=False):
+    def ws_source(self, v2=False, v3=False):
         root, lock, spec = self.source()
         cfg = json.loads((root / "manifest.json").read_text())["config"]
         del cfg["revision_policy"]
         cfg.update(gateway_config="/fixture/gateway.toml", gateway_config_sha256="a" * 64,
                    terminal=dict(enabled=True, symbols=dict(IMOEXF={}), max_heartbeat_age_seconds=45))
-        if v2:
+        if v2 or v3:
             cfg["context_finalization"] = True
+        if v3:
+            cfg["ordinary_observation_max_lateness_seconds"] = 90
+            cfg["terminal"]["max_lateness_seconds"] = 90
         sha = service.hashlib.sha256(json.dumps(cfg, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        version = "shadow_gateway_ws_closed_m10_v2" if v2 else "shadow_gateway_ws_closed_m10_v1"
+        version = "shadow_gateway_ws_closed_m10_v3" if v3 else "shadow_gateway_ws_closed_m10_v2" if v2 else "shadow_gateway_ws_closed_m10_v1"
         (root / "manifest.json").write_text(json.dumps(dict(version=version, config=cfg, config_sha256=sha)))
         health = dict(version=version, config_sha256=sha, status="ready", generation=1,
                       heartbeat_utc=int(time.time()), last_ws_rx_utc=int(time.time()),
                       connected=True, subscribed=True, history_complete=True, order_emission_allowed=False)
+        if v3:
+            health.update(ordinary_delayed_rows=0, model_freshness_policy="consumer_owned_unchanged")
         (root / "HEALTH.json").write_text(json.dumps(health))
         return root, lock, spec, health
+
+    def test_ws_v3_checks_explicit_collection_policy_and_no_freshness_claim(self):
+        root, _, spec, health = self.ws_source(v3=True)
+        guard = service.ClosedSourceGuard(root, spec)
+        delayed = {**health, "ordinary_delayed_rows": 1}
+        (root / "HEALTH.json").write_text(json.dumps(delayed))
+        guard.check()  # Collection liveness is not model freshness admission.
+        for key, value in (("model_freshness_policy", "source_waives_model_age"), ("ordinary_delayed_rows", True)):
+            (root / "HEALTH.json").write_text(json.dumps({**health, key: value}))
+            with self.assertRaises(service.SourceUnavailable):
+                guard.check()
+        (root / "HEALTH.json").write_text(json.dumps(health))
+        manifest = json.loads((root / "manifest.json").read_text())
+        for value in (True, 0, 89, 301, None):
+            manifest["config"]["ordinary_observation_max_lateness_seconds"] = value
+            (root / "manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "bounded ordinary"):
+                service.ClosedSourceGuard(root, spec)
 
     def test_ws_v2_requires_opt_in_and_preserves_health_guard(self):
         root, _, spec, health = self.ws_source(v2=True)

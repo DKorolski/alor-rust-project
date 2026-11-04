@@ -155,6 +155,10 @@ impl ServiceGuard {
             status.started_sessions < self.policy.max_sessions || !status.runner.session_complete,
             "generation session budget exhausted"
         );
+        self.check_model_ages(&status)
+    }
+
+    pub(super) fn check_model_ages(&self, status: &ServiceStatus) -> Result<()> {
         ensure!(
             status.max_unobserved_queue_age_seconds <= self.policy.max_queue_age_seconds as i64,
             "model receipt queue age exceeded; no retrospective observations"

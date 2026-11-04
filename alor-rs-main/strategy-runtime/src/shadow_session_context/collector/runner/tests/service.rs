@@ -122,6 +122,27 @@ fn reaction_service_age_diagnostics_do_not_count_history_or_duplicates() {
 }
 
 #[test]
+fn ordinary_125s_evidence_does_not_waive_model_120s_freshness() {
+    let (_temp, mut r) = create("USDRUBF");
+    let guard = ServiceGuard::new(&r, policy(), epoch("2026-10-26 06:59")).unwrap();
+    warm(&mut r);
+    let input = bar("USDRUBF", epoch("2026-10-26 07:00"), 100.);
+    now(input.close_time_utc + 725);
+    append(&mut r, &input);
+    let before = r.state.model_hash().unwrap();
+    let status = guard.status(&r).unwrap();
+    assert_eq!(status.max_unobserved_queue_age_seconds, 0);
+    assert_eq!(status.max_unobserved_model_lateness_seconds, 125);
+    assert!(!status.order_emission_allowed);
+    assert!(guard
+        .check_model_ages(&status)
+        .unwrap_err()
+        .to_string()
+        .contains("source lateness exceeded"));
+    assert_eq!(r.state.model_hash().unwrap(), before);
+}
+
+#[test]
 fn reaction_service_complete_generation_is_not_restartable() {
     let (_temp, mut r) = create("IMOEXF");
     let mut limits = policy();

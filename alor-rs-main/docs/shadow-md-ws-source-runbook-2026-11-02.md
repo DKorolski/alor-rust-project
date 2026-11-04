@@ -5,6 +5,12 @@ It only constructs `WsHub::start_market_data_only`. No CWS, order consumer,
 account subscriptions, strategy execution or broker command publisher is started.
 Live and retained shadow deployments remain unchanged.
 
+Current templates/binary describe v3 with a separately bounded ordinary
+collection budget. See [ordinary delay hardening](shadow-ws-ordinary-delay-hardening-2026-11-04.md).
+This is NOT a model freshness waiver. V1/v2 states and failed generations cannot
+be upgraded/resumed with the new binary; source-only admission requires a fresh
+generation and explicitly reviewed dates.
+
 See [parallel preparation and gates](shadow-parallel-preparation-and-gates-2026-11-03.md)
 for the read-only RI closing audit and USD symbol-specific preflight. The v1
 canary has a known sparse forward-context limitation. The separately versioned
@@ -68,7 +74,7 @@ Ordinary tradable candles release on a greater real WS timestamp. V2 requires
 explicit `context_finalization=true`: a real non-tradable context buffer may
 release at its own interval end plus grace as `context_interval_ws`/History.
 No absent candle is created; ordinary Live deadlines are not enlarged.
-Templates now describe v2; do not use them to resume v1. Terminal fallback
+V3 templates must not be used to resume v1/v2. Terminal fallback
 requires the actual buffered candle, healthy acknowledged generation/heartbeat,
 resolved history and a drained event queue after session end plus grace.
 Proofs retain real receipt time separately from processing/cutoff time. No timer

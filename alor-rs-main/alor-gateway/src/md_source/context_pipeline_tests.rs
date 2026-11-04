@@ -15,9 +15,11 @@ fn ts(s: &str) -> i64 {
 
 fn advance(r: &mut Runner, s: &str) {
     let utc = ts(s);
+    let previous = r.test_clock.unwrap();
+    assert!(utc >= previous.utc);
     r.test_clock = Some(Clock {
         utc,
-        monotonic_ms: ((utc - ts("2026-11-07T09:51:00+03:00")) * 1000) as u64,
+        monotonic_ms: previous.monotonic_ms + ((utc - previous.utc) * 1000) as u64,
     });
     r.last_rx = utc;
 }
@@ -29,12 +31,20 @@ fn quote(label: i64) -> serde_json::Value {
 #[tokio::test]
 #[ignore = "explicit owned Redis executable required; never connects to an existing server"]
 async fn sparse_context_pipeline_preserves_receipts_prefix_and_restore() {
-    tokio::time::timeout(Duration::from_secs(30), pipeline())
+    tokio::time::timeout(Duration::from_secs(30), pipeline(false))
         .await
         .unwrap();
 }
 
-async fn pipeline() {
+#[tokio::test]
+#[ignore = "explicit owned Redis executable required; never connects to an existing server"]
+async fn ordinary_delayed_pipeline_retains_evidence_not_model_freshness() {
+    tokio::time::timeout(Duration::from_secs(30), pipeline(true))
+        .await
+        .unwrap();
+}
+
+async fn pipeline(ordinary: bool) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let socket = root.join("redis.sock");
@@ -82,13 +92,22 @@ async fn pipeline() {
             .any(|line| line.trim() == format!("process_id:{}", owned.0.id())),
         "refusing unrelated Redis"
     );
-    let cfg:SourceConfig=serde_json::from_value(json!({"symbol":"USDRUBF","stream":"shadow.source.closed10m.USDRUBF.owned_context",
-        "bootstrap_start":"2026-11-05","first_live_session":"2026-11-09","excluded_dates":[],"context_finalization":true,
+    let mut cfg:SourceConfig=serde_json::from_value(json!({"symbol":"USDRUBF","stream":"shadow.source.closed10m.USDRUBF.owned_context",
+        "bootstrap_start":"2026-11-05","first_live_session":"2026-11-09","excluded_dates":[],"context_finalization":true,"ordinary_observation_max_lateness_seconds":300,
         "gateway_config":"/fixture/gateway.toml","gateway_config_sha256":"a".repeat(64),
         "terminal":{"enabled":true,"first_live_session":"2026-11-07","grace_seconds":10,"max_lateness_seconds":90,
         "max_heartbeat_age_seconds":45,"max_clock_step_seconds":5,
         "symbols":{"USDRUBF":{"weekday_end":"23:50:00","weekend_end":"19:00:00","overrides":{}}}}})).unwrap();
-    let now = ts("2026-11-07T09:51:00+03:00");
+    if ordinary {
+        cfg.bootstrap_start = "2026-11-04".parse().unwrap();
+        cfg.terminal.first_live_session = "2026-11-06".parse().unwrap();
+        cfg.first_live_session = "2026-11-06".parse().unwrap();
+    }
+    let now = ts(if ordinary {
+        "2026-11-06T06:00:00+03:00"
+    } else {
+        "2026-11-07T09:51:00+03:00"
+    });
     let state = root.join("source");
     let mut r = Runner {
         store: Store::open(&state, &cfg, "create", now).unwrap(),
@@ -112,14 +131,21 @@ async fn pipeline() {
         }),
     };
     // Real closed historical frames before ACK are staged, never published early.
-    for day in ["2026-11-05T07:00:00+03:00", "2026-11-06T07:00:00+03:00"] {
+    let days = if ordinary {
+        ["2026-11-04T07:00:00+03:00", "2026-11-05T07:00:00+03:00"]
+    } else {
+        ["2026-11-05T07:00:00+03:00", "2026-11-06T07:00:00+03:00"]
+    };
+    for day in days {
         for slot in 0..101 {
             r.raw(quote(ts(day) + slot * 600), 1).await.unwrap();
         }
     }
-    r.raw(quote(ts("2026-11-07T09:50:00+03:00")), 1)
-        .await
-        .unwrap();
+    if !ordinary {
+        r.raw(quote(ts("2026-11-07T09:50:00+03:00")), 1)
+            .await
+            .unwrap();
+    }
     r.drain_history().await.unwrap();
     assert!(r.store.records.is_empty());
     r.event(WsEvent::SubscriptionAck {
@@ -131,6 +157,83 @@ async fn pipeline() {
     r.drain_history().await.unwrap();
     assert_eq!(r.store.records.len(), 202);
     assert!(r.history_complete);
+    if ordinary {
+        advance(&mut r, "2026-11-06T19:50:03+03:00");
+        r.feed().unwrap();
+        r.raw(quote(ts("2026-11-06T19:50:00+03:00")), 1)
+            .await
+            .unwrap();
+        advance(&mut r, "2026-11-06T20:02:05+03:00");
+        r.feed().unwrap();
+        r.raw(quote(ts("2026-11-06T20:00:00+03:00")), 1)
+            .await
+            .unwrap();
+        let delayed = &r.store.records.last_key_value().unwrap().1;
+        let release = delayed.release.as_ref().unwrap();
+        assert_eq!(
+            release.proof.reason,
+            crate::terminal_bar::ReleaseReason::NextTimestampDelayed
+        );
+        assert_eq!(
+            release.proof.observation_cutoff_utc - release.proof.closed_at_utc,
+            125
+        );
+        assert_eq!(
+            release.proof.first_received_at_utc,
+            ts("2026-11-06T19:50:03+03:00")
+        );
+        assert_eq!(delayed.envelope["ts_utc"], r.clock().utc);
+        assert_eq!(delayed.bar().unwrap().origin, DataOrigin::Live);
+        advance(&mut r, "2026-11-06T20:10:01+03:00");
+        r.feed().unwrap();
+        r.raw(quote(ts("2026-11-06T20:10:00+03:00")), 1)
+            .await
+            .unwrap();
+        assert_eq!(r.store.records.len(), 204);
+        assert_eq!(
+            r.store
+                .records
+                .last_key_value()
+                .unwrap()
+                .1
+                .release
+                .as_ref()
+                .unwrap()
+                .proof
+                .reason,
+            crate::terminal_bar::ReleaseReason::NextTimestamp
+        );
+        r.health("ready", true).unwrap();
+        let health: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state.join("HEALTH.json")).unwrap()).unwrap();
+        assert_eq!(health["ordinary_delayed_rows"], 1);
+        assert_eq!(health["last_ordinary_delay_seconds"], 125);
+        assert_eq!(health["model_freshness_policy"], "consumer_owned_unchanged");
+        let rows = r
+            .store
+            .records
+            .values()
+            .rev()
+            .filter_map(|r| r.release.clone())
+            .take(2)
+            .collect::<Vec<_>>();
+        let clock = r.clock();
+        r.store.verify_prefix(&cfg, &mut r.conn).await.unwrap();
+        r.store.stopped(clock.utc).unwrap();
+        drop(r);
+        let store = Store::open(&state, &cfg, "resume", clock.utc).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        store.verify_prefix(&cfg, &mut conn).await.unwrap();
+        let mut core = cfg.finalizer().unwrap();
+        core.restore_committed(&rows.into_iter().rev().collect::<Vec<_>>(), clock)
+            .unwrap();
+        assert_eq!(
+            core.last_committed_label("USDRUBF"),
+            Some(ts("2026-11-06T20:00:00+03:00"))
+        );
+        store.stopped(clock.utc).unwrap();
+        return;
+    }
     advance(&mut r, "2026-11-07T10:00:10+03:00");
     r.feed().unwrap();
     let releases = r.core.tick(r.clock(), true).unwrap();

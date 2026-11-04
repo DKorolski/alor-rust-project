@@ -242,6 +242,12 @@ class WsSourceSmoke(unittest.TestCase):
                     if day.weekday() < 5: prior.append(day)
                     day -= dt.timedelta(days=1)
                 begin = min(prior)
+                if symbol == 'USDRUBF':
+                    # Keep the named sparse-weekend test meaningful on any weekday.
+                    sunday = today - dt.timedelta(days=1)
+                    while sunday.weekday() != 6:
+                        sunday -= dt.timedelta(days=1)
+                    begin = min(begin, sunday - dt.timedelta(days=2))
                 source_key = f'shadow.source.closed10m.{symbol}.owned_fixture'
                 redis('ACL','SETUSER','source','on','>fixture','~'+source_key,'-@all','+xadd','+xrange','+xlen','+ping')
                 redis('ACL','SETUSER','reader','on','>fixture','~'+source_key,'-@all','+xrange','+multi','+exec','+ping')
@@ -276,7 +282,7 @@ ws_url = "ws://127.0.0.1:{ws.port}"
 oauth_url = "http://127.0.0.1:1/unused-oauth"
 skip_history_bars = false
 ''')
-                cfg=dict(symbol=symbol,stream=source_key,bootstrap_start=str(begin),first_live_session=str(first),context_finalization=True,
+                cfg=dict(symbol=symbol,stream=source_key,bootstrap_start=str(begin),first_live_session=str(first),context_finalization=True,ordinary_observation_max_lateness_seconds=300 if symbol=='USDRUBF' else 90,
                     excluded_dates=[str(d) for d in excluded],gateway_config=str(gateway),
                     gateway_config_sha256=hashlib.sha256(gateway.read_bytes()).hexdigest(),terminal=dict(
                         enabled=True,first_live_session=str(today),grace_seconds=10,max_lateness_seconds=90,
@@ -293,7 +299,7 @@ skip_history_bars = false
                         stdout=log,stderr=subprocess.STDOUT,umask=0o027)
                     processes.append(p)
                     if ready:
-                        for _ in range(400):
+                        for _ in range(800):
                             if p.poll() is not None:
                                 log.flush();self.fail((root/f'{len(processes)-1}.log').read_text())
                             hp=state/'HEALTH.json'

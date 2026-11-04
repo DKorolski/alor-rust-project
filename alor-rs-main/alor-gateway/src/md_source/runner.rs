@@ -107,6 +107,15 @@ impl Runner {
         Ok(())
     }
     fn health(&self, status: &str, drained: bool) -> Result<()> {
+        let delayed = self
+            .store
+            .records
+            .values()
+            .filter_map(|row| row.release.as_ref())
+            .filter(|release| {
+                release.proof.reason == crate::terminal_bar::ReleaseReason::NextTimestampDelayed
+            })
+            .collect::<Vec<_>>();
         self.store.health(&json!({"version":VERSION,"status":status,"heartbeat_utc":Utc::now().timestamp(),
             "last_ws_rx_utc":self.last_rx,"generation":self.generation,
             "history_complete":self.history_complete,"connected":self.connected,"subscribed":self.acked,
@@ -114,6 +123,9 @@ impl Runner {
             "last_published_bar_ts":self.store.records.last_key_value().map(|(ts,_)|*ts),
             "audit_rows":self.store.audit_rows,"review_dates":self.store.review_dates,
             "readiness_wait_seconds":self.readiness_deadline.unready_since.map(|since|self.started.elapsed().saturating_sub(since).as_secs()),
+            "ordinary_delayed_rows":delayed.len(),
+            "last_ordinary_delay_seconds":delayed.last().map(|r|r.proof.observation_cutoff_utc-r.proof.closed_at_utc),
+            "model_freshness_policy":"consumer_owned_unchanged",
             "order_emission_allowed":false,"config_sha256":digest(&serde_json::to_value(&self.cfg)?)?}))
     }
     fn validate_raw(&self, bar: &BarEvent, received: i64) -> Result<()> {
@@ -158,6 +170,8 @@ impl Runner {
             "{}",
             json!({"event":"ws_closed_bar_published","symbol":bar.symbol,
             "label":bar.close_time_utc,"origin":bar.origin,"reason":release.proof.reason,
+            "publication_lateness_seconds":release.proof.observation_cutoff_utc-release.proof.closed_at_utc,
+            "timely_under_terminal_budget":release.proof.observation_cutoff_utc-release.proof.closed_at_utc<=self.cfg.terminal.max_lateness_seconds,
             "rows":self.store.records.len(),"order_emission_allowed":false})
         );
         Ok(())

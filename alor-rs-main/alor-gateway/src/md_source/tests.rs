@@ -10,7 +10,7 @@ fn ts(s: &str) -> i64 {
 }
 fn cfg() -> config::SourceConfig {
     serde_json::from_value(json!({"symbol":"IMOEXF","stream":"shadow.source.closed10m.IMOEXF.test",
-        "bootstrap_start":"2026-10-29","first_live_session":"2026-11-03","excluded_dates":[],"context_finalization":true,
+        "bootstrap_start":"2026-10-29","first_live_session":"2026-11-03","excluded_dates":[],"context_finalization":true,"ordinary_observation_max_lateness_seconds":90,
         "gateway_config":"/fixture/gateway.toml","gateway_config_sha256":"a".repeat(64),
         "terminal":{"enabled":true,"first_live_session":"2026-11-02","grace_seconds":10,
             "max_lateness_seconds":90,"max_heartbeat_age_seconds":45,"max_clock_step_seconds":5,

@@ -21,6 +21,8 @@ pub struct SourceConfig {
     pub terminal: TerminalPolicy,
     #[serde(default)]
     pub context_finalization: bool,
+    #[serde(default)]
+    pub ordinary_observation_max_lateness_seconds: i64,
 }
 
 impl SourceConfig {
@@ -28,7 +30,12 @@ impl SourceConfig {
         self.terminal.validate()?;
         ensure!(
             self.context_finalization,
-            "explicit context finalization required for WS source v2"
+            "explicit context finalization required for WS source v3"
+        );
+        ensure!(
+            (self.terminal.max_lateness_seconds..=300)
+                .contains(&self.ordinary_observation_max_lateness_seconds),
+            "explicit bounded ordinary observation policy required"
         );
         ensure!(
             self.terminal.enabled
@@ -98,9 +105,10 @@ impl SourceConfig {
 
     pub fn finalizer(&self) -> Result<crate::terminal_bar::TerminalFinalizer> {
         ensure!(self.context_finalization, "context policy not enabled");
-        crate::terminal_bar::TerminalFinalizer::new_with_context(
+        crate::terminal_bar::TerminalFinalizer::new_with_observation(
             self.terminal.clone(),
             self.excluded_dates.clone(),
+            self.ordinary_observation_max_lateness_seconds,
         )
     }
 

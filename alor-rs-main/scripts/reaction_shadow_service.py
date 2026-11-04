@@ -97,7 +97,7 @@ class ClosedSourceGuard:
         runner = tomllib.loads(spec.decode())["runner"]
         cfg = source["config"]
         self.version = source["version"]
-        self.is_ws = self.version in ("shadow_gateway_ws_closed_m10_v1", "shadow_gateway_ws_closed_m10_v2")
+        self.is_ws = self.version in ("shadow_gateway_ws_closed_m10_v1", "shadow_gateway_ws_closed_m10_v2", "shadow_gateway_ws_closed_m10_v3")
         if (self.version != "shadow_authenticated_rest_closed_m10_v3" and not self.is_ws
                 or cfg["stream"] != runner["ingress"]["source_stream"]
                 or cfg["symbol"] != runner["ingress"]["symbol"]
@@ -107,10 +107,15 @@ class ClosedSourceGuard:
         if self.is_ws:
             fields = {"symbol", "stream", "bootstrap_start", "first_live_session", "excluded_dates",
                       "gateway_config", "gateway_config_sha256", "terminal"}
-            if self.version == "shadow_gateway_ws_closed_m10_v2":
+            if self.version in ("shadow_gateway_ws_closed_m10_v2", "shadow_gateway_ws_closed_m10_v3"):
                 fields.add("context_finalization")
                 if cfg.get("context_finalization") is not True:
                     raise ValueError("WS v2 requires explicit context finalization")
+            if self.version == "shadow_gateway_ws_closed_m10_v3":
+                fields.add("ordinary_observation_max_lateness_seconds")
+                limit = cfg.get("ordinary_observation_max_lateness_seconds")
+                if (type(limit) is not int or not cfg["terminal"]["max_lateness_seconds"] <= limit <= 300):
+                    raise ValueError("WS v3 requires bounded ordinary collection policy")
             if set(cfg) != fields:
                 raise ValueError("unexpected WS source schema")
             terminal = cfg["terminal"]
@@ -148,6 +153,11 @@ class ClosedSourceGuard:
                 or health["generation"] < max(1, self.generation)
                 or health.get("status") not in ("ready", "reconnecting")):
             raise SourceUnavailable("WS source health stale/failed/mismatched")
+        if self.version == "shadow_gateway_ws_closed_m10_v3" and (
+                health.get("model_freshness_policy") != "consumer_owned_unchanged"
+                or type(health.get("ordinary_delayed_rows")) is not int
+                or not 0 <= health["ordinary_delayed_rows"] <= 4500):
+            raise SourceUnavailable("WS v3 collection/freshness health invalid")
         if ((require_ready and health["status"] != "ready")
                 or (health["status"] == "ready" and (health.get("history_complete") is not True
                     or health.get("connected") is not True or health.get("subscribed") is not True))):
