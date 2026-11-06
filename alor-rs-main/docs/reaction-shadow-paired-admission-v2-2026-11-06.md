@@ -117,3 +117,29 @@ Python3.11+ and real Redis tools without installing packages on the host. Build
 it without secrets, then run as a non-root UID with no network, read-only
 artifact/worker mounts and an isolated writable tmpfs. The two actual-worker
 smokes own and PID-verify a random-port Redis inside that test namespace only.
+
+## Preparation Verification
+
+Admission code `14c2e1b` and fixture packaging `1d19f91` passed31 preflight and25
+supervisor policy tests locally. The two actual-worker integrations were separate
+from that local run. Linux then passed all58 tests, including both integrations,
+under a non-root UID with no external network and only read-only artifact/worker
+mounts. This is focused Python/service coverage, not a new full Rust-workspace run.
+
+Two actual symbol-specific preparation probes used distinct model UIDs, their
+source groups and dedicated read-only Redis ACLs. Both passed without model
+generation creation, bootstrap pinning or approval. Negative admission with
+missing approval was rejected for both. Sources alone were activated; model
+units remained static/inactive with no gate files and no automatic launch.
+
+Target checks also confirmed the bootstrap-date binding is enforced before
+source-state creation: gateway `from_ts` and source `bootstrap_start` must agree.
+Never relax this guard; stage a corrected new identity instead. An actual
+numerical bootstrap inspection before completion of the preceding regular day
+was correctly rejected as missing history. Preserve that result as a pending
+gate, not a numerical PASS or a reason to omit the incomplete weekday.
+
+Final positive admission remains contingent on complete preceding-session and
+weekend evidence, actual final Rust inspection and fresh first-morning approval.
+The preparation checkpoint does not certify those future inputs or start the
+20-session model counter. Existing live/legacy and failed evidence were retained.
