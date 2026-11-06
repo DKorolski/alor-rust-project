@@ -265,6 +265,181 @@ class PreflightTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
 
 
+class AsObservedTests(unittest.TestCase):
+    setUp = PreflightTests.setUp
+    check = PreflightTests.check
+    epoch = staticmethod(PreflightTests.epoch)
+    save_records = PreflightTests.save_records
+    save_approval = PreflightTests.save_approval
+
+    def configure(self, symbol="USDRUBF", monday=False):
+        PreflightTests.admission(self)
+        self.symbol = symbol
+        self.plan["version"] = "reaction_shadow_preflight_v2"
+        if symbol == "IMOEXF":
+            examples = Path(__file__).resolve().parents[1] / 'configs/examples'
+            self.prepared_raw = (examples / 'reaction-shadow.imoexf-combo.toml').read_text().replace(
+                '2026-11-02', '2026-11-06').replace('REPLACE_WITH_APPROVED_IMOEXF_M10_SOURCE', self.stream)
+            self.prepared_raw = self.prepared_raw.replace('excluded_dates = []', 'excluded_dates = ["2026-11-04"]')
+        cfg = json.loads(self.manifest.read_text())["config"]
+        cfg["symbol"] = symbol
+        cfg["terminal"]["symbols"] = {symbol: cfg["terminal"]["symbols"]["USDRUBF"]}
+        cfg["ordinary_observation_max_lateness_seconds"] = 90 if symbol == 'IMOEXF' else 300
+        for r in self.records:
+            r["envelope"]["payload"]["symbol"] = symbol
+            if r["release"]: r["release"]["bar"]["symbol"] = symbol
+        if monday:
+            self.prepared_raw = self.prepared_raw.replace('2026-11-06', '2026-11-09')
+            cfg['first_live_session'] = '2026-11-09'
+            self.now = self.epoch('2026-11-09T06:20:00')
+            self.env['SHADOW_READY_BY'] = '2026-11-09T06:55:00+03:00'
+            for r in self.records:
+                r['envelope']['payload']['close_time_utc'] += 86400
+                r['envelope']['ts_utc'] += 86400
+                r['id'] = str(r['envelope']['payload']['close_time_utc'] * 1000) + '-0'
+            release = self.terminal['release']
+            release['bar']['close_time_utc'] += 86400
+            for k in ('closed_at_utc','first_received_at_utc','last_received_at_utc','observation_cutoff_utc'):
+                release['proof'][k] += 86400
+            self.bootstrap.update(last_source_id=self.terminal['id'], last_session='2026-11-06')
+        self.prepared.write_text(self.prepared_raw)
+        cfg_sha = probe.digest(json.dumps(cfg, sort_keys=True, separators=(',', ':')).encode())
+        self.manifest.write_text(json.dumps(dict(version='shadow_gateway_ws_closed_m10_v3',config=cfg,config_sha256=cfg_sha)))
+        self.health.update(config_sha256=cfg_sha,audit_rows=0,queue_drained=True)
+        (self.source/'HEALTH.json').write_text(json.dumps(self.health))
+        self.save_records()
+        self.plan['files']['prepared_spec']['sha256'] = probe.digest(self.prepared.read_bytes())
+        self.plan['files']['source_manifest']['sha256'] = probe.digest(self.manifest.read_bytes())
+        self.plan_path.write_text(json.dumps(self.plan)); self.plan_sha = probe.digest(self.plan_path.read_bytes())
+        path = self.cfg/'evidence/source_revisions.json'; path.write_text('{"synthetic_revision_review":true}')
+        self.approval.update(version='reaction_shadow_admission_v2',plan_sha256=self.plan_sha,
+                             ready_by=self.env['SHADOW_READY_BY'],reviewed_at_utc=self.now-60)
+        self.approval['evidence'].append(dict(kind='source_revisions',path=str(path),sha256=probe.digest(path.read_bytes())))
+        self.refresh_approval()
+        self.reader.envelope.side_effect = lambda first='-',last='+': (
+            (self.terminal['id'], self.terminal['envelope']) if first!='-' else
+            ('1-0',dict(source='shadow_gateway_ws_closed_m10_v3',payload=dict(symbol=symbol))))
+
+    def refresh_approval(self):
+        raw = self.prepared_raw+'\n[runner.bootstrap]\n'+'\n'.join(f'{k} = {json.dumps(v)}' for k,v in self.bootstrap.items())
+        Path(self.paths['approved_spec']).write_text(raw)
+        self.approval['approved_spec_sha256'] = probe.digest(raw.encode())
+        self.approval['revision_review'] = probe.revision_snapshot(self.source,self.symbol,self.now)
+        self.inspected['preview']['bootstrap'] = self.bootstrap
+        self.completed = subprocess.CompletedProcess([],0,json.dumps(self.inspected).encode(),b'')
+        self.save_approval()
+
+    def revision(self, field='o', value=100.5):
+        old = {k:self.records[1]['envelope']['payload'][k] for k in ('symbol','close_time_utc','o','h','l','c','v','origin')}
+        new = {**old,field:value}; price = field!='v'
+        event=dict(identity=dict(original=old,observed=new),label=old['close_time_utc'],
+                   kind='price_revision' if price else 'volume_only_revision',review_required=price,
+                   generation=1,received_at_utc=old['close_time_utc']+3600)
+        path=self.source/'revisions.jsonl'
+        with path.open('a') as f:f.write(json.dumps(dict(event=event,sha256=probe.digest(json.dumps(event).encode())))+'\n')
+        self.health['audit_rows']+=1
+        if price:self.health['review_dates']=[dt.datetime.fromtimestamp(old['close_time_utc'],probe.MSK).date().isoformat()]
+        (self.source/'HEALTH.json').write_text(json.dumps(self.health))
+
+    def admit(self):
+        with mock.patch.object(probe.subprocess,'run',return_value=self.completed) as run:
+            result=self.check('admission',self.now)
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(run.call_args.args[0][1],'inspect-bootstrap')
+        self.assertFalse(result['worker_started'] or result['generation_created'])
+        return result
+
+    def test_usd_v2_approved_price_revision_keeps_immutable_originals(self):
+        self.configure(); self.revision(); self.refresh_approval()
+        before=(self.source/'committed.jsonl').read_bytes()
+        self.assertTrue(self.admit()['admission_allowed'])
+        self.assertEqual(before,(self.source/'committed.jsonl').read_bytes())
+        self.assertEqual(self.approval['revision_review']['price_rows'],1)
+        self.assertEqual(list(self.owner.iterdir()),[])
+
+    def test_imo_v2_uses_its_own_model_and_terminal(self):
+        self.configure('IMOEXF'); self.revision(); self.refresh_approval()
+        result=self.admit()
+        self.assertEqual(result['symbol'],'IMOEXF')
+        self.assertEqual(result['ordinary_model_limit'],120)
+
+    def test_preparation_reports_audit_without_admission_or_inspection(self):
+        self.configure(); self.revision()
+        with mock.patch.object(probe.subprocess,'run') as run:
+            result=self.check('preparation',self.now)
+        self.assertFalse(result['admission_allowed'] or result['bootstrap_pinned'])
+        self.assertEqual(result['revision_review']['rows'],1)
+        run.assert_not_called()
+
+    def test_review_missing_or_new_revision_blocks_admission(self):
+        self.configure(); self.revision()
+        with self.assertRaisesRegex(ValueError,'revision_review_missing_or_changed'):
+            self.check('admission',self.now)
+
+    def test_revision_during_inspection_blocks_admission(self):
+        self.configure()
+        def changed(*a,**kw):
+            self.revision();return self.completed
+        with mock.patch.object(probe.subprocess,'run',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'revision_journal_changed'):
+                self.check('admission',self.now)
+
+    def test_volume_revision_audited_without_vwap_recomputation(self):
+        self.configure(); self.revision('v',2.0); self.refresh_approval()
+        result=self.admit()
+        self.assertEqual(result['revision_review']['price_rows'],0)
+        self.assertEqual(result['revision_review']['volume_only_rows'],1)
+
+    def test_invalid_revision_is_not_a_minor_change_exception(self):
+        self.configure();self.revision('l',102)
+        with self.assertRaisesRegex(ValueError,'invalid_revision_ohlcv'):
+            self.check('admission',self.now)
+
+    def test_revision_original_must_match_canonical_bar(self):
+        self.configure();self.revision()
+        path=self.source/'revisions.jsonl';item=json.loads(path.read_text());item['event']['identity']['original']['c']=100.25
+        path.write_text(json.dumps(item)+'\n')
+        with self.assertRaisesRegex(ValueError,'original_binding'):
+            self.check('admission',self.now)
+
+    def test_torn_audit_or_health_mismatch_blocks_admission(self):
+        self.configure();self.revision();path=self.source/'revisions.jsonl';raw=path.read_text();path.write_text(raw.rstrip())
+        with self.assertRaisesRegex(ValueError,'journal_incomplete'):
+            self.check('admission',self.now)
+        path.write_text(raw);self.health['audit_rows']=0;(self.source/'HEALTH.json').write_text(json.dumps(self.health))
+        with self.assertRaisesRegex(ValueError,'health_journal_mismatch'):
+            self.check('admission',self.now)
+
+    def test_pending_source_publication_blocks_preparation(self):
+        self.configure();(self.source/'pending.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError,'publication_pending'):
+            self.check('preparation',self.now)
+
+    def test_monday_bootstrap_includes_observed_weekend_context(self):
+        self.configure(monday=True)
+        row=json.loads(json.dumps(self.records[0]));label=self.epoch('2026-11-07T18:50:00')
+        row.update(id=str(label*1000)+'-0');row['envelope']['payload']['close_time_utc']=label;row['envelope']['ts_utc']=label+610
+        self.records.append(row);self.save_records()
+        with self.assertRaisesRegex(ValueError,'context_tail'):
+            self.check('admission',self.now)
+        self.bootstrap.update(last_source_id=row['id'],last_session='2026-11-07');self.refresh_approval()
+        self.assertTrue(self.admit()['admission_allowed'])
+
+    def test_empty_weekend_does_not_fabricate_missing_context(self):
+        self.configure(monday=True)
+        self.assertTrue(self.admit()['admission_allowed'])
+
+    def test_context_tail_arriving_during_inspection_blocks_admission(self):
+        self.configure(monday=True)
+        def changed(*a,**kw):
+            row=json.loads(json.dumps(self.records[-1]));row['release']=None;label=self.epoch('2026-11-07T18:50:00')
+            row.update(id=str(label*1000)+'-0');row['envelope']['payload']['close_time_utc']=label
+            self.records.append(row);self.save_records();return self.completed
+        with mock.patch.object(probe.subprocess,'run',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'tail_changed'):
+                self.check('admission',self.now)
+
+
 class ReaderTests(unittest.TestCase):
     def test_reader_binding_and_opcode_whitelist(self):
         binding = dict(host='127.0.0.1', port=1234, username='shadow_ws_reader_fixture')

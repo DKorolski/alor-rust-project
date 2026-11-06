@@ -93,6 +93,11 @@ Unresolved publication or partial evidence prevents resume and requires review.
 Late revisions append to `revisions.jsonl`; canonical bars are never rewritten.
 Price revisions mark `review_dates`; affected sessions cannot count as clean
 without explicit source-drift review. Volume-only revisions remain audit events.
+For a separately admitted v2 pair, review may accept the immutable as-observed
+contract without substituting later broker restatements. See
+[paired admission v2](reaction-shadow-paired-admission-v2-2026-11-06.md).
+Operational completeness and agreement with restated history are distinct;
+the original flags/audit remain intact.
 
 `HEALTH.json` updates atomically every two seconds on disk, not in Redis.
 It reports generation, receipt/heartbeat, history readiness, watermark, revision

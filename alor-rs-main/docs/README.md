@@ -42,6 +42,8 @@ or a replacement for the production live gateway:
   queue and unchanged terminal budgets.
 - `reaction-shadow-inactive-worker-preflight-2026-11-04.md` - inactive worker,
   read-only preparation, reviewed bootstrap and explicit future admission.
+- `reaction-shadow-paired-admission-v2-2026-11-06.md` - separate IMOEXF/USD
+  admission with immutable as-observed bars, reviewed revisions and weekend tail.
 
 ## Strategy And Deployment Contracts
 

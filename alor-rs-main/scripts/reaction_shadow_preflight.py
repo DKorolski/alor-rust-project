@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -18,6 +19,7 @@ import reaction_shadow_service as service
 
 MSK = dt.timezone(dt.timedelta(hours=3))
 GATES = {"complete_session", "terminal", "overnight_recovery", "revisions", "source_prefix", "bootstrap"}
+AS_OBSERVED = "as_observed_audit_v1"
 FORBIDDEN_ENV = {"ALOR_REFRESH_TOKEN", "SHADOW_ALOR_REFRESH_TOKEN", "ALOR_ACCESS_TOKEN",
                  "SHADOW_SOURCE_REDIS_URL", "REDIS_URL"}
 
@@ -120,17 +122,79 @@ def previous_session(first, excluded):
     raise ValueError("previous_session_not_found")
 
 
-def terminal_record(source, cfg, day, now):
-    end = cfg["terminal"]["symbols"]["USDRUBF"]
-    end = end["overrides"].get(day.isoformat(), end["weekday_end"])
-    require(end == "23:50:00", "review_nonstandard_terminal_separately")
-    close = int(dt.datetime.combine(day, dt.time(23, 50), MSK).timestamp())
-    label = close - 600
-    with (source / "committed.jsonl").open("rb") as handle:
+def source_records(source):
+    with regular(source / "committed.jsonl").open("rb") as handle:
         raw = handle.read(16 * 1024**2 + 1)
     require(len(raw) <= 16 * 1024**2 and raw.endswith(b"\n"), "source_prefix_incomplete_or_oversized")
     records = [json.loads(line)["record"] for line in raw.splitlines()]
     require(1 <= len(records) <= 4500, "source_prefix_row_bound")
+    labels = [r["envelope"]["payload"]["close_time_utc"] for r in records]
+    require(all(type(x) is int for x in labels) and labels == sorted(set(labels)), "source_prefix_label_order")
+    require(all(r["id"] == str(label * 1000) + "-0" for r, label in zip(records, labels)), "source_prefix_id_binding")
+    return records
+
+
+def revision_snapshot(source, symbol, now):
+    """Inspect immutable originals and audited restatements; never apply revisions."""
+    records = source_records(source)
+    canonical = {r["envelope"]["payload"]["close_time_utc"]: r["envelope"]["payload"] for r in records}
+    path = source / "revisions.jsonl"
+    if path.exists() or path.is_symlink():
+        with regular(path).open("rb") as handle:
+            raw = handle.read(1024**2 + 1)
+        require(len(raw) <= 1024**2 and (not raw or raw.endswith(b"\n")), "revision_journal_incomplete_or_oversized")
+    else:
+        raw = b""
+    items = [json.loads(line) for line in raw.splitlines()]
+    require(len(items) <= 1024, "revision_row_bound")
+    dates, ids, price_rows = set(), set(), 0
+    bar_fields = {"symbol", "close_time_utc", "o", "h", "l", "c", "v", "origin"}
+    for item in items:
+        fields(item, ("event", "sha256"))
+        require(sha(item["sha256"]) and item["sha256"] not in ids, "revision_event_identity")
+        ids.add(item["sha256"])
+        event = item["event"]
+        fields(event, ("identity", "label", "kind", "received_at_utc", "generation", "review_required"))
+        fields(event["identity"], ("original", "observed"))
+        old, new = event["identity"]["original"], event["identity"]["observed"]
+        fields(old, bar_fields); fields(new, bar_fields)
+        label = event["label"]
+        require(type(label) is int and label in canonical and label % 600 == 0, "revision_canonical_label")
+        require(old == {k: canonical[label][k] for k in bar_fields}
+                and new["symbol"] == old["symbol"] == symbol and new["close_time_utc"] == label,
+                "revision_original_binding")
+        require(all(type(new[k]) in (int, float) and math.isfinite(new[k]) for k in ("o", "h", "l", "c", "v"))
+                and 0 < new["l"] <= min(new["o"], new["c"])
+                and new["h"] >= max(new["o"], new["c"]) and new["v"] >= 0
+                and new["origin"] in ("live", "history"), "invalid_revision_ohlcv")
+        price = any(old[k] != new[k] for k in ("o", "h", "l", "c"))
+        require((price or old["v"] != new["v"]) and event["review_required"] is price
+                and event["kind"] == ("price_revision" if price else "volume_only_revision")
+                and type(event["generation"]) is int and event["generation"] > 0
+                and type(event["received_at_utc"]) is int and label + 600 <= event["received_at_utc"] <= now,
+                "invalid_revision_metadata")
+        if price:
+            price_rows += 1
+            dates.add(dt.datetime.fromtimestamp(label, MSK).date().isoformat())
+    health = json.loads(small(source / "HEALTH.json"))
+    require(type(health.get("audit_rows")) is int and health["audit_rows"] == len(items)
+            and health.get("review_dates") == sorted(dates),
+            "revision_health_journal_mismatch")
+    require(health.get("queue_drained") is True and not (source / "pending.json").exists()
+            and not (source / "pending.json").is_symlink(), "source_publication_pending")
+    # File SHA binds exact Rust-owned bytes; this is not a Python reimplementation
+    # of the Rust event hash or canonical proof verifier.
+    return dict(policy=AS_OBSERVED, journal_sha256=digest(raw), rows=len(items),
+                price_rows=price_rows, volume_only_rows=len(items) - price_rows, review_dates=sorted(dates))
+
+
+def terminal_record(source, cfg, day, now, symbol="USDRUBF"):
+    end = cfg["terminal"]["symbols"][symbol]
+    end = end["overrides"].get(day.isoformat(), end["weekday_end"])
+    require(end == "23:50:00", "review_nonstandard_terminal_separately")
+    close = int(dt.datetime.combine(day, dt.time(23, 50), MSK).timestamp())
+    label = close - 600
+    records = source_records(source)
     rows = [r for r in records if dt.datetime.fromtimestamp(
         r["envelope"]["payload"]["close_time_utc"], MSK).date() == day]
     expected = list(range(int(dt.datetime.combine(day, dt.time(7), MSK).timestamp()), label + 1, 600))
@@ -168,7 +232,8 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     require(digest(raw) == plan_sha, "preflight_plan_changed")
     plan = json.loads(raw)
     fields(plan, ("version", "files", "paths", "redis"))
-    require(plan["version"] == "reaction_shadow_preflight_v1", "unsupported_preflight_plan")
+    require(plan["version"] in ("reaction_shadow_preflight_v1", "reaction_shadow_preflight_v2"), "unsupported_preflight_plan")
+    v2 = plan["version"] == "reaction_shadow_preflight_v2"
     fields(plan["files"], ("worker", "supervisor", "prepared_spec", "source_manifest"))
     files = {}
     for name, item in plan["files"].items():
@@ -198,7 +263,9 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     policy = service.policy_from_spec(prepared_raw)
     require("bootstrap" not in prepared["runner"], "preparation_must_not_pin_bootstrap")
     runner = prepared["runner"]
-    require(runner["config"]["engine"] == "usdrubf" and runner["ingress"]["symbol"] == "USDRUBF", "usd_profile_required")
+    symbol = runner["ingress"]["symbol"]
+    require((symbol, runner["config"]["engine"]) in (("USDRUBF", "usdrubf"), ("IMOEXF", "imoexf"))
+            and (v2 or symbol == "USDRUBF"), "symbol_profile_required")
     guard = service.ClosedSourceGuard(paths["source"], prepared_raw)
     manifest = json.loads(small(files["source_manifest"]))
     require(manifest["version"] == "shadow_gateway_ws_closed_m10_v3", "v3_source_required")
@@ -214,12 +281,17 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     require(current < cutoff, "model_date_expired_no_inplace_retarget")
     approval = None
     approved_raw = None
+    revisions = revision_snapshot(paths["source"], symbol, current) if v2 else None
     if stage == "admission":
         require(paths["approval"].is_file() and paths["approved_spec"].is_file(), "explicit_admission_missing")
         require(not os.access(paths["approval"], os.W_OK) and not os.access(paths["approved_spec"], os.W_OK), "admission_files_writable_by_worker")
         approval = json.loads(small(paths["approval"]))
-        fields(approval, ("version", "plan_sha256", "approved_spec_sha256", "reviewed_at_utc", "ready_by", "gates", "evidence"))
-        require(approval["version"] == "reaction_shadow_admission_v1" and approval["plan_sha256"] == plan_sha, "admission_identity_mismatch")
+        approval_fields = {"version", "plan_sha256", "approved_spec_sha256", "reviewed_at_utc", "ready_by", "gates", "evidence"}
+        if v2:
+            approval_fields.add("revision_review")
+        fields(approval, approval_fields)
+        require(approval["version"] == ("reaction_shadow_admission_v2" if v2 else "reaction_shadow_admission_v1")
+                and approval["plan_sha256"] == plan_sha, "admission_identity_mismatch")
         require(type(approval["reviewed_at_utc"]) is int and 0 <= current - approval["reviewed_at_utc"] <= 3600
                 and dt.datetime.fromtimestamp(current, MSK).date() == first, "fresh_model_morning_review_required")
         fields(approval["gates"], GATES)
@@ -229,7 +301,7 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
                 and approval["ready_by"] == env.get("SHADOW_READY_BY")
                 and current + policy["startup_timeout_seconds"] <= ready.timestamp() <= cutoff, "readiness_window_invalid")
         evidence = approval["evidence"]
-        require(type(evidence) is list and len(evidence) == 2, "reviewed_evidence_required")
+        require(type(evidence) is list and len(evidence) == (3 if v2 else 2), "reviewed_evidence_required")
         kinds = set()
         for item in evidence:
             fields(item, ("kind", "path", "sha256"))
@@ -237,7 +309,10 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
             require(p.parent == config_dir / "evidence" and not os.access(p, os.W_OK)
                     and sha(item["sha256"]) and digest(small(p)) == item["sha256"], "reviewed_evidence_changed")
             kinds.add(item["kind"])
-        require(kinds == {"natural_session", "overnight_recovery"}, "reviewed_evidence_kinds")
+        require(kinds == ({"natural_session", "overnight_recovery", "source_revisions"} if v2
+                          else {"natural_session", "overnight_recovery"}), "reviewed_evidence_kinds")
+        if v2:
+            require(approval["revision_review"] == revisions, "revision_review_missing_or_changed")
         approved_raw = small(paths["approved_spec"])
         require(digest(approved_raw) == approval["approved_spec_sha256"], "approved_spec_changed")
         approved = tomllib.loads(approved_raw.decode())
@@ -245,16 +320,26 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
         require(approved == prepared and type(bootstrap) is dict, "only_bootstrap_may_be_added")
         fields(bootstrap, ("first_source_id", "last_source_id", "rows", "source_sha256", "first_session", "last_session"))
         previous = previous_session(first, runner["excluded_dates"])
-        require(bootstrap["last_session"] == previous.isoformat(), "bootstrap_must_include_previous_session")
-        health = json.loads(small(paths["source"] / "HEALTH.json"))
-        require(health.get("review_dates") == [], "source_price_revision_requires_separate_review")
-        terminal = terminal_record(paths["source"], cfg, previous, current)
-        require(bootstrap["last_source_id"] == terminal["id"], "bootstrap_must_include_terminal")
+        terminal = terminal_record(paths["source"], cfg, previous, current, symbol)
+        if v2:
+            tail = source_records(paths["source"])[-1]
+            tail_day = dt.datetime.fromtimestamp(tail["envelope"]["payload"]["close_time_utc"], MSK).date()
+            require(previous <= tail_day < first and bootstrap["last_session"] == tail_day.isoformat()
+                    and bootstrap["last_source_id"] == tail["id"], "bootstrap_must_include_context_tail")
+            previous_open = int(dt.datetime.combine(previous, dt.time(7), MSK).timestamp())
+            require(dt.date.fromisoformat(bootstrap["first_session"]) <= previous
+                    and int(bootstrap["first_source_id"].split('-')[0]) <= previous_open * 1000,
+                    "bootstrap_must_include_previous_session")
+        else:
+            require(bootstrap["last_session"] == previous.isoformat(), "bootstrap_must_include_previous_session")
+            health = json.loads(small(paths["source"] / "HEALTH.json"))
+            require(health.get("review_dates") == [], "source_price_revision_requires_separate_review")
+            require(bootstrap["last_source_id"] == terminal["id"], "bootstrap_must_include_terminal")
     reader = Reader(env.get("REACTION_SHADOW_REDIS_URL", ""), binding, cfg["stream"])
     try:
         require(reader.command("PING") == b"PONG", "reader_ping_failed")
         _, envelope = reader.envelope()
-        require(envelope["source"] == manifest["version"] and envelope["payload"]["symbol"] == "USDRUBF", "reader_source_identity_mismatch")
+        require(envelope["source"] == manifest["version"] and envelope["payload"]["symbol"] == symbol, "reader_source_identity_mismatch")
         if stage == "admission":
             sid, envelope = reader.envelope(terminal["id"], terminal["id"])
             require(sid == terminal["id"] and envelope == terminal["envelope"], "terminal_redis_prefix_mismatch")
@@ -275,11 +360,17 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
         finished = int(time.time()) if now is None else current
         require(finished + policy["startup_timeout_seconds"] <= ready.timestamp(), "preflight_missed_startup_window")
     guard.check(require_ready=True)
-    if stage == "admission":
+    if v2:
+        require(revision_snapshot(paths["source"], symbol, int(time.time()) if now is None else current) == revisions,
+                "revision_journal_changed_during_preflight")
+        if stage == "admission":
+            require(source_records(paths["source"])[-1]["id"] == bootstrap["last_source_id"],
+                    "source_tail_changed_during_inspection")
+    elif stage == "admission":
         require(json.loads(small(paths["source"] / "HEALTH.json")).get("review_dates") == [],
                 "source_price_revision_during_inspection")
     require(not generation.exists() and not generation.with_name(generation.name + ".supervisor").exists(), "generation_created_during_preflight")
-    return dict(event="reaction_shadow_preflight", stage=stage, preparation_ready=True,
+    result = dict(event="reaction_shadow_preflight", stage=stage, preparation_ready=True,
                 admission_allowed=stage == "admission", worker_started=False, generation_created=False,
                 reader_uid=os.geteuid(), source_readonly=True,
                 bootstrap_pinned=stage == "admission", order_emission_allowed=False,
@@ -287,6 +378,9 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
                 ordinary_model_limit=policy.get(service.ORDINARY_LIMIT, policy["max_model_lateness_seconds"]),
                 terminal_model_limit=policy["max_model_lateness_seconds"], queue_limit=policy["max_queue_age_seconds"],
                 pending_gates=sorted(GATES) if stage == "preparation" else [])
+    if v2:
+        result.update(symbol=symbol, revision_review=revisions, context_tail_policy="include_observed_pre_cutoff_tail")
+    return result
 
 
 def main():

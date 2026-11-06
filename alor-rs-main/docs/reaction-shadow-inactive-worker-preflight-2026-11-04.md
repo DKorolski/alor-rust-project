@@ -4,6 +4,10 @@ Scope: prepare a new reaction USD model pair behind an explicit admission gate.
 No live/RI/IMOEXF changes, source restart, numerical worker activation, bootstrap
 selection, historical reaction or generation creation is part of preparation.
 See [ordinary processing budget](shadow-ordinary-model-budget-2026-11-04.md).
+This document describes strict USD v1. The separately versioned
+[paired admission v2](reaction-shadow-paired-admission-v2-2026-11-06.md) adds
+IMOEXF, explicit as-observed revision review and the observed weekend tail;
+it does not silently relax or retarget an existing v1 unit.
 
 ## Preparation
 
