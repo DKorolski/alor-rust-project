@@ -108,3 +108,12 @@ Required regression coverage: strict-v1 compatibility, both v2 symbols,
 approved/unreviewed/new revisions, volume-only audit, corrupt/bad-binding events,
 source pending writes, genuine terminal proof, actual Rust inspector invocation,
 Monday context tail and empty weekends, and changes during inspection.
+
+Linux fixture packaging must include both reaction model TOMLs, the USD WS JSON
+used by policy tests, the service template and all selected test modules. Pure
+policy fixtures mock OS ownership/inspector results; actual reader probes remain
+separate. The optional `reaction-shadow-preflight-smoke.Dockerfile` supplies
+Python3.11+ and real Redis tools without installing packages on the host. Build
+it without secrets, then run as a non-root UID with no network, read-only
+artifact/worker mounts and an isolated writable tmpfs. The two actual-worker
+smokes own and PID-verify a random-port Redis inside that test namespace only.
