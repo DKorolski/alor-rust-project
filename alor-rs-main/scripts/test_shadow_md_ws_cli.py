@@ -354,12 +354,17 @@ skip_history_bars = false
                 worker=os.environ.get('REACTION_WORKER_BIN')
                 if worker:
                     spec=root/'worker.toml';spec.write_text(raw)
-                    first_id=str(from_ts*1000)+'-0'
-                    last_label=int(dt.datetime.combine(max(prior),dt.time(23,40),MSK).timestamp())
-                    last_id=str(last_label*1000)+'-0'
+                    # Raw source history may be longer; model bootstrap stays within
+                    # its 2..4 regular-session contract, including the received tail.
+                    first_label=int(dt.datetime.combine(min(prior),dt.time(7),MSK).timestamp())
+                    first_id=str(first_label*1000)+'-0'
+                    canonical=[json.loads(line)['record'] for line in (state/'committed.jsonl').read_text().splitlines()]
+                    last_id=canonical[-1]['id']
                     reader_env={'REACTION_SHADOW_REDIS_URL':f'redis://reader:fixture@127.0.0.1:{port}/0','TZ':'UTC'}
                     preview=json.loads(subprocess.check_output([worker,'inspect-bootstrap',str(spec),first_id,last_id],env=reader_env,text=True,timeout=20))['preview']
                     self.assertTrue(all(len(arm)>=2 for arm in preview['anchors']))
+                    self.assertEqual(preview['bootstrap']['first_session'],str(min(prior)))
+                    self.assertLessEqual(preview['bootstrap']['rows'],312)
                     raw+='\n[runner.bootstrap]\n'+''.join(f'{k} = {json.dumps(v)}\n' for k,v in preview['bootstrap'].items())
                     spec.write_text(raw)
                     generation=root/'worker'
