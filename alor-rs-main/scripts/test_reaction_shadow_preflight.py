@@ -429,12 +429,139 @@ class AsObservedTests(unittest.TestCase):
         self.configure(monday=True)
         self.assertTrue(self.admit()['admission_allowed'])
 
+
     def test_context_tail_arriving_during_inspection_blocks_admission(self):
         self.configure(monday=True)
         def changed(*a,**kw):
             row=json.loads(json.dumps(self.records[-1]));row['release']=None;label=self.epoch('2026-11-07T18:50:00')
             row.update(id=str(label*1000)+'-0');row['envelope']['payload']['close_time_utc']=label
             self.records.append(row);self.save_records();return self.completed
+        with mock.patch.object(probe.subprocess,'run',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'tail_changed'):
+                self.check('admission',self.now)
+
+
+class LateContextTests(unittest.TestCase):
+    setUp = PreflightTests.setUp
+    check = PreflightTests.check
+    epoch = staticmethod(PreflightTests.epoch)
+    save_approval = PreflightTests.save_approval
+    save_records = PreflightTests.save_records
+    refresh_approval = AsObservedTests.refresh_approval
+
+    def configure(self, symbol='USDRUBF'):
+        AsObservedTests.configure(self, symbol, monday=True)
+        version = 'shadow_gateway_ws_closed_m10_v4'
+        cfg = json.loads(self.manifest.read_text())['config']
+        cfg['late_context_history_policy'] = 'audit_only_v1'
+        cfg_sha = probe.digest(json.dumps(cfg,sort_keys=True,separators=(',',':')).encode())
+        self.manifest.write_text(json.dumps(dict(version=version,config=cfg,config_sha256=cfg_sha)))
+        tail = json.loads(json.dumps(self.records[0]));label = self.epoch('2026-11-07T18:50:00')
+        tail['id'] = str(label*1000)+'-0';tail['envelope']['payload']['close_time_utc'] = label
+        tail['envelope']['ts_utc'] = label+610;tail['release'] = None
+        self.records.append(tail)
+        for r in self.records:r['envelope']['source'] = version
+        self.save_v4_records()
+        self.bootstrap.update(last_source_id=tail['id'],last_session='2026-11-07')
+        self.health.update(version=version,config_sha256=cfg_sha,late_context_rows=0,late_context_review_dates=[])
+        self.write_health()
+        self.plan['version'] = 'reaction_shadow_preflight_v3'
+        self.plan['files']['source_manifest']['sha256'] = probe.digest(self.manifest.read_bytes())
+        self.plan_path.write_text(json.dumps(self.plan));self.plan_sha = probe.digest(self.plan_path.read_bytes())
+        self.approval.update(version='reaction_shadow_admission_v3',plan_sha256=self.plan_sha)
+        self.refresh_approval()
+        self.reader.envelope.side_effect = lambda first='-',last='+': (
+            (self.terminal['id'],self.terminal['envelope']) if first!='-' else
+            (self.records[0]['id'],self.records[0]['envelope']))
+        self.refresh_late_review()
+
+    def save_v4_records(self):
+        self.heads = {r['id']:f'{i+1:064x}' for i,r in enumerate(self.records)}
+        (self.source/'committed.jsonl').write_text(''.join(
+            json.dumps(dict(record=r,sha256=self.heads[r['id']]))+'\n' for r in self.records))
+
+    def write_health(self):
+        (self.source/'HEALTH.json').write_text(json.dumps(self.health))
+
+    def refresh_late_review(self):
+        self.approval['late_context_review'] = probe.late_context_snapshot(
+            self.source,json.loads(self.manifest.read_text())['config'],self.now)
+        self.save_approval()
+
+    def late_row(self, minute=50):
+        label=self.epoch(f'2026-11-07T09:{minute:02}:00');tail=self.records[-1]
+        bar={k:v for k,v in self.records[0]['envelope']['payload'].items()
+             if k in ('symbol','close_time_utc','o','h','l','c','v','origin')}
+        bar['close_time_utc']=label
+        event=dict(kind='late_unknown_context_bar',disposition='audit_only_no_model_replay',observed=bar,
+                   received_at_utc=self.now-60,durable_at_utc=self.now-59,generation=2,
+                   canonical_tail_label=tail['envelope']['payload']['close_time_utc'],
+                   canonical_tail_id=tail['id'],canonical_head_sha256=self.heads[tail['id']])
+        item=dict(event=event,sha256=probe.digest(json.dumps(event).encode()))
+        with (self.source/'late-context.jsonl').open('a') as f:f.write(json.dumps(item)+'\n')
+        self.health['late_context_rows']+=1;self.health['late_context_review_dates']=['2026-11-07'];self.write_health()
+        return item
+
+    def admit(self):
+        with mock.patch.object(probe.subprocess,'run',return_value=self.completed):
+            return self.check('admission',self.now)
+
+    def test_both_v4_symbols_require_explicit_review_and_never_import_late_bar(self):
+        self.configure('IMOEXF');self.late_row()
+        before=(self.source/'committed.jsonl').read_bytes()
+        with self.assertRaisesRegex(ValueError,'late_context_review_missing_or_changed'):self.admit()
+        self.refresh_late_review();result=self.admit()
+        self.assertTrue(result['admission_allowed'])
+        self.assertEqual(result['late_context_review']['rows'],1)
+        self.assertEqual(before,(self.source/'committed.jsonl').read_bytes())
+        self.assertEqual(list(self.owner.iterdir()),[])
+
+    def test_empty_late_context_review_is_still_required(self):
+        self.configure();self.assertTrue(self.admit()['admission_allowed'])
+        del self.approval['late_context_review'];self.save_approval()
+        with self.assertRaisesRegex(ValueError,'unexpected_preflight_schema'):self.admit()
+
+    def test_older_plan_cannot_admit_v4_source(self):
+        self.configure();self.plan['version']='reaction_shadow_preflight_v2'
+        self.plan_path.write_text(json.dumps(self.plan));self.plan_sha=probe.digest(self.plan_path.read_bytes())
+        with self.assertRaisesRegex(ValueError,'source_version_required'):self.check(now=self.now)
+
+    def test_late_context_tail_binding_cannot_be_forged(self):
+        self.configure();item=self.late_row();item['event']['canonical_head_sha256']='f'*64
+        (self.source/'late-context.jsonl').write_text(json.dumps(item)+'\n')
+        with self.assertRaisesRegex(ValueError,'tail_binding'):self.check(now=self.now)
+
+    def test_late_context_weekday_or_canonical_bar_is_not_an_exception(self):
+        self.configure();item=self.late_row()
+        item['event']['observed']['close_time_utc']=self.epoch('2026-11-06T07:00:00')
+        (self.source/'late-context.jsonl').write_text(json.dumps(item)+'\n')
+        with self.assertRaisesRegex(ValueError,'calendar_or_canonical_conflict'):self.check(now=self.now)
+
+    def test_torn_late_journal_and_health_mismatch_are_blocked(self):
+        self.configure();self.late_row();p=self.source/'late-context.jsonl';raw=p.read_text();p.write_text(raw.rstrip())
+        with self.assertRaisesRegex(ValueError,'journal_incomplete'):self.check(now=self.now)
+        p.write_text(raw);self.health['late_context_rows']=0;self.write_health()
+        with self.assertRaisesRegex(ValueError,'health_journal_mismatch'):self.check(now=self.now)
+
+    def test_late_context_change_during_inspection_blocks_admission(self):
+        self.configure()
+        def changed(*a,**kw):self.late_row();return self.completed
+        with mock.patch.object(probe.subprocess,'run',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'late_context_changed_during_preflight'):self.check('admission',self.now)
+
+    def test_bad_ohlcv_and_future_receipt_are_not_tolerated(self):
+        self.configure();item=self.late_row();p=self.source/'late-context.jsonl'
+        item['event']['observed']['l']=102.;p.write_text(json.dumps(item)+'\n')
+        with self.assertRaisesRegex(ValueError,'invalid_late_context_ohlcv'):self.check(now=self.now)
+        item['event']['observed']['l']=99.;item['event']['durable_at_utc']=self.now+1;p.write_text(json.dumps(item)+'\n')
+        with self.assertRaisesRegex(ValueError,'invalid_late_context_receipt'):self.check(now=self.now)
+
+    def test_context_tail_arriving_during_inspection_blocks_admission(self):
+        self.configure()
+        def changed(*a,**kw):
+            row=json.loads(json.dumps(self.records[-1]));row['release']=None;label=self.epoch('2026-11-08T18:50:00')
+            row.update(id=str(label*1000)+'-0');row['envelope']['payload']['close_time_utc']=label
+            self.records.append(row);self.save_v4_records();return self.completed
         with mock.patch.object(probe.subprocess,'run',side_effect=changed):
             with self.assertRaisesRegex(ValueError,'tail_changed'):
                 self.check('admission',self.now)

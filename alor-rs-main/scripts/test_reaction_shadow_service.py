@@ -177,6 +177,26 @@ engine = "imoexf"
             with self.assertRaisesRegex(ValueError, "bounded ordinary"):
                 service.ClosedSourceGuard(root, spec)
 
+    def test_ws_v4_requires_opt_in_audit_health_and_preserves_age_guard(self):
+        root, _, spec, health = self.ws_source(v3=True)
+        manifest = json.loads((root/'manifest.json').read_text())
+        manifest['version'] = 'shadow_gateway_ws_closed_m10_v4'
+        manifest['config']['late_context_history_policy'] = 'audit_only_v1'
+        manifest['config_sha256'] = service.hashlib.sha256(json.dumps(
+            manifest['config'],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        (root/'manifest.json').write_text(json.dumps(manifest))
+        health.update(version=manifest['version'],config_sha256=manifest['config_sha256'],
+                      late_context_rows=0,late_context_review_dates=[])
+        (root/'HEALTH.json').write_text(json.dumps(health))
+        guard = service.ClosedSourceGuard(root,spec)
+        for key,value in [('late_context_rows',True),('late_context_rows',1025),('heartbeat_utc',0)]:
+            (root/'HEALTH.json').write_text(json.dumps({**health,key:value}))
+            with self.assertRaises(service.SourceUnavailable):guard.check()
+        (root/'HEALTH.json').write_text(json.dumps(health))
+        manifest['config']['late_context_history_policy']='ignore_all'
+        (root/'manifest.json').write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError,'audit-only'):service.ClosedSourceGuard(root,spec)
+
     def test_ws_v2_requires_opt_in_and_preserves_health_guard(self):
         root, _, spec, health = self.ws_source(v2=True)
         guard = service.ClosedSourceGuard(root, spec)

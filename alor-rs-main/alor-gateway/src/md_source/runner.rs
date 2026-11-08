@@ -9,7 +9,6 @@ use chrono::{Timelike, Utc};
 use serde_json::json;
 
 use super::{
-    VERSION,
     config::{SourceConfig, redis_client},
     digest, local,
     storage::{Record, Store},
@@ -116,7 +115,7 @@ impl Runner {
                 release.proof.reason == crate::terminal_bar::ReleaseReason::NextTimestampDelayed
             })
             .collect::<Vec<_>>();
-        self.store.health(&json!({"version":VERSION,"status":status,"heartbeat_utc":Utc::now().timestamp(),
+        let mut health = json!({"version":self.cfg.version(),"status":status,"heartbeat_utc":Utc::now().timestamp(),
             "last_ws_rx_utc":self.last_rx,"generation":self.generation,
             "history_complete":self.history_complete,"connected":self.connected,"subscribed":self.acked,
             "queue_drained":drained,"published_rows":self.store.records.len(),
@@ -126,7 +125,12 @@ impl Runner {
             "ordinary_delayed_rows":delayed.len(),
             "last_ordinary_delay_seconds":delayed.last().map(|r|r.proof.observation_cutoff_utc-r.proof.closed_at_utc),
             "model_freshness_policy":"consumer_owned_unchanged",
-            "order_emission_allowed":false,"config_sha256":digest(&serde_json::to_value(&self.cfg)?)?}))
+            "order_emission_allowed":false,"config_sha256":digest(&serde_json::to_value(&self.cfg)?)?});
+        if self.cfg.late_context_history_policy.is_some() {
+            health["late_context_rows"] = json!(self.store.late_context_rows);
+            health["late_context_review_dates"] = json!(self.store.late_context_review_dates);
+        }
+        self.store.health(&health)
     }
     fn validate_raw(&self, bar: &BarEvent, received: i64) -> Result<()> {
         ensure!(
@@ -210,6 +214,29 @@ impl Runner {
             if let Some(old) = self.store.records.get(&bar.close_time_utc) {
                 self.store
                     .audit(&old.bar()?, &bar, self.last_rx, generation)?;
+                continue;
+            }
+            // Late context is audit-only: never back-insert it into Redis or model history.
+            if self.cfg.late_context_history_policy.is_some()
+                && self.cfg.context_day(local(bar.close_time_utc)?.date())
+                && self
+                    .store
+                    .records
+                    .last_key_value()
+                    .is_some_and(|(ts, _)| *ts > bar.close_time_utc)
+            {
+                self.store.quarantine_context(
+                    &self.cfg,
+                    &bar,
+                    self.last_rx,
+                    generation,
+                    self.clock().utc,
+                )?;
+                println!(
+                    "{}",
+                    json!({"event":"late_context_quarantined","symbol":self.cfg.symbol,
+                    "label":bar.close_time_utc,"rows":self.store.late_context_rows,"order_emission_allowed":false})
+                );
                 continue;
             }
             let closed_at_subscribe = bar.close_time_utc + 600 <= subscribed;

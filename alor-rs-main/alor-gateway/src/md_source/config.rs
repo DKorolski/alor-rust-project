@@ -23,9 +23,25 @@ pub struct SourceConfig {
     pub context_finalization: bool,
     #[serde(default)]
     pub ordinary_observation_max_lateness_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late_context_history_policy: Option<LateContextHistoryPolicy>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LateContextHistoryPolicy {
+    AuditOnlyV1,
 }
 
 impl SourceConfig {
+    pub fn version(&self) -> &'static str {
+        if self.late_context_history_policy.is_some() {
+            "shadow_gateway_ws_closed_m10_v4"
+        } else {
+            super::VERSION
+        }
+    }
+
     pub fn validate(&self, now: i64) -> Result<()> {
         self.terminal.validate()?;
         ensure!(

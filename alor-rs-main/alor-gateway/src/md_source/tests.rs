@@ -55,6 +55,25 @@ fn source_config_rejects_nonisolated_identity_dates_and_public_redis() {
 }
 
 #[test]
+fn late_context_policy_is_versioned_explicit_and_legacy_hash_stable() {
+    let old = cfg();
+    let raw = serde_json::to_value(&old).unwrap();
+    assert!(raw.get("late_context_history_policy").is_none());
+    assert_eq!(old.version(), super::VERSION);
+    let mut opted = raw.clone();
+    opted["late_context_history_policy"] = json!("audit_only_v1");
+    let new: config::SourceConfig = serde_json::from_value(opted.clone()).unwrap();
+    assert_eq!(new.version(), "shadow_gateway_ws_closed_m10_v4");
+    assert_eq!(
+        new.eligible(ts("2026-11-07T09:50:00+03:00")).unwrap(),
+        old.eligible(ts("2026-11-07T09:50:00+03:00")).unwrap()
+    );
+    opted["late_context_history_policy"] = json!("ignore_all");
+    assert!(serde_json::from_value::<config::SourceConfig>(opted).is_err());
+    assert_eq!(serde_json::to_value(old).unwrap(), raw);
+}
+
+#[test]
 fn terminal_release_survives_canonical_journal_roundtrip_and_audit() {
     let config = cfg();
     let mut core = config.finalizer().unwrap();

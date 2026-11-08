@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only USD preparation/admission checks. Never starts or writes a generation."""
+"""Read-only paired preparation/admission checks. Never starts or writes a generation."""
 import argparse
 import datetime as dt
 import hashlib
@@ -223,6 +223,61 @@ def terminal_record(source, cfg, day, now, symbol="USDRUBF"):
     return record
 
 
+def late_context_snapshot(source, cfg, now):
+    """Bind quarantined context to canonical witnesses, never import or replay it."""
+    records = source_records(source)
+    by_label = {r['envelope']['payload']['close_time_utc']: r for r in records}
+    heads = {item['record']['id']: item.get('sha256') for item in (
+        json.loads(line) for line in (source/'committed.jsonl').read_bytes().splitlines())}
+    path = source/'late-context.jsonl'
+    raw = b''
+    if path.exists() or path.is_symlink():
+        with regular(path).open('rb') as handle:
+            raw = handle.read(1024**2 + 1)
+    require(len(raw) <= 1024**2 and (not raw or raw.endswith(b'\n')), 'late_context_journal_incomplete')
+    items = [json.loads(line) for line in raw.splitlines()]
+    require(len(items) <= 1024, 'late_context_row_bound')
+    dates, identities, hashes = set(), set(), set()
+    for item in items:
+        fields(item, ('event','sha256'))
+        require(sha(item['sha256']) and item['sha256'] not in hashes, 'late_context_event_identity')
+        hashes.add(item['sha256'])
+        e = item['event']
+        fields(e, ('kind','disposition','observed','received_at_utc','durable_at_utc','generation',
+                   'canonical_tail_label','canonical_tail_id','canonical_head_sha256'))
+        b = e['observed']
+        fields(b, ('symbol','close_time_utc','o','h','l','c','v','origin'))
+        label = b['close_time_utc']
+        require(type(label) is int and label > 0 and label % 600 == 0, 'late_context_label')
+        day = dt.datetime.fromtimestamp(label, MSK)
+        context = day.weekday() >= 5 or day.date().isoformat() in cfg['excluded_dates']
+        calendar = cfg['terminal']['symbols'][cfg['symbol']]
+        end = calendar['overrides'].get(day.date().isoformat(), calendar['weekend_end'] if day.weekday() >= 5 else calendar['weekday_end'])
+        require(context and end is not None and dt.time(9,50) <= day.time() < dt.time.fromisoformat(end)
+                and day.date() >= dt.date.fromisoformat(cfg['bootstrap_start'])
+                and b['symbol'] == cfg['symbol'] and b['origin'] == 'history' and label not in by_label,
+                'late_context_calendar_or_canonical_conflict')
+        require(all(type(b[k]) in (int,float) and math.isfinite(b[k]) for k in ('o','h','l','c','v'))
+                and 0 < b['l'] <= min(b['o'],b['c']) and b['h'] >= max(b['o'],b['c']) and b['v'] >= 0,
+                'invalid_late_context_ohlcv')
+        tail = by_label.get(e['canonical_tail_label'])
+        require(type(e['canonical_tail_label']) is int and tail is not None and label < e['canonical_tail_label']
+                and tail['id'] == e['canonical_tail_id'] and sha(e['canonical_head_sha256'])
+                and heads[tail['id']] == e['canonical_head_sha256'], 'late_context_tail_binding')
+        require(e['kind'] == 'late_unknown_context_bar' and e['disposition'] == 'audit_only_no_model_replay'
+                and type(e['generation']) is int and e['generation'] > 0
+                and type(e['received_at_utc']) is int and type(e['durable_at_utc']) is int
+                and label + 600 <= e['received_at_utc'] <= e['durable_at_utc'] <= now,
+                'invalid_late_context_receipt')
+        identity = json.dumps(b,sort_keys=True,separators=(',',':'),allow_nan=False)
+        require(identity not in identities, 'duplicate_late_context_observation')
+        identities.add(identity); dates.add(day.date().isoformat())
+    h = json.loads(small(source/'HEALTH.json'))
+    require(h.get('late_context_rows') == len(items) and type(h.get('late_context_rows')) is int
+            and h.get('late_context_review_dates') == sorted(dates), 'late_context_health_journal_mismatch')
+    return dict(policy='audit_only_v1',journal_sha256=digest(raw),rows=len(items),review_dates=sorted(dates))
+
+
 def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     require(stage in ("preparation", "admission") and sha(plan_sha), "explicit_preflight_stage_and_digest_required")
     require(os.geteuid() != 0, "dedicated_nonroot_reader_required")
@@ -232,8 +287,9 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     require(digest(raw) == plan_sha, "preflight_plan_changed")
     plan = json.loads(raw)
     fields(plan, ("version", "files", "paths", "redis"))
-    require(plan["version"] in ("reaction_shadow_preflight_v1", "reaction_shadow_preflight_v2"), "unsupported_preflight_plan")
-    v2 = plan["version"] == "reaction_shadow_preflight_v2"
+    require(plan["version"] in ("reaction_shadow_preflight_v1", "reaction_shadow_preflight_v2", "reaction_shadow_preflight_v3"), "unsupported_preflight_plan")
+    v3 = plan['version'] == 'reaction_shadow_preflight_v3'
+    v2 = plan["version"] in ('reaction_shadow_preflight_v2','reaction_shadow_preflight_v3')
     fields(plan["files"], ("worker", "supervisor", "prepared_spec", "source_manifest"))
     files = {}
     for name, item in plan["files"].items():
@@ -268,7 +324,7 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
             and (v2 or symbol == "USDRUBF"), "symbol_profile_required")
     guard = service.ClosedSourceGuard(paths["source"], prepared_raw)
     manifest = json.loads(small(files["source_manifest"]))
-    require(manifest["version"] == "shadow_gateway_ws_closed_m10_v3", "v3_source_required")
+    require(manifest["version"] == ("shadow_gateway_ws_closed_m10_v4" if v3 else "shadow_gateway_ws_closed_m10_v3"), "source_version_required")
     cfg = manifest["config"]
     fields(plan["redis"], ("host", "port", "username"))
     binding = plan["redis"]
@@ -282,6 +338,7 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     approval = None
     approved_raw = None
     revisions = revision_snapshot(paths["source"], symbol, current) if v2 else None
+    late_context = late_context_snapshot(paths['source'], cfg, current) if v3 else None
     if stage == "admission":
         require(paths["approval"].is_file() and paths["approved_spec"].is_file(), "explicit_admission_missing")
         require(not os.access(paths["approval"], os.W_OK) and not os.access(paths["approved_spec"], os.W_OK), "admission_files_writable_by_worker")
@@ -289,8 +346,10 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
         approval_fields = {"version", "plan_sha256", "approved_spec_sha256", "reviewed_at_utc", "ready_by", "gates", "evidence"}
         if v2:
             approval_fields.add("revision_review")
+        if v3:
+            approval_fields.add('late_context_review')
         fields(approval, approval_fields)
-        require(approval["version"] == ("reaction_shadow_admission_v2" if v2 else "reaction_shadow_admission_v1")
+        require(approval["version"] == ("reaction_shadow_admission_v3" if v3 else "reaction_shadow_admission_v2" if v2 else "reaction_shadow_admission_v1")
                 and approval["plan_sha256"] == plan_sha, "admission_identity_mismatch")
         require(type(approval["reviewed_at_utc"]) is int and 0 <= current - approval["reviewed_at_utc"] <= 3600
                 and dt.datetime.fromtimestamp(current, MSK).date() == first, "fresh_model_morning_review_required")
@@ -313,6 +372,8 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
                           else {"natural_session", "overnight_recovery"}), "reviewed_evidence_kinds")
         if v2:
             require(approval["revision_review"] == revisions, "revision_review_missing_or_changed")
+        if v3:
+            require(approval['late_context_review'] == late_context, 'late_context_review_missing_or_changed')
         approved_raw = small(paths["approved_spec"])
         require(digest(approved_raw) == approval["approved_spec_sha256"], "approved_spec_changed")
         approved = tomllib.loads(approved_raw.decode())
@@ -363,6 +424,9 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     if v2:
         require(revision_snapshot(paths["source"], symbol, int(time.time()) if now is None else current) == revisions,
                 "revision_journal_changed_during_preflight")
+        if v3:
+            require(late_context_snapshot(paths['source'],cfg,int(time.time()) if now is None else current) == late_context,
+                    'late_context_changed_during_preflight')
         if stage == "admission":
             require(source_records(paths["source"])[-1]["id"] == bootstrap["last_source_id"],
                     "source_tail_changed_during_inspection")
@@ -380,6 +444,8 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
                 pending_gates=sorted(GATES) if stage == "preparation" else [])
     if v2:
         result.update(symbol=symbol, revision_review=revisions, context_tail_policy="include_observed_pre_cutoff_tail")
+    if v3:
+        result['late_context_review'] = late_context
     return result
 
 

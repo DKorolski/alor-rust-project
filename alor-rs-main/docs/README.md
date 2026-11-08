@@ -44,6 +44,8 @@ or a replacement for the production live gateway:
   read-only preparation, reviewed bootstrap and explicit future admission.
 - `reaction-shadow-paired-admission-v2-2026-11-06.md` - separate IMOEXF/USD
   admission with immutable as-observed bars, reviewed revisions and weekend tail.
+- `shadow-late-context-recovery-2026-11-08.md` - opt-in source v4 / admission v3,
+  audited late context without back-insertion or model replay; successor gates.
 
 ## Strategy And Deployment Contracts
 

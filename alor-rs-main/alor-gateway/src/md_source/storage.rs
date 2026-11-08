@@ -10,7 +10,7 @@ use redis::streams::StreamRangeReply;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{MAX_AUDIT_ROWS, MAX_ROWS, VERSION, config::SourceConfig, digest};
+use super::{MAX_AUDIT_ROWS, MAX_ROWS, config::SourceConfig, digest};
 use crate::{models::BarEvent, terminal_bar::Release};
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -38,7 +38,7 @@ impl Record {
         payload["source_proof"] = proof;
         Ok(Self {
             id: format!("{}-0", bar.close_time_utc * 1000),
-            envelope: json!({"schema_version":1,"ts_utc":now,"source":VERSION,"msg_type":"bar","payload":payload}),
+            envelope: json!({"schema_version":1,"ts_utc":now,"source":config.version(),"msg_type":"bar","payload":payload}),
             release,
         })
     }
@@ -75,6 +75,10 @@ pub struct Store {
     pub audit_rows: usize,
     pub review_dates: std::collections::BTreeSet<chrono::NaiveDate>,
     audit_seen: std::collections::BTreeSet<String>,
+    pub late_context_rows: usize,
+    pub late_context_review_dates: std::collections::BTreeSet<chrono::NaiveDate>,
+    late_context_seen: std::collections::BTreeSet<String>,
+    record_heads: BTreeMap<i64, String>,
     head: String,
     attempt: usize,
     _lock: File,
@@ -114,7 +118,7 @@ impl Store {
             .truncate(false)
             .open(&lock_path)?;
         lock.try_lock().context("source writer already running")?;
-        let manifest = json!({"version":VERSION,"config":config,
+        let manifest = json!({"version":config.version(),"config":config,
             "config_sha256":digest(&serde_json::to_value(config)?)?});
         if create {
             publish_new(&root.join("manifest.json"), &manifest)?;
@@ -136,6 +140,10 @@ impl Store {
             audit_rows: 0,
             review_dates: Default::default(),
             audit_seen: Default::default(),
+            late_context_rows: 0,
+            late_context_review_dates: Default::default(),
+            late_context_seen: Default::default(),
+            record_heads: Default::default(),
             head: "genesis".into(),
             attempt: 1,
             _lock: lock,
@@ -177,6 +185,7 @@ impl Store {
                     "unordered/duplicate source journal"
                 );
                 s.head = item["sha256"].as_str().context("source hash")?.into();
+                s.record_heads.insert(b.close_time_utc, s.head.clone());
                 s.records.insert(b.close_time_utc, row);
                 ensure!(s.records.len() <= MAX_ROWS, "source row budget");
             }
@@ -213,6 +222,42 @@ impl Store {
                 }
             }
         }
+        let late = root.join("late-context.jsonl");
+        if late.exists() {
+            regular(&late)?;
+            ensure!(
+                late.metadata()?.len() <= 1024 * 1024,
+                "late context byte budget"
+            );
+            ensure!(
+                fs::read(&late)?.last() == Some(&b'\n'),
+                "torn late context tail"
+            );
+            for line in BufReader::new(File::open(&late)?).split(b'\n') {
+                let line = line?;
+                ensure!(
+                    !line.is_empty() && line.len() <= 16384,
+                    "late context row budget"
+                );
+                let item: Value = serde_json::from_slice(&line)?;
+                ensure!(
+                    item["sha256"] == digest(&item["event"])?,
+                    "late context checksum"
+                );
+                let bar = s.validate_late_context(config, &item["event"], now)?;
+                ensure!(
+                    s.late_context_seen.insert(digest(&bar)?),
+                    "duplicate late context audit"
+                );
+                s.late_context_rows += 1;
+                ensure!(
+                    s.late_context_rows <= MAX_AUDIT_ROWS,
+                    "late context capacity"
+                );
+                s.late_context_review_dates
+                    .insert(super::local(bar.close_time_utc)?.date());
+            }
+        }
         let mut attempt_files = std::collections::BTreeSet::new();
         for (index, entry) in fs::read_dir(root)?.enumerate() {
             ensure!(index < 300, "source directory budget");
@@ -226,6 +271,7 @@ impl Store {
                         | "manifest.json"
                         | "committed.jsonl"
                         | "revisions.jsonl"
+                        | "late-context.jsonl"
                         | "HEALTH.json"
                 ) || name.ends_with(".started.json")
                     || name.ends_with(".stopped.json"),
@@ -269,7 +315,7 @@ impl Store {
             config.eligible(bar.close_time_utc)?
                 && bar.symbol == config.symbol
                 && row.id == format!("{}-0", bar.close_time_utc * 1000)
-                && row.envelope["source"] == VERSION
+                && row.envelope["source"] == config.version()
                 && row.envelope["schema_version"] == 1
                 && row.envelope["msg_type"] == "bar",
             "invalid canonical source identity"
@@ -449,6 +495,8 @@ impl Store {
         fs::remove_file(path)?;
         sync_dir(&self.root)?;
         self.head = sha;
+        self.record_heads
+            .insert(bar.close_time_utc, self.head.clone());
         self.records.insert(bar.close_time_utc, row);
         Ok(())
     }
@@ -535,6 +583,108 @@ impl Store {
                     .is_some_and(|ts| ts >= original.close_time_utc + 600 && ts <= now),
             "invalid revision kind/receipt/generation"
         );
+        Ok(())
+    }
+
+    fn validate_late_context(
+        &self,
+        config: &SourceConfig,
+        event: &Value,
+        now: i64,
+    ) -> Result<BarEvent> {
+        ensure!(
+            config.late_context_history_policy.is_some(),
+            "late context policy required"
+        );
+        ensure!(
+            event.as_object().is_some_and(|v| v.len() == 9),
+            "late context event schema"
+        );
+        let bar: BarEvent = serde_json::from_value(event["observed"].clone())?;
+        let tail_label = event["canonical_tail_label"]
+            .as_i64()
+            .context("late context tail label")?;
+        let tail = self
+            .records
+            .get(&tail_label)
+            .context("late context tail missing")?;
+        ensure!(
+            config.eligible(bar.close_time_utc)?
+                && config.context_day(super::local(bar.close_time_utc)?.date())
+                && bar.symbol == config.symbol
+                && bar.origin == crate::models::DataOrigin::History
+                && !self.records.contains_key(&bar.close_time_utc)
+                && bar.close_time_utc < tail_label
+                && event["canonical_tail_id"] == tail.id
+                && event["canonical_head_sha256"].as_str()
+                    == self.record_heads.get(&tail_label).map(String::as_str)
+                && event["canonical_head_sha256"].is_string()
+                && event["kind"] == "late_unknown_context_bar"
+                && event["disposition"] == "audit_only_no_model_replay"
+                && event["generation"].as_u64().is_some_and(|g| g > 0),
+            "invalid late context identity/calendar/binding"
+        );
+        let received = event["received_at_utc"]
+            .as_i64()
+            .context("late context receipt")?;
+        let durable = event["durable_at_utc"]
+            .as_i64()
+            .context("late context durable clock")?;
+        ensure!(
+            bar.close_time_utc + 600 <= received && received <= durable && durable <= now,
+            "invalid late context receipt"
+        );
+        ensure!(
+            [bar.o, bar.h, bar.l, bar.c, bar.v]
+                .iter()
+                .all(|x| x.is_finite())
+                && bar.l > 0.
+                && bar.l <= bar.o.min(bar.c)
+                && bar.h >= bar.o.max(bar.c)
+                && bar.v >= 0.,
+            "invalid late context OHLCV"
+        );
+        Ok(bar)
+    }
+
+    pub fn quarantine_context(
+        &mut self,
+        config: &SourceConfig,
+        bar: &BarEvent,
+        received: i64,
+        generation: u64,
+        now: i64,
+    ) -> Result<()> {
+        let (label, tail) = self
+            .records
+            .last_key_value()
+            .context("late context needs canonical tail")?;
+        let event = json!({"kind":"late_unknown_context_bar","disposition":"audit_only_no_model_replay",
+            "observed":bar,"received_at_utc":received,"durable_at_utc":now,"generation":generation,
+            "canonical_tail_label":label,"canonical_tail_id":tail.id,"canonical_head_sha256":self.head});
+        self.validate_late_context(config, &event, now)?;
+        let identity = digest(bar)?;
+        if self.late_context_seen.contains(&identity) {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&json!({"event":event,"sha256":digest(&event)?}))?;
+        let path = self.root.join("late-context.jsonl");
+        ensure!(
+            self.late_context_rows < MAX_AUDIT_ROWS
+                && bytes.len() <= 16384
+                && fs::metadata(&path).map(|m| m.len()).unwrap_or(0) + (bytes.len() as u64)
+                    < 1024 * 1024,
+            "late context capacity"
+        );
+        let mut file = OpenOptions::new().append(true).create(true).open(path)?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        sync_dir(&self.root)?;
+        self.late_context_seen.insert(identity);
+        self.late_context_rows += 1;
+        self.late_context_review_dates
+            .insert(super::local(bar.close_time_utc)?.date());
         Ok(())
     }
 

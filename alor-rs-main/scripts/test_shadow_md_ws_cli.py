@@ -207,7 +207,13 @@ class WsSourceSmoke(unittest.TestCase):
     def test_usdrubf_uncertain_ack_and_reconnect(self):
         self.smoke(True, tamper=False, symbol='USDRUBF')
 
-    def smoke(self, drop_ack, tamper, symbol='IMOEXF'):
+    def test_imoexf_v4_reconnect_quarantines_late_0950_without_source_changes(self):
+        self.smoke(False, tamper=False, late_audit=True)
+
+    def test_usdrubf_v4_reconnect_quarantines_late_0950_without_source_changes(self):
+        self.smoke(False, tamper=False, symbol='USDRUBF', late_audit=True)
+
+    def smoke(self, drop_ack, tamper, symbol='IMOEXF', late_audit=False):
         binary = Path(os.environ['SHADOW_MD_WS_BIN']).resolve(strict=True)
         server_bin = os.environ.get('REDIS_SERVER_BIN') or shutil.which('redis-server')
         cli_bin = os.environ.get('REDIS_CLI_BIN') or shutil.which('redis-cli')
@@ -248,13 +254,21 @@ class WsSourceSmoke(unittest.TestCase):
                     while sunday.weekday() != 6:
                         sunday -= dt.timedelta(days=1)
                     begin = min(begin, sunday - dt.timedelta(days=2))
+                if late_audit:
+                    late_day = today - dt.timedelta(days=1)
+                    while late_day.weekday() < 5:late_day -= dt.timedelta(days=1)
+                    begin = min(begin,late_day-dt.timedelta(days=2))
+                    late_label = int(dt.datetime.combine(late_day,dt.time(9,50),MSK).timestamp())
                 source_key = f'shadow.source.closed10m.{symbol}.owned_fixture'
                 redis('ACL','SETUSER','source','on','>fixture','~'+source_key,'-@all','+xadd','+xrange','+xlen','+ping')
                 redis('ACL','SETUSER','reader','on','>fixture','~'+source_key,'-@all','+xrange','+multi','+exec','+ping')
                 self.assertIn('NOPERM',redis('XADD','cmd.orders.fixture','*','payload','forbidden',reader=True))
                 self.assertIn('NOPERM',redis('XADD','cmd.orders.fixture','*','payload','forbidden',source=True))
                 self.assertIn('NOPERM',redis('XRANGE','md.bars.live.IMOEXF','-','+',source=True))
+                batches = 0
                 def bars():
+                    nonlocal batches
+                    batches += 1
                     now = int(time.time()); result=[]; day=begin
                     while day <= today:
                         if day in excluded: day+=dt.timedelta(days=1); continue
@@ -265,6 +279,7 @@ class WsSourceSmoke(unittest.TestCase):
                             if symbol=='USDRUBF' and day.weekday()>=5 and slot in (8,15,27,40):
                                 continue  # Real history may have absent non-tradable context slots.
                             label=base+slot*600
+                            if late_audit and batches == 1 and label == late_label:continue
                             if label<=now:
                                 result.append(dict(time=label,open=100.,high=102.,low=98.,close=101.,volume=1.))
                         day+=dt.timedelta(days=1)
@@ -289,6 +304,8 @@ skip_history_bars = false
                         max_heartbeat_age_seconds=45,max_clock_step_seconds=5,symbols={symbol:dict(
                             weekday_end='23:50:00',weekend_end='19:00:00',overrides={str(d):None for d in excluded})}))
                 config=root/'source.json';config.write_text(json.dumps(cfg))
+                if late_audit:
+                    cfg['late_context_history_policy']='audit_only_v1';config.write_text(json.dumps(cfg))
                 state=root/'source'
                 env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),'SHADOW_SOURCE_REDIS_URL':f'redis://source:fixture@127.0.0.1:{proxy.port}/0',
                      'SHADOW_FIXTURE_ACCESS_TOKEN':'fixture-access-token','TZ':'UTC'}
@@ -323,6 +340,12 @@ skip_history_bars = false
                 else:self.fail('owned WS reconnect readiness timeout')
                 self.assertEqual(redis('XRANGE',source_key,'-','+'),before)
                 self.assertEqual(proxy.xadds,count)
+                if late_audit:
+                    journal = [json.loads(line) for line in (state/'late-context.jsonl').read_text().splitlines()]
+                    self.assertEqual(len(journal),1)
+                    self.assertEqual(journal[0]['event']['observed']['close_time_utc'],late_label)
+                    self.assertEqual(journal[0]['event']['disposition'],'audit_only_no_model_replay')
+                    self.assertEqual(health['late_context_rows'],1)
                 template_name='reaction-shadow.imoexf-combo.toml' if symbol=='IMOEXF' else 'reaction-shadow.usdrubf-h4-w4.toml'
                 template=(Path(__file__).resolve().parents[1]/'configs/examples'/template_name).read_text()
                 raw=template.replace('"2026-11-02"',json.dumps(str(first))).replace(f'REPLACE_WITH_APPROVED_{symbol}_M10_SOURCE',source_key)

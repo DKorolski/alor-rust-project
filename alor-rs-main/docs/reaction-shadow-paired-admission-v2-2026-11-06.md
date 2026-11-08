@@ -1,5 +1,9 @@
 # Paired Shadow Admission V2
 
+For opt-in source v4 late-context recovery use the separately versioned
+[admission v3 contract](shadow-late-context-recovery-2026-11-08.md). V1/v2
+plans continue to reject v4; this document's strict existing semantics remain.
+
 Scope: isolated IMOEXF and USDRUBF reaction pairs. No live/legacy deployment,
 signal formula, cost, execution route, position size or Rust numerical change.
 The existing `reaction_shadow_preflight_v1` / `reaction_shadow_admission_v1`

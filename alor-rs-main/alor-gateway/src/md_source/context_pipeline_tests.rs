@@ -31,7 +31,7 @@ fn quote(label: i64) -> serde_json::Value {
 #[tokio::test]
 #[ignore = "explicit owned Redis executable required; never connects to an existing server"]
 async fn sparse_context_pipeline_preserves_receipts_prefix_and_restore() {
-    tokio::time::timeout(Duration::from_secs(30), pipeline(false))
+    tokio::time::timeout(Duration::from_secs(30), pipeline(false, false))
         .await
         .unwrap();
 }
@@ -39,12 +39,20 @@ async fn sparse_context_pipeline_preserves_receipts_prefix_and_restore() {
 #[tokio::test]
 #[ignore = "explicit owned Redis executable required; never connects to an existing server"]
 async fn ordinary_delayed_pipeline_retains_evidence_not_model_freshness() {
-    tokio::time::timeout(Duration::from_secs(30), pipeline(true))
+    tokio::time::timeout(Duration::from_secs(30), pipeline(true, false))
         .await
         .unwrap();
 }
 
-async fn pipeline(ordinary: bool) {
+#[tokio::test]
+#[ignore = "explicit owned Redis executable required; never connects to an existing server"]
+async fn late_weekend_0950_reconnect_is_audited_without_backfill_or_model_replay() {
+    tokio::time::timeout(Duration::from_secs(30), pipeline(false, true))
+        .await
+        .unwrap();
+}
+
+async fn pipeline(ordinary: bool, late_audit: bool) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let socket = root.join("redis.sock");
@@ -103,6 +111,10 @@ async fn pipeline(ordinary: bool) {
         cfg.terminal.first_live_session = "2026-11-06".parse().unwrap();
         cfg.first_live_session = "2026-11-06".parse().unwrap();
     }
+    if late_audit {
+        cfg.late_context_history_policy =
+            Some(crate::md_source::config::LateContextHistoryPolicy::AuditOnlyV1);
+    }
     let now = ts(if ordinary {
         "2026-11-06T06:00:00+03:00"
     } else {
@@ -141,7 +153,7 @@ async fn pipeline(ordinary: bool) {
             r.raw(quote(ts(day) + slot * 600), 1).await.unwrap();
         }
     }
-    if !ordinary {
+    if !ordinary && !late_audit {
         r.raw(quote(ts("2026-11-07T09:50:00+03:00")), 1)
             .await
             .unwrap();
@@ -237,19 +249,21 @@ async fn pipeline(ordinary: bool) {
     advance(&mut r, "2026-11-07T10:00:10+03:00");
     r.feed().unwrap();
     let releases = r.core.tick(r.clock(), true).unwrap();
-    assert_eq!(releases.len(), 1);
-    r.release(releases[0].clone()).await.unwrap();
-    let row = r.store.records.last_key_value().unwrap().1;
-    assert_eq!(row.bar().unwrap().origin, DataOrigin::History);
-    assert_eq!(
-        row.release.as_ref().unwrap().proof.reason,
-        crate::terminal_bar::ReleaseReason::ContextIntervalWs
-    );
-    assert_eq!(row.envelope["ts_utc"], r.clock().utc);
-    assert_eq!(
-        row.release.as_ref().unwrap().proof.last_received_at_utc,
-        now
-    );
+    assert_eq!(releases.len(), usize::from(!late_audit));
+    if let Some(release) = releases.first() {
+        r.release(release.clone()).await.unwrap();
+        let row = r.store.records.last_key_value().unwrap().1;
+        assert_eq!(row.bar().unwrap().origin, DataOrigin::History);
+        assert_eq!(
+            row.release.as_ref().unwrap().proof.reason,
+            crate::terminal_bar::ReleaseReason::ContextIntervalWs
+        );
+        assert_eq!(row.envelope["ts_utc"], r.clock().utc);
+        assert_eq!(
+            row.release.as_ref().unwrap().proof.last_received_at_utc,
+            now
+        );
+    }
     // Two missing intervals do not stall the healthy source or create empty candles.
     advance(&mut r, "2026-11-07T10:20:00+03:00");
     r.feed().unwrap();
@@ -259,7 +273,7 @@ async fn pipeline(ordinary: bool) {
     for release in r.core.tick(r.clock(), true).unwrap() {
         r.release(release).await.unwrap();
     }
-    assert_eq!(r.store.records.len(), 204);
+    assert_eq!(r.store.records.len(), 204 - usize::from(late_audit));
     for absent in ["2026-11-07T10:00:00+03:00", "2026-11-07T10:10:00+03:00"] {
         assert!(!r.store.records.contains_key(&ts(absent)));
     }
@@ -272,14 +286,77 @@ async fn pipeline(ordinary: bool) {
     .await
     .unwrap();
     assert!(r.core.pending_releases().is_empty());
+    if late_audit {
+        advance(&mut r, "2026-11-08T03:08:00+03:00");
+        r.event(WsEvent::Conn {
+            event: ConnEvent::Connected,
+            generation: 2,
+        })
+        .await
+        .unwrap();
+    }
     r.subscribed_at = Some(r.clock().utc);
-    assert!(
+    if late_audit {
+        let before = std::fs::read(state.join("committed.jsonl")).unwrap();
+        let late = ts("2026-11-07T09:50:00+03:00");
+        for _ in 0..2 {
+            r.raw(quote(late), 2).await.unwrap();
+        }
+        assert_eq!(r.store.late_context_rows, 1);
+        assert!(!r.store.records.contains_key(&late));
+        assert_eq!(
+            before,
+            std::fs::read(state.join("committed.jsonl")).unwrap()
+        );
+        r.store.verify_prefix(&cfg, &mut r.conn).await.unwrap();
+        let missing_weekday = ts("2026-11-06T07:10:00+03:00");
+        let held = r.store.records.remove(&missing_weekday).unwrap();
+        assert!(
+            r.raw(quote(missing_weekday), 2)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("immutable source prefix")
+        );
+        r.store.records.insert(missing_weekday, held);
+        let mut bad = quote(late);
+        bad["data"]["low"] = json!(103.);
+        assert!(r.raw(bad, 2).await.is_err());
+        let mut weekday = r.store.records.first_key_value().unwrap().1.bar().unwrap();
+        weekday.close_time_utc = ts("2026-11-05T06:50:00+03:00");
+        assert!(
+            r.store
+                .quarantine_context(&cfg, &weekday, r.clock().utc, 2, r.clock().utc)
+                .is_err()
+        );
+        r.event(WsEvent::SubscriptionAck {
+            subscription_type: "bars".into(),
+            generation: 2,
+        })
+        .await
+        .unwrap();
+        r.drain_history().await.unwrap();
+        assert!(r.history_complete && r.acked && r.connected);
+        r.health("ready", true).unwrap();
+        let health: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state.join("HEALTH.json")).unwrap()).unwrap();
+        assert_eq!(health["late_context_rows"], 1);
+        assert_eq!(health["late_context_review_dates"], json!(["2026-11-07"]));
+        // Even after freeze, late context stays audit-only, never canonical history.
+        advance(&mut r, "2026-11-09T07:00:01+03:00");
         r.raw(quote(ts("2026-11-07T10:00:00+03:00")), 2)
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("immutable source prefix")
-    );
+            .unwrap();
+        assert_eq!(r.store.late_context_rows, 2);
+    } else {
+        assert!(
+            r.raw(quote(ts("2026-11-07T10:00:00+03:00")), 2)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("immutable source prefix")
+        );
+    }
     let restored = r
         .store
         .records
@@ -291,7 +368,8 @@ async fn pipeline(ordinary: bool) {
     let clock = r.clock();
     r.store.stopped(clock.utc).unwrap();
     drop(r);
-    let store = Store::open(&state, &cfg, "resume", clock.utc).unwrap();
+    let mut store = Store::open(&state, &cfg, "resume", clock.utc).unwrap();
+    assert_eq!(store.late_context_rows, if late_audit { 2 } else { 0 });
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     store.verify_prefix(&cfg, &mut conn).await.unwrap();
     let mut core = cfg.finalizer().unwrap();
@@ -302,4 +380,28 @@ async fn pipeline(ordinary: bool) {
         Some(ts("2026-11-07T10:20:00+03:00"))
     );
     store.stopped(clock.utc).unwrap();
+    if late_audit {
+        let path = state.join("late-context.jsonl");
+        let before = std::fs::read(&path).unwrap();
+        let mut duplicate = store.records.first_key_value().unwrap().1.bar().unwrap();
+        duplicate.close_time_utc = ts("2026-11-07T09:50:00+03:00");
+        store
+            .quarantine_context(&cfg, &duplicate, clock.utc, 3, clock.utc)
+            .unwrap();
+        assert_eq!(before, std::fs::read(&path).unwrap());
+        drop(store);
+        let mut item: serde_json::Value =
+            serde_json::from_slice(before.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        item["event"]["canonical_head_sha256"] = json!("f".repeat(64));
+        // A forged but rehashed side journal must still bind the actual canonical tail.
+        item["sha256"] = json!(digest(&item["event"]).unwrap());
+        std::fs::write(path, format!("{}\n", item)).unwrap();
+        assert!(
+            Store::open(&state, &cfg, "resume", clock.utc)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("identity/calendar/binding")
+        );
+    }
 }
