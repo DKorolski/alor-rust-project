@@ -112,3 +112,18 @@ three owned-Redis runner cases passed, six owned WS/Redis CLI cases passed;
 66 Python policy tests passed (two real-worker integrations run separately on
 Linux). Gateway all-target clippy, formatting and diff checks are required.
 This is focused source/admission coverage, not new frozen-model parity or live GO.
+
+Linux verification of source commit `ce7fcac`, with the separately pinned
+fixture-only correction `a400560`, passed 108 gateway unit tests, all three
+owned-Redis runner cases, eight service unit tests and the explicit owned-Redis
+service integration. Seven RI receipt-audit tests also passed. Non-root,
+network-disabled Docker fixtures then passed all 68 policy/actual-worker tests
+and six composed WS/Redis/actual-worker cases, with no skips. The resulting
+worker binary is unchanged; only the MD-only source executable needs updating.
+
+Two harness problems were retained and corrected without relaxing production
+guards: pure UID-policy tests must not run as root; a growing raw WS fixture
+must not expand the model bootstrap beyond its 2..4 complete regular sessions.
+The fixture now selects its latest two regular sessions plus the actual context
+tail, while retaining longer raw history to exercise late-context reconnect.
+Original failed reports remain evidence, not successful verification records.
