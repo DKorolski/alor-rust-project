@@ -4,6 +4,7 @@ use std::cell::Cell;
 
 mod bootstrap_tests;
 mod continuous;
+mod late_start;
 mod service;
 
 thread_local! { static NOW: Cell<i64> = const { Cell::new(0) }; }
@@ -32,6 +33,7 @@ fn spec(symbol: &str) -> RunnerSpec {
         first_decision_session: date("2026-10-26"),
         excluded_dates: BTreeSet::new(),
         bootstrap: None,
+        late_start: None,
         config: if symbol == "IMOEXF" {
             Config::Imoexf {
                 sleeve: Sleeve::Combo,

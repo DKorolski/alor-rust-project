@@ -53,7 +53,7 @@ impl HistoricalBootstrap {
         Ok(())
     }
 
-    fn digest(inputs: &[Receipt]) -> Result<String> {
+    pub(super) fn digest(inputs: &[Receipt]) -> Result<String> {
         hash(
             &inputs
                 .iter()

@@ -1,0 +1,44 @@
+# Non-launchable diagnostic create-only template; substitute all @...@ tokens.
+[Unit]
+Description=Diagnostic late-start reaction shadow with durable grant
+After=network-online.target @SOURCE_UNIT@
+ConditionPathExists=@CONFIG@/ADMISSION.json
+ConditionPathExists=@CONFIG@/approved-worker.toml
+ConditionPathExists=@CONFIG@/admission.env
+ConditionPathExists=!@OWNER@/generation
+ConditionPathExists=!@OWNER@/generation.supervisor
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+SupplementaryGroups=@SOURCE_GROUP@
+EnvironmentFile=@READER_ENV@
+EnvironmentFile=-@CONFIG@/admission.env
+Environment=TZ=UTC PYTHONDONTWRITEBYTECODE=1
+UnsetEnvironment=ALOR_REFRESH_TOKEN SHADOW_ALOR_REFRESH_TOKEN ALOR_ACCESS_TOKEN SHADOW_SOURCE_REDIS_URL REDIS_URL
+ExecStart=/usr/bin/python3 @SCRIPTS@/reaction_shadow_late_launch.py --plan @CONFIG@/plan.json --plan-sha256 @PLAN_SHA@
+Restart=no
+TimeoutStartSec=60
+TimeoutStopSec=25
+KillMode=mixed
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=@SOURCE_STATE@ @CONFIG@
+ReadWritePaths=@OWNER@
+IPAddressDeny=any
+IPAddressAllow=@REDIS_IP@/32
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+MemoryMax=384M
+MemorySwapMax=0
+CPUQuota=50%
+Nice=10
+TasksMax=32
+StandardOutput=journal
+StandardError=journal

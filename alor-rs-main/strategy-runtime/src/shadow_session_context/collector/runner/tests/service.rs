@@ -3,7 +3,7 @@ use crate::shadow_session_context::collector::runner::service::{
     LaunchSpec, ServiceGuard, ServicePolicy,
 };
 
-fn policy() -> ServicePolicy {
+pub(super) fn policy() -> ServicePolicy {
     ServicePolicy {
         startup_timeout_seconds: 600,
         poll_timeout_seconds: 60,

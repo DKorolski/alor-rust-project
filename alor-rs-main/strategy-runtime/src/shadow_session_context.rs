@@ -214,6 +214,8 @@ pub struct Frozen {
     pub previous: Option<Anchor>,
     pub previous2: Option<Anchor>,
     pub skipped: Vec<Skipped>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_as_observed_at_utc: Option<i64>,
 }
 impl Frozen {
     pub fn ready(&self) -> bool {
@@ -230,6 +232,11 @@ enum Operation {
     Bootstrap {
         receipts: Vec<Receipt>,
         first_decision_session: NaiveDate,
+        processed_at_utc: i64,
+    },
+    DiagnosticBootstrap {
+        receipts: Vec<Receipt>,
+        session_date: NaiveDate,
         processed_at_utc: i64,
     },
     Ingest {
@@ -437,13 +444,37 @@ impl Store {
     // Not a retrospective receipt override: this one-time context import is
     // admitted only before a future activation and retains the actual clocks.
     fn bootstrap(&mut self, receipts: &[Receipt], day: NaiveDate, now: i64) -> Result<()> {
+        self.bootstrap_inner(receipts, day, now, false)
+    }
+
+    fn bootstrap_diagnostic(
+        &mut self,
+        receipts: &[Receipt],
+        day: NaiveDate,
+        now: i64,
+    ) -> Result<()> {
+        self.bootstrap_inner(receipts, day, now, true)
+    }
+
+    fn bootstrap_inner(
+        &mut self,
+        receipts: &[Receipt],
+        day: NaiveDate,
+        now: i64,
+        diagnostic: bool,
+    ) -> Result<()> {
         self.check_clock(now)?;
         ensure!(
             self.inputs.is_empty() && self.frozen.is_empty(),
             "bootstrap requires empty context"
         );
         ensure!(
-            self.identity.trading_date(day) && now < self.identity.cutoff(day),
+            self.identity.trading_date(day)
+                && if diagnostic {
+                    local(now)?.date() == day && now >= self.identity.cutoff(day)
+                } else {
+                    now < self.identity.cutoff(day)
+                },
             "bootstrap must precede first decision cutoff"
         );
         ensure!(
@@ -485,7 +516,12 @@ impl Store {
                     && input.bar.close <= input.bar.h,
                 "invalid bootstrap OHLCV"
             );
-            let route = staged.ingest_inner(input.clone(), now, Some(self.identity.cutoff(day)))?;
+            let availability = if diagnostic {
+                now.checked_add(1).context("diagnostic clock overflow")?
+            } else {
+                self.identity.cutoff(day)
+            };
+            let route = staged.ingest_inner(input.clone(), now, Some(availability))?;
             ensure!(
                 matches!(
                     route,
@@ -498,7 +534,11 @@ impl Store {
                 "invalid bootstrap receipt: {route:?}"
             );
         }
-        let (anchors, _) = staged.anchors_before(day)?;
+        let (anchors, _) = if diagnostic {
+            staged.collect_anchors(day, now + 1)?
+        } else {
+            staged.anchors_before(day)?
+        };
         ensure!(anchors.len() >= 2, "bootstrap paired anchors not ready");
         let regular: BTreeSet<_> = anchors
             .iter()
@@ -517,10 +557,18 @@ impl Store {
             );
             date = date.succ_opt().context("date overflow")?;
         }
-        staged.operations = vec![Operation::Bootstrap {
-            receipts: receipts.to_vec(),
-            first_decision_session: day,
-            processed_at_utc: now,
+        staged.operations = vec![if diagnostic {
+            Operation::DiagnosticBootstrap {
+                receipts: receipts.to_vec(),
+                session_date: day,
+                processed_at_utc: now,
+            }
+        } else {
+            Operation::Bootstrap {
+                receipts: receipts.to_vec(),
+                first_decision_session: day,
+                processed_at_utc: now,
+            }
         }];
         *self = staged;
         Ok(())
@@ -531,6 +579,28 @@ impl Store {
         self.collect_anchors(day, cutoff)
     }
     fn freeze(&mut self, day: NaiveDate, now: i64, barrier: &Barrier) -> Result<Frozen> {
+        self.freeze_inner(day, now, barrier, None)
+    }
+
+    fn freeze_diagnostic(&mut self, day: NaiveDate, now: i64, barrier: &Barrier) -> Result<Frozen> {
+        ensure!(
+            self.frozen.is_empty() && local(now)?.date() == day,
+            "diagnostic freeze is initial same-day only"
+        );
+        ensure!(
+            matches!(self.operations.first(), Some(Operation::DiagnosticBootstrap { session_date, .. }) if *session_date == day),
+            "diagnostic freeze requires explicit diagnostic bootstrap"
+        );
+        self.freeze_inner(day, now, barrier, Some(barrier.through_utc))
+    }
+
+    fn freeze_inner(
+        &mut self,
+        day: NaiveDate,
+        now: i64,
+        barrier: &Barrier,
+        diagnostic: Option<i64>,
+    ) -> Result<Frozen> {
         self.check_clock(now)?;
         ensure!(self.identity.trading_date(day), "non-trading freeze date");
         ensure!(
@@ -551,7 +621,16 @@ impl Store {
                 && barrier.attested_at_utc <= now,
             "missing/premature cutoff attestation"
         );
-        let (mut anchors, skipped) = self.anchors_before(day)?;
+        let (mut anchors, skipped) = if let Some(observed) = diagnostic {
+            self.collect_anchors(
+                day,
+                observed
+                    .checked_add(1)
+                    .context("diagnostic clock overflow")?,
+            )?
+        } else {
+            self.anchors_before(day)?
+        };
         let previous = anchors.pop();
         let previous2 = anchors.pop();
         let value = Frozen {
@@ -563,6 +642,7 @@ impl Store {
             previous,
             previous2,
             skipped,
+            diagnostic_as_observed_at_utc: diagnostic,
         };
         self.frozen.insert(day, value.clone());
         self.operations.push(Operation::Freeze {
@@ -691,10 +771,25 @@ impl Store {
                         "replayed routing mismatch"
                     );
                 }
+                Operation::DiagnosticBootstrap {
+                    receipts,
+                    session_date,
+                    processed_at_utc,
+                } => {
+                    result.bootstrap_diagnostic(receipts, *session_date, *processed_at_utc)?;
+                }
                 Operation::Freeze { value } => {
+                    let actual = if value.diagnostic_as_observed_at_utc.is_some() {
+                        result.freeze_diagnostic(
+                            value.session_date,
+                            value.frozen_at_utc,
+                            &value.barrier,
+                        )?
+                    } else {
+                        result.freeze(value.session_date, value.frozen_at_utc, &value.barrier)?
+                    };
                     ensure!(
-                        &result.freeze(value.session_date, value.frozen_at_utc, &value.barrier)?
-                            == value.as_ref(),
+                        &actual == value.as_ref(),
                         "replayed frozen context mismatch"
                     );
                 }

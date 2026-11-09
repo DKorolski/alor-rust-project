@@ -101,12 +101,20 @@ class ClosedSourceGuard:
         source = json.loads(self.manifest)
         runner = tomllib.loads(spec.decode())["runner"]
         cfg = source["config"]
+        late = runner.get('late_start')
+        if late is not None:
+            if (source['version'] != 'shadow_gateway_ws_closed_m10_v4'
+                    or late.get('version') != 'diagnostic_late_start_v1'):
+                raise ValueError('diagnostic late start requires explicit v4 source binding')
+            expected_source_date = late['source_first_live_session']
+        else:
+            expected_source_date = runner['first_decision_session']
         self.version = source["version"]
         self.is_ws = self.version in ("shadow_gateway_ws_closed_m10_v1", "shadow_gateway_ws_closed_m10_v2", "shadow_gateway_ws_closed_m10_v3", "shadow_gateway_ws_closed_m10_v4")
         if (self.version != "shadow_authenticated_rest_closed_m10_v3" and not self.is_ws
                 or cfg["stream"] != runner["ingress"]["source_stream"]
                 or cfg["symbol"] != runner["ingress"]["symbol"]
-                or cfg["first_live_session"] != runner["first_decision_session"]
+                or cfg["first_live_session"] != expected_source_date
                 or cfg["excluded_dates"] != runner["excluded_dates"]):
             raise ValueError("source/worker identity or calendar mismatch")
         if self.is_ws:
@@ -457,6 +465,8 @@ def main():
     root = args.generation.absolute()
     worker, spec = args.worker.resolve(strict=True), args.spec.resolve(strict=True)
     raw = read_small(spec)
+    if tomllib.loads(raw.decode())['runner'].get('late_start') is not None:
+        raise ValueError('diagnostic late start requires its dedicated granted launcher')
     policy = policy_from_spec(raw)
     spec_sha = hashlib.sha256(raw).hexdigest()
     source_stream = tomllib.loads(raw.decode())["runner"]["ingress"]["source_stream"]

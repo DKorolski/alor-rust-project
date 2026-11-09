@@ -14,6 +14,7 @@ const VERSION: &str = "weekend_reaction_runner_v1";
 const OBSERVATION_BATCH: u64 = 16;
 
 pub mod bootstrap;
+pub mod late_start;
 pub mod service;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,6 +26,8 @@ pub struct RunnerSpec {
     pub excluded_dates: BTreeSet<NaiveDate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap: Option<bootstrap::HistoricalBootstrap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late_start: Option<late_start::LateStart>,
 }
 impl RunnerSpec {
     fn header(&self) -> Result<Header> {
@@ -44,6 +47,9 @@ impl RunnerSpec {
         );
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.validate(self.first_decision_session)?;
+        }
+        if let Some(late) = &self.late_start {
+            late.validate(self, &identity)?;
         }
         ensure!(
             identity.profile != Profile::UsdrubfPreviousDay09,
@@ -97,6 +103,8 @@ pub enum Disposition {
     Duplicate,
     ContextNotReady,
     ModelObserved,
+    DiagnosticReplayed,
+    DiagnosticForwardObserved,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +142,8 @@ pub struct CommittedOutput {
     pub order_emission_allowed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub historical_bootstrap: Option<bootstrap::HistoricalBootstrap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_late_start: Option<late_start::OutputQuality>,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -258,7 +268,11 @@ impl PairState {
             "skipped/backdated decision session; explicit recovery required"
         );
         ensure!(
-            cutoff.barrier().through_utc == identity.cutoff(date),
+            if spec.late_start.is_some() && self.day.is_none() {
+                cutoff.barrier().through_utc >= identity.cutoff(date)
+            } else {
+                cutoff.barrier().through_utc == identity.cutoff(date)
+            },
             "wrong calendar cutoff"
         );
         if let Some(sessions) = &self.sessions {
@@ -277,10 +291,18 @@ impl PairState {
                 "unobserved live tail before freeze"
             );
         }
-        let frozen = [
-            self.stores[0].freeze(date, now, cutoff.barrier())?,
-            self.stores[1].freeze(date, now, cutoff.barrier())?,
-        ];
+        let diagnostic = spec.late_start.is_some() && self.day.is_none();
+        let frozen = if diagnostic {
+            [
+                self.stores[0].freeze_diagnostic(date, now, cutoff.barrier())?,
+                self.stores[1].freeze_diagnostic(date, now, cutoff.barrier())?,
+            ]
+        } else {
+            [
+                self.stores[0].freeze(date, now, cutoff.barrier())?,
+                self.stores[1].freeze(date, now, cutoff.barrier())?,
+            ]
+        };
         self.sessions = if frozen.iter().all(Frozen::ready) {
             Some([
                 NumericalSession::new(&self.stores[0], date, spec.config.clone())?,
@@ -293,7 +315,13 @@ impl PairState {
         self.model_inputs.clear();
         Ok(frozen)
     }
-    fn observe(&mut self, spec: &RunnerSpec, input: &Receipt, now: i64) -> Result<Disposition> {
+    fn observe(
+        &mut self,
+        spec: &RunnerSpec,
+        input: &Receipt,
+        collector: &Collector,
+        now: i64,
+    ) -> Result<Disposition> {
         let dt = local(input.bar.close_time_utc)?;
         let date = dt.date();
         let identity = self.stores[0].identity();
@@ -307,7 +335,18 @@ impl PairState {
         {
             return Ok(Disposition::NonTradingBar);
         }
-        if input.bar.origin != DataOrigin::Live {
+        let recovered = spec.late_start.as_ref().is_some_and(|late| {
+            date == spec.first_decision_session && input.sequence <= late.recovery.rows
+        });
+        let diagnostic_forward = !recovered
+            && input.bar.origin == DataOrigin::History
+            && spec.late_start.as_ref().is_some_and(|late| {
+                date == spec.first_decision_session && date < late.source_first_live_session
+            });
+        if diagnostic_forward {
+            late_start::verify_forward_proof(collector, input)?;
+        }
+        if input.bar.origin != DataOrigin::Live && !recovered && !diagnostic_forward {
             return Ok(Disposition::ContextOnly);
         }
         ensure!(
@@ -354,7 +393,13 @@ impl PairState {
         }
         self.model_inputs
             .insert(input.bar.close_time_utc, input.clone());
-        Ok(Disposition::ModelObserved)
+        Ok(if recovered {
+            Disposition::DiagnosticReplayed
+        } else if diagnostic_forward {
+            Disposition::DiagnosticForwardObserved
+        } else {
+            Disposition::ModelObserved
+        })
     }
     fn apply(
         &mut self,
@@ -382,7 +427,11 @@ impl PairState {
                     "bootstrap after observation"
                 );
                 for store in &mut self.stores {
-                    store.bootstrap(&inputs, spec.first_decision_session, now)?;
+                    if spec.late_start.is_some() {
+                        store.bootstrap_diagnostic(&inputs, spec.first_decision_session, now)?;
+                    } else {
+                        store.bootstrap(&inputs, spec.first_decision_session, now)?;
+                    }
                 }
                 self.observed = plan.rows;
             }
@@ -416,8 +465,13 @@ impl PairState {
                 );
                 for input in &collector.prefix(*through)?[self.observed as usize..] {
                     let before = self.states()?;
-                    let disposition = self.observe(spec, input, now)?;
-                    let states = if disposition == Disposition::ModelObserved {
+                    let disposition = self.observe(spec, input, collector, now)?;
+                    let states = if matches!(
+                        disposition,
+                        Disposition::ModelObserved
+                            | Disposition::DiagnosticReplayed
+                            | Disposition::DiagnosticForwardObserved
+                    ) {
                         self.states()?
                     } else {
                         None
@@ -481,7 +535,12 @@ impl ReactionShadowRunner {
     fn create_with_clock(root: &Path, spec: RunnerSpec, clock: fn() -> i64) -> Result<Self> {
         let header = spec.header()?;
         ensure!(
-            clock() < header.identities[0].cutoff(spec.first_decision_session),
+            if spec.late_start.is_some() {
+                local(clock())?.date() == spec.first_decision_session
+                    && clock() >= header.identities[0].cutoff(spec.first_decision_session)
+            } else {
+                clock() < header.identities[0].cutoff(spec.first_decision_session)
+            },
             "create before first decision cutoff"
         );
         fs::create_dir(root).context("new generation directory required")?;
@@ -591,6 +650,16 @@ impl ReactionShadowRunner {
                 steps,
                 order_emission_allowed: false,
                 historical_bootstrap,
+                diagnostic_late_start: self.spec.late_start.as_ref().map(|late| {
+                    late_start::OutputQuality {
+                        diagnostic_session: self.spec.first_decision_session,
+                        first_clean_session: late.first_clean_session,
+                        recovery_through_sequence: late.recovery.rows,
+                        current_session_clean_eligible: next
+                            .day
+                            .is_some_and(|d| d >= late.first_clean_session),
+                    }
+                }),
             },
             context_sha256: [
                 hash(&next.stores[0].checkpoint_bytes()?)?,
@@ -633,6 +702,15 @@ impl ReactionShadowRunner {
         if !self.collector.status().caught_up {
             return Ok(());
         }
+        if self.state.day.is_none() {
+            if let Some(late) = &self.spec.late_start {
+                late.recovery.verify(
+                    &self.collector.prefix(late.recovery.rows)?,
+                    &self.spec,
+                    self.collector.journal.now()?,
+                )?;
+            }
+        }
         let now = self.collector.journal.now()?;
         let date = local(now)?.date();
         let identity = &self.header.identities[0];
@@ -641,7 +719,13 @@ impl ReactionShadowRunner {
             && now >= identity.cutoff(date)
             && self.state.day != Some(date)
         {
-            let cutoff = self.collector.seal_cutoff(identity.cutoff(date))?;
+            let cutoff = self.collector.seal_cutoff(
+                if self.spec.late_start.is_some() && self.state.day.is_none() {
+                    now
+                } else {
+                    identity.cutoff(date)
+                },
+            )?;
             self.commit(
                 Operation::Freeze {
                     date,

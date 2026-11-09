@@ -63,7 +63,10 @@ async fn run() -> Result<()> {
         "use the reaction shadow supervisor: mode spec generation ready-by-epoch"
     );
     ensure!(
-        matches!(args[1].as_str(), "create" | "resume" | "inspect-bootstrap"),
+        matches!(
+            args[1].as_str(),
+            "create" | "resume" | "inspect-bootstrap" | "inspect-late-start"
+        ),
         "invalid worker mode"
     );
     let mut raw = Vec::new();
@@ -73,7 +76,7 @@ async fn run() -> Result<()> {
     ensure!(raw.len() <= 64 * 1024, "launch spec too large");
     let spec: LaunchSpec = toml::from_str(std::str::from_utf8(&raw)?)?;
     spec.validate()?;
-    let ready_by = if args[1] != "inspect-bootstrap" {
+    let ready_by = if !args[1].starts_with("inspect-") {
         let ready_by: i64 = args[4].parse()?;
         ensure!(
             chrono::Utc::now().timestamp() < ready_by,
@@ -105,6 +108,19 @@ async fn run() -> Result<()> {
         return respond(
             serde_json::json!({"event":"bootstrap_inspected", "preview":preview,
             "order_emission_allowed":false}),
+        );
+    }
+    if args[1] == "inspect-late-start" {
+        let preview =
+            strategy_runtime::shadow_session_context::collector::runner::late_start::inspect(
+                &mut connection,
+                &spec.runner,
+                &args[3],
+                &args[4],
+            )
+            .await?;
+        return respond(
+            serde_json::json!({"event":"late_start_inspected", "preview":preview, "order_emission_allowed":false}),
         );
     }
     let mut runner = match args[1].as_str() {

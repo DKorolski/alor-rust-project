@@ -359,6 +359,16 @@ impl RiIngressJournal {
         self.rows.last().map(|row| row.raw.source_id.as_str())
     }
 
+    pub(crate) fn raw_payload(&self, sequence: u64) -> Result<&str> {
+        ensure!(sequence > 0, "invalid raw receipt sequence");
+        Ok(&self
+            .rows
+            .get((sequence - 1) as usize)
+            .context("raw receipt missing")?
+            .raw
+            .raw_bar_json)
+    }
+
     pub(super) fn source_id_at(&self, sequence: u64) -> Result<Option<String>> {
         ensure!(sequence <= self.last_sequence(), "missing ingress sequence");
         Ok(sequence

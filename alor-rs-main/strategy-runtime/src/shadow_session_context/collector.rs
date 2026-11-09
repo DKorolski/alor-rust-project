@@ -299,7 +299,9 @@ impl Collector {
             );
             for f in store.frozen.values() {
                 ensure!(
-                    f.barrier.through_utc == store.identity().cutoff(f.session_date)
+                    f.barrier.through_utc
+                        == f.diagnostic_as_observed_at_utc
+                            .unwrap_or_else(|| store.identity().cutoff(f.session_date))
                         && attestations.contains(&f.barrier),
                     "context contains unattested freeze"
                 );

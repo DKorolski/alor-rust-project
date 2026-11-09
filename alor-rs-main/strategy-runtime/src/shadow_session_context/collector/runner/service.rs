@@ -89,6 +89,10 @@ pub struct ServiceStatus {
     pub ordinary_model_lateness_limit_seconds: u64,
     pub terminal_model_lateness_limit_seconds: u64,
     pub order_emission_allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_late_start: Option<late_start::OutputQuality>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clean_sessions_completed: Option<usize>,
 }
 
 pub struct ServiceGuard {
@@ -115,12 +119,34 @@ impl ServiceGuard {
             Some(day) => identity.next_cutoff(day)?,
             None => identity.cutoff(runner.spec.first_decision_session),
         };
+        let initial_diagnostic = runner.spec.late_start.is_some() && status.session_date.is_none();
+        let allowed_deadline = if initial_diagnostic {
+            (runner
+                .spec
+                .first_decision_session
+                .and_hms_opt(23, 40, 0)
+                .unwrap()
+                - Duration::hours(3))
+            .and_utc()
+            .timestamp()
+        } else {
+            cutoff
+        };
         ensure!(
-            now < ready_by_utc && ready_by_utc <= cutoff,
+            now < ready_by_utc && ready_by_utc <= allowed_deadline,
             "readiness deadline must be future and not after the next decision cutoff"
         );
         ensure!(
-            runner.state.stores[0].frozen.len() < policy.max_sessions,
+            runner.state.stores[0]
+                .frozen
+                .keys()
+                .filter(|d| runner
+                    .spec
+                    .late_start
+                    .as_ref()
+                    .is_none_or(|l| **d >= l.first_clean_session))
+                .count()
+                < policy.max_sessions,
             "completed generation cannot resume"
         );
         Ok(Self {
@@ -143,8 +169,21 @@ impl ServiceGuard {
             .skip(runner.state.observed as usize)
         {
             let bar = &receipt.bar;
+            if runner
+                .spec
+                .late_start
+                .as_ref()
+                .is_some_and(|late| receipt.sequence <= late.recovery.rows)
+            {
+                continue;
+            }
             let dt = local(bar.close_time_utc)?;
-            if bar.origin != DataOrigin::Live
+            let diagnostic_history = bar.origin == DataOrigin::History
+                && runner.spec.late_start.as_ref().is_some_and(|late| {
+                    dt.date() == runner.spec.first_decision_session
+                        && dt.date() < late.source_first_live_session
+                });
+            if (bar.origin != DataOrigin::Live && !diagnostic_history)
                 || dt.date() < runner.spec.first_decision_session
                 || !identity.trading_date(dt.date())
                 || bar.close_time_utc < identity.cutoff(dt.date())
@@ -229,7 +268,9 @@ impl ServiceGuard {
                     "next decision cutoff missed while catching up source"
                 );
             }
-        } else if local(now)?.date() >= runner.spec.first_decision_session {
+        } else if local(now)?.date() >= runner.spec.first_decision_session
+            && runner.spec.late_start.is_none()
+        {
             ensure!(
                 now <= identity.cutoff(runner.spec.first_decision_session)
                     + self.policy.max_model_lateness_seconds as i64,
@@ -244,13 +285,30 @@ impl ServiceGuard {
         let ingress = runner.collector.journal.usage();
         let (queue_age, ordinary_age, terminal_age) =
             self.queue_ages(runner, runner.collector.journal.now()?)?;
-        let started = runner.state.stores[0].frozen.len();
-        let last_complete = if status.session_complete {
+        let clean = |day: NaiveDate| {
+            runner
+                .spec
+                .late_start
+                .as_ref()
+                .is_none_or(|l| day >= l.first_clean_session)
+        };
+        let started = runner.state.stores[0]
+            .frozen
+            .keys()
+            .filter(|d| clean(**d))
+            .count();
+        let last_complete = (if status.session_complete {
             status.session_date
         } else {
             // Each transition verifies both previous numerical sessions complete.
             runner.state.stores[0].frozen.keys().rev().nth(1).copied()
-        };
+        })
+        .filter(|d| clean(*d));
+        let completed_clean = runner.state.stores[0]
+            .frozen
+            .keys()
+            .filter(|d| clean(**d) && (Some(**d) != status.session_date || status.session_complete))
+            .count();
         let usage = [
             (ingress.records as u64, ingress.max_records as u64),
             (ingress.barriers as u64, ingress.max_barriers as u64),
@@ -262,6 +320,17 @@ impl ServiceGuard {
             (status.transaction_bytes, storage::MAX_TOTAL),
         ];
         let completed = started == self.policy.max_sessions && status.session_complete;
+        let diagnostic_late_start =
+            runner
+                .spec
+                .late_start
+                .as_ref()
+                .map(|late| late_start::OutputQuality {
+                    diagnostic_session: runner.spec.first_decision_session,
+                    first_clean_session: late.first_clean_session,
+                    recovery_through_sequence: late.recovery.rows,
+                    current_session_clean_eligible: status.session_date.is_some_and(clean),
+                });
         Ok(ServiceStatus {
             runner: status,
             ingress,
@@ -280,6 +349,8 @@ impl ServiceGuard {
             ordinary_model_lateness_limit_seconds: self.policy.ordinary_lateness_seconds(),
             terminal_model_lateness_limit_seconds: self.policy.max_model_lateness_seconds,
             order_emission_allowed: false,
+            diagnostic_late_start,
+            clean_sessions_completed: runner.spec.late_start.as_ref().map(|_| completed_clean),
         })
     }
 

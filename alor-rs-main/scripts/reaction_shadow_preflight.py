@@ -319,6 +319,7 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     policy = service.policy_from_spec(prepared_raw)
     require("bootstrap" not in prepared["runner"], "preparation_must_not_pin_bootstrap")
     runner = prepared["runner"]
+    require('late_start' not in runner, 'diagnostic_late_start_requires_dedicated_launcher')
     symbol = runner["ingress"]["symbol"]
     require((symbol, runner["config"]["engine"]) in (("USDRUBF", "usdrubf"), ("IMOEXF", "imoexf"))
             and (v2 or symbol == "USDRUBF"), "symbol_profile_required")
