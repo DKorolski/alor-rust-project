@@ -4,6 +4,10 @@ Scope: opt-in isolated IMOEXF / USDRUBF shadow MD sources only. No production
 gateway/runtime deployment, trading-route, signal, cost, session-calendar or
 position-size change. Existing source v3 and admission v1/v2 remain strict.
 
+The [November9 repair/grant contract](shadow-review-repair-and-grant-2026-11-09.md)
+adds an opt-in v3 create launcher and MD-only remote Close/EOF recovery.
+Existing prepared units are not automatically converted to that launcher.
+
 ## Failure Boundary
 
 After a WS reconnect, broker history can include a previously unseen eligible
@@ -85,6 +89,20 @@ An unknown/unreviewed/new audit entry, changed journal during inspection, bad
 binding, torn tail or health/count/date mismatch blocks admission. Audit review
 is not authorization to import the excluded candle, clear flags, reset a failed
 source or claim parity with later-restated broker history.
+
+In the legacy prepared template, ExecStartPre and ExecStart are separate; it
+does not provide a durable admission grant or a fence through worker creation.
+The opt-in granted template runs fresh preflight inside ExecStart and persists
+the reviewed grant in its supervisor manifest before spawn. Later valid audit
+append is allowed by that declared contract, not silently treated as an unchanged
+snapshot. Changes observed by the final preflight rereads reject admission.
+Those final rereads are not a writer fence; the grant binds the approved bytes,
+not simultaneous current equality through manifest fsync or worker spawn.
+
+`durable_at_utc` in existing late-context events is sampled before write/fsync;
+the completed journal operation is durable before it returns, but this field is
+not a measurement of fsync completion or latency. Do not rewrite old records or
+hashes to rename it. A future timing-schema extension needs separate versioning.
 
 ## Controlled Successor Rollout
 

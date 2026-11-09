@@ -22,7 +22,7 @@ LIMITS = dict(startup_timeout_seconds=900, poll_timeout_seconds=120,
               max_queue_age_seconds=120, max_model_lateness_seconds=300,
               max_sessions=20)
 ORDINARY_LIMIT = "max_ordinary_model_lateness_seconds"
-WORKER_REASONS = {"queue_age", "source_lateness", "missing_model_bar", "readiness_deadline",
+WORKER_REASONS = {"historical_bootstrap", "queue_age", "source_lateness", "missing_model_bar", "readiness_deadline",
                   "incomplete_session_resume", "anchors_not_ready", "storage_maintenance",
                   "source_cursor_missing", "source_cursor_changed", "supervisor_lost", "worker_error"}
 
@@ -360,16 +360,25 @@ def terminate_owned(process):
             process.wait()
 
 
-def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit=print, source_guard=None):
+def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit=print, source_guard=None,
+              require_full_startup_window=False):
     stop = stop or StopRequest()
+    if stop.at is not None:
+        raise InterruptedError("operator stop before worker spawn")
     started = time.monotonic()
     remaining = ready_by - time.time()
     if not math.isfinite(remaining) or remaining <= 0:
         raise ValueError("readiness deadline expired before spawn")
+    if require_full_startup_window and remaining < policy['startup_timeout_seconds']:
+        raise ValueError("full startup window unavailable before reservation")
     if source_guard is not None:
         source_guard.check()
     startup_deadline = started + min(policy["startup_timeout_seconds"], remaining)
     attempt.start(ready_by)  # survives timeout, crash, supervisor SIGKILL or host reboot
+    if stop.at is not None:
+        raise InterruptedError("operator stop after attempt reservation")
+    if require_full_startup_window and ready_by - time.time() < policy['startup_timeout_seconds']:
+        raise ValueError("full startup window exhausted during reservation")
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, env=env, start_new_session=True)
     channel = Channel(process, source_guard)

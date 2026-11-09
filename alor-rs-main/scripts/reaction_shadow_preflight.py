@@ -342,7 +342,8 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     if stage == "admission":
         require(paths["approval"].is_file() and paths["approved_spec"].is_file(), "explicit_admission_missing")
         require(not os.access(paths["approval"], os.W_OK) and not os.access(paths["approved_spec"], os.W_OK), "admission_files_writable_by_worker")
-        approval = json.loads(small(paths["approval"]))
+        approval_raw = small(paths["approval"])
+        approval = json.loads(approval_raw)
         approval_fields = {"version", "plan_sha256", "approved_spec_sha256", "reviewed_at_utc", "ready_by", "gates", "evidence"}
         if v2:
             approval_fields.add("revision_review")
@@ -446,6 +447,21 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
         result.update(symbol=symbol, revision_review=revisions, context_tail_policy="include_observed_pre_cutoff_tail")
     if v3:
         result['late_context_review'] = late_context
+        if stage == 'admission':
+            checked = int(time.time()) if now is None else current
+            require(checked >= current and checked + policy['startup_timeout_seconds'] <= ready.timestamp(),
+                    'grant_missed_startup_window')
+            result['admission_grant'] = dict(
+                version='reaction_shadow_admission_grant_v1', checked_at_utc=checked,
+                policy='as_observed_reviewed_snapshot_grant_v1',
+                plan_sha256=plan_sha, approved_spec_sha256=approval['approved_spec_sha256'],
+                approval_sha256=digest(approval_raw), reviewed_at_utc=approval['reviewed_at_utc'],
+                source_manifest_sha256=plan['files']['source_manifest']['sha256'],
+                worker_sha256=plan['files']['worker']['sha256'],
+                supervisor_sha256=plan['files']['supervisor']['sha256'],
+                bootstrap=bootstrap, revision_review=revisions, late_context_review=late_context,
+                ready_by=approval['ready_by'], model_first_session=first.isoformat(),
+                reader_uid=os.geteuid(), order_emission_allowed=False)
     return result
 
 

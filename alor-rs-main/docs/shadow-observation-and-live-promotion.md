@@ -122,8 +122,10 @@ only, no historical decisions. Pin inspected source-ID bounds/row count/hash;
 resume uses the durable cursor and frozen state, not a fresh history overwrite.
 RI's initial collector uses prospective context and has its own readiness gate.
 
-Missing/late/conflicting data, source revisions, torn state and incomplete
-supervisor attempts fail visibly. Preserve FAILED evidence; no auto-clear,
+Missing/late/conflicting data, torn state and incomplete supervisor attempts
+fail visibly. Under an explicit as-observed audit policy, valid restatements
+are retained separately without rewriting model input; they are not an automatic
+source failure or proof of numerical invariance. Preserve FAILED evidence; no auto-clear,
 silent cursor skip, in-place profile switch or synthetic flat. Live broker
 reconciliation is not implemented by these shadow fail-stop mechanisms.
 
@@ -131,9 +133,12 @@ reconciliation is not implemented by these shadow fail-stop mechanisms.
 
 The existing gateway router buffers a Live bar until a later timestamp arrives.
 Without a next timestamp, the terminal candle may appear only next morning as
-History/HistoryGap. The isolated shadow fix uses an authenticated REST source
-and new streams, without changing shared gateway or live inputs. See the
-[source contract](shadow-closed-m10-source-2026-11-01.md).
+History/HistoryGap. The first isolated implementation used authenticated REST;
+that [source contract](shadow-closed-m10-source-2026-11-01.md) is historical.
+The current opt-in line uses an MD-only WS source with confirmed finalization,
+separate streams and the as-observed v4 audit policy. It does not require REST=WS
+or replace the live input. See the [version index](shadow-source-version-index-2026-11-09.md)
+and [WS runbook](shadow-md-ws-source-runbook-2026-11-02.md).
 
 These are separate engineering responsibilities:
 

@@ -53,6 +53,11 @@ sys.exit(8)
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_historical_bootstrap_reason_is_not_lost(self):
+        error = service.WorkerFailure(dict(event="failed", reason="historical_bootstrap"))
+        self.assertEqual(error.reason, "historical_bootstrap")
+        self.assertEqual(service.WorkerFailure(dict(reason="unknown")).reason, "worker_error")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve() / "generation"
@@ -98,6 +103,55 @@ class SupervisorTests(unittest.TestCase):
             self.run_worker("ok", again)
         finally:
             again.close()
+
+    def test_operator_stop_before_spawn_never_launches_worker(self):
+        attempt = self.attempt(); stop = service.StopRequest(); stop.request()
+        try:
+            with mock.patch.object(service.subprocess, 'Popen') as spawn:
+                with self.assertRaises(InterruptedError):
+                    service.supervise(['unused'], POLICY, time.time()+10, attempt, {}, 'fixture', stop)
+                spawn.assert_not_called()
+                self.assertFalse((attempt.control/'0001.started.json').exists())
+        finally:
+            attempt.close()
+
+    def test_operator_stop_after_reservation_retains_evidence_without_spawn(self):
+        attempt = self.attempt(); stop = service.StopRequest(); original = attempt.start
+        def reserved(ready_by):
+            original(ready_by); stop.request()
+        try:
+            with mock.patch.object(attempt, 'start', side_effect=reserved), mock.patch.object(service.subprocess, 'Popen') as spawn:
+                with self.assertRaises(InterruptedError):
+                    service.supervise(['unused'], POLICY, time.time()+10, attempt, {}, 'fixture', stop)
+                spawn.assert_not_called()
+                self.assertTrue((attempt.control/'0001.started.json').is_file())
+                self.assertFalse((attempt.control/'0001.stopped.json').exists())
+        finally:
+            attempt.close()
+
+    def test_granted_start_requires_full_margin_before_reservation(self):
+        attempt = self.attempt(); now = time.time()
+        try:
+            with mock.patch.object(service.subprocess, 'Popen') as spawn:
+                with self.assertRaisesRegex(ValueError, 'full startup window unavailable'):
+                    service.supervise(['unused'], POLICY, now+1, attempt, {}, 'fixture',
+                                      require_full_startup_window=True)
+                spawn.assert_not_called()
+                self.assertFalse((attempt.control/'0001.started.json').exists())
+        finally:
+            attempt.close()
+
+    def test_granted_start_exhausted_by_fsync_keeps_reservation_without_spawn(self):
+        attempt = self.attempt(); now = time.time()
+        try:
+            with mock.patch.object(service.time, 'time', side_effect=[now,now,now+9]), mock.patch.object(service.subprocess, 'Popen') as spawn:
+                with self.assertRaisesRegex(ValueError, 'full startup window exhausted'):
+                    service.supervise(['unused'], POLICY, now+10, attempt, {}, 'fixture',
+                                      require_full_startup_window=True)
+                spawn.assert_not_called()
+                self.assertTrue((attempt.control/'0001.started.json').exists())
+        finally:
+            attempt.close()
 
     def source(self):
         root = self.root.parent / "source"

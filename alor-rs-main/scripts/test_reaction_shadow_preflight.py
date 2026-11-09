@@ -61,7 +61,8 @@ class PreflightTests(unittest.TestCase):
         # preparation probe separately checks the actual dedicated reader UID.
         self.access = mock.patch.object(probe.os, 'access', side_effect=lambda p, mode: mode != os.W_OK or Path(p) == self.owner)
         self.access.start(); self.addCleanup(self.access.stop)
-        self.uid = mock.patch.object(probe.os, 'geteuid', return_value=1000)
+        self.reader_uid = self.source.stat().st_uid + 1
+        self.uid = mock.patch.object(probe.os, 'geteuid', return_value=self.reader_uid)
         self.uid.start(); self.addCleanup(self.uid.stop)
 
     @staticmethod
@@ -246,9 +247,36 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(list(self.owner.iterdir()), [])
 
     def test_root_and_shared_source_uid_cannot_pass_preparation(self):
-        for uid, reason in ((0, 'nonroot_reader'), (self.source.stat().st_uid, 'uid_must_differ')):
-            with mock.patch.object(probe.os, 'geteuid', return_value=uid):
-                with self.assertRaisesRegex(ValueError, reason): self.check()
+        with mock.patch.object(probe.os, 'geteuid', return_value=0):
+            with self.assertRaisesRegex(ValueError, 'nonroot_reader'): self.check()
+        original = Path.stat
+        def source_owner(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            if path == self.source:
+                values = list(result); values[4] = self.reader_uid
+                return os.stat_result(values)
+            return result
+        with mock.patch.object(Path, 'stat', source_owner), mock.patch.object(
+                probe.os, 'geteuid', return_value=self.reader_uid):
+            with self.assertRaisesRegex(ValueError, 'uid_must_differ'): self.check()
+
+    def test_policy_fixture_is_portable_to_uid_1000_and_other_owner(self):
+        original = Path.stat
+        for owner in (1000, 1007):
+            def source_owner(path, *args, **kwargs):
+                result = original(path, *args, **kwargs)
+                if path.name == 'source':
+                    values = list(result); values[4] = owner
+                    return os.stat_result(values)
+                return result
+            fixture = PreflightTests('test_preparation_never_selects_bootstrap_starts_worker_or_writes_state')
+            with self.subTest(owner=owner), mock.patch.object(Path, 'stat', source_owner):
+                try:
+                    fixture.setUp()
+                    self.assertEqual(fixture.reader_uid, owner + 1)
+                    self.assertTrue(fixture.check()['preparation_ready'])
+                finally:
+                    fixture.doCleanups()
 
     def test_unit_template_keeps_all_admission_conditions_and_no_autostart(self):
         text = (Path(__file__).resolve().parents[1] / 'configs/examples/reaction-shadow-worker-prepared.service').read_text()

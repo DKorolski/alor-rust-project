@@ -46,6 +46,10 @@ or a replacement for the production live gateway:
   admission with immutable as-observed bars, reviewed revisions and weekend tail.
 - `shadow-late-context-recovery-2026-11-08.md` - opt-in source v4 / admission v3,
   audited late context without back-insertion or model replay; successor gates.
+- `shadow-review-repair-and-grant-2026-11-09.md` - MD-only remote Close/EOF repair,
+  portable policy fixtures and opt-in durable admission grant; rollout boundaries.
+- `shadow-source-version-index-2026-11-09.md` - WS/REST source generations,
+  admission entrypoints and historical vs current validation contracts.
 
 ## Strategy And Deployment Contracts
 
