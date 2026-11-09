@@ -146,3 +146,19 @@ policy/grant100 tests passed;3 owned Redis/actual-worker late protocol smokes
 passed with actual wall time. Runtime all-target clippy with warnings denied,
 fmt and diff checks passed. These local results do not replace native Linux
 role/ACL qualification or actual source admission.
+
+Native Linux checkpoint for code commit `fa7b798`: all5 late-start Rust cases,
+105 Python reaction tests (including5 actual-worker/Redis protocol integrations)
+and12 composed WS/source/worker cases passed. Both symbols' full granted-launch
+fixtures passed under their actual separated source/model UIDs, read-only
+mounts and Redis ACL, using real wall time and no injected admission clock.
+Synthetic fixture evidence was not reused as actual source evidence.
+
+Qualified Linux worker SHA256:
+`6df982fbcea17c4213fa58166c1af9541381f04c43cadb5a846162c2868d5af4`.
+Actual isolated source-backed diagnostic admission subsequently passed for
+both pairs, including the first post-recovery History-origin WS observation.
+No live strategy or broker-command path was changed. Operational source IDs,
+prices, PIDs and raw evidence remain in the private observation journal.
+The actual first diagnostic session still earns no clean credit; full EOD,
+next-day continuity and future clean-session evaluation remain outstanding.
