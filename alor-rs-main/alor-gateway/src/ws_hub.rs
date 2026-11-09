@@ -173,6 +173,21 @@ enum SubscriptionScope {
     MarketDataOnly,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionExit {
+    RequestedShutdown,
+    EventConsumerDropped,
+    RemoteClose,
+    RemoteEof,
+}
+
+impl ConnectionExit {
+    fn reconnects(self, scope: SubscriptionScope) -> bool {
+        scope == SubscriptionScope::MarketDataOnly
+            && matches!(self, Self::RemoteClose | Self::RemoteEof)
+    }
+}
+
 impl WsHub {
     pub fn start(
         cfg: AlorGatewayConfig,
@@ -202,10 +217,9 @@ impl WsHub {
 
         let generation = Arc::new(AtomicU64::new(0));
         tokio::spawn(async move {
-            let mut should_run = true;
             let mut attempt: u64 = 0;
             let mut backoff = Duration::from_millis(cfg.backoff_initial_ms);
-            while should_run {
+            loop {
                 let current_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
                 if event_tx
                     .send(WsEvent::Conn {
@@ -230,22 +244,29 @@ impl WsHub {
                 )
                 .await
                 {
-                    Ok(()) => {
-                        info!("ws hub ended gracefully");
-                        should_run = false;
+                    Ok(reason) if reason.reconnects(scope) => {
+                        warn!(?reason, "ws hub remote stream ended; reconnecting");
+                    }
+                    Ok(reason) => {
+                        info!(?reason, "ws hub ended gracefully");
+                        break;
                     }
                     Err(error) => {
                         warn!(?error, "ws hub error; reconnecting");
-                        let _ = event_tx
-                            .send(WsEvent::Conn {
-                                event: ConnEvent::Disconnected,
-                                generation: current_generation,
-                            })
-                            .await;
-                        tokio::time::sleep(jittered(backoff)).await;
-                        backoff = next_backoff(backoff, &cfg);
                     }
                 }
+                if event_tx
+                    .send(WsEvent::Conn {
+                        event: ConnEvent::Disconnected,
+                        generation: current_generation,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(jittered(backoff)).await;
+                backoff = next_backoff(backoff, &cfg);
             }
         });
 
@@ -318,7 +339,7 @@ async fn connect_and_run(
     backfill_plan: Arc<RwLock<BackfillPlan>>,
     generation: u64,
     scope: SubscriptionScope,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ConnectionExit> {
     let token = token_provider
         .access_token_with_context("ws_hub_connect")
         .await?;
@@ -473,7 +494,7 @@ async fn connect_and_run(
                                 Ok::<(), tokio_tungstenite::tungstenite::Error>(())
                             }).await;
                         }
-                        return Ok(());
+                        return Ok(ConnectionExit::RequestedShutdown);
                     }
                 }
             }
@@ -519,7 +540,7 @@ async fn connect_and_run(
                                     .await
                                     .is_err()
                                 {
-                                    return Ok(());
+                                    return Ok(ConnectionExit::EventConsumerDropped);
                                 }
                             }
                             Err(_) => {
@@ -550,11 +571,11 @@ async fn connect_and_run(
                     }
                     Some(Ok(Message::Close(frame))) => {
                         info!(?frame, "ws close received");
-                        return Ok(());
+                        return Ok(ConnectionExit::RemoteClose);
                     }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => return Err(error.into()),
-                    None => return Ok(()),
+                    None => return Ok(ConnectionExit::RemoteEof),
                 }
             }
         }

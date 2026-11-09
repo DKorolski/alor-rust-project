@@ -7,6 +7,142 @@ use std::{
 };
 
 type Reply = Result<Message, tokio_tungstenite::tungstenite::Error>;
+
+#[test]
+fn remote_termination_reconnects_only_in_md_scope() {
+    for reason in [ConnectionExit::RemoteClose, ConnectionExit::RemoteEof] {
+        assert!(reason.reconnects(SubscriptionScope::MarketDataOnly));
+        assert!(!reason.reconnects(SubscriptionScope::Trading));
+    }
+}
+
+#[test]
+fn requested_termination_does_not_reconnect() {
+    for scope in [
+        SubscriptionScope::MarketDataOnly,
+        SubscriptionScope::Trading,
+    ] {
+        for reason in [
+            ConnectionExit::RequestedShutdown,
+            ConnectionExit::EventConsumerDropped,
+        ] {
+            assert!(!reason.reconnects(scope));
+        }
+    }
+}
+
+#[tokio::test]
+async fn md_remote_normal_close_recovers_subscription_and_operator_stop_ends_owner() {
+    md_remote_close(1000).await;
+}
+
+#[tokio::test]
+async fn md_remote_going_away_recovers_subscription_and_operator_stop_ends_owner() {
+    md_remote_close(1001).await;
+}
+
+async fn md_remote_close(code: u16) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        for connection in 1..=2 {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut subscriptions = 0;
+            let mut unsubscriptions = 0;
+            loop {
+                tokio::select! {
+                    _ = &mut close_rx, if connection == 1 => {
+                        ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                            code: code.into(), reason: "owned fixture close".into(),
+                        })).await.unwrap();
+                        break;
+                    }
+                    frame = ws.next() => {
+                        match frame.unwrap().unwrap() {
+                            Message::Text(text) => {
+                                let value: Value = serde_json::from_str(&text).unwrap();
+                                match value["opcode"].as_str().unwrap() {
+                                    "BarsGetAndSubscribe" => {
+                                        assert!(value.get("portfolio").is_none());
+                                        subscriptions += 1;
+                                        ws.send(Message::Text(serde_json::json!({
+                                            "guid":value["guid"],"httpCode":200,
+                                        }).to_string().into())).await.unwrap();
+                                        if subscriptions == 2 {
+                                            ws.send(Message::Text(serde_json::json!({
+                                                "guid":value["guid"],"data":{"time":1200,
+                                                "open":100.,"high":102.,"low":98.,"close":101.,"volume":1.}
+                                            }).to_string().into())).await.unwrap();
+                                        }
+                                    }
+                                    "unsubscribe" => unsubscriptions += 1,
+                                    other => panic!("forbidden opcode: {other}"),
+                                }
+                            }
+                            Message::Ping(body) => ws.send(Message::Pong(body)).await.unwrap(),
+                            Message::Close(_) => {
+                                assert_eq!(connection, 2);
+                                assert_eq!(unsubscriptions, 2);
+                                ws.flush().await.unwrap();
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            assert_eq!(subscriptions, 2);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let mut cfg = config();
+    cfg.ws_url = format!("ws://{addr}");
+    cfg.backoff_initial_ms = 10;
+    cfg.backoff_max_ms = 20;
+    let token =
+        TokenProvider::new_with_token("http://127.0.0.1:1/unused-oauth", "fixture", "fixture");
+    let (handle, mut events) = WsHub::start_market_data_only(cfg, token);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut close_tx = Some(close_tx);
+        let mut disconnected = false;
+        while let Some(event) = events.recv().await {
+            match event {
+                WsEvent::Conn {
+                    event: ConnEvent::Disconnected,
+                    generation: 1,
+                } => disconnected = true,
+                WsEvent::Raw { generation: 1, .. } => {
+                    close_tx.take().unwrap().send(()).unwrap();
+                }
+                WsEvent::Raw { generation: 2, .. } => {
+                    assert!(disconnected);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        panic!("remote close ended the MD reconnect owner");
+    })
+    .await
+    .unwrap();
+    handle.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while events.recv().await.is_some() {}
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 struct AckSink {
     replies: futures::channel::mpsc::UnboundedSender<Reply>,
     opcodes: Arc<Mutex<Vec<String>>>,

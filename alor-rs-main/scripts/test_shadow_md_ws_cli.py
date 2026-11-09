@@ -190,6 +190,17 @@ class OwnedWs:
                 raise AssertionError('expected one owned source socket')
             self.send(self.connections[0], 3, b'owned-invalid-opcode')
 
+    def force_remote_end(self, kind):
+        with self.connection_lock:
+            if len(self.connections) != 1:
+                raise AssertionError('expected one owned source socket')
+            if kind == 'eof':
+                self.connections[0].shutdown(socket.SHUT_WR)
+            elif kind in (1000, 1001):
+                self.send(self.connections[0], 8, struct.pack('!H', kind))
+            else:
+                raise ValueError('unknown owned remote termination')
+
     def close(self):
         self.stop.set(); self.sock.close(); self.thread.join(timeout=2)
 
@@ -213,7 +224,25 @@ class WsSourceSmoke(unittest.TestCase):
     def test_usdrubf_v4_reconnect_quarantines_late_0950_without_source_changes(self):
         self.smoke(False, tamper=False, symbol='USDRUBF', late_audit=True)
 
-    def smoke(self, drop_ack, tamper, symbol='IMOEXF', late_audit=False):
+    def test_imoexf_close_1000_reconnects(self):
+        self.smoke(False, tamper=False, disconnect=1000)
+
+    def test_imoexf_close_1001_reconnects(self):
+        self.smoke(False, tamper=False, disconnect=1001)
+
+    def test_imoexf_remote_eof_reconnects(self):
+        self.smoke(False, tamper=False, disconnect='eof')
+
+    def test_usdrubf_close_1000_reconnects(self):
+        self.smoke(False, tamper=False, symbol='USDRUBF', disconnect=1000)
+
+    def test_usdrubf_close_1001_reconnects(self):
+        self.smoke(False, tamper=False, symbol='USDRUBF', disconnect=1001)
+
+    def test_usdrubf_remote_eof_reconnects(self):
+        self.smoke(False, tamper=False, symbol='USDRUBF', disconnect='eof')
+
+    def smoke(self, drop_ack, tamper, symbol='IMOEXF', late_audit=False, disconnect='protocol'):
         binary = Path(os.environ['SHADOW_MD_WS_BIN']).resolve(strict=True)
         server_bin = os.environ.get('REDIS_SERVER_BIN') or shutil.which('redis-server')
         cli_bin = os.environ.get('REDIS_CLI_BIN') or shutil.which('redis-cli')
@@ -330,7 +359,10 @@ skip_history_bars = false
                 self.assertEqual(proxy.xadds,count)
                 self.assertEqual(proxy.lost,int(drop_ack))
                 old_generation=json.loads((state/'HEALTH.json').read_text())['generation']
-                ws.force_protocol_reset()
+                if disconnect == 'protocol':
+                    ws.force_protocol_reset()
+                else:
+                    ws.force_remote_end(disconnect)
                 for _ in range(400):
                     self.assertIsNone(p.poll(), 'source stopped during owned reconnect')
                     health=json.loads((state/'HEALTH.json').read_text())
