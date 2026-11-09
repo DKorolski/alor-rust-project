@@ -120,7 +120,51 @@ model sessions only after actual admission, not from source-only collection.
   under actual UID1000 and UID1007, read-only artifact mount and no network.
 - Workspace all-target clippy with warnings denied, fmt check and diff check passed.
 
-This is not a native Linux Rust source qualification or a target granted-launch
-probe under real separated source/worker UIDs and ACLs. Those remain rollout
-gates. No VPS service/config/state, live artifact or broker command was changed;
-source-only observation is not numerical model admission.
+The local checkpoint above preceded the separate native qualification below.
+It did not itself qualify Linux artifacts or real ownership isolation.
+
+## Native Linux Qualification Checkpoint
+
+Clean source commit `9f1e393` was exported with a per-file hash manifest and
+built offline on Linux/x86_64. No production executable or service definition
+was replaced. The bounded build used a private network, one compiler job,
+0.5 CPU and a 2 GiB memory limit; Python fixtures used non-root readers, read-only
+artifacts, dropped capabilities and an owned loopback network only.
+
+- All 112 gateway tests, 3 owned source-runner cases, 8 service tests and the
+  explicitly enabled owned Redis/service integration passed. Runner cases
+  remained serial with their original deadlines.
+- Python reaction suite passed 86 tests, including two actual-worker/ACL
+  integrations. All 12 composed source WS/Redis/actual-worker cases passed.
+- Each symbol's separate source/model UID fixture exercised the exact granted
+  launcher and Linux worker without mocking filesystem permissions, Redis or
+  inspection. Each loaded 202 bootstrap receipts, recorded the grant before worker
+  start, stopped cleanly, rejected duplicate create and preserved canonical
+  source bytes. Direct Redis writes/consumer-group reads were denied by ACL.
+- Both positive launches used an explicitly synthetic calendar and injected
+  admission clock, not real forward-source evidence. The unmodified CLI with
+  actual wall time rejected those fixtures. This is protocol qualification, not actual
+  morning admission or prospective clean-session credit.
+- For both current symbol sources, the new read-only preparation ran under
+  their actual dedicated reader UIDs with production source mounts and reader
+  connections. ACL DRYRUN confirmed read-only permissions; absent actual
+  approval blocked admission. Existing model-owner directories remained empty,
+  pinned inputs unchanged and source/model services unchanged.
+
+Qualified Linux binary SHA256 values for that source commit:
+
+| Binary | SHA256 |
+|---|---|
+| alor_shadow_md_ws | b50482da8a4cf2a0896d0d5acb09fa1ddd26b9e28da7fca4999b834283244aa1 |
+| reaction_shadow_worker | 74446c54f45705fbc56c1e553634929d6607bb13b09e5a349a3657994b75f02b |
+
+Artifacts were staged separately, not bound into running service identities.
+The long SSH transport closed during qualification; the owned process remained
+running and wrote its successful native result. No duplicate attempt was
+started. Logs and original transport outcome are retained privately.
+
+Remaining gates: controlled replacement/source identity and unit/plan bindings,
+actual full-session/terminal/overnight checks and fresh morning approval of the
+exact target. The synthetic fixture and preparation-only checks do not remove
+those gates. No live strategy, broker command, Redis ACL/retention or actual
+model admission was changed by qualification.
