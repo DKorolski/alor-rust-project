@@ -258,18 +258,22 @@ fn strict_creation_after_cutoff_and_diagnostic_invalid_clean_date_are_blocked() 
 
 #[test]
 fn late_start_history_forward_requires_original_ws_proof_and_preserves_age_guard() {
-    for proof in [false, true] {
+    for (proof, reason) in [
+        (false, "next_timestamp"),
+        (true, "next_timestamp"),
+        (true, "next_timestamp_delayed"),
+    ] {
         let (_dir, mut r) = setup("USDRUBF");
         let guard = ServiceGuard::new(&r, super::service::policy(), clock() + 600).unwrap();
         advance_owned_prefix(&mut r).unwrap();
         let mut next = bar("USDRUBF", epoch("2026-10-26 11:10"), 105.);
         next.origin = DataOrigin::History;
-        now(next.close_time_utc + 610);
+        now(next.close_time_utc + 699);
         let mut payload = serde_json::to_value(&next).unwrap();
         if proof {
             payload["source_proof"] = serde_json::json!({"kind":"as_observed_ws","release_id":"owned-test", "ws_sequence_at_cutoff":10,
-            "release":{"generation":1,"closed_at_utc":next.close_time_utc+600,"reason":"next_timestamp", "next_label_utc":next.close_time_utc+600,
-                "observation_cutoff_utc":next.close_time_utc+601,"first_received_at_utc":next.close_time_utc,"last_received_at_utc":next.close_time_utc+600}});
+            "release":{"generation":1,"closed_at_utc":next.close_time_utc+600,"reason":reason, "next_label_utc":next.close_time_utc+600,
+                "observation_cutoff_utc":next.close_time_utc+695,"first_received_at_utc":next.close_time_utc,"last_received_at_utc":next.close_time_utc+695}});
         }
         let seq = r.collector.journal.last_sequence() + 1;
         r.collector

@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{Timelike, Utc};
 use serde_json::json;
 
@@ -30,6 +30,9 @@ struct Received {
 #[cfg(test)]
 #[path = "context_pipeline_tests.rs"]
 mod context_pipeline_tests;
+#[cfg(test)]
+#[path = "strict_fixture.rs"]
+mod strict_fixture;
 
 struct ReadinessDeadline {
     unready_since: Option<Duration>,
@@ -115,7 +118,7 @@ impl Runner {
                 release.proof.reason == crate::terminal_bar::ReleaseReason::NextTimestampDelayed
             })
             .collect::<Vec<_>>();
-        let mut health = json!({"version":self.cfg.version(),"status":status,"heartbeat_utc":Utc::now().timestamp(),
+        let mut health = json!({"version":self.cfg.version(),"status":status,"heartbeat_utc":self.clock().utc,
             "last_ws_rx_utc":self.last_rx,"generation":self.generation,
             "history_complete":self.history_complete,"connected":self.connected,"subscribed":self.acked,
             "queue_drained":drained,"published_rows":self.store.records.len(),
@@ -272,14 +275,26 @@ impl Runner {
                 };
                 if self.prior_complete()? && self.connected && self.acked {
                     self.drain_history().await?;
-                    self.live(received).await?;
+                    if self.history_complete {
+                        self.live(received).await?;
+                    } else {
+                        self.stage_current(received)?;
+                    }
                 } else {
-                    ensure!(self.current.as_ref().is_none_or(|old|old.bar.close_time_utc==received.bar.close_time_utc),
-                            "current WS observation advanced while history was unready");
-                    self.current = Some(received);
+                    self.stage_current(received)?;
                 }
             }
         }
+        Ok(())
+    }
+    fn stage_current(&mut self, received: Received) -> Result<()> {
+        ensure!(
+            self.current
+                .as_ref()
+                .is_none_or(|old| old.bar.close_time_utc == received.bar.close_time_utc),
+            "current WS observation advanced while history was unready"
+        );
+        self.current = Some(received);
         Ok(())
     }
     async fn event(&mut self, event: WsEvent) -> Result<()> {
@@ -328,7 +343,18 @@ impl Runner {
                 self.last_rx = ts;
                 self.feed()?;
             }
-            WsEvent::Raw { value, generation } if generation == self.generation => {
+            WsEvent::Raw {
+                value,
+                generation,
+                received_at_utc,
+            } if generation == self.generation => {
+                let received = received_at_utc.context("MD_FRAME_RECEIPT_MISSING")?;
+                ensure!(
+                    received >= self.last_rx && received <= self.clock().utc,
+                    "MD_FRAME_CLOCK"
+                );
+                self.last_rx = received;
+                self.feed()?;
                 self.raw(value, generation).await?
             }
             _ => {}
@@ -341,6 +367,11 @@ impl Runner {
         let mut regular = 0;
         while day < today {
             if !self.cfg.context_day(day) {
+                ensure!(
+                    self.cfg.terminal.symbols[&self.cfg.symbol].terminal_label(day)
+                        == Some(day.and_hms_opt(23, 40, 0).unwrap().and_utc().timestamp() - 10800),
+                    "UNSUPPORTED_SESSION_PLAN"
+                );
                 let from = day.and_hms_opt(7, 0, 0).unwrap().and_utc().timestamp() - 10800;
                 for slot in 0..101 {
                     let ts = from + slot * 600;
@@ -354,11 +385,36 @@ impl Runner {
         }
         Ok(regular >= 2)
     }
+
+    fn current_coverage_complete(&self) -> Result<bool> {
+        let now = self.clock().utc;
+        let today = local(now)?.date();
+        if self.cfg.context_day(today) || today < self.cfg.first_live_session {
+            return Ok(true);
+        }
+        let subscribed = self
+            .subscribed_at
+            .context("coverage without subscription")?;
+        let start = today.and_hms_opt(7, 0, 0).unwrap().and_utc().timestamp() - 10800;
+        let last_closed = subscribed / 600 * 600 - 600;
+        let terminal = self.cfg.terminal.symbols[&self.cfg.symbol]
+            .terminal_label(today)
+            .context("UNSUPPORTED_SESSION_PLAN")?;
+        ensure!(terminal == start + 100 * 600, "UNSUPPORTED_SESSION_PLAN");
+        for label in (start..=last_closed.min(terminal)).step_by(600) {
+            if !self.store.records.contains_key(&label) && !self.history.contains_key(&label) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     async fn drain_history(&mut self) -> Result<()> {
         if !self.connected || !self.acked {
             return Ok(());
         }
-        if !self.history_complete && !self.prior_complete()? {
+        if !self.history_complete
+            && (!self.prior_complete()? || !self.current_coverage_complete()?)
+        {
             return Ok(());
         }
         let inputs = std::mem::take(&mut self.history);
@@ -390,6 +446,60 @@ impl Runner {
             self.live(current).await?;
         }
         Ok(())
+    }
+
+    async fn terminal_tick(
+        &mut self,
+        events: &mut tokio::sync::mpsc::Receiver<WsEvent>,
+    ) -> Result<()> {
+        let mut drained = 0;
+        loop {
+            self.drain_history().await?;
+            loop {
+                match events.try_recv() {
+                    Ok(event) => {
+                        self.event(event).await?;
+                        drained += 1;
+                        ensure!(drained <= 2048, "TERMINAL_QUEUE_DEADLINE");
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        bail!("WS_EVENT_SOURCE_ENDED")
+                    }
+                }
+            }
+            // A processed frame may have staged history. Its awaited append must
+            // finish before rechecking the complete-event queue and taking cutoff.
+            if !self.history.is_empty()
+                && self.connected
+                && self.acked
+                && self.prior_complete()?
+                && self.current_coverage_complete()?
+            {
+                continue;
+            }
+            // No await between the final empty-prefix check and proposal.
+            if self.history_complete {
+                let releases = self.core.tick(self.clock(), true)?;
+                for release in releases {
+                    self.release(release).await?;
+                }
+            }
+            let now = self.clock().utc;
+            let today = local(now)?.date();
+            if self.cfg.terminal.enabled
+                && today >= self.cfg.terminal.first_live_session
+                && let Some(label) =
+                    self.cfg.terminal.symbols[&self.cfg.symbol].terminal_label(today)
+            {
+                ensure!(
+                    now <= label + 600 + self.cfg.terminal.max_lateness_seconds
+                        || self.store.records.contains_key(&label),
+                    "TERMINAL_REQUIRED_BAR_MISSING"
+                );
+            }
+            return Ok(());
+        }
     }
 }
 
@@ -503,19 +613,9 @@ pub async fn run(config: SourceConfig, root: &Path, mode: &str, fixture: bool) -
                 _=interrupt.recv()=>break,
                 event=events.recv()=>runner.event(event.context("WS event source ended")?).await?,
                 _=interval.tick()=>{
-                    let mut drained=0;
-                    while let Ok(event)=events.try_recv() {
-                        runner.event(event).await?;drained+=1;
-                        ensure!(drained<=2048,"WS event drain budget exceeded");
-                    }
                     let clock=runner.clock();
                     runner.cfg.validate(clock.utc)?;
-                    if events.is_empty() {
-                        runner.drain_history().await?;
-                        if runner.history_complete {
-                            for release in runner.core.tick(runner.clock(),true)? {runner.release(release).await?;}
-                        }
-                    }
+                    runner.terminal_tick(&mut events).await?;
                     runner.readiness_deadline.check(runner.started.elapsed())?;
                     runner.health(if runner.history_complete&&runner.connected&&runner.acked{"ready"}else{"reconnecting"},events.is_empty())?;
                 }

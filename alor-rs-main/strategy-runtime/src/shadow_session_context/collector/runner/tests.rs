@@ -6,6 +6,7 @@ mod bootstrap_tests;
 mod continuous;
 mod late_start;
 mod service;
+mod strict_fixture;
 
 thread_local! { static NOW: Cell<i64> = const { Cell::new(0) }; }
 fn clock() -> i64 {

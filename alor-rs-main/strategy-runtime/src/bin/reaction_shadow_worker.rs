@@ -130,6 +130,7 @@ async fn run() -> Result<()> {
     let mut guard = ServiceGuard::new(&runner, spec.policy, ready_by)?;
     respond(
         serde_json::json!({"event":"opened", "spec_sha256":format!("{:x}", Sha256::digest(raw)),
+        "capabilities":["split_collect_advance_v1"],
         "status":guard.status(&runner)?, "order_emission_allowed":false}),
     )?;
     let mut input = io::stdin().lock();
@@ -140,6 +141,12 @@ async fn run() -> Result<()> {
         match command.as_str() {
             "poll\n" => respond(serde_json::json!({"event":"polled",
                 "status":guard.poll_once(&mut runner, &mut connection).await?,
+                "order_emission_allowed":false}))?,
+            "collect\n" => respond(serde_json::json!({"event":"collected",
+                "status":guard.collect_once(&mut runner, &mut connection).await?,
+                "order_emission_allowed":false}))?,
+            "advance\n" => respond(serde_json::json!({"event":"advanced",
+                "status":guard.advance_collected(&mut runner)?,
                 "order_emission_allowed":false}))?,
             "stop\n" => {
                 respond(

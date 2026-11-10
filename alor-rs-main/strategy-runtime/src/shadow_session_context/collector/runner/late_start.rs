@@ -1,6 +1,7 @@
 //! Explicit as-observed reconstruction, never a pre-opening receipt attestation.
 use super::*;
 use crate::ri_context::ingress::redis_source::{bar_payload, stream_id};
+use anyhow::bail;
 use redis::streams::StreamRangeReply;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,22 +129,22 @@ pub(super) fn verify_forward_proof(collector: &Collector, input: &Receipt) -> Re
             && cutoff <= received,
         "invalid diagnostic forward WS proof"
     );
-    if release["reason"] == "next_timestamp" {
-        ensure!(
+    match release["reason"].as_str() {
+        Some("next_timestamp" | "next_timestamp_delayed") => ensure!(
             release["next_label_utc"]
                 .as_i64()
                 .is_some_and(|t| close <= t && t <= cutoff),
             "invalid diagnostic next timestamp proof"
-        );
-    } else {
-        ensure!(
-            release["reason"] == "session_boundary_ws"
-                && release["next_label_utc"].is_null()
+        ),
+        Some("session_boundary_ws") => ensure!(
+            release["next_label_utc"].is_null()
                 && local(input.bar.close_time_utc)?.time()
                     == chrono::NaiveTime::from_hms_opt(23, 40, 0).unwrap()
                 && cutoff >= close + 10,
             "invalid diagnostic terminal proof"
-        );
+        ),
+        Some("context_interval_ws") => bail!("diagnostic context-only release cannot drive model"),
+        _ => bail!("unsupported diagnostic release reason"),
     }
     Ok(())
 }

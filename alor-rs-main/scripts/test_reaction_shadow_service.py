@@ -22,10 +22,12 @@ from pathlib import Path
 mode, root = sys.argv[1:]
 Path(root).with_suffix(".pid").write_text(str(os.getpid()))
 s = dict(runner=dict(failed=False, order_emission_allowed=False, committed_transactions=0,
-                     source_caught_up=True), order_emission_allowed=False,
+                     source_caught_up=True, durable_receipts=0), order_emission_allowed=False,
+         next_guard_deadline_utc=int(time.time())+3600,
          armed=False, completed=False, resource_state="normal")
 def emit(event):
     print(json.dumps(dict(event=event, spec_sha256="fixture", status=s,
+                          capabilities=['split_collect_advance_v1'],
                           order_emission_allowed=False)), flush=True)
 if mode == "opening_hang": time.sleep(30)
 if mode == "overflow":
@@ -36,6 +38,12 @@ if mode == "bad_spec":
                          order_emission_allowed=False)), flush=True)
 else: emit("opened")
 for line in sys.stdin:
+    if line == 'collect\n':
+        emit('collected'); continue
+    if line == 'advance\n':
+        s['armed']=True
+        s['runner']['committed_transactions']+=1
+        emit('advanced'); continue
     if line == "poll\n":
         if mode == "poll_hang": time.sleep(30)
         if mode == "crash": sys.exit(7)
@@ -334,10 +342,77 @@ engine = "imoexf"
         (root / "HEALTH.json").write_text(json.dumps(health))
         with self.assertRaises(service.SourceUnavailable):
             guard.check()
-        (root / "HEALTH.json").unlink()
-        with self.assertRaises(service.SourceUnavailable):
-            guard.check()
 
+    def test_recovery_pauses_stale_rx_not_writer_and_keeps_flapping_budget(self):
+        root, _, spec, health = self.ws_source()
+        guard = service.ClosedSourceGuard(root, spec)
+        status = dict(next_guard_deadline_utc=int(time.time())+1000)
+        guard.enable_recovery(status)
+        paused = {**health, 'status':'reconnecting', 'connected':False,
+                  'last_ws_rx_utc':int(time.time())-46}
+        with mock.patch.object(service.time, 'monotonic', return_value=100):
+            (root/'HEALTH.json').write_text(json.dumps(paused))
+            self.assertFalse(guard.check())
+            self.assertEqual(guard.recovery_since,100)
+        with mock.patch.object(service.time, 'monotonic', return_value=101):
+            (root/'HEALTH.json').write_text(json.dumps({**health,'generation':2}))
+            self.assertTrue(guard.check())
+            self.assertEqual(guard.recovery_since,100)
+            (root/'HEALTH.json').write_text(json.dumps({**paused,'generation':2}))
+            self.assertFalse(guard.check())
+            self.assertEqual(guard.recovery_since,100)
+        with mock.patch.object(service.time, 'monotonic', return_value=700):
+            with self.assertRaises(service.SourceUnavailable) as failed:
+                guard.check()
+            self.assertEqual(failed.exception.code,'RECOVERY_DEADLINE')
+        (root/'HEALTH.json').write_text(json.dumps({**paused,'generation':2,'heartbeat_utc':0}))
+        with self.assertRaises(service.SourceUnavailable) as failed:
+            guard.check()
+        self.assertEqual(failed.exception.code,'WRITER_HEARTBEAT_STALE')
+
+    def test_model_deadline_caps_recovery_without_age_waiver(self):
+        root, _, spec, health = self.ws_source()
+        guard=service.ClosedSourceGuard(root,spec)
+        guard.enable_recovery(dict(next_guard_deadline_utc=int(time.time())-1))
+        (root/'HEALTH.json').write_text(json.dumps({**health,'status':'reconnecting','connected':False}))
+        with self.assertRaises(service.SourceUnavailable) as failed:
+            guard.check()
+        self.assertEqual(failed.exception.code,'REQUIRED_BAR_MISSING')
+
+    def test_strict_session_window_rejects_short_warmup_and_future_day(self):
+        root, _, spec, _ = self.ws_source(v3=True)
+        guard=service.ClosedSourceGuard(root,spec)
+        calendar={'weekday_end':'23:50:00','overrides':{}}
+        guard.session_config['terminal']['symbols']['IMOEXF']=calendar
+        guard.check_full_session_window()
+        for day in ('2026-10-29','2026-11-03'):
+            calendar['overrides']={day:'19:00:00'}
+            with self.assertRaises(service.SourceUnavailable) as failed:
+                guard.check_full_session_window()
+            self.assertEqual(failed.exception.code,'UNSUPPORTED_SESSION_PLAN')
+
+    def test_strict_supervisor_pauses_before_steps_and_resumes_without_restart(self):
+        root, _, spec, health=self.ws_source(v3=True)
+        cfg=json.loads((root/'manifest.json').read_text())['config']
+        cfg['terminal']['symbols']['IMOEXF']={'weekday_end':'23:50:00','overrides':{}}
+        sha=service.hashlib.sha256(json.dumps(cfg,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        (root/'manifest.json').write_text(json.dumps(dict(version=health['version'],config=cfg,config_sha256=sha)))
+        health['config_sha256']=sha
+        (root/'HEALTH.json').write_text(json.dumps(health))
+        guard=service.ClosedSourceGuard(root,spec)
+        def event(row):
+            if row['event']=='reaction_shadow_opened':
+                (root/'HEALTH.json').write_text(json.dumps({**health,'status':'reconnecting','connected':False}))
+            elif row['event']=='reaction_shadow_recovery_paused':
+                (root/'HEALTH.json').write_text(json.dumps({**health,'generation':2}))
+        attempt=self.attempt()
+        try:
+            final,events=self.run_worker('ok',attempt,source_guard=guard,on_event=event)
+            kinds=[row['event'] for row in events]
+            self.assertIn('reaction_shadow_recovery_paused',kinds)
+            self.assertIn('reaction_shadow_recovery_resumed',kinds)
+            self.assertEqual(final['runner']['committed_transactions'],1)
+        finally:attempt.close()
     def test_source_guard_rejects_unreadable_or_changed_manifest(self):
         root, _, spec = self.source()
         guard = service.ClosedSourceGuard(root, spec)
@@ -369,7 +444,8 @@ engine = "imoexf"
         try:
             with self.assertRaises(service.SourceUnavailable):
                 self.run_worker('ok', attempt, source_guard=guard, on_event=failed_after_open)
-            self.assertEqual([e['event'] for e in events], ['reaction_shadow_opened'])
+            self.assertEqual([e['event'] for e in events],
+                             ['reaction_shadow_opened', 'reaction_shadow_source_failed'])
             self.assertFalse((attempt.control / '0001.stopped.json').exists())
         finally:
             attempt.close()

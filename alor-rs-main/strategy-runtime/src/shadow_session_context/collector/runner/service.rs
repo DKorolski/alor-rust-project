@@ -88,6 +88,7 @@ pub struct ServiceStatus {
     pub max_unobserved_terminal_lateness_seconds: i64,
     pub ordinary_model_lateness_limit_seconds: u64,
     pub terminal_model_lateness_limit_seconds: u64,
+    pub next_guard_deadline_utc: Option<i64>,
     pub order_emission_allowed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic_late_start: Option<late_start::OutputQuality>,
@@ -99,6 +100,7 @@ pub struct ServiceGuard {
     policy: ServicePolicy,
     ready_by_utc: i64,
     armed: bool,
+    collected_prefix: Option<u64>,
 }
 impl ServiceGuard {
     pub fn new(
@@ -153,15 +155,20 @@ impl ServiceGuard {
             policy,
             ready_by_utc,
             armed: false,
+            collected_prefix: None,
         })
     }
 
-    fn queue_ages(&self, runner: &ReactionShadowRunner, now: i64) -> Result<(i64, i64, i64)> {
+    fn queue_ages(
+        &self,
+        runner: &ReactionShadowRunner,
+        now: i64,
+    ) -> Result<(i64, i64, i64, Option<i64>)> {
         if runner.state.observed == runner.collector.journal.last_sequence() {
-            return Ok((0, 0, 0));
+            return Ok((0, 0, 0, None));
         }
         let identity = &runner.header.identities[0];
-        let mut ages = (0, 0, 0);
+        let mut ages = (0, 0, 0, None::<i64>);
         for receipt in runner
             .collector
             .prefix(runner.collector.journal.last_sequence())?
@@ -201,6 +208,12 @@ impl ServiceGuard {
                 .context("missing original receipt time")?;
             ages.0 = ages.0.max(now - received);
             let model_age = now - bar.close_time_utc - 600;
+            let deadline = (received + self.policy.max_queue_age_seconds as i64).min(
+                bar.close_time_utc
+                    + 600
+                    + self.policy.lateness_for_label(bar.close_time_utc)? as i64,
+            );
+            ages.3 = Some(ages.3.map_or(deadline, |old| old.min(deadline)));
             if dt.time() == chrono::NaiveTime::from_hms_opt(23, 40, 0).unwrap() {
                 ages.2 = ages.2.max(model_age);
             } else {
@@ -283,8 +296,31 @@ impl ServiceGuard {
     pub fn status(&self, runner: &ReactionShadowRunner) -> Result<ServiceStatus> {
         let status = runner.status();
         let ingress = runner.collector.journal.usage();
-        let (queue_age, ordinary_age, terminal_age) =
+        let (queue_age, ordinary_age, terminal_age, queue_deadline) =
             self.queue_ages(runner, runner.collector.journal.now()?)?;
+        let identity = &runner.header.identities[0];
+        let mut deadline = if !self.armed {
+            Some(self.ready_by_utc)
+        } else if let Some(day) = runner.state.day {
+            Some(if status.session_complete {
+                identity.next_cutoff(day)? + self.policy.max_model_lateness_seconds as i64
+            } else {
+                let next = runner
+                    .state
+                    .model_inputs
+                    .last_key_value()
+                    .map_or(identity.cutoff(day), |(ts, _)| ts + 600);
+                next + 600 + self.policy.lateness_for_label(next)? as i64
+            })
+        } else {
+            Some(
+                identity.cutoff(runner.spec.first_decision_session)
+                    + self.policy.max_model_lateness_seconds as i64,
+            )
+        };
+        if let Some(queued) = queue_deadline {
+            deadline = Some(deadline.map_or(queued, |old| old.min(queued)));
+        }
         let clean = |day: NaiveDate| {
             runner
                 .spec
@@ -348,6 +384,7 @@ impl ServiceGuard {
             max_unobserved_terminal_lateness_seconds: terminal_age,
             ordinary_model_lateness_limit_seconds: self.policy.ordinary_lateness_seconds(),
             terminal_model_lateness_limit_seconds: self.policy.max_model_lateness_seconds,
+            next_guard_deadline_utc: deadline,
             order_emission_allowed: false,
             diagnostic_late_start,
             clean_sessions_completed: runner.spec.late_start.as_ref().map(|_| completed_clean),
@@ -359,12 +396,64 @@ impl ServiceGuard {
         runner: &mut ReactionShadowRunner,
         connection: &mut MultiplexedConnection,
     ) -> Result<ServiceStatus> {
+        self.collect_once(runner, connection).await?;
+        self.advance_collected(runner)
+    }
+
+    /// Durable ingress only. The supervisor must admit this fixed prefix again
+    /// before any model advancement; no Redis await exists in advance_collected.
+    pub async fn collect_once(
+        &mut self,
+        runner: &mut ReactionShadowRunner,
+        connection: &mut MultiplexedConnection,
+    ) -> Result<ServiceStatus> {
         runner.log.healthy()?;
         let result = async {
+            ensure!(
+                self.collected_prefix
+                    .is_none_or(|p| p == runner.collector.journal.last_sequence()),
+                "collected prefix changed before revalidation"
+            );
             self.check_before_advance(runner, runner.collector.journal.now()?)?;
             runner.collector.poll_once(connection).await?;
-            // Redis receipts are durable evidence even when too old to drive models.
+            self.collected_prefix = Some(runner.collector.journal.last_sequence());
+            self.status(runner)
+        }
+        .await;
+        result.map_err(|e| runner.log.fail(e))
+    }
+
+    pub fn advance_collected(
+        &mut self,
+        runner: &mut ReactionShadowRunner,
+    ) -> Result<ServiceStatus> {
+        runner.log.healthy()?;
+        let result = (|| {
+            let prefix = self
+                .collected_prefix
+                .context("model advance without collected prefix")?;
+            ensure!(
+                prefix == runner.collector.journal.last_sequence(),
+                "collected prefix changed"
+            );
             self.check_before_advance(runner, runner.collector.journal.now()?)?;
+            let now = runner.collector.journal.now()?;
+            let date = local(now)?.date();
+            let identity = &runner.header.identities[0];
+            if date >= runner.spec.first_decision_session
+                && identity.trading_date(date)
+                && now >= identity.cutoff(date)
+                && runner.state.day != Some(date)
+                && !runner
+                    .collector
+                    .source
+                    .cutoff_poll_ready(&runner.collector.journal, identity.cutoff(date))
+            {
+                // Collection may straddle opening. A new read is required;
+                // never fabricate a post-cutoff poll or fail a healthy prefix.
+                self.collected_prefix = None;
+                return self.status(runner);
+            }
             runner.advance()?;
             let now = runner.collector.journal.now()?;
             self.check_after_advance(runner, now)?;
@@ -375,9 +464,9 @@ impl ServiceGuard {
                 );
                 self.armed = runner.status().source_caught_up;
             }
+            self.collected_prefix = None;
             self.status(runner)
-        }
-        .await;
+        })();
         result.map_err(|e| runner.log.fail(e))
     }
 }

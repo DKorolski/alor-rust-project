@@ -315,7 +315,9 @@ impl Supervisor {
                 let mut current_generation: u64 = 0;
                 while let Some(event) = ws_events.recv().await {
                     match event {
-                        WsEvent::Raw { value, generation } => {
+                        WsEvent::Raw {
+                            value, generation, ..
+                        } => {
                             if generation != current_generation {
                                 if let Some(symbol) = extract_symbol(&value) {
                                     bar_quality_stats

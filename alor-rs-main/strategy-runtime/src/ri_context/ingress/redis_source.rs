@@ -152,6 +152,12 @@ impl RiRedisSource {
         );
         journal.seal_cutoff(cutoff)
     }
+
+    pub(crate) fn cutoff_poll_ready(&self, journal: &RiIngressJournal, cutoff: i64) -> bool {
+        self.last_success.is_some_and(|(polled, sequence)| {
+            polled >= cutoff && sequence == journal.last_sequence()
+        })
+    }
 }
 
 pub(crate) fn bar_payload(row: &redis::streams::StreamId) -> Result<String> {

@@ -31,7 +31,7 @@ fn quote(label: i64) -> serde_json::Value {
 #[tokio::test]
 #[ignore = "explicit owned Redis executable required; never connects to an existing server"]
 async fn sparse_context_pipeline_preserves_receipts_prefix_and_restore() {
-    tokio::time::timeout(Duration::from_secs(30), pipeline(false, false))
+    tokio::time::timeout(Duration::from_secs(30), pipeline(false, false, false))
         .await
         .unwrap();
 }
@@ -39,7 +39,7 @@ async fn sparse_context_pipeline_preserves_receipts_prefix_and_restore() {
 #[tokio::test]
 #[ignore = "explicit owned Redis executable required; never connects to an existing server"]
 async fn ordinary_delayed_pipeline_retains_evidence_not_model_freshness() {
-    tokio::time::timeout(Duration::from_secs(30), pipeline(true, false))
+    tokio::time::timeout(Duration::from_secs(30), pipeline(true, false, false))
         .await
         .unwrap();
 }
@@ -47,12 +47,20 @@ async fn ordinary_delayed_pipeline_retains_evidence_not_model_freshness() {
 #[tokio::test]
 #[ignore = "explicit owned Redis executable required; never connects to an existing server"]
 async fn late_weekend_0950_reconnect_is_audited_without_backfill_or_model_replay() {
-    tokio::time::timeout(Duration::from_secs(30), pipeline(false, true))
+    tokio::time::timeout(Duration::from_secs(30), pipeline(false, true, false))
         .await
         .unwrap();
 }
 
-async fn pipeline(ordinary: bool, late_audit: bool) {
+#[tokio::test]
+#[ignore = "explicit owned Redis; injects a queued frame while canonical append awaits"]
+async fn terminal_rechecks_complete_frames_after_awaited_history_append() {
+    tokio::time::timeout(Duration::from_secs(30), pipeline(false, false, true))
+        .await
+        .unwrap();
+}
+
+async fn pipeline(ordinary: bool, late_audit: bool, terminal_race: bool) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let socket = root.join("redis.sock");
@@ -153,13 +161,68 @@ async fn pipeline(ordinary: bool, late_audit: bool) {
             r.raw(quote(ts(day) + slot * 600), 1).await.unwrap();
         }
     }
-    if !ordinary && !late_audit {
+    if !ordinary && !late_audit && !terminal_race {
         r.raw(quote(ts("2026-11-07T09:50:00+03:00")), 1)
             .await
             .unwrap();
     }
     r.drain_history().await.unwrap();
     assert!(r.store.records.is_empty());
+    if terminal_race {
+        advance(&mut r, "2026-11-07T19:00:10+03:00");
+        r.feed().unwrap();
+        let label = ts("2026-11-07T18:50:00+03:00");
+        r.raw(quote(label), 1).await.unwrap();
+        r.event(WsEvent::SubscriptionAck {
+            subscription_type: "bars".into(),
+            generation: 1,
+        })
+        .await
+        .unwrap();
+        let _: String = redis::cmd("CLIENT")
+            .arg("PAUSE")
+            .arg(200)
+            .arg("WRITE")
+            .query_async(&mut r.conn)
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let _keep_producer = tx.clone();
+        let pending = state.join("pending.json");
+        let inject = tokio::spawn(async move {
+            for _ in 0..1000 {
+                if pending.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                pending.exists(),
+                "must inject during the awaited durable append"
+            );
+            let mut updated = quote(label);
+            updated["data"]["close"] = json!(101.5);
+            tx.send(WsEvent::Raw {
+                value: updated,
+                generation: 1,
+                received_at_utc: Some(ts("2026-11-07T19:00:10+03:00")),
+            })
+            .await
+            .unwrap();
+            // Keep the producer alive through the final empty-prefix check.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        r.terminal_tick(&mut rx).await.unwrap();
+        let row = &r.store.records[&label];
+        assert_eq!(row.bar().unwrap().c, 101.5);
+        assert_eq!(
+            row.release.as_ref().unwrap().proof.reason,
+            crate::terminal_bar::ReleaseReason::SessionBoundaryWs
+        );
+        assert_eq!(r.store.records.len(), 203);
+        inject.await.unwrap();
+        return;
+    }
     r.event(WsEvent::SubscriptionAck {
         subscription_type: "bars".into(),
         generation: 1,

@@ -31,6 +31,8 @@ class WorkerFailure(RuntimeError):
     def __init__(self, event):
         reason = event.get("reason")
         self.reason = reason if reason in WORKER_REASONS else "worker_error"
+        digest = event.get('error_sha256')
+        self.error_sha256 = digest if isinstance(digest,str) and len(digest)==64 and all(c in '0123456789abcdef' for c in digest) else None
         super().__init__("worker failure: " + self.reason)
 
 
@@ -90,6 +92,11 @@ def policy_from_spec(raw):
 class SourceUnavailable(RuntimeError):
     reason = "closed_source_unavailable"
 
+    def __init__(self, message, *, code="SOURCE_UNAVAILABLE", **details):
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
 
 class ClosedSourceGuard:
     """Read-only dependency check, not a source restart or repair mechanism."""
@@ -101,7 +108,16 @@ class ClosedSourceGuard:
         source = json.loads(self.manifest)
         runner = tomllib.loads(spec.decode())["runner"]
         cfg = source["config"]
+        self.session_config = cfg
+        self.first_decision_session = runner['first_decision_session']
+        self.max_sessions = tomllib.loads(spec.decode()).get('policy', {}).get('max_sessions')
         late = runner.get('late_start')
+        self.diagnostic = late is not None
+        self.recovery_enabled = False
+        self.recovery_since = None
+        self.model_deadline = None
+        # Transport ceiling only; the worker's queue/required-bar deadline wins.
+        self.recovery_limit = 600
         if late is not None:
             if (source['version'] != 'shadow_gateway_ws_closed_m10_v4'
                     or late.get('version') != 'diagnostic_late_start_v1'):
@@ -166,15 +182,23 @@ class ClosedSourceGuard:
         health = json.loads(read_small(self.root / "HEALTH.json"))
         now = time.time()
         if (health.get("version") != self.version or health.get("config_sha256") != self.config_sha
-                or health.get("order_emission_allowed") is not False
-                or type(health.get("heartbeat_utc")) is not int
-                or not -5 <= now - health["heartbeat_utc"] <= 15
-                or type(health.get("last_ws_rx_utc")) is not int
-                or not -5 <= now - health["last_ws_rx_utc"] <= self.heartbeat_budget
-                or type(health.get("generation")) is not int
-                or health["generation"] < max(1, self.generation)
-                or health.get("status") not in ("ready", "reconnecting")):
-            raise SourceUnavailable("WS source health stale/failed/mismatched")
+                or health.get("order_emission_allowed") is not False):
+            raise SourceUnavailable("WS source identity mismatch", code="SOURCE_IDENTITY_CHANGED")
+        if type(health.get('generation')) is not int or health['generation'] < max(1,self.generation):
+            raise SourceUnavailable('WS source generation rollback',code='SOURCE_GENERATION_ROLLBACK')
+        if health.get('status') not in ('ready','reconnecting'):
+            raise SourceUnavailable('WS source failed or unsupported phase',code='SOURCE_FAILED_OR_UNSUPPORTED')
+        if type(health.get('heartbeat_utc')) is not int:
+            raise SourceUnavailable('writer heartbeat invalid',code='WRITER_HEARTBEAT_INVALID')
+        if type(health.get('last_ws_rx_utc')) is not int:
+            raise SourceUnavailable('WS RX timestamp invalid',code='WS_RX_INVALID')
+        heartbeat_age = now - health['heartbeat_utc']
+        if not -5 <= heartbeat_age <= 15:
+            raise SourceUnavailable("WS writer heartbeat stale", code="WRITER_HEARTBEAT_STALE",
+                                    age_seconds=heartbeat_age, limit_seconds=15)
+        rx_age = now - health['last_ws_rx_utc']
+        if rx_age < -5:
+            raise SourceUnavailable("WS RX clock invalid", code="WS_RX_CLOCK")
         if self.version in ("shadow_gateway_ws_closed_m10_v3", "shadow_gateway_ws_closed_m10_v4") and (
                 health.get("model_freshness_policy") != "consumer_owned_unchanged"
                 or type(health.get("ordinary_delayed_rows")) is not int
@@ -186,17 +210,79 @@ class ClosedSourceGuard:
                 or type(health.get("late_context_review_dates")) is not list
                 or len(health["late_context_review_dates"]) > 40):
             raise SourceUnavailable("WS v4 late context health invalid")
-        if ((require_ready and health["status"] != "ready")
-                or (health["status"] == "ready" and (health.get("history_complete") is not True
-                    or health.get("connected") is not True or health.get("subscribed") is not True))):
-            raise SourceUnavailable("WS source not ready for admission")
+        ready = (health['status'] == 'ready' and health.get('history_complete') is True
+                 and health.get('connected') is True and health.get('subscribed') is True
+                 and rx_age <= self.heartbeat_budget)
+        legacy_invalid = (not self.recovery_enabled and (
+            rx_age > self.heartbeat_budget or health['status'] == 'ready'))
+        if not ready and (require_ready or legacy_invalid):
+            raise SourceUnavailable("WS source not ready for admission", code=(
+                "WS_RX_STALE" if rx_age > self.heartbeat_budget else "SOURCE_NOT_READY"),
+                generation=health['generation'], rx_age_seconds=rx_age,
+                limit_seconds=self.heartbeat_budget)
         self.generation = health["generation"]
+        if self.recovery_enabled:
+            if not ready and self.recovery_since is None:
+                self.recovery_since = time.monotonic()
+            if self.recovery_since is not None:
+                elapsed = time.monotonic() - self.recovery_since
+                if elapsed >= self.recovery_limit:
+                    raise SourceUnavailable("source recovery budget exhausted", code="RECOVERY_DEADLINE",
+                                            age_seconds=elapsed, limit_seconds=self.recovery_limit)
+                if self.model_deadline is not None and now > self.model_deadline:
+                    raise SourceUnavailable("required bar deadline during recovery", code="REQUIRED_BAR_MISSING",
+                                            deadline_utc=self.model_deadline)
+        return ready
+
+    def enable_recovery(self, status):
+        if not self.is_ws or self.diagnostic:
+            raise ValueError('split recovery is for strict WS generations only')
+        self.recovery_enabled = True
+        self.bind_status(status)
+
+    def check_full_session_window(self):
+        if not self.is_ws or self.diagnostic:
+            return
+        cfg = self.session_config
+        if type(self.max_sessions) is not int or not 1 <= self.max_sessions <= 20:
+            raise ValueError('complete bounded policy required for strict WS session window')
+        first = dt.date.fromisoformat(self.first_decision_session)
+        day = dt.date.fromisoformat(cfg['bootstrap_start'])
+        if not 0 <= (first - day).days <= 30:
+            raise ValueError('unsupported full-session warmup window')
+        calendar = cfg['terminal']['symbols'][cfg['symbol']]
+        remaining = self.max_sessions
+        for _ in range(90):
+            if day.weekday() < 5 and day.isoformat() not in cfg['excluded_dates']:
+                end = calendar.get('overrides', {}).get(day.isoformat(), calendar.get('weekday_end'))
+                if end != '23:50:00':
+                    raise SourceUnavailable('unsupported shortened or closed regular session',
+                        code='UNSUPPORTED_SESSION_PLAN', session_date=day.isoformat())
+                if day >= first:
+                    remaining -= 1
+                    if remaining == 0:
+                        return
+            day += dt.timedelta(days=1)
+        raise ValueError('bounded full-session horizon exhausted')
+
+    def bind_status(self, status):
+        deadline = status.get('next_guard_deadline_utc')
+        if type(deadline) is not int:
+            raise ValueError('worker must expose its required-bar/queue deadline')
+        self.model_deadline = deadline
+
+    def confirm_progress(self, status):
+        self.bind_status(status)
+        ready = self.check()
+        if ready:
+            self.recovery_since = None
+        return ready
 
     def check(self, require_ready=False):
         try:
             failed = self.root / "FAILED.json"
             if failed.exists() or failed.is_symlink() or read_small(self.root / "manifest.json") != self.manifest:
-                raise SourceUnavailable("source failed or manifest changed")
+                raise SourceUnavailable("source failed or manifest changed", code="SOURCE_IDENTITY_CHANGED_OR_FAILED")
             fd = os.open(self.root / "writer.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(fd, "rb") as handle:
                 if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
@@ -205,8 +291,8 @@ class ClosedSourceGuard:
                     fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
                     if self.is_ws:
-                        self._ws_health(require_ready)
-                    return  # Exclusive lock remains held by the source writer.
+                        return self._ws_health(require_ready)
+                    return True  # Exclusive lock remains held by the source writer.
                 raise SourceUnavailable("source writer is not running")
         except SourceUnavailable:
             raise
@@ -381,6 +467,8 @@ def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit
         raise ValueError("full startup window unavailable before reservation")
     if source_guard is not None:
         source_guard.check()
+        if isinstance(source_guard, ClosedSourceGuard):
+            source_guard.check_full_session_window()
     startup_deadline = started + min(policy["startup_timeout_seconds"], remaining)
     attempt.start(ready_by)  # survives timeout, crash, supervisor SIGKILL or host reboot
     if stop.at is not None:
@@ -397,18 +485,59 @@ def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit
             raise ValueError("worker read different launch spec")
         if source_guard is not None:
             source_guard.check()
+        split = (isinstance(source_guard, ClosedSourceGuard) and source_guard.is_ws
+                 and not source_guard.diagnostic)
+        if split:
+            if 'split_collect_advance_v1' not in opened.get('capabilities', []):
+                raise ValueError('strict WS worker requires split collect/advance capability')
+            source_guard.enable_recovery(status)
         emit(json.dumps(dict(event="reaction_shadow_opened", status=status)))
         last_log = time.monotonic()
         last_progress = None
+        collected = False
+        paused = False
         while stop.at is None and not status["completed"]:
-            if source_guard is not None:
-                source_guard.check()
+            ready = source_guard.check() if source_guard is not None else True
+            if split and not ready:
+                if not paused:
+                    emit(json.dumps(dict(event='reaction_shadow_recovery_paused',
+                        phase='PAUSED_RECOVERY', generation=source_guard.generation,
+                        next_guard_deadline_utc=source_guard.model_deadline,
+                        order_emission_allowed=False)))
+                paused = True
+                time.sleep(.1)
+                continue
             deadline = (time.monotonic() + policy["poll_timeout_seconds"]
                         if status["armed"] else startup_deadline)
-            channel.send("poll")
-            status = status_of(channel.receive(deadline, stop, policy["shutdown_timeout_seconds"]), "polled")
-            if source_guard is not None:
-                source_guard.check()
+            if split:
+                if not collected:
+                    channel.send('collect')
+                    status = status_of(channel.receive(deadline, stop, policy['shutdown_timeout_seconds']), 'collected')
+                    source_guard.bind_status(status)
+                    collected = True
+                if not source_guard.check():
+                    # Re-poll the durable cursor after recovery before admission.
+                    collected = False
+                    continue
+                # This permission is for the already durable, fixed prefix only.
+                # advance performs no Redis read/await and cannot take new rows.
+                prefix = status['runner']['durable_receipts']
+                channel.send('advance')
+                status = status_of(channel.receive(deadline, stop, policy['shutdown_timeout_seconds']), 'advanced')
+                if status['runner']['durable_receipts'] != prefix:
+                    raise ValueError('model advanced a prefix not admitted by supervisor')
+                collected = False
+                progress_ready = source_guard.confirm_progress(status)
+                if paused and progress_ready:
+                    emit(json.dumps(dict(event='reaction_shadow_recovery_resumed',
+                        phase='READY', generation=source_guard.generation,
+                        admitted_prefix=prefix, order_emission_allowed=False)))
+                    paused = False
+            else:
+                channel.send("poll")
+                status = status_of(channel.receive(deadline, stop, policy["shutdown_timeout_seconds"]), "polled")
+                if source_guard is not None:
+                    source_guard.check()
             progress = (status["runner"].get("committed_transactions"),
                         status["runner"].get("source_caught_up"), status["armed"],
                         status.get("resource_state"))
@@ -439,6 +568,16 @@ def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit
         attempt.stopped(reason, final)
         emit(json.dumps(dict(event="reaction_shadow_stopped", reason=reason, status=final)))
         return final
+    except SourceUnavailable as error:
+        emit(json.dumps(dict(event='reaction_shadow_source_failed', phase='INCOMPLETE',
+                             code=error.code, details=error.details,
+                             order_emission_allowed=False)))
+        raise
+    except WorkerFailure as error:
+        emit(json.dumps(dict(event='reaction_shadow_worker_failed',phase='INCOMPLETE',
+                             code=error.reason.upper(),error_sha256=error.error_sha256,
+                             order_emission_allowed=False)))
+        raise
     finally:
         try:
             terminate_owned(process)

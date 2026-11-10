@@ -29,6 +29,8 @@ pub enum WsEvent {
     Raw {
         value: Value,
         generation: u64,
+        /// MD-only frames carry receipt and payload as one queue event.
+        received_at_utc: Option<i64>,
     },
     Conn {
         event: ConnEvent,
@@ -514,9 +516,11 @@ async fn connect_and_run(
                     Some(Ok(Message::Text(txt))) => {
                         let now = Utc::now().timestamp();
                         last_ws_rx_ts.store(now, Ordering::SeqCst);
-                        let _ = event_tx
-                            .send(WsEvent::WsRx { ts: now, generation })
-                            .await;
+                        if scope == SubscriptionScope::Trading {
+                            let _ = event_tx
+                                .send(WsEvent::WsRx { ts: now, generation })
+                                .await;
+                        }
                         tracing::trace!(payload = %txt, "ws recv text");
                         match serde_json::from_str::<Value>(&txt) {
                             Ok(val) => {
@@ -536,7 +540,8 @@ async fn connect_and_run(
                                     }
                                 }
                                 if event_tx
-                                    .send(WsEvent::Raw { value: val, generation })
+                                    .send(WsEvent::Raw { value: val, generation,
+                                        received_at_utc: (scope == SubscriptionScope::MarketDataOnly).then_some(now) })
                                     .await
                                     .is_err()
                                 {
@@ -962,12 +967,14 @@ async fn read_until_guid(
             if let Message::Text(txt) = msg {
                 let now = Utc::now().timestamp();
                 last_ws_rx_ts.store(now, Ordering::SeqCst);
-                let _ = event_tx
-                    .send(WsEvent::WsRx {
-                        ts: now,
-                        generation,
-                    })
-                    .await;
+                if scope == SubscriptionScope::Trading {
+                    let _ = event_tx
+                        .send(WsEvent::WsRx {
+                            ts: now,
+                            generation,
+                        })
+                        .await;
+                }
                 tracing::trace!(payload = %txt, "ws recv text (awaiting guid)");
                 match serde_json::from_str::<Value>(&txt) {
                     Ok(val) => {
@@ -982,6 +989,7 @@ async fn read_until_guid(
                                     .send(WsEvent::Raw {
                                         value: attach_symbol(val, bars_guid_map),
                                         generation,
+                                        received_at_utc: Some(now),
                                     })
                                     .await;
                                 continue;
@@ -1011,6 +1019,8 @@ async fn read_until_guid(
                             .send(WsEvent::Raw {
                                 value: val,
                                 generation,
+                                received_at_utc: (scope == SubscriptionScope::MarketDataOnly)
+                                    .then_some(now),
                             })
                             .await;
                     }
