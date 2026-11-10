@@ -89,6 +89,71 @@ fn advance_owned_prefix(r: &mut ReactionShadowRunner) -> Result<()> {
     observe(r)
 }
 
+#[tokio::test]
+#[ignore = "starts a PID-verified owned Redis; never uses service Redis"]
+async fn diagnostic_cutoff_waits_for_fresh_poll_after_bootstrap_crosses_second() {
+    use crate::ri_context::ingress::redis_source::tests::TestServer;
+    use alor_protocol::{Envelope, MessageType};
+
+    for symbol in ["IMOEXF", "USDRUBF"] {
+        let (_unused, prototype) = setup(symbol);
+        let spec = prototype.spec.clone();
+        drop(prototype);
+        let dir = tempfile::tempdir().unwrap();
+        let mut r =
+            ReactionShadowRunner::create_with_clock(&dir.path().join("run"), spec, clock).unwrap();
+        let server = TestServer::start().await;
+        let mut connection = server.admin().await;
+        let inputs = bars(symbol);
+        for (index, input) in inputs.iter().enumerate() {
+            let payload = serde_json::to_string(&Envelope::new(
+                clock(),
+                "owned-diagnostic-cutoff",
+                MessageType::Bar,
+                input,
+            ))
+            .unwrap();
+            let _: String = redis::cmd("XADD")
+                .arg(&r.spec.ingress.source_stream)
+                .arg(format!("{}-0", index + 1))
+                .arg("payload")
+                .arg(payload)
+                .query_async(&mut connection)
+                .await
+                .unwrap();
+        }
+        let mut guard = ServiceGuard::new(&r, super::service::policy(), clock() + 600).unwrap();
+        while !r.collector.status().caught_up {
+            guard.collect_once(&mut r, &mut connection).await.unwrap();
+        }
+        let received = clock();
+        now(received + 1);
+        let pending = guard.advance_collected(&mut r).unwrap();
+        assert!(!pending.armed && !pending.runner.pair_ready && !pending.runner.failed);
+        assert_eq!(
+            pending.runner.observed_sequence,
+            r.spec.bootstrap.as_ref().unwrap().rows
+        );
+        assert_eq!(pending.runner.ingested_sequence, inputs.len() as u64);
+        assert_eq!(r.collector.journal.sealed_barriers().unwrap().len(), 0);
+        guard.collect_once(&mut r, &mut connection).await.unwrap();
+        let ready = guard.advance_collected(&mut r).unwrap();
+        assert!(ready.armed && ready.runner.pair_ready && !ready.runner.failed);
+        assert_eq!(ready.clean_sessions_completed, Some(0));
+        assert_eq!(ready.runner.observed_sequence, inputs.len() as u64);
+        assert!(r
+            .collector
+            .prefix(inputs.len() as u64)
+            .unwrap()
+            .iter()
+            .all(|row| {
+                row.received_at_utc == Some(received) && row.durable_at_utc == Some(received)
+            }));
+        assert_eq!(r.collector.journal.sealed_barriers().unwrap().len(), 1);
+        assert!(!ready.order_emission_allowed);
+    }
+}
+
 #[test]
 fn late_start_reconstructs_both_models_pending_and_preserves_actual_receipt_clocks() {
     for symbol in ["IMOEXF", "USDRUBF"] {

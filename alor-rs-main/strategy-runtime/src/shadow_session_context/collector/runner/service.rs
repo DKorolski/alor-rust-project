@@ -462,7 +462,9 @@ impl ServiceGuard {
                     now < self.ready_by_utc,
                     "catch-up missed readiness deadline"
                 );
-                self.armed = runner.status().source_caught_up;
+                let ready = runner.status();
+                self.armed = ready.source_caught_up
+                    && (runner.spec.late_start.is_none() || ready.pair_ready);
             }
             self.collected_prefix = None;
             self.status(runner)

@@ -135,3 +135,24 @@ subsequently timed out during banner exchange, delaying that follow-up.
 Do not infer a trading-service failure from this SSH symptom, or deployment GO
 from successful compilation. The patch has not replaced any active binary or
 source/model generation. Keep the previous review archive and source evidence.
+
+## November 10 Continuation
+
+On a compatible Ubuntu24/glibc2.39 isolated fixture, terminal26, source pipeline4,
+recovery regression5, Python policy104 and composed6 passed. One of17 production
+protocol smokes exposed a real diagnostic-only cutoff race. The source read was
+fresh at collection, but bootstrap/ingest could cross a wall-clock second before
+the diagnostic as-of freeze. That freeze correctly required a newer poll and
+previously poisoned the generation. The failure reproduced5/8 times; original
+markers and logs are retained. It is not a synthetic model or exchange failure.
+
+The retained collector digest `aac9804489bdef34e2f042d509f9d099986b43f05ff48a188c4b3748133efd43`
+matches `cutoff requires a fresh source poll`; nested worker digest is
+`f75c3e24e38015aa79c5015f15092299cdd3d8e1555f4749f87599e7dd6f7cf4`.
+
+The follow-up keeps bootstrap/ingest durable, returns unarmed before diagnostic
+freeze, and re-polls the unchanged source prefix. Only a genuinely fresh read
+can freeze/arm. Original receipts, deadline and clean-session eligibility do not
+change. Strict pre-opening and RI logic are unchanged; diagnostic admission is
+still not planned. A PID-verified owned-Redis regression for both symbols was
+RED on the old code and PASS after this fix. Full requalification is pending.

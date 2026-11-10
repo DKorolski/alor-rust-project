@@ -719,13 +719,23 @@ impl ReactionShadowRunner {
             && now >= identity.cutoff(date)
             && self.state.day != Some(date)
         {
-            let cutoff = self.collector.seal_cutoff(
-                if self.spec.late_start.is_some() && self.state.day.is_none() {
-                    now
-                } else {
-                    identity.cutoff(date)
-                },
-            )?;
+            let diagnostic_start = self.spec.late_start.is_some() && self.state.day.is_none();
+            let through = if diagnostic_start {
+                now
+            } else {
+                identity.cutoff(date)
+            };
+            // Bootstrap/ingest can cross a wall-clock second after collection.
+            // Re-poll before diagnostic freeze, never backdate its attestation.
+            if diagnostic_start
+                && !self
+                    .collector
+                    .source
+                    .cutoff_poll_ready(&self.collector.journal, through)
+            {
+                return Ok(());
+            }
+            let cutoff = self.collector.seal_cutoff(through)?;
             self.commit(
                 Operation::Freeze {
                     date,
