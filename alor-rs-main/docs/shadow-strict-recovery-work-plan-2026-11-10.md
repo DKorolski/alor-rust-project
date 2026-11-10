@@ -1,7 +1,7 @@
 # Strict Shadow Recovery
 
-Status: implementation committed; local qualification PASS, native qualification
-PARTIAL. No deployment/admission.
+Status: code4503b6a local/native qualification PASS. Separate MD-only sources
+prepared and started; model admission remains pending. No live deployment.
 Source baseline f270443; isolated engineering line, not a live gateway release.
 Responds to the November 10 external review of terminal/source/model boundaries.
 
@@ -117,7 +117,7 @@ separate gates; this checkpoint does not approve deployment. Initial fixture
 development failures were corrected before this result: bootstrap must be pinned,
 USD's360-second budget must not be tested as120, and bridge STOP must reap cleanly.
 
-## Native Qualification Checkpoint
+## Initial Native Checkpoint (Historical)
 
 Clean implementation `818606e` was exported from Git objects with per-file hashes.
 Offline Linux builds completed for both library test executables and production
@@ -169,3 +169,43 @@ with matching future source/model activation dates, a pinned fresh bootstrap,
 read-only model ACL and a full readiness window. An inactive artifact may be
 staged only after native PASS; it is not a grant or an enabled service. No
 current live/legacy source, failed generation or marker is replaced by this work.
+
+## Final Native Checkpoint
+
+Clean code4503b6a passed171 native Linux checks, including8 repeated executions:
+terminal26, source pipeline4, recovery/diagnostic6, Python policy104, composed6,
+production protocol17 and repeated IMO diagnostic protocol8/8. No skipped Python
+tests. Both production executables were rebuilt offline in a bounded sandbox;
+test execution used a compatible Ubuntu24/glibc2.39 image, non-root UID, owned
+Redis and no external network. The before/after comparison confirmed unchanged
+pre-existing container identities and protected service PIDs/restart counters.
+
+The inactive release pins executable/script hashes and qualification evidence.
+It is not a live gateway image, model admission or a completed natural session.
+Original failed fixtures/generations and the prior review archive are retained.
+
+## MD-Only Preparation
+
+The operator selected November11 with morning review at06:20 MSK. Two separate
+MD-only sources started November10 after native PASS, without changing existing
+live/legacy services. Source/model activation is November11; the distinct source
+terminal observation date is November10. Today's records remain History/context
+only. The new sources must collect their own genuine previous-session terminal;
+an imported historical terminal alone cannot satisfy strict admission.
+
+Both sources reached READY with two complete101-bar regular context sessions.
+Separate OS identities and exact-stream writer/read-only Redis ACL are used;
+broker refresh tokens are not copied. Reader-role checks confirmed no source
+write permission or access to MD environment/gateway files, and a supported full
+session calendar. Prepared model units remain inactive, with no approval files,
+bootstrap pin, model generation or supervisor attempt. Admission without approval
+was explicitly rejected. An operator helper initially read an absent `reason`
+field in that negative response; it was corrected to verify the exact safe error
+digest. The healthy source was not restarted and no model state was created.
+
+Next review is manual, not a scheduled/autonomous GO: verify natural terminal,
+overnight continuity/recovery evidence, current source readiness, revisions,
+context tail, read ACL and capacity; then pin fresh bootstrap and grant only
+inside the full pre-opening window. Do not clear failures or use late-start
+fallback if any gate is missing. Source terminal, paired EOD and clean-session
+credit remain separate facts; twenty clean sessions are not automatic promotion.
