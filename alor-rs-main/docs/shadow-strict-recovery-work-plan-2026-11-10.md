@@ -155,4 +155,17 @@ freeze, and re-polls the unchanged source prefix. Only a genuinely fresh read
 can freeze/arm. Original receipts, deadline and clean-session eligibility do not
 change. Strict pre-opening and RI logic are unchanged; diagnostic admission is
 still not planned. A PID-verified owned-Redis regression for both symbols was
-RED on the old code and PASS after this fix. Full requalification is pending.
+RED on the old code and PASS after this fix.
+
+Follow-up code commit: `4503b6a`. Full local requalification PASS: gateway112,
+runtime507/17 opt-in ignored, Python policy104, composed6, queued-frame race1
+and the new owned-Redis cutoff regression1. All-target clippy with warnings
+denied, fmt and diff checks also passed. The native rebuild must use the clean
+Git-object export of4503b6a and a compatible Ubuntu24/glibc2.39 fixture, include
+the sixth recovery regression and8 repeated IMO production-protocol cases.
+
+The next explicit admission remains a separate operation. Start before opening,
+with matching future source/model activation dates, a pinned fresh bootstrap,
+read-only model ACL and a full readiness window. An inactive artifact may be
+staged only after native PASS; it is not a grant or an enabled service. No
+current live/legacy source, failed generation or marker is replaced by this work.
