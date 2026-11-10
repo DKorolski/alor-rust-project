@@ -1,6 +1,7 @@
 # Strict Shadow Recovery
 
-Status: implementation and qualification in progress. No deployment/admission.
+Status: implementation committed; local qualification PASS, native qualification
+PARTIAL. No deployment/admission.
 Source baseline f270443; isolated engineering line, not a live gateway release.
 Responds to the November 10 external review of terminal/source/model boundaries.
 
@@ -80,6 +81,22 @@ First real day: source terminal count, both model EODs and clean-session count a
 separate checks. A healthy day with no reconnect is not recovery PASS. No live
 promotion or automatic GO after 20 sessions is included.
 
+## Review Disposition
+
+F1: publication reasons are dispatched explicitly; an ordinary delayed row is
+not a terminal exception. F2: split admission and bounded recovery distinguish
+transport pause from broken data. F3: shortened sessions HOLD before admission;
+general calendar/model support is deferred. F4: terminal drains complete frames
+after awaited history writes. F5: broader auxiliary-audit/storage isolation is a
+follow-up; this patch does not claim that storage failures are recoverable.
+F6: current-session closed-label coverage is required, not just ACK/READY.
+F7: supervisor failures expose safe classes and retain worker digests.
+
+Do not use daily clean restarts to hide new failures. Qualify combinations in
+the composed bench first, preserve failed generations, and classify each real
+failure against its original receipt/deadline. Recovery must not turn missing
+history into a timely prospective event or reset the observation-day counter.
+
 ## Local Qualification Checkpoint
 
 Local library suites: gateway112 passed/5 explicit opt-in ignored; runtime507
@@ -99,3 +116,22 @@ passed. Native Linux qualification and any actual future admission are still
 separate gates; this checkpoint does not approve deployment. Initial fixture
 development failures were corrected before this result: bootstrap must be pinned,
 USD's360-second budget must not be tested as120, and bridge STOP must reap cleanly.
+
+## Native Qualification Checkpoint
+
+Clean implementation `818606e` was exported from Git objects with per-file hashes.
+Offline Linux builds completed for both library test executables and production
+`alor_shadow_md_ws` / `reaction_shadow_worker`. All26 terminal unit tests passed.
+
+The first owned source-pipeline invocation failed before exercising the pipeline:
+the qualification helper selected a host Redis executable path that does not
+exist. Its log is retained. No host packages or working Redis are changed to fix
+the fixture. A separate follow-up helper runs those tests, policy/process tests,
+composed cases and production-protocol probes inside the existing isolated Redis
+fixture image. Full native qualification is not PASS until those results and
+the before/after protected-service comparison are available. New SSH connections
+subsequently timed out during banner exchange, delaying that follow-up.
+
+Do not infer a trading-service failure from this SSH symptom, or deployment GO
+from successful compilation. The patch has not replaced any active binary or
+source/model generation. Keep the previous review archive and source evidence.
