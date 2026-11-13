@@ -206,6 +206,8 @@ pub struct PaperSources {
     pub enabled: ConfigSource,
     pub output: ConfigSource,
     pub execution_mode: ConfigSource,
+    pub market_fill_on_close: ConfigSource,
+    pub simulate_stop_limits: ConfigSource,
     pub file_path: ConfigSource,
     pub trades_csv: ConfigSource,
     pub summary_json: ConfigSource,
@@ -371,6 +373,8 @@ impl Default for PaperSources {
             enabled: ConfigSource::Default,
             output: ConfigSource::Default,
             execution_mode: ConfigSource::Default,
+            market_fill_on_close: ConfigSource::Default,
+            simulate_stop_limits: ConfigSource::Default,
             file_path: ConfigSource::Default,
             trades_csv: ConfigSource::Default,
             summary_json: ConfigSource::Default,
@@ -696,6 +700,8 @@ struct PaperConfigFile {
     enabled: Option<bool>,
     output: Option<String>,
     execution_mode: Option<String>,
+    market_fill_on_close: Option<bool>,
+    simulate_stop_limits: Option<bool>,
     file_path: Option<String>,
     trades_csv: Option<String>,
     summary_json: Option<String>,
@@ -1574,6 +1580,8 @@ pub fn load_runtime_config(
         enabled: DEFAULT_PAPER_ENABLED,
         output: DEFAULT_PAPER_OUTPUT,
         execution_mode: DEFAULT_PAPER_EXECUTION_MODE,
+        market_fill_on_close: false,
+        simulate_stop_limits: false,
         file_path: DEFAULT_PAPER_FILE_PATH.to_string(),
         trades_csv: DEFAULT_PAPER_TRADES_CSV.to_string(),
         summary_json: DEFAULT_PAPER_SUMMARY_JSON.to_string(),
@@ -1821,6 +1829,14 @@ pub fn load_runtime_config(
             }
         }
         if let Some(paper_file) = &file_config.paper {
+            if let Some(value) = paper_file.simulate_stop_limits {
+                paper.simulate_stop_limits = value;
+                sources.paper.simulate_stop_limits = ConfigSource::File;
+            }
+            if let Some(value) = paper_file.market_fill_on_close {
+                paper.market_fill_on_close = value;
+                sources.paper.market_fill_on_close = ConfigSource::File;
+            }
             if let Some(value) = paper_file.enabled {
                 paper.enabled = value;
                 sources.paper.enabled = ConfigSource::File;
@@ -2807,6 +2823,7 @@ exchange = "MOEX"
 [paper]
 enabled = true
 execution_mode = "history_sim"
+market_fill_on_close = true
 "#,
         );
 
@@ -2816,6 +2833,11 @@ execution_mode = "history_sim"
             PaperExecutionMode::HistorySim
         );
         assert_eq!(resolved.sources.paper.execution_mode, ConfigSource::File);
+        assert!(resolved.config.paper.market_fill_on_close);
+        assert_eq!(
+            resolved.sources.paper.market_fill_on_close,
+            ConfigSource::File
+        );
         let _ = std::fs::remove_file(path);
     }
 }

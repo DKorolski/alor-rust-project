@@ -1,6 +1,7 @@
 pub mod config;
 pub mod health_server;
 pub mod live_guard;
+mod paper_prices;
 pub mod redis_transport;
 pub mod ri_context;
 pub mod risk_gate_store;
@@ -653,6 +654,10 @@ pub struct PaperConfig {
     pub enabled: bool,
     pub output: PaperOutput,
     pub execution_mode: PaperExecutionMode,
+    #[serde(default)]
+    pub market_fill_on_close: bool,
+    #[serde(default)]
+    pub simulate_stop_limits: bool,
     pub file_path: String,
     pub trades_csv: String,
     pub summary_json: String,

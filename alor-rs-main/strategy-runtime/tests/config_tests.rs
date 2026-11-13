@@ -61,6 +61,87 @@ fn repo_config_path(relative_path: &str) -> PathBuf {
 }
 
 #[test]
+fn paper_execution_flags_are_independent_and_opt_in() {
+    use strategy_runtime::config::ConfigSource;
+
+    let _env_guard = env_lock();
+    let _guards = clear_env_vars(&[
+        "TRADE_MODE",
+        "ALLOW_LIVE_ORDERS",
+        "ALLOW_PAPER_ORDERS",
+        "PAPER_EXECUTION_MODE",
+        "STRATEGY_KIND",
+    ]);
+    for (settings, close, stops, from_file) in [
+        ("", false, false, false),
+        (
+            "market_fill_on_close = false\nsimulate_stop_limits = false\n",
+            false,
+            false,
+            true,
+        ),
+        (
+            "market_fill_on_close = true\nsimulate_stop_limits = false\n",
+            true,
+            false,
+            true,
+        ),
+        (
+            "market_fill_on_close = false\nsimulate_stop_limits = true\n",
+            false,
+            true,
+            true,
+        ),
+        (
+            "market_fill_on_close = true\nsimulate_stop_limits = true\n",
+            true,
+            true,
+            true,
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.toml");
+        fs::write(
+            &path,
+            format!(
+                "redis_url = 'redis://example/'\n\
+                 [runtime]\ntrade_mode = 'paper'\n\
+                 allow_live_orders = false\nallow_paper_orders = false\n\
+                 [paper]\n{settings}"
+            ),
+        )
+        .unwrap();
+        let resolved = load_runtime_config(path, false).unwrap();
+        assert_eq!(
+            resolved.config.trade_mode,
+            strategy_runtime::TradeMode::Paper
+        );
+        assert!(!resolved.config.allow_live_orders && !resolved.config.allow_paper_orders);
+        assert_eq!(resolved.config.paper.market_fill_on_close, close);
+        assert_eq!(resolved.config.paper.simulate_stop_limits, stops);
+        let source = if from_file {
+            ConfigSource::File
+        } else {
+            ConfigSource::Default
+        };
+        assert_eq!(resolved.sources.paper.market_fill_on_close, source);
+        assert_eq!(resolved.sources.paper.simulate_stop_limits, source);
+
+        let mut legacy = serde_json::to_value(&resolved.config.paper).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("market_fill_on_close");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("simulate_stop_limits");
+        let restored: strategy_runtime::PaperConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.market_fill_on_close && !restored.simulate_stop_limits);
+    }
+}
+
+#[test]
 fn loads_toml_defaults() {
     let _env_guard = env_lock();
     let _guards = clear_env_vars(&[

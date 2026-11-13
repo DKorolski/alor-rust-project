@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ use alor_types::{MarketState, Scheduler};
 
 use crate::health_server::{spawn_health_server, HealthCfg, RuntimeSharedState};
 use crate::live_guard::{evaluate_live_guard, HealthEvent, LiveGuardDecision, LiveGuardState};
+use crate::paper_prices::{limit_price, stop_or_replace_price};
 use crate::redis_transport::{RedisRuntimeTransport, RuntimeMessage};
 use crate::risk_gate_store::{
     append_risk_gate_runtime_session, run_risk_gate_startup_store,
@@ -263,6 +264,12 @@ struct SimOrder {
 enum SimOrderType {
     Market,
     Limit,
+    StopLimit {
+        stop_price: f64,
+        condition: alor_protocol::StopLimitCondition,
+        triggered: bool,
+        end_time: i64,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -854,6 +861,11 @@ impl StrategyRuntime {
         }
 
         let prev_bar_ts = self.state.last_processed_bar_ts.get(&bar.symbol).copied();
+        if self.config.trade_mode != TradeMode::Live
+            && self.can_advance_paper_execution(bar.origin.clone())
+        {
+            self.simulate_fills(&bar).await?;
+        }
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, bar.close_time_utc);
         let (intents, previous_strategy_state) =
             self.invoke_strategy_callback(&ctx, "on_bar_replay", |strategy, strategy_ctx| {
@@ -864,7 +876,7 @@ impl StrategyRuntime {
         if self.config.trade_mode != TradeMode::Live {
             self.flush_strategy_journal_records().await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
-                self.simulate_fills(&bar).await?;
+                let ctx = self.strategy_ctx_for_bar_intents(&bar, bar.close_time_utc);
                 let executable_intents = self.filter_paper_intents_for_simulation(
                     &ctx,
                     bar.close_time_utc,
@@ -2312,6 +2324,13 @@ impl StrategyRuntime {
         }
         self.maybe_wait_for_live_bar_readiness("on_bar_pre_callback", event_ts, &bar)
             .await?;
+        // Pending simulated orders settle before the model observes this bar.
+        // Otherwise it can create an intent against the pre-fill position.
+        if self.config.trade_mode != TradeMode::Live
+            && self.can_advance_paper_execution(bar.origin.clone())
+        {
+            self.simulate_fills(&bar).await?;
+        }
         let ctx = self.strategy_ctx_with_last_bar_and_event_ts(prev_bar_ts, event_ts);
         let (intents, previous_strategy_state) =
             self.invoke_strategy_callback(&ctx, "on_bar", |strategy, strategy_ctx| {
@@ -2321,7 +2340,7 @@ impl StrategyRuntime {
         if self.config.trade_mode != TradeMode::Live {
             self.flush_strategy_journal_records().await?;
             if self.can_advance_paper_execution(bar.origin.clone()) {
-                self.simulate_fills(&bar).await?;
+                let ctx = self.strategy_ctx_for_bar_intents(&bar, event_ts);
                 let executable_intents = self.filter_paper_intents_for_simulation(
                     &ctx,
                     event_ts,
@@ -2573,7 +2592,9 @@ impl StrategyRuntime {
     }
 
     async fn simulate_intents(&mut self, bar: &BarEvent, intents: Vec<Intent>) -> Result<()> {
-        for intent in intents {
+        let price_step = self.config.strategy.tick_size;
+        let mut pending: VecDeque<_> = intents.into();
+        while let Some(intent) = pending.pop_front() {
             let mut intent = intent;
             let mut intent_class = intent.explicit_class();
             loop {
@@ -2598,10 +2619,11 @@ impl StrategyRuntime {
                     side,
                     comment,
                 } => {
+                    let price = limit_price(price, price_step, side);
                     let order_id = self.next_sim_order_id;
                     self.next_sim_order_id += 1;
                     let side = format!("{side:?}").to_lowercase();
-                    self.sim_orders.push(SimOrder {
+                    let order = SimOrder {
                         order_id,
                         symbol: bar.symbol.clone(),
                         side: side.clone(),
@@ -2611,7 +2633,10 @@ impl StrategyRuntime {
                         price: Some(price),
                         comment,
                         created_bar_ts: bar.close_time_utc,
-                    });
+                    };
+                    let followup = self.notify_simulated_order(bar, &order, "working", 0.0, price);
+                    pending.extend(followup);
+                    self.sim_orders.push(order);
                     self.ledger.record_order(OrderRecord {
                         order_id,
                         symbol: bar.symbol.clone(),
@@ -2736,30 +2761,39 @@ impl StrategyRuntime {
                     self.next_sim_order_id += 1;
                     let side = format!("{side:?}").to_lowercase();
 
+                    // Opt-in close pricing; default Market pricing remains next-bar open.
+                    let fill_price = fill_price.or_else(|| {
+                        (self.config.trade_mode == TradeMode::Paper
+                            && self.config.paper.market_fill_on_close)
+                            .then_some(bar.close)
+                    });
                     if let Some(price) = fill_price {
-                        self.ledger.record_fill(TradeRecord {
-                            ts_utc: bar.close_time_utc,
-                            order_id,
-                            symbol: symbol.clone(),
-                            side: side.clone(),
-                            qty: effective_qty,
+                        let followup = self.apply_simulated_fill(
+                            bar,
+                            SimOrder {
+                                order_id,
+                                symbol,
+                                side,
+                                intent_class,
+                                order_type: SimOrderType::Market,
+                                qty: effective_qty,
+                                price: Some(price),
+                                comment,
+                                created_bar_ts: bar.close_time_utc,
+                            },
+                            effective_qty,
                             price,
-                            commission: 0.0,
-                            owned: true,
-                            comment: comment.clone(),
-                        });
-                        self.ledger.record_order(OrderRecord {
-                            order_id,
-                            symbol: symbol.clone(),
-                            side,
-                            qty: effective_qty,
-                            filled: effective_qty,
-                            price,
-                            status: "filled".to_string(),
-                            ts_utc: bar.close_time_utc,
-                            owned: true,
-                        });
-                        self.persist_ledger_reports().await?;
+                        );
+                        self.record_non_live_intents(
+                            bar.close_time_utc,
+                            &followup,
+                            self.config.trade_mode,
+                        )
+                        .await?;
+                        // Complete lifecycle feedback before the next original action.
+                        for intent in followup.into_iter().rev() {
+                            pending.push_front(intent);
+                        }
                     } else {
                         self.sim_orders.push(SimOrder {
                             order_id,
@@ -2792,6 +2826,14 @@ impl StrategyRuntime {
                         .position(|order| order.order_id == order_id)
                     {
                         let order = self.sim_orders.remove(pos);
+                        let followup = self.notify_simulated_order(
+                            bar,
+                            &order,
+                            "canceled",
+                            0.0,
+                            order.price.unwrap_or(0.0),
+                        );
+                        pending.extend(followup);
                         self.ledger.record_order(OrderRecord {
                             order_id: order.order_id,
                             symbol: order.symbol.clone(),
@@ -2810,6 +2852,7 @@ impl StrategyRuntime {
                     new_price,
                     new_qty,
                 } => {
+                    let new_price = stop_or_replace_price(new_price, price_step);
                     if let Some(order) = self
                         .sim_orders
                         .iter_mut()
@@ -2830,21 +2873,154 @@ impl StrategyRuntime {
                         });
                     }
                 }
-                Intent::CreateStopLimit { .. } | Intent::DeleteStopLimit { .. } => {
-                    // Backtest/paper simulator does not emulate broker-side stop-order lifecycle.
+                Intent::CreateStopLimit {
+                    side,
+                    qty,
+                    trigger_price,
+                    price,
+                    condition,
+                    stop_end_unix_time,
+                    comment,
+                    ..
+                } => {
+                    if !self.config.paper.simulate_stop_limits {
+                        continue;
+                    }
+                    let trigger_price = stop_or_replace_price(trigger_price, price_step);
+                    let price = stop_or_replace_price(price, price_step);
+                    let order = SimOrder {
+                        order_id: self.next_sim_order_id,
+                        symbol: bar.symbol.clone(),
+                        side: format!("{side:?}").to_lowercase(),
+                        intent_class,
+                        order_type: SimOrderType::StopLimit {
+                            stop_price: trigger_price,
+                            condition,
+                            triggered: false,
+                            end_time: stop_end_unix_time,
+                        },
+                        qty,
+                        price: Some(price),
+                        comment,
+                        created_bar_ts: bar.close_time_utc,
+                    };
+                    self.next_sim_order_id += 1;
+                    pending.extend(self.notify_simulated_stop(bar, &order, "working", false));
+                    self.sim_orders.push(order);
+                }
+                Intent::DeleteStopLimit { order_id, .. } => {
+                    if let Some(index) = self.sim_orders.iter().position(|order| {
+                        format!("paper-stop-{}", order.order_id) == order_id
+                            && matches!(
+                                order.order_type,
+                                SimOrderType::StopLimit {
+                                    triggered: false,
+                                    ..
+                                }
+                            )
+                    }) {
+                        let order = self.sim_orders.remove(index);
+                        pending.extend(self.notify_simulated_stop(bar, &order, "canceled", false));
+                    }
                 }
                 Intent::Classified { .. } | Intent::Routed { .. } => {
                     unreachable!("wrapped intents are flattened above")
                 }
             }
         }
+        self.persist_ledger_reports().await?;
         Ok(())
     }
 
     async fn simulate_fills(&mut self, bar: &BarEvent) -> Result<()> {
         let mut filled = Vec::new();
+        // OHLC cannot reveal touch order. Resolve triggered stops before sibling TP.
+        let stops: Vec<_> = self
+            .sim_orders
+            .iter()
+            .filter(|order| {
+                order.symbol == bar.symbol
+                    && bar.close_time_utc > order.created_bar_ts
+                    && matches!(order.order_type, SimOrderType::StopLimit { .. })
+            })
+            .cloned()
+            .collect();
+        for order in stops {
+            if !self.sim_orders.iter().any(|o| o.order_id == order.order_id) {
+                continue;
+            }
+            let SimOrderType::StopLimit {
+                stop_price,
+                condition,
+                triggered,
+                end_time,
+            } = order.order_type
+            else {
+                unreachable!()
+            };
+            if !triggered && end_time > 0 && bar.close_time_utc >= end_time {
+                self.sim_orders.retain(|o| o.order_id != order.order_id);
+                let followup = self.notify_simulated_stop(bar, &order, "expired", false);
+                self.simulate_intents(bar, followup).await?;
+                continue;
+            }
+            let matches = |price| match condition {
+                alor_protocol::StopLimitCondition::More => price > stop_price,
+                alor_protocol::StopLimitCondition::MoreOrEqual => price >= stop_price,
+                alor_protocol::StopLimitCondition::Less => price < stop_price,
+                alor_protocol::StopLimitCondition::LessOrEqual => price <= stop_price,
+            };
+            if !triggered && !matches(bar.h) && !matches(bar.l) {
+                continue;
+            }
+            let limit = order.price.unwrap_or(stop_price);
+            let buy = order.side == "buy";
+            let fill_price = if triggered || matches(bar.o) {
+                // The limit exists at the open: honor its cap, even after a gap.
+                if buy && bar.l <= limit {
+                    Some(bar.o.min(limit))
+                } else if !buy && bar.h >= limit {
+                    Some(bar.o.max(limit))
+                } else {
+                    None
+                }
+            } else if matches!(
+                condition,
+                alor_protocol::StopLimitCondition::MoreOrEqual
+                    | alor_protocol::StopLimitCondition::LessOrEqual
+            ) && ((buy && limit >= stop_price) || (!buy && limit <= stop_price))
+            {
+                Some(stop_price)
+            } else {
+                // Strict/inverted intrabar trigger: no invented post-trigger retrace.
+                None
+            };
+            if !triggered {
+                info!(action="paper_stop_triggered", order_id=order.order_id,
+                    stop_price, limit_price=limit, fill_price=?fill_price,
+                    intrabar_policy="stop_first", "paper stop activated; OHLC ordering is an assumption");
+                if let Some(current) = self
+                    .sim_orders
+                    .iter_mut()
+                    .find(|o| o.order_id == order.order_id)
+                {
+                    current.order_type = SimOrderType::StopLimit {
+                        triggered: true,
+                        stop_price,
+                        condition,
+                        end_time,
+                    };
+                }
+                let mut followup = self.notify_simulated_stop(bar, &order, "triggered", true);
+                followup.extend(self.notify_simulated_order(bar, &order, "working", 0.0, limit));
+                self.simulate_intents(bar, followup).await?;
+            }
+            if let Some(price) = fill_price {
+                filled.push((order.order_id, price));
+            }
+        }
         for order in &self.sim_orders {
-            if bar.close_time_utc <= order.created_bar_ts {
+            if order.symbol != bar.symbol || bar.close_time_utc <= order.created_bar_ts {
                 continue;
             }
             let fill_price = match order.order_type {
@@ -2859,6 +3035,7 @@ impl StrategyRuntime {
                         None
                     }
                 }
+                SimOrderType::StopLimit { .. } => None,
             };
             if let Some(price) = fill_price {
                 filled.push((order.order_id, price));
@@ -2872,7 +3049,13 @@ impl StrategyRuntime {
             {
                 let order = self.sim_orders.remove(index);
                 let mut effective_qty = order.qty;
-                if matches!(order.intent_class, Some(alor_protocol::IntentClass::Exit)) {
+                if matches!(
+                    order.intent_class,
+                    Some(
+                        alor_protocol::IntentClass::Exit
+                            | alor_protocol::IntentClass::ProtectiveRepair
+                    )
+                ) {
                     let current_pos_qty = self
                         .state
                         .positions
@@ -2996,55 +3179,7 @@ impl StrategyRuntime {
                         continue;
                     }
                 }
-                let trade = TradeRecord {
-                    ts_utc: bar.close_time_utc,
-                    order_id: order.order_id,
-                    symbol: order.symbol.clone(),
-                    side: order.side.clone(),
-                    qty: effective_qty,
-                    price,
-                    commission: 0.0,
-                    owned: true,
-                    comment: order.comment.clone(),
-                };
-                self.ledger.record_fill(trade);
-                self.ledger.record_order(OrderRecord {
-                    order_id: order.order_id,
-                    symbol: order.symbol.clone(),
-                    side: order.side.clone(),
-                    qty: effective_qty,
-                    filled: effective_qty,
-                    price,
-                    status: "filled".to_string(),
-                    ts_utc: bar.close_time_utc,
-                    owned: true,
-                });
-                // Synthetic paper feedback: propagate position delta back into strategy.
-                let delta_qty = if order.side.eq_ignore_ascii_case("buy") {
-                    effective_qty
-                } else {
-                    -effective_qty
-                };
-                let prev_qty = self
-                    .state
-                    .positions
-                    .get(&order.symbol)
-                    .map(|p| p.qty)
-                    .unwrap_or(0.0);
-                let next_qty = prev_qty + delta_qty;
-                let pos_event = PositionEvent {
-                    symbol: order.symbol.clone(),
-                    qty: next_qty,
-                    existing: false,
-                    avg_price: price,
-                    ts_utc: bar.close_time_utc,
-                };
-                self.state
-                    .positions
-                    .insert(order.symbol.clone(), pos_event.clone());
-                let ctx = self.strategy_ctx();
-                let intents = self.strategy.on_position(&ctx, &pos_event);
-                self.state.strategy_state = self.strategy.state().clone();
+                let intents = self.apply_simulated_fill(bar, order, effective_qty, price);
                 if !intents.is_empty() {
                     self.record_non_live_intents(
                         bar.close_time_utc,
@@ -3058,6 +3193,153 @@ impl StrategyRuntime {
             }
         }
         Ok(())
+    }
+
+    // All synthetic fills must advance both accounting and strategy ownership.
+    fn apply_simulated_fill(
+        &mut self,
+        bar: &BarEvent,
+        order: SimOrder,
+        effective_qty: f64,
+        price: f64,
+    ) -> Vec<Intent> {
+        let trade = TradeRecord {
+            ts_utc: bar.close_time_utc,
+            order_id: order.order_id,
+            symbol: order.symbol.clone(),
+            side: order.side.clone(),
+            qty: effective_qty,
+            price,
+            commission: 0.0,
+            owned: true,
+            comment: order.comment.clone(),
+        };
+        self.ledger.record_fill(trade);
+        self.ledger.record_order(OrderRecord {
+            order_id: order.order_id,
+            symbol: order.symbol.clone(),
+            side: order.side.clone(),
+            qty: effective_qty,
+            filled: effective_qty,
+            price,
+            status: "filled".to_string(),
+            ts_utc: bar.close_time_utc,
+            owned: true,
+        });
+        // Synthetic paper feedback: propagate position delta back into strategy.
+        let delta_qty = if order.side.eq_ignore_ascii_case("buy") {
+            effective_qty
+        } else {
+            -effective_qty
+        };
+        let prev_qty = self
+            .state
+            .positions
+            .get(&order.symbol)
+            .map(|p| p.qty)
+            .unwrap_or(0.0);
+        let next_qty = prev_qty + delta_qty;
+        let pos_event = PositionEvent {
+            symbol: order.symbol.clone(),
+            qty: next_qty,
+            existing: false,
+            avg_price: price,
+            ts_utc: bar.close_time_utc,
+        };
+        self.state
+            .positions
+            .insert(order.symbol.clone(), pos_event.clone());
+        let ctx = self.strategy_ctx_for_bar_intents(bar, bar.close_time_utc);
+        let mut intents = self.notify_simulated_order(bar, &order, "filled", effective_qty, price);
+        intents.extend(self.strategy.on_position(&ctx, &pos_event));
+        self.state.strategy_state = self.strategy.state().clone();
+        info!(
+            action = "paper_fill_applied",
+            mode = ?self.config.trade_mode,
+            order_id = order.order_id,
+            symbol = %order.symbol,
+            ts_utc = bar.close_time_utc,
+            qty = effective_qty,
+            price,
+            position_before = prev_qty,
+            position_after = next_qty,
+            followup_intents = intents.len(),
+            "simulated fill reconciled with strategy lifecycle"
+        );
+        intents
+    }
+
+    fn notify_simulated_order(
+        &mut self,
+        bar: &BarEvent,
+        order: &SimOrder,
+        status: &str,
+        filled: f64,
+        price: f64,
+    ) -> Vec<Intent> {
+        let ctx = self.strategy_ctx_for_bar_intents(bar, bar.close_time_utc);
+        let intents = self.strategy.on_order(
+            &ctx,
+            &OrderEvent {
+                order_id: order.order_id,
+                request_id: None,
+                symbol: order.symbol.clone(),
+                side: order.side.clone(),
+                order_type: match order.order_type {
+                    SimOrderType::Market => "market",
+                    SimOrderType::Limit => "limit",
+                    SimOrderType::StopLimit { .. } => "limit",
+                }
+                .to_string(),
+                qty: order.qty,
+                filled,
+                price,
+                status: status.to_string(),
+                ts_utc: bar.close_time_utc,
+                existing: false,
+                comment: order.comment.clone(),
+            },
+        );
+        self.state.strategy_state = self.strategy.state().clone();
+        intents
+    }
+
+    fn notify_simulated_stop(
+        &mut self,
+        bar: &BarEvent,
+        order: &SimOrder,
+        status: &str,
+        exchange: bool,
+    ) -> Vec<Intent> {
+        let SimOrderType::StopLimit {
+            stop_price,
+            end_time,
+            ..
+        } = order.order_type
+        else {
+            return Vec::new();
+        };
+        let ctx = self.strategy_ctx_for_bar_intents(bar, bar.close_time_utc);
+        let intents = self.strategy.on_stop_order(
+            &ctx,
+            &StopOrderEvent {
+                stop_order_id: format!("paper-stop-{}", order.order_id),
+                exchange_order_id: exchange.then_some(order.order_id),
+                symbol: order.symbol.clone(),
+                status: status.to_string(),
+                side: order.side.clone(),
+                qty: order.qty,
+                filled: 0.0,
+                stop_price,
+                price: order.price.unwrap_or(0.0),
+                existing: false,
+                comment: order.comment.clone(),
+                end_time: Some(end_time),
+                ts_utc: bar.close_time_utc,
+            },
+        );
+        self.state.strategy_state = self.strategy.state().clone();
+        intents
     }
 
     async fn persist_ledger_reports(&self) -> Result<()> {
@@ -4732,6 +5014,8 @@ mod tests {
                 enabled: false,
                 output: PaperOutput::Stdout,
                 execution_mode: PaperExecutionMode::LiveOnly,
+                market_fill_on_close: false,
+                simulate_stop_limits: false,
                 file_path: "paper.jsonl".to_string(),
                 trades_csv: "trades.csv".to_string(),
                 summary_json: "summary.json".to_string(),
@@ -6294,9 +6578,744 @@ mod tests {
         drop(runtime);
     }
 
+    fn paper_hybrid_fixture(mr_enabled: bool) -> (StrategyRuntime, tempfile::TempDir) {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let reports = tempfile::tempdir().unwrap();
+        runtime.config.paper.trades_csv =
+            reports.path().join("trades.csv").to_string_lossy().into();
+        runtime.config.paper.summary_json =
+            reports.path().join("summary.json").to_string_lossy().into();
+        runtime.config.paper.market_fill_on_close = true;
+        runtime.config.paper.execution_mode = PaperExecutionMode::HistorySim;
+        runtime.config.allow_live_orders = false;
+        runtime.config.allow_paper_orders = false;
+        runtime.config.strategy = StrategyConfig::defaults_for_kind(StrategyKind::HybridIntraday);
+        runtime.config.strategy.symbol = "IMOEXF".to_string();
+        runtime
+            .config
+            .strategy
+            .hybrid_intraday_mut()
+            .unwrap()
+            .live_order_style = crate::MarketBuyAndCloseLiveOrderStyle::Market;
+        runtime.config.strategy.max_silence_bars_sec = 1200;
+        runtime.config.strategy.trading_periods = Some(TradingPeriods {
+            session_start: NaiveTime::from_hms_opt(7, 0, 0).unwrap(),
+            session_end: NaiveTime::from_hms_opt(23, 49, 0).unwrap(),
+            break_start_1: NaiveTime::MIN,
+            break_end_1: NaiveTime::MIN,
+            break_start_2: NaiveTime::MIN,
+            break_end_2: NaiveTime::MIN,
+            weekends_off: true,
+            timezone_offset_hours: 3,
+        });
+        let settings = &mut runtime
+            .config
+            .strategy
+            .hybrid_intraday_mut()
+            .unwrap()
+            .strategy;
+        settings.live_mr_entries_enabled = mr_enabled;
+        settings.mr_variant = "author41_boundary_short".to_string();
+        settings.bo_k = 0.53;
+        settings.bo_wait_hours = 3.0;
+        settings.model_session_start_time = "09:00:00".to_string();
+        settings.model_session_end_time = "23:49:59".to_string();
+        let registry = StrategyRegistry::builtin().unwrap();
+        runtime.strategy = registry.create(&runtime.config.strategy).unwrap();
+        runtime.strategy_capabilities = registry
+            .descriptor(StrategyKind::HybridIntraday)
+            .unwrap()
+            .capabilities;
+        let history = vec![
+            hybrid_paper_bar(24, 9, 0, 100.0),
+            hybrid_paper_bar(24, 23, 30, 100.0),
+            hybrid_paper_bar(25, 9, 0, 100.0),
+            hybrid_paper_bar(25, 23, 30, 100.0),
+        ];
+        let ctx = runtime.strategy_ctx();
+        runtime.strategy.warmup_from_history(&ctx, &history);
+        (runtime, reports)
+    }
+
+    fn hybrid_paper_bar(day: u32, hour: u32, minute: u32, close: f64) -> BarEvent {
+        BarEvent {
+            symbol: "IMOEXF".to_string(),
+            close_time_utc: chrono::NaiveDate::from_ymd_opt(2026, 9, day)
+                .unwrap()
+                .and_hms_opt(hour, minute, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+                - 3 * 3600,
+            o: close,
+            h: close + 1.0,
+            l: close - 1.0,
+            close,
+            v: 1.0,
+            origin: DataOrigin::Replay,
+        }
+    }
+
+    #[test]
+    fn paper_hybrid_bo_close_fill_advances_ownership_and_closes_eod() {
+        let (mut runtime, _reports) = paper_hybrid_fixture(false);
+        let bar = hybrid_paper_bar;
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            runtime
+                .handle_replay_bar(bar(28, 9, 0, 100.0))
+                .await
+                .unwrap();
+            runtime
+                .handle_replay_bar(bar(28, 12, 0, 98.0))
+                .await
+                .unwrap();
+            assert_eq!(runtime.state.positions["IMOEXF"].qty, -1.0);
+            assert!(matches!(
+                runtime.strategy.state(),
+                StrategyState::HybridIntradayRuntime {
+                    current_owner: Some(
+                        crate::strategies::hybrid_intraday::Owner::IntradayBreakout
+                    ),
+                    pending_entry_request_id: None,
+                    ..
+                }
+            ));
+            assert!(runtime.sim_orders.is_empty());
+            runtime
+                .handle_replay_bar(bar(28, 12, 0, 98.0))
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.ledger.trades().len(),
+                1,
+                "duplicate bar is idempotent"
+            );
+            runtime
+                .handle_replay_bar(bar(28, 23, 30, 98.0))
+                .await
+                .unwrap();
+            assert_eq!(runtime.state.positions["IMOEXF"].qty, 0.0);
+            assert_eq!(runtime.ledger.trades().len(), 2);
+            assert_eq!(
+                runtime.ledger.trades()[1].ts_utc,
+                bar(28, 23, 30, 98.0).close_time_utc
+            );
+            assert!(matches!(
+                runtime.strategy.state(),
+                StrategyState::HybridIntradayRuntime {
+                    current_owner: None,
+                    pending_entry_request_id: None,
+                    pending_exit_request_id: None,
+                    ..
+                }
+            ));
+            runtime
+                .handle_replay_bar(bar(28, 23, 40, 98.0))
+                .await
+                .unwrap();
+            assert_eq!(runtime.ledger.trades().len(), 2, "no post-EOD reentry");
+            assert!(
+                runtime.our_request_ids.is_empty(),
+                "no broker command routing"
+            );
+        });
+    }
+
+    #[test]
+    fn paper_hybrid_mr_tp_and_time_exit_leave_no_residual_order() {
+        for take_fills in [true, false] {
+            let (mut runtime, _reports) = paper_hybrid_fixture(true);
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                runtime
+                    .handle_replay_bar(hybrid_paper_bar(28, 9, 10, 100.1))
+                    .await
+                    .unwrap();
+                assert_eq!(runtime.state.positions["IMOEXF"].qty, -1.0);
+                assert_eq!(runtime.sim_orders.len(), 1, "one simulated TP");
+                let tp_id = runtime.sim_orders[0].order_id;
+                assert!(
+                    matches!(runtime.strategy.state(), StrategyState::HybridIntradayRuntime {
+                    tp_order_id: Some(id), pending_tp_request_id: None, ..
+                } if *id == tp_id)
+                );
+                let mut exit_bar = hybrid_paper_bar(28, if take_fills { 9 } else { 20 }, 20, 100.4);
+                exit_bar.h = 100.5; // Keep SL untouched: this test covers TP/time-exit cleanup.
+                exit_bar.l = if take_fills { 99.9 } else { 100.3 };
+                runtime.handle_replay_bar(exit_bar.clone()).await.unwrap();
+                assert_eq!(runtime.state.positions["IMOEXF"].qty, 0.0);
+                assert!(runtime.sim_orders.is_empty(), "no stale TP after flat");
+                assert_eq!(
+                    runtime.ledger.order(tp_id).unwrap().status,
+                    if take_fills { "filled" } else { "canceled" }
+                );
+                assert_eq!(runtime.ledger.trades().len(), 2);
+                assert!(matches!(
+                    runtime.strategy.state(),
+                    StrategyState::HybridIntradayRuntime {
+                        current_owner: None,
+                        pending_entry_request_id: None,
+                        pending_exit_request_id: None,
+                        tp_order_id: None,
+                        ..
+                    }
+                ));
+                exit_bar.close_time_utc += 600;
+                exit_bar.l = 99.0;
+                runtime.handle_replay_bar(exit_bar).await.unwrap();
+                assert_eq!(runtime.state.positions["IMOEXF"].qty, 0.0);
+                assert_eq!(
+                    runtime.ledger.trades().len(),
+                    2,
+                    "no stale protection reversal"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn paper_hybrid_stop_lifecycle_gap_and_ambiguous_touch() {
+        for gap in [false, true] {
+            let (mut runtime, _reports) = paper_hybrid_fixture(true);
+            runtime.config.paper.simulate_stop_limits = true;
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                runtime
+                    .handle_replay_bar(hybrid_paper_bar(28, 9, 10, 100.1))
+                    .await
+                    .unwrap();
+                assert_eq!(runtime.sim_orders.len(), 2);
+                assert!(matches!(
+                    runtime.strategy.state(),
+                    StrategyState::HybridIntradayRuntime {
+                        sl_stop_order_id: Some(_),
+                        pending_sl_request_id: None,
+                        tp_order_id: Some(_),
+                        pending_tp_request_id: None,
+                        ..
+                    }
+                ));
+                let stop = runtime
+                    .sim_orders
+                    .iter()
+                    .find(|o| matches!(o.order_type, SimOrderType::StopLimit { .. }))
+                    .unwrap()
+                    .clone();
+                let SimOrderType::StopLimit { stop_price, .. } = stop.order_type else {
+                    unreachable!()
+                };
+                let tp = runtime
+                    .sim_orders
+                    .iter()
+                    .find(|o| matches!(o.order_type, SimOrderType::Limit))
+                    .unwrap()
+                    .clone();
+                let limit = stop.price.unwrap();
+                let mut bar = hybrid_paper_bar(28, 9, 20, stop_price);
+                if gap {
+                    bar.o = limit + 2.0;
+                    bar.h = limit + 3.0;
+                    bar.l = limit + 1.0;
+                    bar.close = limit + 2.0;
+                } else {
+                    bar.o = 100.1;
+                    bar.h = stop_price + 1.0;
+                    bar.l = tp.price.unwrap() - 1.0;
+                }
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert_eq!(
+                    runtime.ledger.order(tp.order_id).unwrap().status,
+                    "canceled"
+                );
+                if gap {
+                    assert_eq!(
+                        runtime.state.positions["IMOEXF"].qty, -1.0,
+                        "stop-limit gap cannot invent a fill"
+                    );
+                    assert_eq!(runtime.ledger.trades().len(), 1);
+                    assert!(matches!(
+                        runtime.strategy.state(),
+                        StrategyState::HybridIntradayRuntime {
+                            sl_exchange_order_id: Some(_),
+                            sl_stop_order_id: None,
+                            ..
+                        }
+                    ));
+                    bar.close_time_utc += 600;
+                    bar.l = limit;
+                    bar.close = limit;
+                    runtime.simulate_fills(&bar).await.unwrap();
+                }
+                assert_eq!(runtime.state.positions["IMOEXF"].qty, 0.0);
+                assert!(runtime.sim_orders.is_empty());
+                assert_eq!(runtime.ledger.trades().len(), 2);
+                assert_eq!(
+                    runtime.ledger.trades()[1].price,
+                    if gap { limit } else { stop_price }
+                );
+                assert!(matches!(
+                    runtime.strategy.state(),
+                    StrategyState::HybridIntradayRuntime {
+                        current_owner: None,
+                        pending_exit_request_id: None,
+                        pending_sl_request_id: None,
+                        pending_tp_request_id: None,
+                        tp_order_id: None,
+                        sl_stop_order_id: None,
+                        sl_exchange_order_id: None,
+                        ..
+                    }
+                ));
+                assert!(runtime.our_request_ids.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn paper_hybrid_tp_or_time_exit_cancels_registered_stop() {
+        for tp_hit in [false, true] {
+            let (mut runtime, _reports) = paper_hybrid_fixture(true);
+            runtime.config.paper.simulate_stop_limits = true;
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                runtime
+                    .handle_replay_bar(hybrid_paper_bar(28, 9, 10, 100.1))
+                    .await
+                    .unwrap();
+                let mut bar = hybrid_paper_bar(28, if tp_hit { 9 } else { 20 }, 20, 100.4);
+                bar.h = 100.5;
+                bar.l = if tp_hit { 99.9 } else { 100.3 };
+                runtime.handle_replay_bar(bar.clone()).await.unwrap();
+                assert_eq!(runtime.state.positions["IMOEXF"].qty, 0.0);
+                assert!(runtime.sim_orders.is_empty());
+                assert!(matches!(
+                    runtime.strategy.state(),
+                    StrategyState::HybridIntradayRuntime {
+                        current_owner: None,
+                        pending_sl_request_id: None,
+                        pending_tp_request_id: None,
+                        sl_stop_order_id: None,
+                        sl_exchange_order_id: None,
+                        tp_order_id: None,
+                        ..
+                    }
+                ));
+                bar.close_time_utc += 600;
+                bar.h = 200.0;
+                bar.l = 1.0;
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert_eq!(
+                    runtime.ledger.trades().len(),
+                    2,
+                    "canceled protection cannot reverse flat"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn paper_sell_stop_honors_gap_limit_and_expiry() {
+        for expired in [false, true] {
+            let mut runtime = test_runtime(TradeMode::Paper);
+            runtime.state.positions.insert(
+                "SBER".to_string(),
+                PositionEvent {
+                    symbol: "SBER".to_string(),
+                    qty: 1.0,
+                    avg_price: 100.0,
+                    ts_utc: 100,
+                    existing: false,
+                },
+            );
+            runtime.sim_orders.push(SimOrder {
+                order_id: 99,
+                symbol: "SBER".to_string(),
+                side: "sell".to_string(),
+                intent_class: Some(alor_protocol::IntentClass::ProtectiveRepair),
+                order_type: SimOrderType::StopLimit {
+                    stop_price: 99.0,
+                    condition: alor_protocol::StopLimitCondition::LessOrEqual,
+                    triggered: false,
+                    end_time: if expired { 200 } else { 0 },
+                },
+                qty: 2.0,
+                price: Some(98.0),
+                comment: None,
+                created_bar_ts: 100,
+            });
+            let mut bar = BarEvent {
+                symbol: "OTHER".to_string(),
+                close_time_utc: 200,
+                o: 95.0,
+                h: 96.0,
+                l: 94.0,
+                close: 95.0,
+                v: 1.0,
+                origin: DataOrigin::Replay,
+            };
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert_eq!(
+                    runtime.sim_orders.len(),
+                    1,
+                    "unrelated symbol cannot activate/expire stop"
+                );
+                bar.symbol = "SBER".to_string();
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert_eq!(runtime.state.positions["SBER"].qty, 1.0);
+                assert!(runtime.ledger.trades().is_empty());
+                if expired {
+                    assert!(runtime.sim_orders.is_empty());
+                } else {
+                    assert!(matches!(
+                        runtime.sim_orders[0].order_type,
+                        SimOrderType::StopLimit {
+                            triggered: true,
+                            ..
+                        }
+                    ));
+                    bar.close_time_utc += 600;
+                    bar.h = 99.0;
+                    runtime.simulate_fills(&bar).await.unwrap();
+                    assert_eq!(runtime.state.positions["SBER"].qty, 0.0);
+                    assert_eq!(runtime.ledger.trades()[0].price, 98.0);
+                    assert_eq!(
+                        runtime.ledger.trades()[0].qty,
+                        1.0,
+                        "clamp protective quantity"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn paper_protective_fill_is_reduce_only_and_clamped() {
+        for starting_qty in [0.0, -1.0, 1.0] {
+            let mut runtime = test_runtime(TradeMode::Paper);
+            runtime.state.positions.insert(
+                "SBER".to_string(),
+                PositionEvent {
+                    symbol: "SBER".to_string(),
+                    qty: starting_qty,
+                    avg_price: 100.0,
+                    ts_utc: 100,
+                    existing: false,
+                },
+            );
+            runtime.sim_orders.push(SimOrder {
+                order_id: 99,
+                symbol: "SBER".to_string(),
+                side: "sell".to_string(),
+                intent_class: Some(alor_protocol::IntentClass::ProtectiveRepair),
+                order_type: SimOrderType::Limit,
+                qty: 6.0,
+                price: Some(101.0),
+                comment: None,
+                created_bar_ts: 100,
+            });
+            let bar = BarEvent {
+                symbol: "SBER".to_string(),
+                close_time_utc: 200,
+                o: 101.0,
+                h: 102.0,
+                l: 100.0,
+                close: 101.0,
+                v: 1.0,
+                origin: DataOrigin::Replay,
+            };
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(runtime.simulate_fills(&bar))
+                .unwrap();
+            assert_eq!(runtime.state.positions["SBER"].qty, starting_qty.min(0.0));
+            assert_eq!(
+                runtime.ledger.trades().len(),
+                usize::from(starting_qty > 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn paper_live_only_does_not_fill_on_history_bar() {
+        let (mut runtime, _reports) = paper_hybrid_fixture(false);
+        runtime.config.paper.execution_mode = PaperExecutionMode::LiveOnly;
+        runtime.sim_orders.push(SimOrder {
+            order_id: 42,
+            symbol: "IMOEXF".to_string(),
+            side: "buy".to_string(),
+            intent_class: Some(alor_protocol::IntentClass::Entry),
+            order_type: SimOrderType::Market,
+            qty: 1.0,
+            price: None,
+            comment: None,
+            created_bar_ts: 1,
+        });
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            runtime
+                .handle_replay_bar(hybrid_paper_bar(28, 12, 0, 98.0))
+                .await
+                .unwrap();
+        });
+        assert!(runtime.ledger.trades().is_empty());
+        assert_eq!(runtime.sim_orders.len(), 1);
+        assert!(runtime.state.positions.is_empty());
+    }
+
+    fn paper_price_fixture() -> (StrategyRuntime, tempfile::TempDir, BarEvent) {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        let reports = tempdir().unwrap();
+        runtime.config.strategy.tick_size = 0.5;
+        runtime.config.paper.trades_csv =
+            reports.path().join("trades.csv").to_string_lossy().into();
+        runtime.config.paper.summary_json =
+            reports.path().join("summary.json").to_string_lossy().into();
+        let mut bar = hybrid_paper_bar(28, 9, 10, 2322.5);
+        bar.symbol = "SBER".to_string();
+        (runtime, reports, bar)
+    }
+
+    #[test]
+    fn paper_limit_rounding_reaches_order_feedback_ledger_and_fill() {
+        for (side, expected) in [
+            (alor_protocol::Side::Buy, 2322.0),
+            (alor_protocol::Side::Sell, 2322.5),
+        ] {
+            let (mut runtime, _reports, mut bar) = paper_price_fixture();
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                runtime
+                    .simulate_intents(
+                        &bar,
+                        vec![Intent::Place {
+                            price: 2322.34,
+                            qty: 1.0,
+                            side,
+                            comment: None,
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                let id = runtime.sim_orders[0].order_id;
+                assert_eq!(runtime.sim_orders[0].price, Some(expected));
+                assert_eq!(runtime.ledger.order(id).unwrap().price, expected);
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert!(runtime.ledger.trades().is_empty(), "no creation-bar fill");
+                bar.close_time_utc += 600;
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert_eq!(runtime.ledger.trades().len(), 1);
+                assert_eq!(runtime.ledger.trades()[0].price, expected);
+                assert_eq!(runtime.ledger.order(id).unwrap().status, "filled");
+                assert!(runtime.sim_orders.is_empty());
+                assert!(runtime.our_request_ids.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn paper_replace_uses_nearest_tick_not_place_side_rounding() {
+        let (mut runtime, _reports, bar) = paper_price_fixture();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Place {
+                        price: 2322.34,
+                        qty: 1.0,
+                        side: alor_protocol::Side::Buy,
+                        comment: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            let id = runtime.sim_orders[0].order_id;
+            assert_eq!(runtime.sim_orders[0].price, Some(2322.0));
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Replace {
+                        order_id: id,
+                        new_price: 2322.34,
+                        new_qty: 2.0,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(runtime.sim_orders[0].price, Some(2322.5));
+            assert_eq!(runtime.sim_orders[0].qty, 2.0);
+            assert_eq!(runtime.ledger.order(id).unwrap().price, 2322.5);
+        });
+    }
+
+    #[test]
+    fn paper_stop_rounding_controls_trigger_and_gap_limit() {
+        for side in [alor_protocol::Side::Buy, alor_protocol::Side::Sell] {
+            let (mut runtime, _reports, mut bar) = paper_price_fixture();
+            runtime.config.paper.simulate_stop_limits = true;
+            let buy = side == alor_protocol::Side::Buy;
+            runtime.state.positions.insert(
+                bar.symbol.clone(),
+                PositionEvent {
+                    symbol: bar.symbol.clone(),
+                    qty: if buy { -1.0 } else { 1.0 },
+                    avg_price: 2322.5,
+                    ts_utc: bar.close_time_utc,
+                    existing: false,
+                },
+            );
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                runtime
+                    .simulate_intents(
+                        &bar,
+                        vec![Intent::CreateStopLimit {
+                            side,
+                            qty: 2.0,
+                            trigger_price: 2322.25,
+                            price: if buy { 2322.75 } else { 2321.75 },
+                            condition: if buy {
+                                alor_protocol::StopLimitCondition::MoreOrEqual
+                            } else {
+                                alor_protocol::StopLimitCondition::LessOrEqual
+                            },
+                            stop_end_unix_time: 0,
+                            comment: None,
+                            instrument_group: None,
+                            check_duplicates: None,
+                        }
+                        .with_class(alor_protocol::IntentClass::ProtectiveRepair)],
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    runtime.sim_orders[0].order_type,
+                    SimOrderType::StopLimit {
+                        stop_price: 2322.5,
+                        triggered: false,
+                        ..
+                    }
+                ));
+                let limit = if buy { 2323.0 } else { 2322.0 };
+                assert_eq!(runtime.sim_orders[0].price, Some(limit));
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert!(
+                    runtime.ledger.trades().is_empty(),
+                    "no creation-bar stop fill"
+                );
+                bar.close_time_utc += 600;
+                // Just outside the rounded trigger, then gap through its limit.
+                let untouched = if buy { 2322.0 } else { 2323.0 };
+                bar.o = untouched;
+                bar.h = untouched;
+                bar.l = untouched;
+                bar.close = untouched;
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert!(matches!(
+                    runtime.sim_orders[0].order_type,
+                    SimOrderType::StopLimit {
+                        triggered: false,
+                        ..
+                    }
+                ));
+                bar.close_time_utc += 600;
+                let gap = if buy { limit + 1.0 } else { limit - 1.0 };
+                bar.o = gap;
+                bar.h = gap;
+                bar.l = gap;
+                bar.close = gap;
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert!(matches!(
+                    runtime.sim_orders[0].order_type,
+                    SimOrderType::StopLimit {
+                        triggered: true,
+                        ..
+                    }
+                ));
+                assert!(
+                    runtime.ledger.trades().is_empty(),
+                    "cannot fill outside rounded cap"
+                );
+                bar.close_time_utc += 600;
+                if buy {
+                    bar.l = limit;
+                } else {
+                    bar.h = limit;
+                }
+                bar.close = limit;
+                runtime.simulate_fills(&bar).await.unwrap();
+                assert_eq!(runtime.ledger.trades().len(), 1);
+                assert_eq!(runtime.ledger.trades()[0].price, limit);
+                assert_eq!(
+                    runtime.ledger.trades()[0].qty,
+                    1.0,
+                    "protective fill stays reduce-only"
+                );
+                assert_eq!(runtime.state.positions[&bar.symbol].qty, 0.0);
+                assert!(runtime.sim_orders.is_empty());
+                assert!(runtime.our_request_ids.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn paper_close_fill_opt_in_closes_eod_without_next_bar() {
+        let mut runtime = test_runtime(TradeMode::Paper);
+        assert!(!runtime.config.paper.market_fill_on_close);
+        runtime.config.paper.market_fill_on_close = true;
+        let mut bar = BarEvent {
+            symbol: "SBER".to_string(),
+            close_time_utc: 100,
+            close: 10.5,
+            o: 10.0,
+            h: 10.6,
+            l: 9.9,
+            v: 0.0,
+            origin: DataOrigin::Live,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Buy,
+                        fill_price: None,
+                        comment: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(runtime.state.positions["SBER"].qty, 1.0);
+            bar.close_time_utc = 200;
+            bar.close = 11.0;
+            runtime
+                .simulate_intents(
+                    &bar,
+                    vec![Intent::Market {
+                        qty: 1.0,
+                        side: alor_protocol::Side::Sell,
+                        fill_price: None,
+                        comment: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert!(runtime.sim_orders.is_empty());
+            assert_eq!(runtime.ledger.trades().len(), 2);
+            assert_eq!(runtime.ledger.trades()[1].ts_utc, 200);
+            assert_eq!(runtime.ledger.trades()[1].price, 11.0);
+            assert_eq!(
+                runtime
+                    .state
+                    .positions
+                    .get("SBER")
+                    .map(|p| p.qty)
+                    .unwrap_or(0.0),
+                0.0
+            );
+        });
+    }
+
     #[test]
     fn simulated_market_with_fill_price_fills_immediately_on_current_bar() {
         let mut runtime = test_runtime(TradeMode::Paper);
+        runtime.config.paper.market_fill_on_close = true;
         let bar = BarEvent {
             symbol: "SBER".to_string(),
             close_time_utc: 100,

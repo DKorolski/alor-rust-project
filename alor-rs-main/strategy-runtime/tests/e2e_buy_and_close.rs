@@ -86,6 +86,8 @@ fn build_config(redis_url: String, prefix: &str, consumer_name: &str) -> Runtime
             enabled: false,
             output: PaperOutput::Stdout,
             execution_mode: PaperExecutionMode::LiveOnly,
+            market_fill_on_close: false,
+            simulate_stop_limits: false,
             file_path: format!("{prefix}-paper.jsonl"),
             trades_csv: format!("{prefix}-trades.csv"),
             summary_json: format!("{prefix}-summary.json"),
