@@ -259,6 +259,39 @@ engine = "imoexf"
         (root/'manifest.json').write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError,'audit-only'):service.ClosedSourceGuard(root,spec)
 
+    def test_diagnostic_ws_rx_stale_remains_fail_closed_without_recovery_contract(self):
+        root, _, spec, health = self.ws_source(v3=True)
+        manifest = json.loads((root / 'manifest.json').read_text())
+        manifest['version'] = 'shadow_gateway_ws_closed_m10_v4'
+        manifest['config']['late_context_history_policy'] = 'audit_only_v1'
+        manifest['config_sha256'] = service.hashlib.sha256(json.dumps(
+            manifest['config'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        (root / 'manifest.json').write_text(json.dumps(manifest))
+        health.update(version=manifest['version'], config_sha256=manifest['config_sha256'],
+                      late_context_rows=0, late_context_review_dates=[])
+        (root / 'HEALTH.json').write_text(json.dumps(health))
+        spec += b'''\n[runner.late_start]
+version = "diagnostic_late_start_v1"
+source_first_live_session = "2026-11-02"
+'''
+        guard = service.ClosedSourceGuard(root, spec)
+        self.assertTrue(guard.diagnostic)
+        with self.assertRaisesRegex(ValueError, 'strict WS generations only'):
+            guard.enable_recovery(dict(next_guard_deadline_utc=int(time.time()) + 120))
+        self.assertFalse(guard.recovery_enabled)
+        now = int(time.time())
+        (root / 'HEALTH.json').write_text(json.dumps({
+            **health, 'status': 'reconnecting', 'connected': False,
+            'heartbeat_utc': now, 'last_ws_rx_utc': now - 46,
+        }))
+        with self.assertRaises(service.SourceUnavailable) as failure:
+            guard.check()
+        self.assertEqual(failure.exception.code, 'WS_RX_STALE')
+        self.assertEqual(failure.exception.details['limit_seconds'], 45)
+        self.assertFalse((root / 'FAILED.json').exists(), 'model failure is not source failure')
+        (root / 'HEALTH.json').write_text(json.dumps({**health, 'generation': 2}))
+        self.assertTrue(guard.check(), 'source can recover without a model readmission')
+
     def test_ws_v2_requires_opt_in_and_preserves_health_guard(self):
         root, _, spec, health = self.ws_source(v2=True)
         guard = service.ClosedSourceGuard(root, spec)

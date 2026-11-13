@@ -110,7 +110,12 @@ independent missing-bar deadlines; a running source is not proof of fresh data.
 next model-open cutoff. `resume` uses the same syntax, exact binary/spec and
 existing generation. It is permitted only after an acknowledged operator STOP
 and before initial cutoff, or after complete paired EOD and before the next
-eligible cutoff. Intraday automatic recovery is NOT supported by this wrapper.
+eligible cutoff. Intraday automatic process restart/resume is NOT supported by
+this wrapper. The newer strict WS contract has bounded same-process
+collect/advance recovery; diagnostic late-start still uses fail-closed polling
+and does not acquire that recovery on the next clean-eligible date. A recovered
+MD source can therefore coexist with a failed diagnostic model. See the
+[dependency and recovery boundary](shadow-diagnostic-recovery-boundary.md).
 
 SIGINT/SIGTERM requests a bounded acknowledged STOP of the owned worker group.
 The adjacent `<generation>.supervisor` directory is part of recovery evidence:
