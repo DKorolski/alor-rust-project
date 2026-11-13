@@ -1,14 +1,16 @@
 # Strict Shadow Recovery
 
 Status: code4503b6a local/native qualification PASS. Separate MD-only sources
-prepared and started; model admission remains pending. No live deployment.
+running; paired numerical models admitted in explicitly authorized diagnostic
+late-start mode on November 11. No live deployment or clean-day credit yet.
 Source baseline f270443; isolated engineering line, not a live gateway release.
 Responds to the November 10 external review of terminal/source/model boundaries.
 
 ## Scope
 
 Keep ordinary BarEvent as model input, v4 wire and existing source journal bytes.
-The next operational generation is strict/pre-opening, not diagnostic late start.
+The default operational admission is strict/pre-opening. The separately approved
+November 11 diagnostic exception is documented below, not a strict grant.
 Failed November 9 generations, markers, virtual exposure and evidence are retained.
 Live inputs/models/parameters/quantities/action-scoped execution remain untouched.
 
@@ -209,3 +211,69 @@ context tail, read ACL and capacity; then pin fresh bootstrap and grant only
 inside the full pre-opening window. Do not clear failures or use late-start
 fallback if any gate is missing. Source terminal, paired EOD and clean-session
 credit remain separate facts; twenty clean sessions are not automatic promotion.
+
+## Authorized Diagnostic Admission
+
+On November 11 the strict pre-opening window expired without a model grant.
+The operator then explicitly authorized a same-day start with relaxed startup
+conditions. This is a distinct diagnostic admission, not an automatic fallback
+or a rewritten strict approval. The already qualified diagnostic late launcher
+and worker from4503b6a were used without modifying model or supervisor code.
+
+The exception covers pre07 startup and strict pre-opening recovery qualification
+for the diagnostic day only. Evidence states that no controlled recovery smoke
+was performed; READY plus an increased WS generation is not relabeled as that
+test. Actual previous-session terminal evidence is retained and checked.
+
+Unchanged requirements include complete context, a pinned canonical recovery
+prefix, genuine receipts, source readiness/identity, reviewed revisions, separate
+non-root read-only model identities and technical prohibition of broker orders.
+Startup600seconds, queue30seconds, ordinary model lateness120seconds for IMO and
+360seconds for USD, and terminal120seconds are unchanged. Existing strict model
+plans, source manifests, failed attempts, live and legacy shadow units remain
+untouched. New configurations, owners, receipts and grants have distinct paths.
+
+Both numerical weekday/weekend pairs armed with pair_ready=true, loaded202
+historical context rows, caught up to their source and reported no failure.
+November11 is diagnostic as-of recovery, not a full prospective day: reconstructed
+events must be separated from newly observed events in economics/decision audit.
+The first possible clean session is November12, conditional on uninterrupted
+valid coverage, both model EODs and all normal data/deadline checks. The active
+process can continue into that session; do not recreate it daily or clear its
+state. A failed generation still requires retained evidence and explicit review.
+
+The launch before/after check confirmed unchanged protected container identities,
+live/legacy service PIDs and source PIDs. Source terminal publication, paired EOD
+and clean-session count still require separate observation at the actual close.
+
+Post-start verification observed the next genuine Live M10 bar in both paired
+model states, not only an advancing source cursor. Startup recovery was marked
+diagnostic_replayed and the new Live event model_observed; these are distinct
+from diagnostic_forward_observed for eligible History-origin inputs. Both pairs
+remained armed/caught-up without failure or restart, with no broker environment
+and Redis-only network access. Today's clean count remained zero.
+
+## Reusing Qualified Admission
+
+After the November12 provider-maintenance pause, the operator explicitly allowed
+same-day numerical shadow admission without waiting for another night or another
+terminal observation by each new source generation. Existing successful native
+qualification and genuine prior-session terminal evidence are reusable engineering
+evidence, not mandatory daily tests. Record their exact provenance: a terminal
+witness from a prior generation must not be presented as a forward publication
+by the current generation. Current source health, canonical prefix and actual
+post-admission observations still require independent checks.
+
+Use the already qualified diagnostic late-start launcher for the incomplete day,
+with a new immutable spec/grant/generation and explicit authorization. Do not
+rewrite an existing source manifest to relabel History as Live, or call the
+reconstructed morning a prospective observation. A future source activation date
+may match the first clean session, as supported by the diagnostic contract;
+proof-backed forward History is audited separately from bootstrap recovery.
+
+A successfully running diagnostic pair continues into its first full eligible
+session without a fresh morning grant, daily restart or another overnight wait.
+Morning inspection is monitoring, not recurring manual admission. Keep normal
+source readiness, isolation, receipt provenance, queue/required-bar deadlines,
+terminal handling and durable failure behavior. This authorization is not a
+general bypass for stale/missing data, failed generations or live-order promotion.
