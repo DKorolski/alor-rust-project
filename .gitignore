@@ -5,6 +5,10 @@
 .venv/
 venv/
 env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
 
 # Local env files / secrets
 .env
@@ -50,7 +54,15 @@ alor-rs-main/docs/*soak-observation*
 alor-rs-main/docs/*soak-results*
 alor-rs-main/docs/*development-observations*
 alor-rs-main/docs/*local-bringup*
+alor-rs-main/docs/weekly-retrospective-*.md
+alor-rs-main/docs/vps-observation-*.md
+alor-rs-main/docs/vps-check-*.md
 scripts/*.expect
+
+# Distribution/review bundles stay outside the engineering repository.
+*.zip
+*.tar.gz
+*.tgz
 
 # OS / editor metadata
 **/.DS_Store

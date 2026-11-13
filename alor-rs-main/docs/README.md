@@ -26,6 +26,8 @@ omitted to avoid operational confusion.
 - `live-runtime-service-patterns-anti-regression-checklist-2026-05-07.md` -
   shared live service patterns and anti-regression checklist.
 - `failure-test-matrix.md` - failure scenarios and expected behavior.
+- `testing-redis-isolation.md` - isolated test environments, opt-in Redis E2E
+  coverage and the explicitly retained legacy baseline test gap.
 - `safe-build-cache-maintenance.md` - reviewed target/venv/Docker cache cleanup,
   rollback protection and before/after guards; separate from Redis retention.
 
@@ -52,6 +54,10 @@ or a replacement for the production live gateway:
   diagnostic recovery, original receipt clocks and first-day clean-count exclusion.
 - `shadow-source-version-index-2026-11-09.md` - WS/REST source generations,
   admission entrypoints and historical vs current validation contracts.
+- `shadow-strict-recovery-work-plan-2026-11-10.md` - bounded source recovery,
+  strict versus separately approved diagnostic admission and evidence reuse.
+- `finam-new-shadow-models-handoff-2026-11-13.md` - broker-neutral porting
+  contract for the three paired shadow models; private bundles stay external.
 
 ## Strategy And Deployment Contracts
 

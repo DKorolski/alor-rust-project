@@ -31,6 +31,15 @@ Store local-only material under an ignored directory such as `private/`,
 Files already tracked in `origin/main` are not hidden by `.gitignore`. Updating
 one of them still requires an explicit content and secret review.
 
+Distribution ZIP/tar archives and duplicate source snapshots are transferred
+separately, not added to the engineering tree. Keep only the portable model/
+adapter contract and reproducible verification instructions in published docs.
+
+Before reconciling an older mixed local tree, retain a local-only safety ref
+and verify both tracked and untracked changes. An engineering-only tree import
+on top of `origin/main` must not merge archive branch ancestry, which can
+contain historical operational notes. Never force-push those local histories.
+
 ## Pre-push checks
 
 1. Start from the latest `origin/main` and require a fast-forward push.
