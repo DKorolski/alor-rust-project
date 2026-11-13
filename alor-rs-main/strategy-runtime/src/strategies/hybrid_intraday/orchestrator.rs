@@ -194,6 +194,13 @@ impl HybridOrchestrator {
             return actions;
         }
 
+        // Same-day exits above must remain executable; new exposure after EOD must not.
+        if matches!(self.config.breakout_eod_mode, BreakoutEodMode::SameDay)
+            && (bar.dt.hour() > 23 || (bar.dt.hour() == 23 && bar.dt.minute() >= 30))
+        {
+            return actions;
+        }
+
         if let Some(signal) = mr_entry_signal {
             return self.emit_entry_action(signal);
         }
@@ -302,6 +309,52 @@ mod tests {
         match &actions[0] {
             Action::SubmitEntry(entry) => assert_eq!(entry.owner, Owner::MeanReversion),
             _ => panic!("expected submit_entry"),
+        }
+    }
+
+    #[test]
+    fn same_day_eod_blocks_new_entries_but_preserves_exit() {
+        for minute in [20, 30, 40] {
+            let mr = MeanReversionEngine::new(MeanReversionConfig::default());
+            let mut br = IntradayBreakoutEngine::new(IntradayBreakoutConfig {
+                min_range_mode: MinRangeMode::Disabled,
+                wait_hours: 0.0,
+                ..IntradayBreakoutConfig::default()
+            });
+            br.on_bar(dt(2026, 1, 5, 9, 0), 100.0, 101.0, 99.0, 100.0);
+            br.on_bar(dt(2026, 1, 6, 9, 0), 100.0, 101.0, 99.0, 100.0);
+            let mut orch = HybridOrchestrator::new(mr, br, HybridOrchestratorConfig::default());
+            let mut bar = BarInput {
+                dt: dt(2026, 1, 6, 23, minute),
+                open: 103.0,
+                high: 104.0,
+                low: 102.0,
+                close: 103.0,
+                close_prev: 100.0,
+                day_range_prev: 2.0,
+                has_open_position: false,
+                has_live_orders: false,
+            };
+            let actions = orch.on_bar_with_mr_override(bar, None, None);
+            if minute == 20 {
+                assert!(matches!(actions.as_slice(), [Action::SubmitEntry(_)]));
+            } else {
+                assert!(actions.is_empty());
+                assert_eq!(orch.state, HybridState::Flat);
+                assert!(orch.pending_entry.is_none());
+                if minute == 30 {
+                    orch.on_order_filled("entry", Owner::IntradayBreakout, Some(Side::Long));
+                    bar.has_open_position = true;
+                    let exits = orch.on_bar_with_mr_override(bar, None, None);
+                    assert!(matches!(
+                        exits.as_slice(),
+                        [Action::SubmitExit {
+                            owner: Owner::IntradayBreakout,
+                            reason: ReasonCode::BreakoutEodExit,
+                        }]
+                    ));
+                }
+            }
         }
     }
 
