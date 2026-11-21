@@ -278,6 +278,23 @@ def late_context_snapshot(source, cfg, now):
     return dict(policy='audit_only_v1',journal_sha256=digest(raw),rows=len(items),review_dates=sorted(dates))
 
 
+def verify_reader_prefix(reader, records):
+    require(0 < len(records) <= 4500, 'reader_prefix_size_invalid')
+    cursor, last = '-', records[-1]['id']
+    for row in records:
+        sid, envelope = reader.envelope(cursor, last)
+        require(sid == row['id'] and envelope == row['envelope'], 'reader_canonical_content_mismatch')
+        cursor = '(' + sid
+    require(reader.command('XRANGE', reader.stream, cursor, last, 'COUNT', '1') == [],
+            'reader_extra_canonical_row')
+    return len(records)
+
+
+def continuity_module():
+    import shadow_source_continuity
+    return shadow_source_continuity
+
+
 def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     require(stage in ("preparation", "admission") and sha(plan_sha), "explicit_preflight_stage_and_digest_required")
     require(os.geteuid() != 0, "dedicated_nonroot_reader_required")
@@ -286,11 +303,14 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     raw = small(plan_path)
     require(digest(raw) == plan_sha, "preflight_plan_changed")
     plan = json.loads(raw)
-    fields(plan, ("version", "files", "paths", "redis"))
-    require(plan["version"] in ("reaction_shadow_preflight_v1", "reaction_shadow_preflight_v2", "reaction_shadow_preflight_v3"), "unsupported_preflight_plan")
-    v3 = plan['version'] == 'reaction_shadow_preflight_v3'
-    v2 = plan["version"] in ('reaction_shadow_preflight_v2','reaction_shadow_preflight_v3')
-    fields(plan["files"], ("worker", "supervisor", "prepared_spec", "source_manifest"))
+    v4 = plan.get('version') == 'reaction_shadow_preflight_v4'
+    fields(plan, ("version", "files", "paths", "redis", "source_continuity") if v4
+           else ("version", "files", "paths", "redis"))
+    require(plan["version"] in ("reaction_shadow_preflight_v1", "reaction_shadow_preflight_v2", "reaction_shadow_preflight_v3", "reaction_shadow_preflight_v4"), "unsupported_preflight_plan")
+    v3 = plan['version'] in ('reaction_shadow_preflight_v3','reaction_shadow_preflight_v4')
+    v2 = plan["version"] in ('reaction_shadow_preflight_v2','reaction_shadow_preflight_v3','reaction_shadow_preflight_v4')
+    file_fields = ("worker", "supervisor", "prepared_spec", "source_manifest")
+    fields(plan["files"], (*file_fields, 'continuity_helper') if v4 else file_fields)
     files = {}
     for name, item in plan["files"].items():
         fields(item, ("path", "sha256"))
@@ -298,6 +318,12 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
         require(sha(item["sha256"]) and service.file_hash(files[name]) == item["sha256"], "pinned_file_changed")
         require(not os.access(files[name], os.W_OK), "pinned_file_writable_by_worker")
     require(files["supervisor"] == Path(service.__file__).resolve(), "supervisor_import_mismatch")
+    if v4:
+        require(files['continuity_helper'] == Path(continuity_module().__file__).resolve(),
+                'continuity_helper_import_mismatch')
+        require(plan['source_continuity'].get('prepared_spec') == plan['files']['prepared_spec']
+                and plan['source_continuity'].get('source_manifest_sha256') == plan['files']['source_manifest']['sha256'],
+                'continuity_plan_binding_mismatch')
     require(os.access(files["worker"], os.X_OK), "worker_not_executable")
     fields(plan["paths"], ("source", "owner", "generation", "approved_spec", "approval"))
     paths = {k: Path(v) for k, v in plan["paths"].items()}
@@ -323,7 +349,8 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
     symbol = runner["ingress"]["symbol"]
     require((symbol, runner["config"]["engine"]) in (("USDRUBF", "usdrubf"), ("IMOEXF", "imoexf"))
             and (v2 or symbol == "USDRUBF"), "symbol_profile_required")
-    guard = service.ClosedSourceGuard(paths["source"], prepared_raw)
+    guard = service.ClosedSourceGuard(paths["source"], prepared_raw,
+                                      source_continuity=plan.get('source_continuity'))
     manifest = json.loads(small(files["source_manifest"]))
     require(manifest["version"] == ("shadow_gateway_ws_closed_m10_v4" if v3 else "shadow_gateway_ws_closed_m10_v3"), "source_version_required")
     cfg = manifest["config"]
@@ -350,9 +377,14 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
             approval_fields.add("revision_review")
         if v3:
             approval_fields.add('late_context_review')
+        if v4:
+            approval_fields.add('source_continuity_sha256')
         fields(approval, approval_fields)
-        require(approval["version"] == ("reaction_shadow_admission_v3" if v3 else "reaction_shadow_admission_v2" if v2 else "reaction_shadow_admission_v1")
+        require(approval["version"] == ("reaction_shadow_admission_v4" if v4 else "reaction_shadow_admission_v3" if v3 else "reaction_shadow_admission_v2" if v2 else "reaction_shadow_admission_v1")
                 and approval["plan_sha256"] == plan_sha, "admission_identity_mismatch")
+        if v4:
+            require(approval['source_continuity_sha256'] == continuity_module().fingerprint(plan['source_continuity']),
+                    'continuity_not_explicitly_approved')
         require(type(approval["reviewed_at_utc"]) is int and 0 <= current - approval["reviewed_at_utc"] <= 3600
                 and dt.datetime.fromtimestamp(current, MSK).date() == first, "fresh_model_morning_review_required")
         fields(approval["gates"], GATES)
@@ -399,6 +431,7 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
             require(health.get("review_dates") == [], "source_price_revision_requires_separate_review")
             require(bootstrap["last_source_id"] == terminal["id"], "bootstrap_must_include_terminal")
     reader = Reader(env.get("REACTION_SHADOW_REDIS_URL", ""), binding, cfg["stream"])
+    reader_prefix_rows = None
     try:
         require(reader.command("PING") == b"PONG", "reader_ping_failed")
         _, envelope = reader.envelope()
@@ -406,6 +439,8 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
         if stage == "admission":
             sid, envelope = reader.envelope(terminal["id"], terminal["id"])
             require(sid == terminal["id"] and envelope == terminal["envelope"], "terminal_redis_prefix_mismatch")
+        if v4:
+            reader_prefix_rows = verify_reader_prefix(reader, source_records(paths['source']))
     finally:
         reader.close()
     if stage == "admission":
@@ -463,6 +498,16 @@ def preflight(plan_path, plan_sha, stage, environ=None, now=None):
                 bootstrap=bootstrap, revision_review=revisions, late_context_review=late_context,
                 ready_by=approval['ready_by'], model_first_session=first.isoformat(),
                 reader_uid=os.geteuid(), order_emission_allowed=False)
+    if v4:
+        result.update(source_continuity_sha256=continuity_module().fingerprint(plan['source_continuity']),
+                      reader_prefix_verified_rows=reader_prefix_rows)
+        if stage == 'admission':
+            result['admission_grant'].update(version='reaction_shadow_admission_grant_v2',
+                policy='normal_source_reuse_reviewed_snapshot_grant_v1',
+                source_continuity=plan['source_continuity'],
+                source_continuity_sha256=result['source_continuity_sha256'],
+                continuity_helper_sha256=plan['files']['continuity_helper']['sha256'],
+                reader_prefix_verified_rows=reader_prefix_rows)
     return result
 
 

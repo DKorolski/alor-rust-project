@@ -27,7 +27,7 @@ s = dict(runner=dict(failed=False, order_emission_allowed=False, committed_trans
          armed=False, completed=False, resource_state="normal")
 def emit(event):
     print(json.dumps(dict(event=event, spec_sha256="fixture", status=s,
-                          capabilities=['split_collect_advance_v1'],
+                          capabilities=[] if mode == 'no_split' else ['split_collect_advance_v1'],
                           order_emission_allowed=False)), flush=True)
 if mode == "opening_hang": time.sleep(30)
 if mode == "overflow":
@@ -43,6 +43,7 @@ for line in sys.stdin:
     if line == 'advance\n':
         s['armed']=True
         s['runner']['committed_transactions']+=1
+        if mode == 'changed_prefix': s['runner']['durable_receipts']+=1
         emit('advanced'); continue
     if line == "poll\n":
         if mode == "poll_hang": time.sleep(30)
@@ -259,10 +260,13 @@ engine = "imoexf"
         (root/'manifest.json').write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError,'audit-only'):service.ClosedSourceGuard(root,spec)
 
-    def test_diagnostic_ws_rx_stale_remains_fail_closed_without_recovery_contract(self):
+    def diagnostic_ws_source(self, symbol='IMOEXF'):
         root, _, spec, health = self.ws_source(v3=True)
         manifest = json.loads((root / 'manifest.json').read_text())
         manifest['version'] = 'shadow_gateway_ws_closed_m10_v4'
+        manifest['config']['symbol'] = symbol
+        manifest['config']['stream'] = manifest['config']['stream'].replace('IMOEXF', symbol)
+        manifest['config']['terminal']['symbols'] = {symbol: {}}
         manifest['config']['late_context_history_policy'] = 'audit_only_v1'
         manifest['config_sha256'] = service.hashlib.sha256(json.dumps(
             manifest['config'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -274,10 +278,14 @@ engine = "imoexf"
 version = "diagnostic_late_start_v1"
 source_first_live_session = "2026-11-02"
 '''
+        if symbol == 'USDRUBF':
+            spec = spec.replace(b'IMOEXF', b'USDRUBF').replace(b'engine = "imoexf"', b'engine = "usdrubf"')
+        return root, spec, health
+
+    def test_diagnostic_ws_admission_is_strict_but_enabled_recovery_can_pause(self):
+        root, spec, health = self.diagnostic_ws_source()
         guard = service.ClosedSourceGuard(root, spec)
         self.assertTrue(guard.diagnostic)
-        with self.assertRaisesRegex(ValueError, 'strict WS generations only'):
-            guard.enable_recovery(dict(next_guard_deadline_utc=int(time.time()) + 120))
         self.assertFalse(guard.recovery_enabled)
         now = int(time.time())
         (root / 'HEALTH.json').write_text(json.dumps({
@@ -289,8 +297,79 @@ source_first_live_session = "2026-11-02"
         self.assertEqual(failure.exception.code, 'WS_RX_STALE')
         self.assertEqual(failure.exception.details['limit_seconds'], 45)
         self.assertFalse((root / 'FAILED.json').exists(), 'model failure is not source failure')
+        status = dict(next_guard_deadline_utc=now + 120)
+        guard.enable_recovery(status)
+        self.assertFalse(guard.check(), 'admitted worker pauses instead of exiting on stale RX')
+        for field in ('connected', 'subscribed', 'history_complete'):
+            (root / 'HEALTH.json').write_text(json.dumps({**health, 'generation': 2, field: False}))
+            self.assertFalse(guard.check(), field + ' must recover before model advance')
         (root / 'HEALTH.json').write_text(json.dumps({**health, 'generation': 2}))
-        self.assertTrue(guard.check(), 'source can recover without a model readmission')
+        self.assertTrue(guard.confirm_progress(status))
+        self.assertIsNone(guard.recovery_since)
+        (root / 'HEALTH.json').write_text(json.dumps({**health, 'generation': 2, 'heartbeat_utc': 0}))
+        with self.assertRaises(service.SourceUnavailable) as failure:
+            guard.check()
+        self.assertEqual(failure.exception.code, 'WRITER_HEARTBEAT_STALE')
+
+    def diagnostic_reconnect_without_restart(self, symbol):
+        root, spec, health = self.diagnostic_ws_source(symbol)
+        guard = service.ClosedSourceGuard(root, spec)
+        def event(row):
+            if row['event'] == 'reaction_shadow_opened':
+                (root / 'HEALTH.json').write_text(json.dumps({
+                    **health, 'status': 'reconnecting', 'connected': False,
+                    'last_ws_rx_utc': int(time.time()) - 46,
+                }))
+            elif row['event'] == 'reaction_shadow_recovery_paused':
+                (root / 'HEALTH.json').write_text(json.dumps({**health, 'generation': 2}))
+        attempt = self.attempt()
+        try:
+            final, events = self.run_worker('ok', attempt, source_guard=guard, on_event=event)
+            kinds = [row['event'] for row in events]
+            self.assertIn('reaction_shadow_recovery_paused', kinds)
+            self.assertIn('reaction_shadow_recovery_resumed', kinds)
+            self.assertEqual(kinds.count('reaction_shadow_opened'), 1)
+            self.assertEqual(final['runner']['committed_transactions'], 1)
+            self.assertEqual(final['runner']['durable_receipts'], 0)
+            self.assertFalse(final['order_emission_allowed'])
+        finally:
+            attempt.close()
+
+    def test_diagnostic_imoexf_nightly_reconnect_resumes_without_restart(self):
+        self.diagnostic_reconnect_without_restart('IMOEXF')
+
+    def test_diagnostic_usdrubf_nightly_reconnect_resumes_without_restart(self):
+        self.diagnostic_reconnect_without_restart('USDRUBF')
+
+    def test_diagnostic_recovery_does_not_waive_required_bar_deadline(self):
+        root, spec, health = self.diagnostic_ws_source()
+        guard = service.ClosedSourceGuard(root, spec)
+        guard.enable_recovery(dict(next_guard_deadline_utc=int(time.time()) - 1))
+        (root / 'HEALTH.json').write_text(json.dumps({**health, 'status': 'reconnecting', 'connected': False}))
+        with self.assertRaises(service.SourceUnavailable) as failure:
+            guard.check()
+        self.assertEqual(failure.exception.code, 'REQUIRED_BAR_MISSING')
+
+    def test_diagnostic_ws_cannot_fall_back_to_unsplit_worker(self):
+        _, spec, _ = self.diagnostic_ws_source()
+        guard = service.ClosedSourceGuard(self.root.parent / 'source', spec)
+        attempt = self.attempt()
+        try:
+            with self.assertRaisesRegex(ValueError, 'split collect/advance capability'):
+                self.run_worker('no_split', attempt, source_guard=guard)
+            self.assertFalse((attempt.control / '0001.stopped.json').exists())
+        finally:
+            attempt.close()
+
+    def test_diagnostic_ws_rejects_model_advance_of_changed_prefix(self):
+        root, spec, _ = self.diagnostic_ws_source()
+        guard = service.ClosedSourceGuard(root, spec)
+        attempt = self.attempt()
+        try:
+            with self.assertRaisesRegex(ValueError, 'prefix not admitted'):
+                self.run_worker('changed_prefix', attempt, source_guard=guard)
+        finally:
+            attempt.close()
 
     def test_ws_v2_requires_opt_in_and_preserves_health_guard(self):
         root, _, spec, health = self.ws_source(v2=True)

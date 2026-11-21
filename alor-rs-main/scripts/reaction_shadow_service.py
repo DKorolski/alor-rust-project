@@ -100,7 +100,7 @@ class SourceUnavailable(RuntimeError):
 
 class ClosedSourceGuard:
     """Read-only dependency check, not a source restart or repair mechanism."""
-    def __init__(self, root, spec):
+    def __init__(self, root, spec, *, source_continuity=None):
         self.root = Path(root).absolute()
         if self.root.resolve(strict=True) != self.root or not self.root.is_dir():
             raise ValueError("canonical source state directory required")
@@ -118,7 +118,13 @@ class ClosedSourceGuard:
         self.model_deadline = None
         # Transport ceiling only; the worker's queue/required-bar deadline wins.
         self.recovery_limit = 600
-        if late is not None:
+        self.source_continuity = None
+        if source_continuity is not None:
+            import shadow_source_continuity as continuity
+            self.continuity_checker = continuity
+            self.source_continuity = continuity.validate(source_continuity, self.root, self.manifest, spec)
+            expected_source_date = self.source_continuity['source_first_live_session']
+        elif late is not None:
             if (source['version'] != 'shadow_gateway_ws_closed_m10_v4'
                     or late.get('version') != 'diagnostic_late_start_v1'):
                 raise ValueError('diagnostic late start requires explicit v4 source binding')
@@ -176,6 +182,9 @@ class ClosedSourceGuard:
                     and cfg["symbol"] == "IMOEXF" and runner["config"]["engine"] == "imoexf"):
                 raise ValueError("source volume policy not approved for worker model")
         self.identity = dict(path=str(self.root), manifest_sha256=hashlib.sha256(self.manifest).hexdigest())
+        if self.source_continuity is not None:
+            self.identity.update(source_continuity=self.source_continuity,
+                                 source_continuity_sha256=self.continuity_checker.fingerprint(self.source_continuity))
         self.check(require_ready=True)
 
     def _ws_health(self, require_ready):
@@ -184,7 +193,8 @@ class ClosedSourceGuard:
         if (health.get("version") != self.version or health.get("config_sha256") != self.config_sha
                 or health.get("order_emission_allowed") is not False):
             raise SourceUnavailable("WS source identity mismatch", code="SOURCE_IDENTITY_CHANGED")
-        if type(health.get('generation')) is not int or health['generation'] < max(1,self.generation):
+        minimum = self.source_continuity['minimum_ws_generation'] if self.source_continuity else 1
+        if type(health.get('generation')) is not int or health['generation'] < max(minimum,self.generation):
             raise SourceUnavailable('WS source generation rollback',code='SOURCE_GENERATION_ROLLBACK')
         if health.get('status') not in ('ready','reconnecting'):
             raise SourceUnavailable('WS source failed or unsupported phase',code='SOURCE_FAILED_OR_UNSUPPORTED')
@@ -235,8 +245,8 @@ class ClosedSourceGuard:
         return ready
 
     def enable_recovery(self, status):
-        if not self.is_ws or self.diagnostic:
-            raise ValueError('split recovery is for strict WS generations only')
+        if not self.is_ws:
+            raise ValueError('split recovery requires a WS source')
         self.recovery_enabled = True
         self.bind_status(status)
 
@@ -280,6 +290,8 @@ class ClosedSourceGuard:
 
     def check(self, require_ready=False):
         try:
+            if self.source_continuity is not None:
+                self.continuity_checker.check_process(self.source_continuity)
             failed = self.root / "FAILED.json"
             if failed.exists() or failed.is_symlink() or read_small(self.root / "manifest.json") != self.manifest:
                 raise SourceUnavailable("source failed or manifest changed", code="SOURCE_IDENTITY_CHANGED_OR_FAILED")
@@ -485,11 +497,11 @@ def supervise(command, policy, ready_by, attempt, env, spec_sha, stop=None, emit
             raise ValueError("worker read different launch spec")
         if source_guard is not None:
             source_guard.check()
-        split = (isinstance(source_guard, ClosedSourceGuard) and source_guard.is_ws
-                 and not source_guard.diagnostic)
+        # Late-start quality applies to the initial session, not WS recovery.
+        split = isinstance(source_guard, ClosedSourceGuard) and source_guard.is_ws
         if split:
             if 'split_collect_advance_v1' not in opened.get('capabilities', []):
-                raise ValueError('strict WS worker requires split collect/advance capability')
+                raise ValueError('WS worker requires split collect/advance capability')
             source_guard.enable_recovery(status)
         emit(json.dumps(dict(event="reaction_shadow_opened", status=status)))
         last_log = time.monotonic()
