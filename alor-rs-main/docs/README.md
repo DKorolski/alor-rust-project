@@ -58,6 +58,33 @@ or a replacement for the production live gateway:
   strict versus separately approved diagnostic admission and evidence reuse.
 - `finam-new-shadow-models-handoff-2026-11-13.md` - broker-neutral porting
   contract for the three paired shadow models; private bundles stay external.
+- `finam-shadow-operational-stability-handoff-2026-11-19.md` - recovery, terminal,
+  immutable input and acceptance patterns for a separately operated broker contour.
+- `shadow-admission-evidence-permissions-hardening-2026-11-16.md` - cross-UID
+  read-only evidence staging and safe failure diagnostics.
+- `shadow-context-aware-admission-work-plan-2026-11-15.md` - reviewed context
+  dependencies; transport reconnect or audit growth alone is not a HOLD rule.
+- `shadow-normal-source-reuse-admission-contract-2026-11-16.md` - opt-in v4
+  pre-open source reuse and same-generation resume without grant renewal.
+- `reaction-shadow-ws-recovery-contract-2026-11-19.md` - split collect/advance,
+  required-bar deadlines and recovery for diagnostic as well as strict workers.
+
+## Experimental Calendar And OI
+
+These opt-in libraries/tools do not alter live strategies or admit new model
+arms. A successful build/probe is not prospective model or live acceptance:
+
+- `moex-calendar-context-oi-shadow-engineering-tz-2026-11-15.md` - frozen model,
+  calendar, separate MR/BO contexts, OI and prospective acceptance requirements.
+- `moex-calendar-oi-stage1-progress-2026-11-15.md` - implemented slices, executed
+  verification boundaries and remaining model-admission work.
+- `imoexf-component-session-bridge-contract-2026-11-16.md` - immutable receipt
+  journal, component state/event traces and calendar-aware session coordinator.
+- `oi-shadow-collect-only-runbook-2026-11-20.md` - optional `shadow-oi-http`
+  collector, non-PIT probe, dated capture schedule and strict host-clock checks.
+
+Synthetic native fixtures required by these tests are in `strategy-runtime/tests/fixtures`.
+Full historical exports and raw OI/soak reports remain external or ignored.
 
 ## Strategy And Deployment Contracts
 
